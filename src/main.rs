@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{env, sync::Arc, time::Duration};
 
 use async_read_progress::AsyncReadProgressExt;
 use console::style;
@@ -41,7 +41,6 @@ fn get_all_paths(nodes: &mega::Nodes, node: &mega::Node) -> Vec<String> {
 async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
     let nodes = mega.fetch_public_nodes(public_url).await?;
 
-    println!();
     for root in nodes.roots() {
         let paths = get_all_paths(&nodes, root);
 
@@ -65,6 +64,7 @@ async fn download_path(
     bar.set_message(format!("downloading {0}...", node.name()));
     let file = File::create(node.name()).await?;
     let bar = Arc::new(bar);
+    bar.set_style(progress_bar_style());
     let reader = {
         let bar = bar.clone();
 
@@ -96,7 +96,7 @@ async fn main() {
     run(&mut mega, public_url).await.unwrap();
 }
 
-fn progress_bar_style() -> ProgressStyle {
+pub fn progress_bar_style() -> ProgressStyle {
     let template = format!(
         "{}{{bar:30.magenta.bold/magenta/bold}}{} {{percent}}% at {{binary_bytes_per_sec}} (ETA {{eta}}): {{msg}}",
         style("▐").bold().magenta(),
