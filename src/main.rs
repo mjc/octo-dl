@@ -81,7 +81,7 @@ async fn download_path(
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() {
+async fn main() -> mega::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let public_url = match args.as_slice() {
         [public_url] => public_url.as_str(),
@@ -91,9 +91,9 @@ async fn main() {
     };
 
     let http_client = reqwest::Client::new();
-    let mut mega = mega::Client::builder().build(http_client).unwrap();
+    let mut mega = mega::Client::builder().build(http_client)?;
 
-    run(&mut mega, public_url).await.unwrap();
+    run(&mut mega, public_url).await
 }
 
 pub fn progress_bar_style() -> ProgressStyle {
