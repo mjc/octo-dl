@@ -1,11 +1,5 @@
-//!
-//! Example program that displays all of the nodes from a public MEGA link
-//! in a textual tree format.
-//!
-
-use text_trees::{FormatCharacters, StringTreeNode, TreeFormatting};
-
-fn construct_tree_node(nodes: &mega::Nodes, node: &mega::Node) -> StringTreeNode {
+fn get_all_files(nodes: &mega::Nodes, node: &mega::Node) -> Vec<String> {
+    let mut paths = vec![];
     let (mut folders, mut files): (Vec<_>, Vec<_>) = node
         .children()
         .iter()
@@ -15,25 +9,29 @@ fn construct_tree_node(nodes: &mega::Nodes, node: &mega::Node) -> StringTreeNode
     folders.sort_unstable_by_key(|node| node.name());
     files.sort_unstable_by_key(|node| node.name());
 
-    let children = std::iter::empty()
-        .chain(folders)
-        .chain(files)
-        .map(|node| construct_tree_node(nodes, node));
+    for file in files {
+        paths.push(format!(
+            "{}/{}",
+            node.name().to_string(),
+            file.name().to_string()
+        ));
+    }
 
-    StringTreeNode::with_child_nodes(node.name().to_string(), children)
+    for folder in folders {
+        let mut child_files = get_all_files(nodes, folder);
+        paths.append(&mut child_files);
+    }
+
+    paths
 }
 
 async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
-    let mut stdout = std::io::stdout().lock();
-
     let nodes = mega.fetch_public_nodes(public_url).await?;
-    let formatting = TreeFormatting::dir_tree(FormatCharacters::box_chars());
 
     println!();
     for root in nodes.roots() {
-        let tree = construct_tree_node(&nodes, root);
-        tree.write_with_format(&mut stdout, &formatting).unwrap();
-        println!();
+        let files = get_all_files(&nodes, root);
+        println!("{:?}", files);
     }
 
     Ok(())
