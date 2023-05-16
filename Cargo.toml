@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 mega = "0.4.0"
+trauma = "2.2.3"
