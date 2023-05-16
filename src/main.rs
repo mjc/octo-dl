@@ -1,9 +1,9 @@
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_read_progress::AsyncReadProgressExt;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
-use tokio::fs::File;
+use tokio::fs::{create_dir_all, File};
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 fn get_all_paths(nodes: &mega::Nodes, node: &mega::Node) -> Vec<String> {
@@ -49,15 +49,20 @@ async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
             let node = nodes
                 .get_node_by_path(&path)
                 .ok_or(mega::Error::NodeNotFound)?;
-            download_path(node, mega).await?;
+            download_path(path, node, mega).await?;
         }
     }
 
     Ok(())
 }
 
-async fn download_path(node: &mega::Node, mega: &mut mega::Client) -> Result<(), mega::Error> {
-    let file = File::create(node.name()).await?;
+async fn download_path(
+    path: String,
+    node: &mega::Node,
+    mega: &mut mega::Client,
+) -> Result<(), mega::Error> {
+    let _dir = create_dir_all(PathBuf::from(&path).parent().unwrap()).await?;
+    let file = File::create(&path).await?;
     let (reader, writer) = sluice::pipe::pipe();
 
     let bar = progress_bar(node);
