@@ -11,7 +11,12 @@ fn get_all_files(nodes: &mega::Nodes, node: &mega::Node) -> Vec<String> {
 
     for file in files {
         paths.push(format!(
-            "{}/{}",
+            "{}/{}/{}",
+            nodes
+                .get_node_by_hash(node.parent().unwrap())
+                .unwrap()
+                .name()
+                .to_string(),
             node.name().to_string(),
             file.name().to_string()
         ));
@@ -31,7 +36,10 @@ async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
     println!();
     for root in nodes.roots() {
         let files = get_all_files(&nodes, root);
-        println!("{:?}", files);
+
+        for file in files {
+            println!("{:?}", nodes.get_node_by_path(&file).unwrap().name());
+        }
     }
 
     Ok(())
