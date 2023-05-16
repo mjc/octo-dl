@@ -19,18 +19,7 @@ fn get_all_paths(nodes: &mega::Nodes, node: &mega::Node) -> Vec<String> {
 
     let mut file_paths = files
         .iter()
-        .map(|file| {
-            format!(
-                "{}/{}/{}",
-                nodes
-                    .get_node_by_hash(node.parent().unwrap())
-                    .unwrap()
-                    .name()
-                    .to_string(),
-                node.name().to_string(),
-                file.name().to_string()
-            )
-        })
+        .filter_map(|file| build_path(node, nodes, file))
         .collect();
 
     let mut child_file_paths: Vec<String> = folders
@@ -44,6 +33,12 @@ fn get_all_paths(nodes: &mega::Nodes, node: &mega::Node) -> Vec<String> {
     paths
 }
 
+fn build_path(node: &mega::Node, nodes: &mega::Nodes, file: &&mega::Node) -> Option<String> {
+    let parent_node = nodes.get_node_by_hash(node.parent()?)?;
+    let parent_name = parent_node.name();
+    Some(format!("{}/{}/{}", parent_name, node.name(), file.name()))
+}
+
 async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
     let nodes = mega.fetch_public_nodes(public_url).await?;
 
@@ -51,26 +46,22 @@ async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
         let paths = get_all_paths(&nodes, root);
 
         for path in paths {
-            download_path(&nodes, path, mega).await?;
+            let node = nodes
+                .get_node_by_path(&path)
+                .ok_or(mega::Error::NodeNotFound)?;
+            download_path(node, mega).await?;
         }
     }
 
     Ok(())
 }
 
-async fn download_path(
-    nodes: &mega::Nodes,
-    path: String,
-    mega: &mut mega::Client,
-) -> Result<(), mega::Error> {
-    let (reader, writer) = sluice::pipe::pipe();
-    let node = nodes.get_node_by_path(&path).unwrap();
-    let bar = ProgressBar::new(node.size());
-    bar.set_style(progress_bar_style());
-    bar.set_message(format!("downloading {0}...", node.name()));
+async fn download_path(node: &mega::Node, mega: &mut mega::Client) -> Result<(), mega::Error> {
     let file = File::create(node.name()).await?;
-    let bar = Arc::new(bar);
-    bar.set_style(progress_bar_style());
+    let (reader, writer) = sluice::pipe::pipe();
+
+    let bar = progress_bar(node);
+
     let reader = {
         let bar = bar.clone();
 
@@ -78,12 +69,22 @@ async fn download_path(
             bar.set_position(bytes_read as u64);
         })
     };
+
     let handle =
         tokio::spawn(async move { futures::io::copy(reader, &mut file.compat_write()).await });
     mega.download_node(node, writer).await?;
-    handle.await.unwrap()?;
+    handle.await.expect("download failed")?;
     bar.finish_with_message(format!("{0} downloaded !", node.name()));
     Ok(())
+}
+
+fn progress_bar(node: &mega::Node) -> Arc<ProgressBar> {
+    let bar = ProgressBar::new(node.size());
+    bar.set_style(progress_bar_style());
+    bar.set_message(format!("downloading {0}...", node.name()));
+    let bar = Arc::new(bar);
+    bar.set_style(progress_bar_style());
+    bar
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -112,5 +113,5 @@ pub fn progress_bar_style() -> ProgressStyle {
     ProgressStyle::default_bar()
         .progress_chars("▨▨╌")
         .template(template.as_str())
-        .unwrap()
+        .expect("somehow couldn't set up progress bar template")
 }
