@@ -6,7 +6,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use tokio::fs::{create_dir_all, File};
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
-fn get_all_paths(nodes: &mega::Nodes, node: &mega::Node) -> Vec<String> {
+fn get_all_paths<'node>(
+    nodes: &'node mega::Nodes,
+    node: &'node mega::Node,
+) -> Vec<(String, &'node mega::Node)> {
     let mut paths = vec![];
     let (mut folders, mut files): (Vec<_>, Vec<_>) = node
         .children()
@@ -19,10 +22,10 @@ fn get_all_paths(nodes: &mega::Nodes, node: &mega::Node) -> Vec<String> {
 
     let mut file_paths = files
         .iter()
-        .filter_map(|file| build_path(node, nodes, file))
+        .filter_map(|file| Some((build_path(node, nodes, file)?, *file)))
         .collect();
 
-    let mut child_file_paths: Vec<String> = folders
+    let mut child_file_paths: Vec<(String, &mega::Node)> = folders
         .iter()
         .flat_map(|folder| get_all_paths(nodes, folder))
         .collect();
@@ -43,12 +46,9 @@ async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
     let nodes = mega.fetch_public_nodes(public_url).await?;
 
     for root in nodes.roots() {
-        let paths = get_all_paths(&nodes, root);
+        let tree = get_all_paths(&nodes, root);
 
-        for path in paths {
-            let node = nodes
-                .get_node_by_path(&path)
-                .ok_or(mega::Error::NodeNotFound)?;
+        for (path, node) in tree {
             download_path(path, node, mega).await?;
         }
     }
@@ -60,7 +60,7 @@ async fn download_path(
     path: String,
     node: &mega::Node,
     mega: &mut mega::Client,
-) -> Result<(), mega::Error> {
+) -> mega::Result<()> {
     let _dir = create_dir_all(PathBuf::from(&path).parent().unwrap()).await?;
     let file = File::create(&path).await?;
     let (reader, writer) = sluice::pipe::pipe();
