@@ -1,4 +1,4 @@
-use std::{env, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use async_read_progress::AsyncReadProgressExt;
 use console::style;
@@ -17,23 +17,29 @@ fn get_all_paths(nodes: &mega::Nodes, node: &mega::Node) -> Vec<String> {
     folders.sort_unstable_by_key(|node| node.name());
     files.sort_unstable_by_key(|node| node.name());
 
-    for file in files {
-        paths.push(format!(
-            "{}/{}/{}",
-            nodes
-                .get_node_by_hash(node.parent().unwrap())
-                .unwrap()
-                .name()
-                .to_string(),
-            node.name().to_string(),
-            file.name().to_string()
-        ));
-    }
+    let mut file_paths = files
+        .iter()
+        .map(|file| {
+            format!(
+                "{}/{}/{}",
+                nodes
+                    .get_node_by_hash(node.parent().unwrap())
+                    .unwrap()
+                    .name()
+                    .to_string(),
+                node.name().to_string(),
+                file.name().to_string()
+            )
+        })
+        .collect();
 
-    for folder in folders {
-        let mut child_files = get_all_paths(nodes, folder);
-        paths.append(&mut child_files);
-    }
+    let mut child_file_paths: Vec<String> = folders
+        .iter()
+        .flat_map(|folder| get_all_paths(nodes, folder))
+        .collect();
+
+    paths.append(&mut file_paths);
+    paths.append(&mut child_file_paths);
 
     paths
 }
