@@ -1,4 +1,12 @@
-fn get_all_files(nodes: &mega::Nodes, node: &mega::Node) -> Vec<String> {
+use std::{sync::Arc, time::Duration};
+
+use async_read_progress::AsyncReadProgressExt;
+use console::style;
+use indicatif::{ProgressBar, ProgressStyle};
+use tokio::fs::File;
+use tokio_util::compat::TokioAsyncWriteCompatExt;
+
+fn get_all_paths(nodes: &mega::Nodes, node: &mega::Node) -> Vec<String> {
     let mut paths = vec![];
     let (mut folders, mut files): (Vec<_>, Vec<_>) = node
         .children()
@@ -23,7 +31,7 @@ fn get_all_files(nodes: &mega::Nodes, node: &mega::Node) -> Vec<String> {
     }
 
     for folder in folders {
-        let mut child_files = get_all_files(nodes, folder);
+        let mut child_files = get_all_paths(nodes, folder);
         paths.append(&mut child_files);
     }
 
@@ -35,13 +43,40 @@ async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
 
     println!();
     for root in nodes.roots() {
-        let files = get_all_files(&nodes, root);
+        let paths = get_all_paths(&nodes, root);
 
-        for file in files {
-            println!("{:?}", nodes.get_node_by_path(&file).unwrap().name());
+        for path in paths {
+            download_path(&nodes, path, mega).await?;
         }
     }
 
+    Ok(())
+}
+
+async fn download_path(
+    nodes: &mega::Nodes,
+    path: String,
+    mega: &mut mega::Client,
+) -> Result<(), mega::Error> {
+    let (reader, writer) = sluice::pipe::pipe();
+    let node = nodes.get_node_by_path(&path).unwrap();
+    let bar = ProgressBar::new(node.size());
+    bar.set_style(progress_bar_style());
+    bar.set_message(format!("downloading {0}...", node.name()));
+    let file = File::create(node.name()).await?;
+    let bar = Arc::new(bar);
+    let reader = {
+        let bar = bar.clone();
+
+        reader.report_progress(Duration::from_millis(100), move |bytes_read| {
+            bar.set_position(bytes_read as u64);
+        })
+    };
+    let handle =
+        tokio::spawn(async move { futures::io::copy(reader, &mut file.compat_write()).await });
+    mega.download_node(node, writer).await?;
+    handle.await.unwrap()?;
+    bar.finish_with_message(format!("{0} downloaded !", node.name()));
     Ok(())
 }
 
@@ -59,4 +94,17 @@ async fn main() {
     let mut mega = mega::Client::builder().build(http_client).unwrap();
 
     run(&mut mega, public_url).await.unwrap();
+}
+
+fn progress_bar_style() -> ProgressStyle {
+    let template = format!(
+        "{}{{bar:30.magenta.bold/magenta/bold}}{} {{percent}}% at {{binary_bytes_per_sec}} (ETA {{eta}}): {{msg}}",
+        style("▐").bold().magenta(),
+        style("▌").bold().magenta(),
+    );
+
+    ProgressStyle::default_bar()
+        .progress_chars("▨▨╌")
+        .template(template.as_str())
+        .unwrap()
 }
