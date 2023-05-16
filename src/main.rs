@@ -48,19 +48,23 @@ async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
     for root in nodes.roots() {
         let tree = get_all_paths(&nodes, root);
 
-        for (path, node) in tree {
-            download_path(path, node, mega).await?;
+        let chunks: Vec<&[(String, &mega::Node)]> = tree.chunks(5).collect();
+
+        for chunk in chunks {
+            let mut futures = Vec::new();
+
+            for (path, node) in chunk {
+                futures.push(download_path(path, node, mega));
+            }
+
+            futures::future::join_all(futures).await;
         }
     }
 
     Ok(())
 }
 
-async fn download_path(
-    path: String,
-    node: &mega::Node,
-    mega: &mut mega::Client,
-) -> mega::Result<()> {
+async fn download_path(path: &str, node: &mega::Node, mega: &mega::Client) -> mega::Result<()> {
     let _dir = create_dir_all(PathBuf::from(&path).parent().unwrap()).await?;
     let file = File::create(&path).await?;
     let (reader, writer) = sluice::pipe::pipe();
