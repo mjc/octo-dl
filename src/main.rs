@@ -2,7 +2,7 @@ use std::{env, path::PathBuf, sync::Arc, time::Duration};
 
 use async_read_progress::AsyncReadProgressExt;
 use console::style;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tokio::fs::{create_dir_all, File};
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
@@ -54,22 +54,30 @@ async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
             let mut futures = Vec::new();
 
             for (path, node) in chunk {
-                futures.push(download_path(path, node, mega));
+                let m = MultiProgress::new();
+
+                let bar = m.add(progress_bar(node));
+
+                futures.push(download_path(bar, path, node, mega));
             }
 
             futures::future::join_all(futures).await;
+            panic!("testing");
         }
     }
 
     Ok(())
 }
 
-async fn download_path(path: &str, node: &mega::Node, mega: &mega::Client) -> mega::Result<()> {
+async fn download_path(
+    bar: ProgressBar,
+    path: &str,
+    node: &mega::Node,
+    mega: &mega::Client,
+) -> mega::Result<()> {
     let _dir = create_dir_all(PathBuf::from(&path).parent().unwrap()).await?;
     let file = File::create(&path).await?;
     let (reader, writer) = sluice::pipe::pipe();
-
-    let bar = progress_bar(node);
 
     let reader = {
         let bar = bar.clone();
@@ -87,12 +95,10 @@ async fn download_path(path: &str, node: &mega::Node, mega: &mega::Client) -> me
     Ok(())
 }
 
-fn progress_bar(node: &mega::Node) -> Arc<ProgressBar> {
+fn progress_bar(node: &mega::Node) -> ProgressBar {
     let bar = ProgressBar::new(node.size());
     bar.set_style(progress_bar_style());
     bar.set_message(format!("downloading {0}...", node.name()));
-    let bar = Arc::new(bar);
-    bar.set_style(progress_bar_style());
     bar
 }
 
