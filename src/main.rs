@@ -48,7 +48,7 @@ async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
     for root in nodes.roots() {
         let tree = get_all_paths(&nodes, root);
 
-        let chunks: Vec<&[(String, &mega::Node)]> = tree.chunks(5).collect();
+        let chunks: Vec<&[(String, &mega::Node)]> = tree.chunks(20).collect();
         let m = MultiProgress::new();
 
         for chunk in chunks {
@@ -107,7 +107,7 @@ fn progress_bar(node: &mega::Node) -> ProgressBar {
     bar
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> mega::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let public_url = match args.as_slice() {
