@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, time::Duration};
+use std::{env, fs, path::PathBuf, time::Duration};
 
 use async_read_progress::AsyncReadProgressExt;
 use console::style;
@@ -59,7 +59,6 @@ async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
             }
 
             futures::future::join_all(futures).await;
-            panic!("testing");
         }
     }
 
@@ -73,7 +72,14 @@ async fn download_path(
     mega: &mega::Client,
 ) -> mega::Result<()> {
     let _dir = create_dir_all(PathBuf::from(&path).parent().unwrap()).await?;
-    let file = File::create(&path).await?;
+    let file = {
+        if let Ok(len) = fs::metadata(path) {
+            if len.len() == node.size() as u64 {
+                return Ok(()); // file already exists
+            }
+        }
+        File::create(&path).await?
+    };
     let (reader, writer) = sluice::pipe::pipe();
 
     let bar = m.add(progress_bar(node));
