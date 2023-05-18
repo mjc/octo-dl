@@ -1,3 +1,5 @@
+#![feature(let_chains)]
+
 use std::{env, fs, path::PathBuf, time::Duration};
 
 use async_read_progress::AsyncReadProgressExt;
@@ -37,9 +39,14 @@ fn get_all_paths<'node>(
 }
 
 fn build_path(node: &mega::Node, nodes: &mega::Nodes, file: &&mega::Node) -> Option<String> {
-    let parent_node = nodes.get_node_by_hash(node.parent()?)?;
-    let parent_name = parent_node.name();
-    Some(format!("{}/{}/{}", parent_name, node.name(), file.name()))
+    if let Some(parent) = node.parent()
+    && let Some(parent_node) = nodes.get_node_by_hash(parent) {
+        Some(format!("{}/{}/{}", parent_node.name(), node.name(), file.name()))
+
+    }
+    else {
+        Some(format!("{}/{}", node.name(), file.name()))
+    }
 }
 
 async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
