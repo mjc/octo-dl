@@ -53,9 +53,20 @@ async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
     let nodes = mega.fetch_public_nodes(public_url).await?;
 
     for root in nodes.roots() {
-        let tree = get_all_paths(&nodes, root);
+        let paths: Vec<(String, &mega::Node)> = get_all_paths(&nodes, root)
+            .iter()
+            .filter_map(|(path, node)| {
+                let _dir = fs::create_dir_all(PathBuf::from(&path).parent().unwrap()).ok();
+                if let Ok(len) = fs::metadata(path) && len.len() == node.size() as u64 {
+               None
+            }
+            else {
+                Some((path.clone(), *node))
+            }
+            })
+            .collect();
 
-        let chunks: Vec<&[(String, &mega::Node)]> = tree.chunks(20).collect();
+        let chunks: Vec<&[(String, &mega::Node)]> = paths.chunks(20).collect();
         let m = MultiProgress::new();
 
         for chunk in chunks {
@@ -78,16 +89,9 @@ async fn download_path(
     node: &mega::Node,
     mega: &mega::Client,
 ) -> mega::Result<()> {
-    let _dir = create_dir_all(PathBuf::from(&path).parent().unwrap()).await?;
-    let file = {
-        if let Ok(len) = fs::metadata(path) {
-            if len.len() == node.size() as u64 {
-                return Ok(()); // file already exists
-            }
-        }
-        File::create(&path).await?
-    };
     let (reader, writer) = sluice::pipe::pipe();
+    let _dir = create_dir_all(PathBuf::from(&path).parent().unwrap()).await?;
+    let file = File::create(&path).await?;
 
     let bar = m.add(progress_bar(node));
     bar.set_message(format!("downloading {0}...", node.name()));
