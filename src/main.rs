@@ -117,12 +117,10 @@ fn progress_bar(node: &mega::Node) -> ProgressBar {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> mega::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let public_url = match args.as_slice() {
-        [public_url] => public_url.as_str(),
-        _ => {
-            panic!("expected 1 command-line argument: {{public_url}}");
-        }
-    };
+
+    if args.len() == 0 {
+        panic!("Usage: mega-download <public url(s)>");
+    }
 
     let email = env::var("MEGA_EMAIL").expect("missing MEGA_EMAIL environment variable");
     let password = env::var("MEGA_PASSWORD").expect("missing MEGA_PASSWORD environment variable");
@@ -133,7 +131,10 @@ async fn main() -> mega::Result<()> {
 
     mega.login(&email, &password, mfa.as_deref()).await.unwrap();
 
-    run(&mut mega, public_url).await
+    for public_url in args.as_slice() {
+        run(&mut mega, public_url).await?;
+    }
+    Ok(())
 }
 
 pub fn progress_bar_style() -> ProgressStyle {
