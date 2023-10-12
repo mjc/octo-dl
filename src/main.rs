@@ -16,7 +16,7 @@ fn get_all_paths<'node>(
     let (mut folders, mut files): (Vec<_>, Vec<_>) = node
         .children()
         .iter()
-        .filter_map(|hash| nodes.get_node_by_hash(hash))
+        .filter_map(|hash| nodes.get_node_by_handle(hash))
         .partition(|node| node.kind().is_folder());
 
     folders.sort_unstable_by_key(|node| node.name());
@@ -39,8 +39,7 @@ fn get_all_paths<'node>(
 }
 
 fn build_path(node: &mega::Node, nodes: &mega::Nodes, file: &&mega::Node) -> Option<String> {
-    if let Some(parent) = node.parent()
-    && let Some(parent_node) = nodes.get_node_by_hash(parent) {
+    if let Some(parent) = node.parent() && let Some(parent_node) = nodes.get_node_by_handle(parent) {
         Some(format!("{}/{}/{}", parent_node.name(), node.name(), file.name()))
 
     }

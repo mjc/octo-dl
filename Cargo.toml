@@ -10,7 +10,7 @@ async-read-progress = { version = "0.2.0", features = ["tokio", "bytes"] }
 console = "0.15.5"
 futures = "0.3.28"
 indicatif = { version = "0.17.3", features = ["tokio", "improved_unicode"] }
-mega = "0.4.0"
+mega = "0.7.0"
 reqwest = "0.11.17"
 sha2 = { version = "0.10.6", features = ["asm"] }
 sluice = "0.5.5"
