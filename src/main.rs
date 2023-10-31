@@ -39,11 +39,16 @@ fn get_all_paths<'node>(
 }
 
 fn build_path(node: &mega::Node, nodes: &mega::Nodes, file: &&mega::Node) -> Option<String> {
-    if let Some(parent) = node.parent() && let Some(parent_node) = nodes.get_node_by_handle(parent) {
-        Some(format!("{}/{}/{}", parent_node.name(), node.name(), file.name()))
-
-    }
-    else {
+    if let Some(parent) = node.parent()
+        && let Some(parent_node) = nodes.get_node_by_handle(parent)
+    {
+        Some(format!(
+            "{}/{}/{}",
+            parent_node.name(),
+            node.name(),
+            file.name()
+        ))
+    } else {
         Some(format!("{}/{}", node.name(), file.name()))
     }
 }
@@ -56,12 +61,13 @@ async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
             .iter()
             .filter_map(|(path, node)| {
                 let _dir = fs::create_dir_all(PathBuf::from(&path).parent().unwrap()).ok();
-                if let Ok(len) = fs::metadata(path) && len.len() == node.size() as u64 {
-               None
-            }
-            else {
-                Some((path.clone(), *node))
-            }
+                if let Ok(len) = fs::metadata(path)
+                    && len.len() == node.size()
+                {
+                    None
+                } else {
+                    Some((path.clone(), *node))
+                }
             })
             .collect();
 
@@ -89,7 +95,8 @@ async fn download_path(
     mega: &mega::Client,
 ) -> mega::Result<()> {
     let (reader, writer) = sluice::pipe::pipe();
-    let _dir = create_dir_all(PathBuf::from(&path).parent().unwrap()).await?;
+
+    create_dir_all(PathBuf::from(&path).parent().unwrap()).await?;
     let file = File::create(&path).await?;
 
     let bar = m.add(progress_bar(node));
@@ -121,7 +128,7 @@ fn progress_bar(node: &mega::Node) -> ProgressBar {
 async fn main() -> mega::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.len() == 0 {
+    if args.is_empty() {
         panic!("Usage: mega-download <public url(s)>");
     }
 
