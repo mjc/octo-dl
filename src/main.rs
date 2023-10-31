@@ -38,22 +38,19 @@ fn get_all_paths<'node>(
     paths
 }
 
-fn build_path(node: &mega::Node, nodes: &mega::Nodes, file: &&mega::Node) -> Option<String> {
-    if let Some(parent) = node.parent()
-        && let Some(parent_node) = nodes.get_node_by_handle(parent)
-    {
-        Some(format!(
-            "{}/{}/{}",
-            parent_node.name(),
-            node.name(),
-            file.name()
-        ))
-    } else {
-        Some(format!("{}/{}", node.name(), file.name()))
-    }
+fn build_path(node: &mega::Node, nodes: &mega::Nodes, file: &mega::Node) -> Option<String> {
+    let parent = node.parent()?;
+    let parent_node = nodes.get_node_by_handle(parent)?;
+
+    Some(format!(
+        "{}/{}/{}",
+        parent_node.name(),
+        node.name(),
+        file.name()
+    ))
 }
 
-async fn run(mega: &mut mega::Client, public_url: &str) -> mega::Result<()> {
+async fn run(mega: &mega::Client, public_url: &str) -> mega::Result<()> {
     let nodes = mega.fetch_public_nodes(public_url).await?;
 
     for root in nodes.roots() {
@@ -128,9 +125,7 @@ fn progress_bar(node: &mega::Node) -> ProgressBar {
 async fn main() -> mega::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.is_empty() {
-        panic!("Usage: mega-download <public url(s)>");
-    }
+    assert!(args.is_empty(), "Usage: mega-download <public url(s)>");
 
     let email = env::var("MEGA_EMAIL").expect("missing MEGA_EMAIL environment variable");
     let password = env::var("MEGA_PASSWORD").expect("missing MEGA_PASSWORD environment variable");
@@ -142,12 +137,12 @@ async fn main() -> mega::Result<()> {
     mega.login(&email, &password, mfa.as_deref()).await.unwrap();
 
     for public_url in args.as_slice() {
-        run(&mut mega, public_url).await?;
+        run(&mega, public_url).await?;
     }
     Ok(())
 }
 
-pub fn progress_bar_style() -> ProgressStyle {
+fn progress_bar_style() -> ProgressStyle {
     let template = format!(
         "{}{{bar:30.magenta.bold/magenta/bold}}{} {{percent}}% at {{binary_bytes_per_sec}} (ETA {{eta}}): {{msg}}",
         style("▐").bold().magenta(),
