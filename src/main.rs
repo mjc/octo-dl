@@ -1,4 +1,6 @@
 #![feature(let_chains)]
+#![warn(clippy::pedantic)]
+#![warn(clippy::nursery)]
 
 use std::{env, fs, path::PathBuf, time::Duration};
 
