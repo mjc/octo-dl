@@ -3,5 +3,6 @@
         "aarch",
         "octo",
         "reqwest"
-    ]
+    ],
+    "nixEnvSelector.nixFile": "${workspaceFolder}/flake.nix"
 }
