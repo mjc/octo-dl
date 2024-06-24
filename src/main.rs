@@ -125,7 +125,7 @@ fn progress_bar(node: &mega::Node) -> ProgressBar {
 async fn main() -> mega::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    assert!(args.len() != 0, "Usage: octo-dl <public url(s)>");
+    assert!(!args.is_empty(), "Usage: octo-dl <public url(s)>");
 
     let email = env::var("MEGA_EMAIL").expect("missing MEGA_EMAIL environment variable");
     let password = env::var("MEGA_PASSWORD").expect("missing MEGA_PASSWORD environment variable");
