@@ -24,11 +24,10 @@
         with pkgs; {
           devShells.default = mkShell {
             buildInputs = [
-              openssl
+              openssl_3
               pkg-config
               eza
               fd
-              # rust-bin.beta.latest.default
               (
                 rust-bin.selectLatestNightlyWith (toolchain:
                   toolchain.default.override {
@@ -39,6 +38,8 @@
                   })
               )
             ];
+
+            LD_LIBRARY_PATH = lib.makeLibraryPath [openssl_3];
 
             shellHook = ''
               alias ls=eza
