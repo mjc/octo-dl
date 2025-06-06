@@ -6,7 +6,9 @@ use std::{env, fs, path::PathBuf, time::Duration};
 
 use async_read_progress::AsyncReadProgressExt;
 use console::style;
+use env_logger;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use log::{error, info};
 use tokio::fs::{create_dir_all, File};
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
@@ -53,7 +55,10 @@ fn build_path(node: &mega::Node, nodes: &mega::Nodes, file: &mega::Node) -> Opti
 }
 
 async fn run(mega: &mega::Client, public_url: &str) -> mega::Result<()> {
-    let nodes = mega.fetch_public_nodes(public_url).await?;
+    let nodes = mega.fetch_public_nodes(public_url).await.map_err(|e| {
+        error!("Failed to fetch public nodes for URL {}: {:?}", public_url, e);
+        e
+    })?;
 
     for root in nodes.roots() {
         let paths: Vec<(String, &mega::Node)> = get_all_paths(&nodes, root)
@@ -77,10 +82,15 @@ async fn run(mega: &mega::Client, public_url: &str) -> mega::Result<()> {
             let mut futures = Vec::new();
 
             for (path, node) in chunk {
-                futures.push(download_path(&m, path, node, mega));
+                futures.push(download_path(&m, path.to_string(), node, mega));
             }
 
-            futures::future::join_all(futures).await;
+            let results = futures::future::join_all(futures).await;
+            for result in results {
+                if let Err(e) = result {
+                    error!("Error downloading file: {:?}", e);
+                }
+            }
         }
     }
 
@@ -89,14 +99,20 @@ async fn run(mega: &mega::Client, public_url: &str) -> mega::Result<()> {
 
 async fn download_path(
     m: &MultiProgress,
-    path: &str,
+    path: String, // Changed `path` to `String` to ensure it has a `'static` lifetime
     node: &mega::Node,
     mega: &mega::Client,
 ) -> mega::Result<()> {
     let (reader, writer) = sluice::pipe::pipe();
 
-    create_dir_all(PathBuf::from(&path).parent().unwrap()).await?;
-    let file = File::create(&path).await?;
+    create_dir_all(PathBuf::from(&path).parent().unwrap()).await.map_err(|e| {
+        error!("Failed to create directory for path {}: {:?}", path, e);
+        e
+    })?;
+    let file = File::create(&path).await.map_err(|e| {
+        error!("Failed to create file {}: {:?}", path, e);
+        e
+    })?;
 
     let bar = m.add(progress_bar(node));
     bar.set_message(format!("downloading {0}...", node.name()));
@@ -109,9 +125,16 @@ async fn download_path(
         })
     };
 
-    let handle =
-        tokio::spawn(async move { futures::io::copy(reader, &mut file.compat_write()).await });
-    mega.download_node(node, writer).await?;
+    let handle = tokio::spawn(async move {
+        futures::io::copy(reader, &mut file.compat_write()).await.map_err(|e| {
+            error!("Failed to copy data to file {}: {:?}", path, e);
+            e
+        })
+    });
+    mega.download_node(node, writer).await.map_err(|e| {
+        error!("Failed to download node {}: {:?}", node.name(), e);
+        e
+    })?;
     handle.await.expect("download failed")?;
     bar.finish_with_message(format!("{0} downloaded !", node.name()));
     Ok(())
@@ -125,6 +148,8 @@ fn progress_bar(node: &mega::Node) -> ProgressBar {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> mega::Result<()> {
+    env_logger::init(); // Initialize the logger
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     assert!(!args.is_empty(), "Usage: octo-dl <public url(s)>");
@@ -133,14 +158,24 @@ async fn main() -> mega::Result<()> {
     let password = env::var("MEGA_PASSWORD").expect("missing MEGA_PASSWORD environment variable");
     let mfa = env::var("MEGA_MFA").ok();
 
+    println!("Initializing MEGA client...");
     let http_client = reqwest::Client::new();
     let mut mega = mega::Client::builder().build(http_client)?;
 
-    mega.login(&email, &password, mfa.as_deref()).await.unwrap();
+    println!("Attempting to log in to MEGA...");
+    mega.login(&email, &password, mfa.as_deref()).await.map_err(|e| {
+        println!("Login attempt failed: {:?}", e);
+        e
+    })?;
 
+    println!("Login successful. Processing public URLs...");
     for public_url in args.as_slice() {
+        println!("Processing URL: {}", public_url);
         run(&mega, public_url).await?;
     }
+
+    println!("All URLs processed successfully.");
+
     Ok(())
 }
 
