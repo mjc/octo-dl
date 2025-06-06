@@ -1,8 +1,10 @@
 {
     "cSpell.words": [
         "aarch",
+        "clippy",
         "octo",
-        "reqwest"
+        "reqwest",
+        "rustc"
     ],
     "nixEnvSelector.nixFile": "${workspaceFolder}/flake.nix"
 }
