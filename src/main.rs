@@ -1,4 +1,3 @@
-#![feature(let_chains)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
@@ -8,7 +7,7 @@ use async_read_progress::AsyncReadProgressExt;
 use console::style;
 use env_logger;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use log::{error, info};
+use log::error;
 use tokio::fs::{create_dir_all, File};
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
