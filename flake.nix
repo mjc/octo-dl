@@ -46,6 +46,7 @@
             pkg-config
             par2cmdline
             xxd
+            gh
           ];
 
           RUSTC_VERSION = overrides.toolchain.channel;
