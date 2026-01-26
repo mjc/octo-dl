@@ -1193,6 +1193,7 @@ dependencies = [
  "reqwest",
  "sha2",
  "sluice",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]
