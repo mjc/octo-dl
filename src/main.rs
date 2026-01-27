@@ -34,19 +34,12 @@ struct DownloadItem<'a> {
 // Download Statistics
 // ============================================================================
 
+/// Tracks download stats using indicatif's speed calculation
 struct DownloadStats {
     start_time: Instant,
     total_bytes: u64,
-    bytes_downloaded: AtomicU64,  // Running total from deltas
-    last_bytes: AtomicU64,
-    last_update_ms: AtomicU64,
-    current_speed: AtomicU64,    // Latest 1-second speed sample
     peak_speed: AtomicU64,
-    // Track time (ms) when we first reached 50%/80% of current speed
-    time_to_50pct_ms: AtomicU64,
     time_to_80pct_ms: AtomicU64,
-    threshold_50pct: AtomicU64,  // Speed threshold for 50%
-    threshold_80pct: AtomicU64,  // Speed threshold for 80%
 }
 
 impl DownloadStats {
@@ -54,57 +47,20 @@ impl DownloadStats {
         Self {
             start_time: Instant::now(),
             total_bytes,
-            bytes_downloaded: AtomicU64::new(0),
-            last_bytes: AtomicU64::new(0),
-            last_update_ms: AtomicU64::new(0),
-            current_speed: AtomicU64::new(0),
             peak_speed: AtomicU64::new(0),
-            time_to_50pct_ms: AtomicU64::new(0),
             time_to_80pct_ms: AtomicU64::new(0),
-            threshold_50pct: AtomicU64::new(0),
-            threshold_80pct: AtomicU64::new(0),
         }
     }
 
-    fn add_bytes(&self, delta: u64) {
-        let current_bytes = self.bytes_downloaded.fetch_add(delta, Ordering::Relaxed) + delta;
-        let elapsed = self.start_time.elapsed();
-        let now_ms = elapsed.as_millis() as u64;
+    /// Called with indicatif's per_sec() value to track peak and ramp-up
+    fn update_speed(&self, speed: u64) {
+        let prev_peak = self.peak_speed.fetch_max(speed, Ordering::Relaxed);
+        let peak = prev_peak.max(speed);
 
-        // Update speed calculation every 1000ms
-        let last_ms = self.last_update_ms.load(Ordering::Relaxed);
-        if now_ms.saturating_sub(last_ms) >= 1000 {
-            let last = self.last_bytes.swap(current_bytes, Ordering::Relaxed);
-            let bytes_delta = current_bytes.saturating_sub(last);
-            let elapsed_secs = (now_ms - last_ms) as f64 / 1000.0;
-
-            if elapsed_secs > 0.5 {  // Require at least 500ms window to avoid spurious spikes
-                let speed = (bytes_delta as f64 / elapsed_secs) as u64;
-                self.current_speed.store(speed, Ordering::Relaxed);
-                self.peak_speed.fetch_max(speed, Ordering::Relaxed);
-
-                // Update thresholds based on peak (ramp-up tracking)
-                let peak = self.peak_speed.load(Ordering::Relaxed);
-                let threshold_50 = peak / 2;
-                let threshold_80 = peak * 4 / 5;
-
-                // Record time when we first crossed these thresholds
-                if speed >= threshold_50 && self.time_to_50pct_ms.load(Ordering::Relaxed) == 0 {
-                    self.time_to_50pct_ms.store(now_ms, Ordering::Relaxed);
-                    self.threshold_50pct.store(threshold_50, Ordering::Relaxed);
-                }
-                if speed >= threshold_80 && self.time_to_80pct_ms.load(Ordering::Relaxed) == 0 {
-                    self.time_to_80pct_ms.store(now_ms, Ordering::Relaxed);
-                    self.threshold_80pct.store(threshold_80, Ordering::Relaxed);
-                }
-            }
-
-            let _ = self.last_update_ms.compare_exchange(
-                last_ms,
-                now_ms,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            );
+        // Track time to reach 80% of peak
+        if self.time_to_80pct_ms.load(Ordering::Relaxed) == 0 && speed >= peak * 4 / 5 {
+            let ms = self.start_time.elapsed().as_millis() as u64;
+            self.time_to_80pct_ms.store(ms, Ordering::Relaxed);
         }
     }
 
@@ -123,10 +79,6 @@ impl DownloadStats {
 
     fn peak_speed(&self) -> u64 {
         self.peak_speed.load(Ordering::Relaxed)
-    }
-
-    fn current_speed(&self) -> u64 {
-        self.current_speed.load(Ordering::Relaxed)
     }
 
     fn time_to_80pct(&self) -> Option<Duration> {
@@ -329,7 +281,7 @@ async fn download_file(
                 bar_clone.reset_elapsed();
             }
             bar_clone.inc(delta);
-            stats_clone.add_bytes(delta);
+            stats_clone.update_speed(bar_clone.per_sec() as u64);
             bar_clone.set_message(name_for_progress.clone());
         }))
         .await;
@@ -663,9 +615,9 @@ mod tests {
             }
 
             #[test]
-            fn download_stats_speed_never_panics(bytes in 0u64..u64::MAX) {
+            fn download_stats_speed_never_panics(bytes in 0u64..u64::MAX, speed in 0u64..1_000_000_000) {
                 let stats = DownloadStats::new(bytes);
-                stats.add_bytes(bytes / 2);
+                stats.update_speed(speed);
                 let _ = stats.average_speed();
                 let _ = stats.peak_speed();
             }
