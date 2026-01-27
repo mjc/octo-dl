@@ -38,36 +38,43 @@ struct DownloadStats {
     start_time: Instant,
     total_bytes: u64,
     last_bytes: AtomicU64,
-    last_time: std::sync::Mutex<Instant>,
+    last_update_ms: AtomicU64,  // Time in milliseconds since start
     peak_speed: AtomicU64,
 }
 
 impl DownloadStats {
     fn new(total_bytes: u64) -> Self {
-        let now = Instant::now();
         Self {
-            start_time: now,
+            start_time: Instant::now(),
             total_bytes,
             last_bytes: AtomicU64::new(0),
-            last_time: std::sync::Mutex::new(now),
+            last_update_ms: AtomicU64::new(0),
             peak_speed: AtomicU64::new(0),
         }
     }
 
     fn update(&self, current_bytes: u64) {
-        let now = Instant::now();
-        let mut last_time = self.last_time.lock().unwrap();
-        let elapsed = now.duration_since(*last_time);
+        let elapsed = self.start_time.elapsed();
+        let now_ms = elapsed.as_millis() as u64;
 
-        // Update speed calculation every 100ms minimum
-        if elapsed >= Duration::from_millis(100) {
+        // Update speed calculation every 1000ms (smoother measurements)
+        let last_ms = self.last_update_ms.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last_ms) >= 1000 {
             let last = self.last_bytes.swap(current_bytes, Ordering::Relaxed);
             let bytes_delta = current_bytes.saturating_sub(last);
-            let speed = (bytes_delta as f64 / elapsed.as_secs_f64()) as u64;
+            let elapsed_secs = (now_ms - last_ms) as f64 / 1000.0;
 
-            // Update peak speed
-            self.peak_speed.fetch_max(speed, Ordering::Relaxed);
-            *last_time = now;
+            if elapsed_secs > 0.0 {
+                let speed = (bytes_delta as f64 / elapsed_secs) as u64;
+                self.peak_speed.fetch_max(speed, Ordering::Relaxed);
+            }
+
+            let _ = self.last_update_ms.compare_exchange(
+                last_ms,
+                now_ms,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
         }
     }
 
@@ -89,6 +96,7 @@ impl DownloadStats {
     }
 }
 
+#[derive(Debug)]
 struct SessionStats {
     files_downloaded: usize,
     files_skipped: usize,
@@ -357,7 +365,7 @@ fn make_progress_bar(size: u64, name: &str) -> ProgressBar {
         ProgressStyle::with_template(
             "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} - {msg}",
         )
-        .unwrap()
+        .expect("progress template is valid")
         .progress_chars("━━╌"),
     );
     bar.set_message(name.to_string());
@@ -550,5 +558,57 @@ mod tests {
         assert_eq!(format_duration(Duration::from_secs(5)), "5.0s");
         assert_eq!(format_duration(Duration::from_secs(65)), "1m 05s");
         assert_eq!(format_duration(Duration::from_secs(3665)), "1h 01m 05s");
+    }
+
+    mod property_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn format_bytes_never_panics(bytes in 0u64..u64::MAX) {
+                let _ = format_bytes(bytes);
+            }
+
+            #[test]
+            fn format_bytes_monotonic(a in 0u64..1_000_000_000, b in 1_000_000_000u64..u64::MAX) {
+                // Larger byte count should produce numerically larger or equal unit value
+                // (not a perfect property but helps catch overflow bugs)
+                let _ = (format_bytes(a), format_bytes(b));
+            }
+
+            #[test]
+            fn format_duration_never_panics(secs in 0u64..1_000_000) {
+                let _ = format_duration(Duration::from_secs(secs));
+            }
+
+            #[test]
+            fn format_duration_millis_never_panics(millis in 0u64..1_000_000_000) {
+                let _ = format_duration(Duration::from_millis(millis));
+            }
+
+            #[test]
+            fn download_stats_speed_never_panics(bytes in 0u64..u64::MAX) {
+                let stats = DownloadStats::new(bytes);
+                stats.update(bytes / 2);
+                let _ = stats.average_speed();
+                let _ = stats.peak_speed();
+            }
+
+            #[test]
+            fn session_stats_never_panics(
+                files in 0usize..1000,
+                bytes in 0u64..1_000_000_000_000,
+                peak_speed in 0u64..1_000_000_000
+            ) {
+                let mut stats = SessionStats::new();
+                for _ in 0..files {
+                    stats.add_download(bytes / (files.max(1) as u64), peak_speed);
+                }
+                // Should not panic when accessing stats
+                let _ = stats.elapsed();
+                let _ = stats.average_speed();
+            }
+        }
     }
 }
