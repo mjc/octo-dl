@@ -47,6 +47,11 @@
             par2cmdline
             xxd
             gh
+            # Profiling tools
+            linuxPackages_latest.perf
+            gnuplot
+            bc
+            strace
           ];
 
           RUSTC_VERSION = overrides.toolchain.channel;

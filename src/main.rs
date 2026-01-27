@@ -19,6 +19,7 @@ struct Config {
     urls: Vec<String>,
     chunks_per_file: usize,
     concurrent_files: usize,
+    force: bool,
 }
 
 struct DownloadItem<'a> {
@@ -65,8 +66,8 @@ fn build_path(nodes: &mega::Nodes, parent: &mega::Node, file: &mega::Node) -> Op
 // File System Helpers
 // ============================================================================
 
-fn should_skip(path: &str, expected_size: u64) -> bool {
-    fs::metadata(path).is_ok_and(|m| m.len() == expected_size)
+fn should_skip(path: &str, expected_size: u64, force: bool) -> bool {
+    !force && fs::metadata(path).is_ok_and(|m| m.len() == expected_size)
 }
 
 fn ensure_parent_dir(path: &str) {
@@ -137,7 +138,7 @@ async fn process_url(
 
     let items: Vec<_> = all_items
         .into_iter()
-        .filter(|item| !should_skip(&item.path, item.node.size()))
+        .filter(|item| !should_skip(&item.path, item.node.size(), config.force))
         .collect();
 
     if items.is_empty() {
@@ -191,6 +192,7 @@ fn parse_args() -> Config {
     let mut urls = Vec::new();
     let mut chunks_per_file = DEFAULT_CHUNKS_PER_FILE;
     let mut concurrent_files = DEFAULT_CONCURRENT_FILES;
+    let mut force = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -206,6 +208,9 @@ fn parse_args() -> Config {
                 if i < args.len() {
                     concurrent_files = args[i].parse().unwrap_or(DEFAULT_CONCURRENT_FILES);
                 }
+            }
+            "-f" | "--force" => {
+                force = true;
             }
             "-h" | "--help" => {
                 print_usage();
@@ -226,6 +231,7 @@ fn parse_args() -> Config {
         urls,
         chunks_per_file,
         concurrent_files,
+        force,
     }
 }
 
@@ -235,6 +241,7 @@ fn print_usage() {
     eprintln!("Options:");
     eprintln!("  -j, --chunks <N>    Chunks per file for parallel download (default: {})", DEFAULT_CHUNKS_PER_FILE);
     eprintln!("  -p, --parallel <N>  Concurrent file downloads (default: {})", DEFAULT_CONCURRENT_FILES);
+    eprintln!("  -f, --force         Overwrite existing files");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
     eprintln!("Environment:");
@@ -303,7 +310,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
         File::create(&path).unwrap().write_all(b"hello").unwrap();
-        assert!(should_skip(path.to_str().unwrap(), 5));
+        assert!(should_skip(path.to_str().unwrap(), 5, false));
     }
 
     #[test]
@@ -311,12 +318,20 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
         File::create(&path).unwrap().write_all(b"hello").unwrap();
-        assert!(!should_skip(path.to_str().unwrap(), 100));
+        assert!(!should_skip(path.to_str().unwrap(), 100, false));
     }
 
     #[test]
     fn dont_skip_missing_file() {
-        assert!(!should_skip("/nonexistent/file.txt", 100));
+        assert!(!should_skip("/nonexistent/file.txt", 100, false));
+    }
+
+    #[test]
+    fn force_overwrite_existing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.txt");
+        File::create(&path).unwrap().write_all(b"hello").unwrap();
+        assert!(!should_skip(path.to_str().unwrap(), 5, true));
     }
 
     #[test]
