@@ -1,6 +1,9 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use std::{env, fs, path::Path};
 
 use futures::{stream, StreamExt};
@@ -25,6 +28,155 @@ struct Config {
 struct DownloadItem<'a> {
     path: String,
     node: &'a mega::Node,
+}
+
+// ============================================================================
+// Download Statistics
+// ============================================================================
+
+struct DownloadStats {
+    start_time: Instant,
+    total_bytes: u64,
+    last_bytes: AtomicU64,
+    last_time: std::sync::Mutex<Instant>,
+    peak_speed: AtomicU64,
+}
+
+impl DownloadStats {
+    fn new(total_bytes: u64) -> Self {
+        let now = Instant::now();
+        Self {
+            start_time: now,
+            total_bytes,
+            last_bytes: AtomicU64::new(0),
+            last_time: std::sync::Mutex::new(now),
+            peak_speed: AtomicU64::new(0),
+        }
+    }
+
+    fn update(&self, current_bytes: u64) {
+        let now = Instant::now();
+        let mut last_time = self.last_time.lock().unwrap();
+        let elapsed = now.duration_since(*last_time);
+
+        // Update speed calculation every 100ms minimum
+        if elapsed >= Duration::from_millis(100) {
+            let last = self.last_bytes.swap(current_bytes, Ordering::Relaxed);
+            let bytes_delta = current_bytes.saturating_sub(last);
+            let speed = (bytes_delta as f64 / elapsed.as_secs_f64()) as u64;
+
+            // Update peak speed
+            self.peak_speed.fetch_max(speed, Ordering::Relaxed);
+            *last_time = now;
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.start_time.elapsed()
+    }
+
+    fn average_speed(&self) -> u64 {
+        let elapsed = self.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            (self.total_bytes as f64 / elapsed) as u64
+        } else {
+            0
+        }
+    }
+
+    fn peak_speed(&self) -> u64 {
+        self.peak_speed.load(Ordering::Relaxed)
+    }
+}
+
+struct SessionStats {
+    files_downloaded: usize,
+    files_skipped: usize,
+    total_bytes: u64,
+    start_time: Instant,
+    peak_speed: u64,
+}
+
+impl SessionStats {
+    fn new() -> Self {
+        Self {
+            files_downloaded: 0,
+            files_skipped: 0,
+            total_bytes: 0,
+            start_time: Instant::now(),
+            peak_speed: 0,
+        }
+    }
+
+    fn add_download(&mut self, bytes: u64, peak: u64) {
+        self.files_downloaded += 1;
+        self.total_bytes += bytes;
+        self.peak_speed = self.peak_speed.max(peak);
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.start_time.elapsed()
+    }
+
+    fn average_speed(&self) -> u64 {
+        let elapsed = self.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            (self.total_bytes as f64 / elapsed) as u64
+        } else {
+            0
+        }
+    }
+
+    fn print_summary(&self) {
+        if self.files_downloaded == 0 && self.files_skipped == 0 {
+            return;
+        }
+
+        println!("\n{}", "─".repeat(60));
+        println!("Download Summary");
+        println!("{}", "─".repeat(60));
+
+        if self.files_downloaded > 0 {
+            println!("  Files downloaded:  {}", self.files_downloaded);
+            println!("  Total size:        {}", format_bytes(self.total_bytes));
+            println!("  Total time:        {}", format_duration(self.elapsed()));
+            println!("  Average speed:     {}/s", format_bytes(self.average_speed()));
+            println!("  Peak speed:        {}/s", format_bytes(self.peak_speed));
+        }
+
+        if self.files_skipped > 0 {
+            println!("  Files skipped:     {}", self.files_skipped);
+        }
+
+        println!("{}", "─".repeat(60));
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 3600 {
+        format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}.{:01}s", secs, d.subsec_millis() / 100)
+    }
 }
 
 // ============================================================================
@@ -85,14 +237,17 @@ async fn download_file(
     progress: &MultiProgress,
     item: &DownloadItem<'_>,
     chunks: usize,
-) -> Result<()> {
+) -> Result<(u64, u64)> {
     let DownloadItem { path, node } = item;
 
     ensure_parent_dir(path);
 
+    let stats = Arc::new(DownloadStats::new(node.size()));
     let bar = progress.add(make_progress_bar(node.size(), node.name()));
     bar.enable_steady_tick(std::time::Duration::from_millis(100));
+
     let bar_clone = bar.clone();
+    let stats_clone = Arc::clone(&stats);
 
     // Open file for parallel chunk download with MAC verification
     let file = tokio::fs::File::create(path).await?;
@@ -101,15 +256,26 @@ async fn download_file(
     let result = client
         .download_node_parallel(node, file, chunks, Some(move |bytes| {
             bar_clone.set_position(bytes);
+            stats_clone.update(bytes);
         }))
         .await;
 
     match &result {
-        Ok(()) => bar.finish_and_clear(),
+        Ok(()) => {
+            bar.finish_and_clear();
+            let _ = progress.println(format!(
+                "  {} - {} in {} ({}/s avg, {}/s peak)",
+                node.name(),
+                format_bytes(node.size()),
+                format_duration(stats.elapsed()),
+                format_bytes(stats.average_speed()),
+                format_bytes(stats.peak_speed()),
+            ));
+        }
         Err(_) => bar.abandon(),
     }
 
-    result
+    result.map(|()| (node.size(), stats.peak_speed()))
 }
 
 async fn process_url(
@@ -117,6 +283,7 @@ async fn process_url(
     progress: &MultiProgress,
     url: &str,
     config: &Config,
+    session_stats: &mut SessionStats,
 ) -> Result<()> {
     let nodes = client.fetch_public_nodes(url).await?;
 
@@ -136,31 +303,46 @@ async fn process_url(
 
     let found_any = !all_items.is_empty();
 
-    let items: Vec<_> = all_items
+    let (to_download, to_skip): (Vec<_>, Vec<_>) = all_items
         .into_iter()
-        .filter(|item| !should_skip(&item.path, item.node.size(), config.force))
-        .collect();
+        .partition(|item| !should_skip(&item.path, item.node.size(), config.force));
 
-    if items.is_empty() {
+    session_stats.files_skipped += to_skip.len();
+
+    if to_download.is_empty() {
         if !found_any {
             let _ = progress.println("No files found in the shared folder.");
         } else {
-            let _ = progress.println("All files already downloaded.");
+            let _ = progress.println(format!(
+                "All {} file(s) already downloaded.",
+                to_skip.len()
+            ));
         }
         return Ok(());
     }
 
-    let _ = progress.println(format!("Downloading {} file(s) with {} chunks each...", items.len(), config.chunks_per_file));
+    let total_size: u64 = to_download.iter().map(|i| i.node.size()).sum();
+    let _ = progress.println(format!(
+        "Downloading {} file(s) ({}) with {} chunks each...\n",
+        to_download.len(),
+        format_bytes(total_size),
+        config.chunks_per_file
+    ));
 
-    stream::iter(&items)
+    let results: Vec<_> = stream::iter(&to_download)
         .map(|item| download_file(client, progress, item, config.chunks_per_file))
         .buffer_unordered(config.concurrent_files)
-        .for_each(|result| async {
-            if let Err(e) = result {
+        .collect()
+        .await;
+
+    for result in results {
+        match result {
+            Ok((bytes, peak)) => session_stats.add_download(bytes, peak),
+            Err(e) => {
                 let _ = progress.println(format!("Download error: {e:?}"));
             }
-        })
-        .await;
+        }
+    }
 
     Ok(())
 }
@@ -280,17 +462,18 @@ async fn main() -> Result<()> {
     println!("Logged in successfully.\n");
 
     let progress = MultiProgress::new();
+    let mut session_stats = SessionStats::new();
 
     for url in &config.urls {
         let _ = progress.println(format!("Processing: {url}"));
-        if let Err(e) = process_url(&client, &progress, url, &config).await {
+        if let Err(e) = process_url(&client, &progress, url, &config, &mut session_stats).await {
             let _ = progress.println(format!("Error processing {url}: {e:?}"));
         }
-        let _ = progress.println("");
     }
 
     progress.clear().ok();
-    println!("Done.");
+    session_stats.print_summary();
+
     Ok(())
 }
 
@@ -351,5 +534,21 @@ mod tests {
     fn progress_bar_creation() {
         let bar = make_progress_bar(1000, "test.txt");
         assert_eq!(bar.length(), Some(1000));
+    }
+
+    #[test]
+    fn format_bytes_units() {
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(1024), "1.00 KB");
+        assert_eq!(format_bytes(1536), "1.50 KB");
+        assert_eq!(format_bytes(1048576), "1.00 MB");
+        assert_eq!(format_bytes(1073741824), "1.00 GB");
+    }
+
+    #[test]
+    fn format_duration_units() {
+        assert_eq!(format_duration(Duration::from_secs(5)), "5.0s");
+        assert_eq!(format_duration(Duration::from_secs(65)), "1m 05s");
+        assert_eq!(format_duration(Duration::from_secs(3665)), "1h 01m 05s");
     }
 }
