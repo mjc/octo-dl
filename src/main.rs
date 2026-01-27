@@ -1,7 +1,7 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{env, fs, path::Path};
@@ -10,7 +10,7 @@ use futures::{stream, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 const DEFAULT_CONCURRENT_FILES: usize = 4;
-const DEFAULT_CHUNKS_PER_FILE: usize = 8;
+const DEFAULT_CHUNKS_PER_FILE: usize = 2;
 
 // ============================================================================
 // Core Types
@@ -37,9 +37,16 @@ struct DownloadItem<'a> {
 struct DownloadStats {
     start_time: Instant,
     total_bytes: u64,
+    bytes_downloaded: AtomicU64,  // Running total from deltas
     last_bytes: AtomicU64,
-    last_update_ms: AtomicU64,  // Time in milliseconds since start
+    last_update_ms: AtomicU64,
+    current_speed: AtomicU64,    // Latest 1-second speed sample
     peak_speed: AtomicU64,
+    // Track time (ms) when we first reached 50%/80% of current speed
+    time_to_50pct_ms: AtomicU64,
+    time_to_80pct_ms: AtomicU64,
+    threshold_50pct: AtomicU64,  // Speed threshold for 50%
+    threshold_80pct: AtomicU64,  // Speed threshold for 80%
 }
 
 impl DownloadStats {
@@ -47,26 +54,49 @@ impl DownloadStats {
         Self {
             start_time: Instant::now(),
             total_bytes,
+            bytes_downloaded: AtomicU64::new(0),
             last_bytes: AtomicU64::new(0),
             last_update_ms: AtomicU64::new(0),
+            current_speed: AtomicU64::new(0),
             peak_speed: AtomicU64::new(0),
+            time_to_50pct_ms: AtomicU64::new(0),
+            time_to_80pct_ms: AtomicU64::new(0),
+            threshold_50pct: AtomicU64::new(0),
+            threshold_80pct: AtomicU64::new(0),
         }
     }
 
-    fn update(&self, current_bytes: u64) {
+    fn add_bytes(&self, delta: u64) {
+        let current_bytes = self.bytes_downloaded.fetch_add(delta, Ordering::Relaxed) + delta;
         let elapsed = self.start_time.elapsed();
         let now_ms = elapsed.as_millis() as u64;
 
-        // Update speed calculation every 1000ms (smoother measurements)
+        // Update speed calculation every 1000ms
         let last_ms = self.last_update_ms.load(Ordering::Relaxed);
         if now_ms.saturating_sub(last_ms) >= 1000 {
             let last = self.last_bytes.swap(current_bytes, Ordering::Relaxed);
             let bytes_delta = current_bytes.saturating_sub(last);
             let elapsed_secs = (now_ms - last_ms) as f64 / 1000.0;
 
-            if elapsed_secs > 0.0 {
+            if elapsed_secs > 0.5 {  // Require at least 500ms window to avoid spurious spikes
                 let speed = (bytes_delta as f64 / elapsed_secs) as u64;
+                self.current_speed.store(speed, Ordering::Relaxed);
                 self.peak_speed.fetch_max(speed, Ordering::Relaxed);
+
+                // Update thresholds based on peak (ramp-up tracking)
+                let peak = self.peak_speed.load(Ordering::Relaxed);
+                let threshold_50 = peak / 2;
+                let threshold_80 = peak * 4 / 5;
+
+                // Record time when we first crossed these thresholds
+                if speed >= threshold_50 && self.time_to_50pct_ms.load(Ordering::Relaxed) == 0 {
+                    self.time_to_50pct_ms.store(now_ms, Ordering::Relaxed);
+                    self.threshold_50pct.store(threshold_50, Ordering::Relaxed);
+                }
+                if speed >= threshold_80 && self.time_to_80pct_ms.load(Ordering::Relaxed) == 0 {
+                    self.time_to_80pct_ms.store(now_ms, Ordering::Relaxed);
+                    self.threshold_80pct.store(threshold_80, Ordering::Relaxed);
+                }
             }
 
             let _ = self.last_update_ms.compare_exchange(
@@ -94,6 +124,15 @@ impl DownloadStats {
     fn peak_speed(&self) -> u64 {
         self.peak_speed.load(Ordering::Relaxed)
     }
+
+    fn current_speed(&self) -> u64 {
+        self.current_speed.load(Ordering::Relaxed)
+    }
+
+    fn time_to_80pct(&self) -> Option<Duration> {
+        let ms = self.time_to_80pct_ms.load(Ordering::Relaxed);
+        if ms > 0 { Some(Duration::from_millis(ms)) } else { None }
+    }
 }
 
 #[derive(Debug)]
@@ -103,6 +142,8 @@ struct SessionStats {
     total_bytes: u64,
     start_time: Instant,
     peak_speed: u64,
+    total_ramp_up_ms: u64,
+    ramp_up_count: u64,
 }
 
 impl SessionStats {
@@ -113,13 +154,19 @@ impl SessionStats {
             total_bytes: 0,
             start_time: Instant::now(),
             peak_speed: 0,
+            total_ramp_up_ms: 0,
+            ramp_up_count: 0,
         }
     }
 
-    fn add_download(&mut self, bytes: u64, peak: u64) {
+    fn add_download(&mut self, bytes: u64, peak: u64, ramp_up: Option<Duration>) {
         self.files_downloaded += 1;
         self.total_bytes += bytes;
         self.peak_speed = self.peak_speed.max(peak);
+        if let Some(ramp) = ramp_up {
+            self.total_ramp_up_ms += ramp.as_millis() as u64;
+            self.ramp_up_count += 1;
+        }
     }
 
     fn elapsed(&self) -> Duration {
@@ -132,6 +179,14 @@ impl SessionStats {
             (self.total_bytes as f64 / elapsed) as u64
         } else {
             0
+        }
+    }
+
+    fn average_ramp_up(&self) -> Option<Duration> {
+        if self.ramp_up_count > 0 {
+            Some(Duration::from_millis(self.total_ramp_up_ms / self.ramp_up_count))
+        } else {
+            None
         }
     }
 
@@ -150,6 +205,9 @@ impl SessionStats {
             println!("  Total time:        {}", format_duration(self.elapsed()));
             println!("  Average speed:     {}/s", format_bytes(self.average_speed()));
             println!("  Peak speed:        {}/s", format_bytes(self.peak_speed));
+            if let Some(ramp) = self.average_ramp_up() {
+                println!("  Avg ramp-up:       {} to 80% of peak", format_duration(ramp));
+            }
         }
 
         if self.files_skipped > 0 {
@@ -245,7 +303,7 @@ async fn download_file(
     progress: &MultiProgress,
     item: &DownloadItem<'_>,
     chunks: usize,
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, Option<Duration>)> {
     let DownloadItem { path, node } = item;
 
     ensure_parent_dir(path);
@@ -256,34 +314,46 @@ async fn download_file(
 
     let bar_clone = bar.clone();
     let stats_clone = Arc::clone(&stats);
+    let first_bytes = Arc::new(AtomicBool::new(false));
+    let first_bytes_clone = Arc::clone(&first_bytes);
 
     // Open file for parallel chunk download with MAC verification
     let file = tokio::fs::File::create(path).await?;
     file.set_len(node.size()).await?;
 
+    let name_for_progress = node.name().to_string();
     let result = client
-        .download_node_parallel(node, file, chunks, Some(move |bytes| {
-            bar_clone.set_position(bytes);
-            stats_clone.update(bytes);
+        .download_node_parallel(node, file, chunks, Some(move |delta| {
+            // Reset elapsed time on first bytes to clear connection establishment delay
+            if !first_bytes_clone.swap(true, Ordering::Relaxed) {
+                bar_clone.reset_elapsed();
+            }
+            bar_clone.inc(delta);
+            stats_clone.add_bytes(delta);
+            bar_clone.set_message(name_for_progress.clone());
         }))
         .await;
 
     match &result {
         Ok(()) => {
             bar.finish_and_clear();
+            let ramp_up = stats.time_to_80pct()
+                .map(|d| format!("ramp {}", format_duration(d)))
+                .unwrap_or_else(|| "ramp <1s".to_string());
             let _ = progress.println(format!(
-                "  {} - {} in {} ({}/s avg, {}/s peak)",
+                "  {} - {} in {} ({}/s avg, {}/s peak, {})",
                 node.name(),
                 format_bytes(node.size()),
                 format_duration(stats.elapsed()),
                 format_bytes(stats.average_speed()),
                 format_bytes(stats.peak_speed()),
+                ramp_up,
             ));
         }
         Err(_) => bar.abandon(),
     }
 
-    result.map(|()| (node.size(), stats.peak_speed()))
+    result.map(|()| (node.size(), stats.peak_speed(), stats.time_to_80pct()))
 }
 
 async fn process_url(
@@ -345,7 +415,7 @@ async fn process_url(
 
     for result in results {
         match result {
-            Ok((bytes, peak)) => session_stats.add_download(bytes, peak),
+            Ok((bytes, peak, ramp_up)) => session_stats.add_download(bytes, peak, ramp_up),
             Err(e) => {
                 let _ = progress.println(format!("Download error: {e:?}"));
             }
@@ -462,7 +532,12 @@ async fn main() -> Result<()> {
 
     let (email, password, mfa) = get_credentials();
 
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(8)
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+        .expect("Failed to build HTTP client");
     let mut client = mega::Client::builder().build(http)?;
 
     println!("Logging in...");
@@ -590,7 +665,7 @@ mod tests {
             #[test]
             fn download_stats_speed_never_panics(bytes in 0u64..u64::MAX) {
                 let stats = DownloadStats::new(bytes);
-                stats.update(bytes / 2);
+                stats.add_bytes(bytes / 2);
                 let _ = stats.average_speed();
                 let _ = stats.peak_speed();
             }
@@ -599,15 +674,18 @@ mod tests {
             fn session_stats_never_panics(
                 files in 0usize..1000,
                 bytes in 0u64..1_000_000_000_000,
-                peak_speed in 0u64..1_000_000_000
+                peak_speed in 0u64..1_000_000_000,
+                ramp_up_ms in proptest::option::of(0u64..60_000)
             ) {
                 let mut stats = SessionStats::new();
                 for _ in 0..files {
-                    stats.add_download(bytes / (files.max(1) as u64), peak_speed);
+                    let ramp_up = ramp_up_ms.map(Duration::from_millis);
+                    stats.add_download(bytes / (files.max(1) as u64), peak_speed, ramp_up);
                 }
                 // Should not panic when accessing stats
                 let _ = stats.elapsed();
                 let _ = stats.average_speed();
+                let _ = stats.average_ramp_up();
             }
         }
     }
