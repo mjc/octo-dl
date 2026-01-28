@@ -1,7 +1,7 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{env, fs, path::Path};
@@ -28,6 +28,11 @@ struct Config {
 struct DownloadItem<'a> {
     path: String,
     node: &'a mega::Node,
+}
+
+struct CollectedFiles<'a> {
+    to_download: Vec<DownloadItem<'a>>,
+    skipped: usize,
 }
 
 // ============================================================================
@@ -111,10 +116,9 @@ impl SessionStats {
         }
     }
 
-    fn add_download(&mut self, bytes: u64, peak: u64, ramp_up: Option<Duration>) {
+    fn add_download(&mut self, bytes: u64, ramp_up: Option<Duration>) {
         self.files_downloaded += 1;
         self.total_bytes += bytes;
-        self.peak_speed = self.peak_speed.max(peak);
         if let Some(ramp) = ramp_up {
             self.total_ramp_up_ms += ramp.as_millis() as u64;
             self.ramp_up_count += 1;
@@ -253,21 +257,21 @@ fn ensure_parent_dir(path: &str) {
 async fn download_file(
     client: &mega::Client,
     progress: &MultiProgress,
+    total_bar: &ProgressBar,
     item: &DownloadItem<'_>,
     chunks: usize,
-) -> Result<(u64, u64, Option<Duration>)> {
+) -> Result<(u64, Option<Duration>)> {
     let DownloadItem { path, node } = item;
 
     ensure_parent_dir(path);
 
     let stats = Arc::new(DownloadStats::new(node.size()));
-    let bar = progress.add(make_progress_bar(node.size(), node.name()));
-    bar.enable_steady_tick(std::time::Duration::from_millis(100));
+    let bar = progress.insert_before(total_bar, make_progress_bar(node.size(), node.name()));
+    bar.enable_steady_tick(std::time::Duration::from_millis(250));
 
     let bar_clone = bar.clone();
+    let total_bar_clone = total_bar.clone();
     let stats_clone = Arc::clone(&stats);
-    let first_bytes = Arc::new(AtomicBool::new(false));
-    let first_bytes_clone = Arc::clone(&first_bytes);
 
     // Open file for parallel chunk download with MAC verification
     let file = tokio::fs::File::create(path).await?;
@@ -276,11 +280,8 @@ async fn download_file(
     let name_for_progress = node.name().to_string();
     let result = client
         .download_node_parallel(node, file, chunks, Some(move |delta| {
-            // Reset elapsed time on first bytes to clear connection establishment delay
-            if !first_bytes_clone.swap(true, Ordering::Relaxed) {
-                bar_clone.reset_elapsed();
-            }
             bar_clone.inc(delta);
+            total_bar_clone.inc(delta);
             stats_clone.update_speed(bar_clone.per_sec() as u64);
             bar_clone.set_message(name_for_progress.clone());
         }))
@@ -305,23 +306,15 @@ async fn download_file(
         Err(_) => bar.abandon(),
     }
 
-    result.map(|()| (node.size(), stats.peak_speed(), stats.time_to_80pct()))
+    result.map(|()| (node.size(), stats.time_to_80pct()))
 }
 
-async fn process_url(
-    client: &mega::Client,
-    progress: &MultiProgress,
-    url: &str,
-    config: &Config,
-    session_stats: &mut SessionStats,
-) -> Result<()> {
-    let nodes = client.fetch_public_nodes(url).await?;
-
+fn collect_from_nodes<'a>(nodes: &'a mega::Nodes, force: bool) -> CollectedFiles<'a> {
     let all_items: Vec<_> = nodes
         .roots()
         .flat_map(|root| {
             if root.kind().is_folder() {
-                collect_files(&nodes, root)
+                collect_files(nodes, root)
             } else {
                 vec![DownloadItem {
                     path: root.name().to_string(),
@@ -331,43 +324,81 @@ async fn process_url(
         })
         .collect();
 
-    let found_any = !all_items.is_empty();
-
     let (to_download, to_skip): (Vec<_>, Vec<_>) = all_items
         .into_iter()
-        .partition(|item| !should_skip(&item.path, item.node.size(), config.force));
+        .partition(|item| !should_skip(&item.path, item.node.size(), force));
 
-    session_stats.files_skipped += to_skip.len();
+    CollectedFiles {
+        to_download,
+        skipped: to_skip.len(),
+    }
+}
 
-    if to_download.is_empty() {
-        if !found_any {
-            let _ = progress.println("No files found in the shared folder.");
-        } else {
-            let _ = progress.println(format!(
-                "All {} file(s) already downloaded.",
-                to_skip.len()
-            ));
-        }
+fn print_file_list(files: &[DownloadItem], skipped: usize) {
+    if files.is_empty() && skipped == 0 {
+        println!("No files found.");
+        return;
+    }
+
+    let total_size: u64 = files.iter().map(|i| i.node.size()).sum();
+
+    println!("\n{}", "─".repeat(60));
+    println!("Files to download:");
+    println!("{}", "─".repeat(60));
+
+    for item in files {
+        println!("  {} ({})", item.path, format_bytes(item.node.size()));
+    }
+
+    println!("{}", "─".repeat(60));
+    println!(
+        "  {} file(s), {} total",
+        files.len(),
+        format_bytes(total_size)
+    );
+    if skipped > 0 {
+        println!("  {} file(s) skipped (already exist)", skipped);
+    }
+    println!("{}\n", "─".repeat(60));
+}
+
+async fn download_all<'a>(
+    client: &mega::Client,
+    progress: &MultiProgress,
+    total_bar: &ProgressBar,
+    files: &[DownloadItem<'a>],
+    config: &Config,
+    session_stats: &mut SessionStats,
+) -> Result<()> {
+    if files.is_empty() {
         return Ok(());
     }
 
-    let total_size: u64 = to_download.iter().map(|i| i.node.size()).sum();
-    let _ = progress.println(format!(
-        "Downloading {} file(s) ({}) with {} chunks each...\n",
-        to_download.len(),
-        format_bytes(total_size),
-        config.chunks_per_file
-    ));
+    // Track aggregate peak speed from total_bar
+    let session_peak = Arc::new(AtomicU64::new(0));
+    let session_peak_clone = Arc::clone(&session_peak);
 
-    let results: Vec<_> = stream::iter(&to_download)
-        .map(|item| download_file(client, progress, item, config.chunks_per_file))
+    let results: Vec<_> = stream::iter(files)
+        .map(|item| {
+            let peak_tracker = Arc::clone(&session_peak_clone);
+            async move {
+                let result = download_file(client, progress, total_bar, item, config.chunks_per_file).await;
+                // Update session peak from total_bar's aggregate speed
+                let current_speed = total_bar.per_sec() as u64;
+                peak_tracker.fetch_max(current_speed, Ordering::Relaxed);
+                result
+            }
+        })
         .buffer_unordered(config.concurrent_files)
         .collect()
         .await;
 
+    // Use aggregate peak, not per-file peak
+    session_stats.peak_speed = session_peak.load(Ordering::Relaxed);
+
     for result in results {
         match result {
-            Ok((bytes, peak, ramp_up)) => session_stats.add_download(bytes, peak, ramp_up),
+            Ok((bytes, ramp_up)) => session_stats.add_download(bytes, ramp_up),
             Err(e) => {
                 let _ = progress.println(format!("Download error: {e:?}"));
             }
@@ -391,6 +422,18 @@ fn make_progress_bar(size: u64, name: &str) -> ProgressBar {
         .progress_chars("━━╌"),
     );
     bar.set_message(name.to_string());
+    bar
+}
+
+fn make_total_progress_bar(size: u64) -> ProgressBar {
+    let bar = ProgressBar::new(size);
+    bar.set_style(
+        ProgressStyle::with_template(
+            "Total [{bar:40.green/white}] {bytes}/{total_bytes} @ {bytes_per_sec}",
+        )
+        .expect("template valid")
+        .progress_chars("━━╌"),
+    );
     bar
 }
 
@@ -494,18 +537,56 @@ async fn main() -> Result<()> {
 
     println!("Logging in...");
     client.login(&email, &password, mfa.as_deref()).await?;
-    println!("Logged in successfully.\n");
+    println!("Logged in successfully.");
 
-    let progress = MultiProgress::new();
-    let mut session_stats = SessionStats::new();
-
+    // Phase 1: Fetch all URLs and collect files
+    println!("Fetching file lists from {} URL(s)...\n", config.urls.len());
+    let mut all_nodes: Vec<(String, mega::Nodes)> = Vec::new();
     for url in &config.urls {
-        let _ = progress.println(format!("Processing: {url}"));
-        if let Err(e) = process_url(&client, &progress, url, &config, &mut session_stats).await {
-            let _ = progress.println(format!("Error processing {url}: {e:?}"));
+        print!("  {} ... ", url);
+        match client.fetch_public_nodes(url).await {
+            Ok(nodes) => {
+                let file_count: usize = nodes.roots().map(|r| {
+                    if r.kind().is_folder() { collect_files(&nodes, r).len() } else { 1 }
+                }).sum();
+                println!("{} file(s)", file_count);
+                all_nodes.push((url.clone(), nodes));
+            }
+            Err(e) => println!("ERROR: {e:?}"),
         }
     }
 
+    // Collect files from all fetched nodes
+    let mut all_files: Vec<DownloadItem> = Vec::new();
+    let mut total_skipped = 0;
+    for (_url, nodes) in &all_nodes {
+        let collected = collect_from_nodes(nodes, config.force);
+        all_files.extend(collected.to_download);
+        total_skipped += collected.skipped;
+    }
+
+    // Phase 2: Print what we found
+    print_file_list(&all_files, total_skipped);
+
+    if all_files.is_empty() {
+        if total_skipped > 0 {
+            println!("All files already downloaded.");
+        }
+        return Ok(());
+    }
+
+    // Phase 3: Download all files
+    let progress = MultiProgress::new();
+    let total_size: u64 = all_files.iter().map(|i| i.node.size()).sum();
+    let total_bar = progress.add(make_total_progress_bar(total_size));
+    total_bar.enable_steady_tick(Duration::from_millis(250));
+
+    let mut session_stats = SessionStats::new();
+    session_stats.files_skipped = total_skipped;
+
+    download_all(&client, &progress, &total_bar, &all_files, &config, &mut session_stats).await?;
+
+    total_bar.finish_and_clear();
     progress.clear().ok();
     session_stats.print_summary();
 
