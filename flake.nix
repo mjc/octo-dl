@@ -85,6 +85,41 @@
             ++ clangIncludePaths
             ++ glibIncludePaths;
         };
+
+        # Cross-compilation shell for release builds
+        devShells.cross = pkgs.mkShell {
+          nativeBuildInputs = with pkgs; [
+            rustup
+            cargo-zigbuild
+            zig
+            pkg-config
+            # For Windows cross-compilation
+            pkgsCross.mingwW64.stdenv.cc
+          ];
+
+          shellHook = ''
+            export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
+
+            # Clean environment - let Zig be the linker for cross-compilation
+            unset CC
+            unset CXX
+            unset AR
+            unset RANLIB
+
+            # Set Zig cache to a writable location
+            export ZIG_GLOBAL_CACHE_DIR="$HOME/.cache/zig"
+            export ZIG_LOCAL_CACHE_DIR="$PWD/.zig-cache"
+
+            echo "Cross-compilation environment ready"
+            echo "Available targets:"
+            echo "  - x86_64-unknown-linux-gnu"
+            echo "  - aarch64-unknown-linux-gnu"
+            echo "  - x86_64-pc-windows-gnu"
+            echo ""
+            echo "Build with: cargo zigbuild --release --target <target>"
+            echo "Or run: ./scripts/build-release.sh <version>"
+          '';
+        };
       }
     );
 }
