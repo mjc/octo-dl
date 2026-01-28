@@ -13,8 +13,14 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
 MODE="${1:-strace}"
-MEGA_URL="${2:-https://mega.nz/file/xxxxx#yyyyy}"
-CHUNKS="${3:-8}"
+CHUNKS="${2:-8}"
+shift 2 2>/dev/null || true
+MEGA_URLS=("$@")
+
+# Default URL if none provided
+if [ ${#MEGA_URLS[@]} -eq 0 ]; then
+    MEGA_URLS=("https://mega.nz/file/xxxxx#yyyyy")
+fi
 
 # Trap Ctrl-C to continue with report generation
 trap 'echo ""; echo "Stopping download, generating reports..."' INT
@@ -23,7 +29,7 @@ echo "=== Download Latency Profile Mode: $MODE ==="
 echo ""
 
 if [ "$MODE" = "-h" ] || [ "$MODE" = "--help" ]; then
-    echo "Usage: $0 [MODE] [MEGA_URL] [CHUNKS]"
+    echo "Usage: $0 [MODE] [CHUNKS] [MEGA_URLs...]"
     echo ""
     echo "Profile octo-dl download latency and waiting patterns"
     echo ""
@@ -32,12 +38,12 @@ if [ "$MODE" = "-h" ] || [ "$MODE" = "--help" ]; then
     echo "  offcpu  - Off-CPU flamegraph (what we're waiting on)"
     echo ""
     echo "Arguments:"
-    echo "  MEGA_URL  MEGA file URL (default: $MEGA_URL)"
-    echo "  CHUNKS    Number of parallel chunks (default: $CHUNKS)"
+    echo "  CHUNKS     Number of parallel chunks (default: 8)"
+    echo "  MEGA_URLs  One or more MEGA file/folder URLs"
     echo ""
     echo "Examples:"
-    echo "  ./scripts/profile-latency.sh strace 'https://mega.nz/file/xxxxx#yyyyy' 8"
-    echo "  ./scripts/profile-latency.sh offcpu 'https://mega.nz/file/xxxxx#yyyyy' 4"
+    echo "  ./scripts/profile-latency.sh strace 8 'https://mega.nz/file/xxxxx#yyyyy'"
+    echo "  ./scripts/profile-latency.sh offcpu 4 'https://mega.nz/folder/aaa#bbb' 'https://mega.nz/file/ccc#ddd'"
     echo ""
     exit 0
 fi
@@ -68,7 +74,7 @@ case "$MODE" in
     echo -ne "\033kocto-dl READY\033\\"
     strace -T -f -tt -e read,write,recvfrom,sendto,poll,epoll_wait,pselect6,open,openat,close \
       -o strace.log \
-      "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "$MEGA_URL" || true
+      "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "${MEGA_URLS[@]}" || true
 
     echo ""
     echo "=== Syscall Summary ==="
@@ -140,7 +146,7 @@ case "$MODE" in
         echo "Recording... (press Ctrl-C to stop)"
         # This is a simplified approach - just run perf in the background
         perf record -e sched:sched_switch -g --call-graph fp -F 997 -o perf-offcpu.data \
-          sh -c "$PROJECT_DIR/target/release/octo-dl -f -j $CHUNKS \"$MEGA_URL\"" || true
+          "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "${MEGA_URLS[@]}" || true
         ;;
 
       perf-sched)
@@ -148,14 +154,14 @@ case "$MODE" in
         echo -ne "\033]0;octo-dl READY (offcpu-sched)\007"
         echo -ne "\033kocto-dl READY\033\\"
         perf sched record -o perf-offcpu.data \
-          "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "$MEGA_URL" || true
+          "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "${MEGA_URLS[@]}" || true
         ;;
 
       perf-cpu)
         echo -ne "\033]0;octo-dl READY (offcpu-cpu)\007"
         echo -ne "\033kocto-dl READY\033\\"
         perf record -e cpu-clock -g --call-graph fp -F 997 -o perf-offcpu.data \
-          "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "$MEGA_URL" || true
+          "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "${MEGA_URLS[@]}" || true
         ;;
     esac
     set -e
@@ -192,7 +198,7 @@ case "$MODE" in
     ;;
 
   *)
-    echo "Usage: $0 [strace|offcpu] [MEGA_URL] [CHUNKS]"
+    echo "Usage: $0 [strace|offcpu] [CHUNKS] [MEGA_URLs...]"
     echo ""
     echo "Modes:"
     echo "  strace  - Record syscall latency (default)"
