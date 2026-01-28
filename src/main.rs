@@ -8,7 +8,8 @@ use std::{env, fs, path::Path};
 
 use futures::{stream, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use base64::Engine;
+
+mod dlc;
 
 const DEFAULT_CONCURRENT_FILES: usize = 4;
 const DEFAULT_CHUNKS_PER_FILE: usize = 2;
@@ -21,6 +22,7 @@ type Result<T> = std::result::Result<T, mega::Error>;
 
 struct Config {
     urls: Vec<String>,
+    dlc_files: Vec<String>,
     chunks_per_file: usize,
     concurrent_files: usize,
     force: bool,
@@ -443,33 +445,13 @@ fn make_total_progress_bar(size: u64) -> ProgressBar {
 // ============================================================================
 
 /// Extract MEGA links from a JDownloader2 DLC file
-/// Returns Some(urls) if successful, None if not a valid DLC file with MEGA links
-fn parse_dlc_file(path: &str) -> Option<Vec<String>> {
-    let content = fs::read_to_string(path).ok()?;
-
-    // Try to decode as base64 (common DLC format)
-    let decoded = if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&content) {
-        String::from_utf8(bytes).ok()?
-    } else {
-        // If not base64, treat as raw content (plain XML or text)
-        content
-    };
-
-    // Extract all URLs that look like MEGA links from the content
-    let mut mega_urls = Vec::new();
-    for part in decoded.split(|c: char| c.is_whitespace() || c == '"' || c == '>' || c == '<' || c == '&') {
-        if (part.starts_with("https://mega.nz/") || part.starts_with("http://mega.nz/"))
-            && !mega_urls.contains(&part.to_string())
-        {
-            mega_urls.push(part.to_string());
-        }
-    }
-
-    if mega_urls.is_empty() {
-        return None;
-    }
-
-    Some(mega_urls)
+/// Handles encrypted DLC containers with JDownloader service integration
+async fn parse_dlc_file(
+    path: &str,
+    http_client: &reqwest::Client,
+    cache: &dlc::DlcKeyCache,
+) -> Option<Vec<String>> {
+    dlc::parse_dlc_file(path, http_client, cache).await
 }
 
 // ============================================================================
@@ -480,6 +462,7 @@ fn parse_args() -> Config {
     let args: Vec<_> = env::args().skip(1).collect();
 
     let mut urls = Vec::new();
+    let mut dlc_files = Vec::new();
     let mut chunks_per_file = DEFAULT_CHUNKS_PER_FILE;
     let mut concurrent_files = DEFAULT_CONCURRENT_FILES;
     let mut force = false;
@@ -509,16 +492,7 @@ fn parse_args() -> Config {
             arg if !arg.starts_with('-') => {
                 // Check if it's a DLC file
                 if arg.ends_with(".dlc") {
-                    match parse_dlc_file(arg) {
-                        Some(mega_urls) => {
-                            eprintln!("  {} DLC file loaded successfully with {} MEGA link(s)", arg, mega_urls.len());
-                            urls.extend(mega_urls);
-                        }
-                        None => {
-                            eprintln!("Error: DLC file '{}' is invalid or contains no MEGA links", arg);
-                            std::process::exit(1);
-                        }
-                    }
+                    dlc_files.push(arg.to_string());
                 } else {
                     urls.push(arg.to_string());
                 }
@@ -533,6 +507,7 @@ fn parse_args() -> Config {
 
     Config {
         urls,
+        dlc_files,
         chunks_per_file,
         concurrent_files,
         force,
@@ -570,21 +545,43 @@ fn get_credentials() -> (String, String, Option<String>) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = parse_args();
+    let mut config = parse_args();
 
-    if config.urls.is_empty() {
+    if config.urls.is_empty() && config.dlc_files.is_empty() {
         print_usage();
         std::process::exit(1);
     }
 
     let (email, password, mfa) = get_credentials();
 
+    // Create HTTP client with custom user agent for DLC service
     let http = reqwest::Client::builder()
         .pool_idle_timeout(Duration::from_secs(60))
         .pool_max_idle_per_host(8)
         .tcp_keepalive(Duration::from_secs(30))
         .build()
         .expect("Failed to build HTTP client");
+
+    // Process DLC files before logging in
+    if !config.dlc_files.is_empty() {
+        println!("Processing DLC files...\n");
+        let dlc_cache = dlc::DlcKeyCache::new();
+        for dlc_path in &config.dlc_files {
+            print!("  {} ... ", dlc_path);
+            match parse_dlc_file(dlc_path, &http, &dlc_cache).await {
+                Some(urls) => {
+                    println!("{} MEGA link(s)", urls.len());
+                    config.urls.extend(urls);
+                }
+                None => {
+                    eprintln!("Error: DLC file '{}' failed to process", dlc_path);
+                    std::process::exit(1);
+                }
+            }
+        }
+        println!();
+    }
+
     let mut client = mega::Client::builder().build(http)?;
 
     println!("Logging in...");
@@ -698,39 +695,6 @@ mod tests {
         ensure_parent_dir("file.txt");
     }
 
-    #[test]
-    fn parse_plain_dlc_content() {
-        let dir = TempDir::new().unwrap();
-        let dlc_path = dir.path().join("test.dlc");
-        let content = r#"<dlc>
-            <package>
-                <url>https://mega.nz/file/test1#key1</url>
-                <url>https://mega.nz/file/test2#key2</url>
-            </package>
-        </dlc>"#;
-        File::create(&dlc_path).unwrap().write_all(content.as_bytes()).unwrap();
-
-        let urls = parse_dlc_file(dlc_path.to_str().unwrap()).unwrap();
-        assert_eq!(urls.len(), 2);
-        assert!(urls[0].contains("mega.nz"));
-        assert!(urls[1].contains("mega.nz"));
-    }
-
-    #[test]
-    fn parse_dlc_rejects_non_mega_links() {
-        let dir = TempDir::new().unwrap();
-        let dlc_path = dir.path().join("test.dlc");
-        let content = r#"<dlc>
-            <package>
-                <url>https://example.com/file</url>
-                <url>https://google.com/search</url>
-            </package>
-        </dlc>"#;
-        File::create(&dlc_path).unwrap().write_all(content.as_bytes()).unwrap();
-
-        let result = parse_dlc_file(dlc_path.to_str().unwrap());
-        assert!(result.is_none());
-    }
 
     #[test]
     fn progress_bar_creation() {
