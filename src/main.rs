@@ -8,6 +8,7 @@ use std::{env, fs, path::Path};
 
 use futures::{stream, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use base64::Engine;
 
 const DEFAULT_CONCURRENT_FILES: usize = 4;
 const DEFAULT_CHUNKS_PER_FILE: usize = 2;
@@ -438,6 +439,40 @@ fn make_total_progress_bar(size: u64) -> ProgressBar {
 }
 
 // ============================================================================
+// DLC File Parsing
+// ============================================================================
+
+/// Extract MEGA links from a JDownloader2 DLC file
+/// Returns Some(urls) if successful, None if not a valid DLC file with MEGA links
+fn parse_dlc_file(path: &str) -> Option<Vec<String>> {
+    let content = fs::read_to_string(path).ok()?;
+
+    // Try to decode as base64 (common DLC format)
+    let decoded = if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&content) {
+        String::from_utf8(bytes).ok()?
+    } else {
+        // If not base64, treat as raw content (plain XML or text)
+        content
+    };
+
+    // Extract all URLs that look like MEGA links from the content
+    let mut mega_urls = Vec::new();
+    for part in decoded.split(|c: char| c.is_whitespace() || c == '"' || c == '>' || c == '<' || c == '&') {
+        if (part.starts_with("https://mega.nz/") || part.starts_with("http://mega.nz/"))
+            && !mega_urls.contains(&part.to_string())
+        {
+            mega_urls.push(part.to_string());
+        }
+    }
+
+    if mega_urls.is_empty() {
+        return None;
+    }
+
+    Some(mega_urls)
+}
+
+// ============================================================================
 // CLI Parsing
 // ============================================================================
 
@@ -472,7 +507,21 @@ fn parse_args() -> Config {
                 std::process::exit(0);
             }
             arg if !arg.starts_with('-') => {
-                urls.push(arg.to_string());
+                // Check if it's a DLC file
+                if arg.ends_with(".dlc") {
+                    match parse_dlc_file(arg) {
+                        Some(mega_urls) => {
+                            eprintln!("  {} DLC file loaded successfully with {} MEGA link(s)", arg, mega_urls.len());
+                            urls.extend(mega_urls);
+                        }
+                        None => {
+                            eprintln!("Error: DLC file '{}' is invalid or contains no MEGA links", arg);
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    urls.push(arg.to_string());
+                }
             }
             _ => {
                 eprintln!("Unknown option: {}", args[i]);
@@ -491,7 +540,10 @@ fn parse_args() -> Config {
 }
 
 fn print_usage() {
-    eprintln!("Usage: octo-dl [OPTIONS] <url>...");
+    eprintln!("Usage: octo-dl [OPTIONS] <url|dlc>...");
+    eprintln!();
+    eprintln!("Arguments:");
+    eprintln!("  <url|dlc>           MEGA URL or JDownloader2 .dlc file (MEGA links only)");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  -j, --chunks <N>    Chunks per file for parallel download (default: {})", DEFAULT_CHUNKS_PER_FILE);
@@ -644,6 +696,40 @@ mod tests {
     #[test]
     fn ensure_parent_handles_root_file() {
         ensure_parent_dir("file.txt");
+    }
+
+    #[test]
+    fn parse_plain_dlc_content() {
+        let dir = TempDir::new().unwrap();
+        let dlc_path = dir.path().join("test.dlc");
+        let content = r#"<dlc>
+            <package>
+                <url>https://mega.nz/file/test1#key1</url>
+                <url>https://mega.nz/file/test2#key2</url>
+            </package>
+        </dlc>"#;
+        File::create(&dlc_path).unwrap().write_all(content.as_bytes()).unwrap();
+
+        let urls = parse_dlc_file(dlc_path.to_str().unwrap()).unwrap();
+        assert_eq!(urls.len(), 2);
+        assert!(urls[0].contains("mega.nz"));
+        assert!(urls[1].contains("mega.nz"));
+    }
+
+    #[test]
+    fn parse_dlc_rejects_non_mega_links() {
+        let dir = TempDir::new().unwrap();
+        let dlc_path = dir.path().join("test.dlc");
+        let content = r#"<dlc>
+            <package>
+                <url>https://example.com/file</url>
+                <url>https://google.com/search</url>
+            </package>
+        </dlc>"#;
+        File::create(&dlc_path).unwrap().write_all(content.as_bytes()).unwrap();
+
+        let result = parse_dlc_file(dlc_path.to_str().unwrap());
+        assert!(result.is_none());
     }
 
     #[test]

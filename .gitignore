@@ -1,3 +1,9 @@
 /target
 .direnv
 .zig-cache/
+
+# Profiling artifacts
+perf*.data
+*.old
+flamegraph*.svg
+strace.log
