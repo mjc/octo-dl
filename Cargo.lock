@@ -1176,7 +1176,9 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 name = "octo-dl"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "base64",
+ "cbc",
  "console",
  "env_logger",
  "futures",
@@ -1184,7 +1186,6 @@ dependencies = [
  "log",
  "mega",
  "proptest",
- "quick-xml",
  "reqwest",
  "sha2",
  "sluice",
@@ -1370,16 +1371,6 @@ name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
-
-[[package]]
-name = "quick-xml"
-version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1004a344b30a54e2ee58d66a71b32d2db2feb0a31f9a2d302bf0536f15de2a33"
-dependencies = [
- "memchr",
- "serde",
-]
 
 [[package]]
 name = "quinn"
