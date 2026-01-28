@@ -150,18 +150,40 @@ case "$MODE" in
         ;;
 
       perf-sched)
-        # Use perf sched for proper scheduler analysis
+        # Use perf sched for proper scheduler analysis, filtering to just our process
         echo -ne "\033]0;octo-dl READY (offcpu-sched)\007"
         echo -ne "\033kocto-dl READY\033\\"
-        perf sched record -o perf-offcpu.data \
-          "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "${MEGA_URLS[@]}" || true
+
+        # Start octo-dl in background and capture its PID
+        "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "${MEGA_URLS[@]}" &
+        APP_PID=$!
+
+        # Give it a moment to start
+        sleep 0.5
+
+        # Record perf data for just this process
+        perf sched record -p $APP_PID -o perf-offcpu.data
+
+        # Wait for download to finish
+        wait $APP_PID || true
         ;;
 
       perf-cpu)
         echo -ne "\033]0;octo-dl READY (offcpu-cpu)\007"
         echo -ne "\033kocto-dl READY\033\\"
-        perf record -e cpu-clock -g --call-graph fp -F 997 -o perf-offcpu.data \
-          "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "${MEGA_URLS[@]}" || true
+
+        # Start octo-dl in background and capture its PID
+        "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "${MEGA_URLS[@]}" &
+        APP_PID=$!
+
+        # Give it a moment to start
+        sleep 0.5
+
+        # Record perf data for just this process
+        perf record -p $APP_PID -e cpu-clock -g --call-graph fp -F 997 -o perf-offcpu.data
+
+        # Wait for download to finish
+        wait $APP_PID || true
         ;;
     esac
     set -e
@@ -173,10 +195,16 @@ case "$MODE" in
       if [ "$OFFCPU_METHOD" = "perf-sched" ]; then
         # perf sched gives latency report, not flamegraph
         echo ""
-        echo "=== Scheduler Latency Report ==="
-        perf sched latency -i perf-offcpu.data 2>/dev/null | head -50
+        echo "=== Scheduler Latency Summary ==="
         echo ""
-        echo "Full report: perf sched latency -i perf-offcpu.data"
+        echo "Top threads by scheduling latency (wait time before running):"
+        perf sched timehist -i perf-offcpu.data 2>&1 | \
+          awk 'NR>2 {print $5 " " $4}' | grep -v '^$' | sort -rn | head -30 || true
+        echo ""
+        echo "For detailed analysis:"
+        echo "  perf sched timehist -i perf-offcpu.data | less"
+        echo ""
+        echo "Note: Full scheduler latency report (perf sched latency) may be slow on large files"
       else
         # cpu-clock can make a flamegraph
         if command -v inferno-collapse-perf &> /dev/null; then
