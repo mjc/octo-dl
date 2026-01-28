@@ -31,9 +31,10 @@
           ''-I${pkgs.llvmPackages_latest.libclang.lib}/lib/clang/${pkgs.llvmPackages_latest.libclang.version}/include''
         ];
 
-        commonIncludePaths = [
+        # glibc is Linux-only; include it only on Linux systems
+        commonIncludePaths = if pkgs.stdenv.isLinux then [
           ''-I${pkgs.glibc.dev}/include''
-        ];
+        ] else [];
       in {
         devShells.default = pkgs.mkShell rec {
           nativeBuildInputs = [pkgs.pkg-config];
@@ -47,12 +48,15 @@
             par2cmdline
             xxd
             gh
-            # Profiling tools
-            linuxPackages_latest.perf
             gnuplot
             bc
-            strace
-          ];
+          ] ++ (
+            if pkgs.stdenv.isLinux then [
+              # Linux-only profiling tools
+              linuxPackages_latest.perf
+              strace
+            ] else []
+          );
 
           RUSTC_VERSION = overrides.toolchain.channel;
 
@@ -61,10 +65,14 @@
 
           shellHook = ''
             export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
+          '' + (if pkgs.stdenv.isLinux then ''
             export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-x86_64-unknown-linux-gnu/bin/
             # Only set LD_LIBRARY_PATH for cargo/rustc, not globally (breaks system nix)
             export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (buildInputs ++ nativeBuildInputs)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          '';
+          '' else ''
+            # On macOS, rustup manages toolchains automatically
+            true
+          '');
 
           # Add precompiled library to rustc search path
           RUSTFLAGS = builtins.map (a: ''-L ${a}/lib'') [
