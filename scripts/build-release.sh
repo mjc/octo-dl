@@ -55,7 +55,7 @@ build_linux_target() {
 	local arch=$2
 
 	log_info "Building for $target..."
-	cargo zigbuild --release --target "$target"
+	cargo-zigbuild zigbuild --release --target "$target"
 	tar -czf "release/v$VERSION/$BINARY_NAME-v$VERSION-$arch-linux.tar.gz" \
 		-C "target/$target/release" "$BINARY_NAME"
 	log_success "Built $arch Linux binary"
@@ -66,7 +66,7 @@ build_windows_target() {
 	local arch=$2
 
 	log_info "Building for $target..."
-	cargo zigbuild --release --target "$target"
+	cargo-zigbuild zigbuild --release --target "$target"
 	(cd "target/$target/release" && \
 		zip "../../../release/v$VERSION/$BINARY_NAME-v$VERSION-$arch-windows.zip" \
 		"$BINARY_NAME.exe")
@@ -110,9 +110,8 @@ echo "════════════════════════�
 echo ""
 
 # Enter cross-compilation environment if not already in it
-if [ -z "${RUSTUP_TOOLCHAIN:-}" ] || [ ! -f "/tmp/.in-nix-cross-env" ]; then
+if [ -z "${IN_NIX_SHELL:-}" ]; then
 	log_info "Entering Nix cross-compilation environment..."
-	touch /tmp/.in-nix-cross-env
 	exec nix develop .#cross -c "$0" "$@"
 fi
 
@@ -156,6 +155,3 @@ echo ""
 echo "Built artifacts:"
 find "release/v$VERSION/" -maxdepth 1 -type f -exec ls -lh {} \; | awk '{printf " • %s (%s)\n", $NF, $5}'
 echo "════════════════════════════════════════════════════════════════════════"
-
-# Clean up the cross-env marker
-rm -f /tmp/.in-nix-cross-env
