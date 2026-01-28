@@ -12,9 +12,17 @@ env_logger = "0.11.8"
 futures = "0.3.29"
 indicatif = { version = "0.17.7", features = ["tokio", "improved_unicode"] }
 log = "0.4.27"
-mega = { path = "../mega-rs" }
+mega = { git = "https://github.com/mjc/mega-rs.git", branch = "parallel-download", default-features = false, features = ["rustls-tls"] }
 reqwest = { version = "0.12.19", default-features = false, features = ["rustls-tls", "charset", "http2", "macos-system-configuration"] }
-sha2 = { version = "0.10.8", features = ["asm", "asm-aarch64"] }
+# sha2 with target-specific asm optimizations (not available on Windows)
+[target.'cfg(all(any(target_arch = "x86_64", target_arch = "x86"), not(target_os = "windows")))'.dependencies]
+sha2 = { version = "0.10.8", features = ["asm"] }
+
+[target.'cfg(all(target_arch = "aarch64", not(target_os = "windows")))'.dependencies]
+sha2 = { version = "0.10.8", features = ["asm-aarch64"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sha2 = "0.10.8"
 sluice = "0.5.5"
 tokio = { version = "1.33.0", features = ["full"] }
 tokio-util = { version = "0.7.10", features = ["full"] }
@@ -22,3 +30,11 @@ tokio-util = { version = "0.7.10", features = ["full"] }
 [dev-dependencies]
 tempfile = "3.24.0"
 proptest = "1.5.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+strip = true
+overflow-checks = true

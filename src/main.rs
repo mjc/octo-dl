@@ -707,13 +707,12 @@ mod tests {
             fn session_stats_never_panics(
                 files in 0usize..1000,
                 bytes in 0u64..1_000_000_000_000,
-                peak_speed in 0u64..1_000_000_000,
                 ramp_up_ms in proptest::option::of(0u64..60_000)
             ) {
                 let mut stats = SessionStats::new();
                 for _ in 0..files {
                     let ramp_up = ramp_up_ms.map(Duration::from_millis);
-                    stats.add_download(bytes / (files.max(1) as u64), peak_speed, ramp_up);
+                    stats.add_download(bytes / (files.max(1) as u64), ramp_up);
                 }
                 // Should not panic when accessing stats
                 let _ = stats.elapsed();
