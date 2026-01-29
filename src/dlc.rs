@@ -1,5 +1,5 @@
 use aes::Aes128;
-use aes::cipher::{KeyIvInit, KeyInit, BlockDecryptMut};
+use aes::cipher::{BlockDecryptMut, KeyInit, KeyIvInit};
 use base64::Engine;
 use cbc::Decryptor;
 use std::collections::HashMap;
@@ -7,8 +7,7 @@ use std::sync::{Arc, Mutex};
 
 // Hardcoded AES/ECB key from JDownloader (hex: 447e787351e60e2c6a96b3964be0c9bd)
 const JDOWNLOADER_KEY: &[u8] = &[
-    0x44, 0x7e, 0x78, 0x73, 0x51, 0xe6, 0x0e, 0x2c, 0x6a, 0x96, 0xb3, 0x96, 0x4b, 0xe0, 0xc9,
-    0xbd,
+    0x44, 0x7e, 0x78, 0x73, 0x51, 0xe6, 0x0e, 0x2c, 0x6a, 0x96, 0xb3, 0x96, 0x4b, 0xe0, 0xc9, 0xbd,
 ];
 
 const DLC_SERVICE: &str = "https://service.jdownloader.org/dlcrypt/service.php";
@@ -148,11 +147,7 @@ async fn call_decryption_service(dlc_key: &str, http_client: &reqwest::Client) -
     let user_agent = format!("JDownloader/2.0 (octo-dl/{version})");
 
     // Build parameters matching JDownloader's actual format
-    let params = [
-        ("destType", "jdtc6"),
-        ("srcType", "dlc"),
-        ("data", dlc_key),
-    ];
+    let params = [("destType", "jdtc6"), ("srcType", "dlc"), ("data", dlc_key)];
 
     let response = http_client
         .post(DLC_SERVICE)
@@ -190,8 +185,8 @@ async fn call_decryption_service(dlc_key: &str, http_client: &reqwest::Client) -
 
 /// Decrypt the service response key using AES/ECB with `JDownloader`'s key
 fn decrypt_service_key(encrypted_key: &str) -> Option<String> {
-    use aes::cipher::generic_array::GenericArray;
     use aes::cipher::BlockDecrypt;
+    use aes::cipher::generic_array::GenericArray;
 
     // Base64 decode the encrypted key
     let encrypted_bytes = base64::engine::general_purpose::STANDARD
@@ -252,17 +247,18 @@ fn decrypt_aes_cbc(encrypted: &[u8], key_str: &str) -> Option<String> {
     let mut data = encrypted.to_vec();
     let cipher = Decryptor::<Aes128>::new(key, iv);
 
-    let decrypted_bytes = if let Ok(d) = cipher.decrypt_padded_mut::<aes::cipher::block_padding::Pkcs7>(&mut data) {
-        d.to_vec()
-    } else {
-        // Try NoPadding as fallback (as per JDownloader's d5 function)
-        let mut data2 = encrypted.to_vec();
-        let cipher2 = Decryptor::<Aes128>::new(key, iv);
-        cipher2
-            .decrypt_padded_mut::<aes::cipher::block_padding::NoPadding>(&mut data2)
-            .ok()?
-            .to_vec()
-    };
+    let decrypted_bytes =
+        if let Ok(d) = cipher.decrypt_padded_mut::<aes::cipher::block_padding::Pkcs7>(&mut data) {
+            d.to_vec()
+        } else {
+            // Try NoPadding as fallback (as per JDownloader's d5 function)
+            let mut data2 = encrypted.to_vec();
+            let cipher2 = Decryptor::<Aes128>::new(key, iv);
+            cipher2
+                .decrypt_padded_mut::<aes::cipher::block_padding::NoPadding>(&mut data2)
+                .ok()?
+                .to_vec()
+        };
 
     // Strip trailing null/padding bytes from decrypted content
     let content_end = decrypted_bytes
@@ -294,11 +290,11 @@ fn extract_mega_links_from_xml(xml: &str) -> Vec<String> {
             // URLs inside DLC XML are base64 encoded
             if let Ok(decoded_bytes) = base64::engine::general_purpose::STANDARD.decode(encoded_url)
                 && let Ok(url) = String::from_utf8(decoded_bytes)
-                    && (url.starts_with("https://mega.nz/") || url.starts_with("http://mega.nz/"))
-                        && !urls.contains(&url)
-                    {
-                        urls.push(url);
-                    }
+                && (url.starts_with("https://mega.nz/") || url.starts_with("http://mega.nz/"))
+                && !urls.contains(&url)
+            {
+                urls.push(url);
+            }
 
             content = &after_tag[end + 6..];
         } else {
@@ -428,9 +424,12 @@ mod tests {
     #[test]
     fn extract_single_mega_link_from_xml() {
         // Base64 encode "https://mega.nz/file/abc123#key456"
-        let encoded = base64::engine::general_purpose::STANDARD
-            .encode("https://mega.nz/file/abc123#key456");
-        let xml = format!("<dlc><content><file><url>{}</url></file></content></dlc>", encoded);
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/abc123#key456");
+        let xml = format!(
+            "<dlc><content><file><url>{}</url></file></content></dlc>",
+            encoded
+        );
         let urls = extract_mega_links_from_xml(&xml);
         assert_eq!(urls.len(), 1);
         assert_eq!(urls[0], "https://mega.nz/file/abc123#key456");
@@ -438,14 +437,11 @@ mod tests {
 
     #[test]
     fn extract_multiple_mega_links_from_xml() {
-        let url1 = base64::engine::general_purpose::STANDARD
-            .encode("https://mega.nz/file/test1#key1");
-        let url2 = base64::engine::general_purpose::STANDARD
-            .encode("https://mega.nz/folder/test2#key2");
-        let xml = format!(
-            "<dlc><url>{}</url><url>{}</url></dlc>",
-            url1, url2
-        );
+        let url1 =
+            base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/test1#key1");
+        let url2 =
+            base64::engine::general_purpose::STANDARD.encode("https://mega.nz/folder/test2#key2");
+        let xml = format!("<dlc><url>{}</url><url>{}</url></dlc>", url1, url2);
         let urls = extract_mega_links_from_xml(&xml);
         assert_eq!(urls.len(), 2);
         assert!(urls.contains(&"https://mega.nz/file/test1#key1".to_string()));
@@ -454,10 +450,10 @@ mod tests {
 
     #[test]
     fn extract_filters_non_mega_links() {
-        let mega_url = base64::engine::general_purpose::STANDARD
-            .encode("https://mega.nz/file/abc#123");
-        let google_url = base64::engine::general_purpose::STANDARD
-            .encode("https://google.com/search");
+        let mega_url =
+            base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/abc#123");
+        let google_url =
+            base64::engine::general_purpose::STANDARD.encode("https://google.com/search");
         let xml = format!(
             "<dlc><url>{}</url><url>{}</url></dlc>",
             mega_url, google_url
@@ -469,8 +465,8 @@ mod tests {
 
     #[test]
     fn extract_handles_http_mega_links() {
-        let url = base64::engine::general_purpose::STANDARD
-            .encode("http://mega.nz/file/oldformat#key");
+        let url =
+            base64::engine::general_purpose::STANDARD.encode("http://mega.nz/file/oldformat#key");
         let xml = format!("<dlc><url>{}</url></dlc>", url);
         let urls = extract_mega_links_from_xml(&xml);
         assert_eq!(urls.len(), 1);
@@ -479,12 +475,8 @@ mod tests {
 
     #[test]
     fn extract_deduplicates_urls() {
-        let url = base64::engine::general_purpose::STANDARD
-            .encode("https://mega.nz/file/same#key");
-        let xml = format!(
-            "<dlc><url>{}</url><url>{}</url></dlc>",
-            url, url
-        );
+        let url = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/same#key");
+        let xml = format!("<dlc><url>{}</url><url>{}</url></dlc>", url, url);
         let urls = extract_mega_links_from_xml(&xml);
         assert_eq!(urls.len(), 1);
     }
@@ -510,8 +502,8 @@ mod tests {
 
     #[test]
     fn extract_handles_nested_structure() {
-        let url = base64::engine::general_purpose::STANDARD
-            .encode("https://mega.nz/file/nested#key");
+        let url =
+            base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/nested#key");
         let xml = format!(
             r#"<dlc><header></header><content><package name="test"><file><url>{}</url></file></package></content></dlc>"#,
             url
@@ -655,8 +647,7 @@ mod tests {
     #[test]
     fn extract_handles_malformed_xml() {
         // Missing closing tag
-        let url = base64::engine::general_purpose::STANDARD
-            .encode("https://mega.nz/file/abc#key");
+        let url = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/abc#key");
         let xml = format!("<dlc><url>{}", url);
         let urls = extract_mega_links_from_xml(&xml);
         assert!(urls.is_empty());
@@ -665,8 +656,7 @@ mod tests {
     #[test]
     fn extract_handles_url_tags_with_attributes() {
         // Real DLC files might have attributes we ignore
-        let url = base64::engine::general_purpose::STANDARD
-            .encode("https://mega.nz/file/abc#key");
+        let url = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/abc#key");
         // Note: our simple parser won't handle attributes, just testing it doesn't crash
         let xml = format!("<dlc><url type=\"http\">{}</url></dlc>", url);
         // Current implementation will find "<url>" without attributes

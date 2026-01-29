@@ -1,12 +1,12 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{env, fs, path::Path};
 
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 mod dlc;
@@ -68,7 +68,12 @@ impl DownloadStats {
         // Track time to reach 80% of peak
         if self.time_to_80pct_ms.load(Ordering::Relaxed) == 0 && speed >= peak * 4 / 5 {
             // u128 -> u64: saturate at MAX for durations > 584 million years
-            let ms = self.start_time.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+            let ms = self
+                .start_time
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
             self.time_to_80pct_ms.store(ms, Ordering::Relaxed);
         }
     }
@@ -79,7 +84,11 @@ impl DownloadStats {
 
     /// Returns average speed in bytes/sec
     /// f64 -> u64 casts saturate since Rust 1.45 (NaN->0, negative->0, overflow->MAX)
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     fn average_speed(&self) -> u64 {
         let secs = self.elapsed().as_secs_f64();
         if secs > 0.0 {
@@ -95,7 +104,11 @@ impl DownloadStats {
 
     fn time_to_80pct(&self) -> Option<Duration> {
         let ms = self.time_to_80pct_ms.load(Ordering::Relaxed);
-        if ms > 0 { Some(Duration::from_millis(ms)) } else { None }
+        if ms > 0 {
+            Some(Duration::from_millis(ms))
+        } else {
+            None
+        }
     }
 }
 
@@ -136,7 +149,11 @@ impl SessionStats {
         self.start_time.elapsed()
     }
 
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     fn average_speed(&self) -> u64 {
         let secs = self.elapsed().as_secs_f64();
         if secs > 0.0 {
@@ -148,7 +165,9 @@ impl SessionStats {
 
     const fn average_ramp_up(&self) -> Option<Duration> {
         if self.ramp_up_count > 0 {
-            Some(Duration::from_millis(self.total_ramp_up_ms / self.ramp_up_count))
+            Some(Duration::from_millis(
+                self.total_ramp_up_ms / self.ramp_up_count,
+            ))
         } else {
             None
         }
@@ -167,10 +186,16 @@ impl SessionStats {
             println!("  Files downloaded:  {}", self.files_downloaded);
             println!("  Total size:        {}", format_bytes(self.total_bytes));
             println!("  Total time:        {}", format_duration(self.elapsed()));
-            println!("  Average speed:     {}/s", format_bytes(self.average_speed()));
+            println!(
+                "  Average speed:     {}/s",
+                format_bytes(self.average_speed())
+            );
             println!("  Peak speed:        {}/s", format_bytes(self.peak_speed));
             if let Some(ramp) = self.average_ramp_up() {
-                println!("  Avg ramp-up:       {} to 80% of peak", format_duration(ramp));
+                println!(
+                    "  Avg ramp-up:       {} to 80% of peak",
+                    format_duration(ramp)
+                );
             }
         }
 
@@ -202,7 +227,12 @@ fn format_bytes(bytes: u64) -> String {
 fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
     if secs >= 3600 {
-        format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+        format!(
+            "{}h {:02}m {:02}s",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        )
     } else if secs >= 60 {
         format!("{}m {:02}s", secs / 60, secs % 60)
     } else {
@@ -253,7 +283,10 @@ fn should_skip(path: &str, expected_size: u64, force: bool) -> bool {
 }
 
 fn ensure_parent_dir(path: &str) {
-    if let Some(parent) = Path::new(path).parent().filter(|p| !p.as_os_str().is_empty()) {
+    if let Some(parent) = Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
         let _ = fs::create_dir_all(parent);
     }
 }
@@ -289,19 +322,27 @@ async fn download_file(
 
     let name_for_progress = node.name().to_string();
     let result = client
-        .download_node_parallel(node, file, chunks, Some(move |delta| {
-            bar_clone.inc(delta);
-            total_bar_clone.inc(delta);
-            // per_sec() returns f64; as u64 saturates (Rust 1.45+)
-            stats_clone.update_speed(bar_clone.per_sec() as u64);
-            bar_clone.set_message(name_for_progress.clone());
-        }))
+        .download_node_parallel(
+            node,
+            file,
+            chunks,
+            Some(move |delta| {
+                bar_clone.inc(delta);
+                total_bar_clone.inc(delta);
+                // per_sec() returns f64; as u64 saturates (Rust 1.45+)
+                stats_clone.update_speed(bar_clone.per_sec() as u64);
+                bar_clone.set_message(name_for_progress.clone());
+            }),
+        )
         .await;
 
     match &result {
         Ok(()) => {
             bar.finish_and_clear();
-            let ramp_up = stats.time_to_80pct().map_or_else(|| "ramp <1s".to_string(), |d| format!("ramp {}", format_duration(d)));
+            let ramp_up = stats.time_to_80pct().map_or_else(
+                || "ramp <1s".to_string(),
+                |d| format!("ramp {}", format_duration(d)),
+            );
             let _ = progress.println(format!(
                 "  {} - {} in {} ({}/s avg, {}/s peak, {})",
                 node.name(),
@@ -387,7 +428,8 @@ async fn download_all(
         .map(|item| {
             let peak_tracker = Arc::clone(&session_peak_clone);
             async move {
-                let result = download_file(client, progress, total_bar, item, config.chunks_per_file).await;
+                let result =
+                    download_file(client, progress, total_bar, item, config.chunks_per_file).await;
                 // Update session peak from total_bar's aggregate speed
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let current_speed = total_bar.per_sec() as u64;
@@ -527,8 +569,12 @@ fn print_usage() {
     eprintln!("  <url|dlc>           MEGA URL or JDownloader2 .dlc file (MEGA links only)");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  -j, --chunks <N>    Chunks per file for parallel download (default: {DEFAULT_CHUNKS_PER_FILE})");
-    eprintln!("  -p, --parallel <N>  Concurrent file downloads (default: {DEFAULT_CONCURRENT_FILES})");
+    eprintln!(
+        "  -j, --chunks <N>    Chunks per file for parallel download (default: {DEFAULT_CHUNKS_PER_FILE})"
+    );
+    eprintln!(
+        "  -p, --parallel <N>  Concurrent file downloads (default: {DEFAULT_CONCURRENT_FILES})"
+    );
     eprintln!("  -f, --force         Overwrite existing files");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
@@ -598,9 +644,16 @@ async fn main() -> Result<()> {
         print!("  {url} ... ");
         match client.fetch_public_nodes(url).await {
             Ok(nodes) => {
-                let file_count: usize = nodes.roots().map(|r| {
-                    if r.kind().is_folder() { collect_files(&nodes, r).len() } else { 1 }
-                }).sum();
+                let file_count: usize = nodes
+                    .roots()
+                    .map(|r| {
+                        if r.kind().is_folder() {
+                            collect_files(&nodes, r).len()
+                        } else {
+                            1
+                        }
+                    })
+                    .sum();
                 println!("{file_count} file(s)");
                 all_nodes.push((url.clone(), nodes));
             }
@@ -636,7 +689,15 @@ async fn main() -> Result<()> {
     let mut session_stats = SessionStats::new();
     session_stats.files_skipped = total_skipped;
 
-    download_all(&client, &progress, &total_bar, &all_files, &config, &mut session_stats).await?;
+    download_all(
+        &client,
+        &progress,
+        &total_bar,
+        &all_files,
+        &config,
+        &mut session_stats,
+    )
+    .await?;
 
     total_bar.finish_and_clear();
     progress.clear().ok();
@@ -697,7 +758,6 @@ mod tests {
     fn ensure_parent_handles_root_file() {
         ensure_parent_dir("file.txt");
     }
-
 
     #[test]
     fn progress_bar_creation() {
