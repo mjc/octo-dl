@@ -17,6 +17,12 @@ pub trait FileSystem: Send + Sync {
 
     /// Creates a file at the given path and pre-allocates the specified size.
     async fn create_file(&self, path: &Path, size: u64) -> std::io::Result<tokio::fs::File>;
+
+    /// Renames a file from one path to another.
+    async fn rename_file(&self, from: &Path, to: &Path) -> std::io::Result<()>;
+
+    /// Removes a file at the given path. Ignores `NotFound` errors.
+    async fn remove_file(&self, path: &Path) -> std::io::Result<()>;
 }
 
 /// Default file system implementation using `tokio::fs`.
@@ -49,6 +55,18 @@ impl FileSystem for TokioFileSystem {
         let file = tokio::fs::File::create(path).await?;
         file.set_len(size).await?;
         Ok(file)
+    }
+
+    async fn rename_file(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        tokio::fs::rename(from, to).await
+    }
+
+    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -105,5 +123,39 @@ mod tests {
         // File should exist with pre-allocated size
         let metadata = std::fs::metadata(&path).unwrap();
         assert_eq!(metadata.len(), 1024);
+    }
+
+    #[tokio::test]
+    async fn tokio_fs_rename_file() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("source.txt");
+        let dst = dir.path().join("dest.txt");
+        std::fs::File::create(&src).unwrap();
+
+        let fs = TokioFileSystem::new();
+        fs.rename_file(&src, &dst).await.unwrap();
+        assert!(!src.exists());
+        assert!(dst.exists());
+    }
+
+    #[tokio::test]
+    async fn tokio_fs_remove_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::File::create(&path).unwrap();
+
+        let fs = TokioFileSystem::new();
+        fs.remove_file(&path).await.unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn tokio_fs_remove_file_not_found_is_ok() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent.txt");
+
+        let fs = TokioFileSystem::new();
+        // Should not error on missing file
+        fs.remove_file(&path).await.unwrap();
     }
 }

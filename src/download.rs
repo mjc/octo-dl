@@ -1,6 +1,6 @@
 //! Core download logic and abstractions.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -10,6 +10,17 @@ use crate::config::DownloadConfig;
 use crate::error::{Error, Result};
 use crate::fs::{FileSystem, TokioFileSystem};
 use crate::stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBuilder};
+
+/// Classification of a file's current state on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileStatus {
+    /// File exists with the expected size — fully downloaded.
+    Complete,
+    /// A `.part` file exists (partial download from a previous run).
+    Partial,
+    /// Neither the final file nor a `.part` file exists.
+    Missing,
+}
 
 /// Trait for receiving download progress updates.
 ///
@@ -27,6 +38,9 @@ pub trait DownloadProgress: Send + Sync {
 
     /// Called when a file download fails.
     fn on_error(&self, _name: &str, _error: &str) {}
+
+    /// Called when a partial `.part` file is detected from a previous run.
+    fn on_partial_detected(&self, _name: &str, _existing_size: u64, _expected_size: u64) {}
 }
 
 /// A null progress implementation that ignores all events.
@@ -49,6 +63,8 @@ pub struct CollectedFiles<'a> {
     pub to_download: Vec<DownloadItem<'a>>,
     /// Number of files skipped (already exist with correct size).
     pub skipped: usize,
+    /// Number of files with partial `.part` downloads detected.
+    pub partial: usize,
 }
 
 impl CollectedFiles<'_> {
@@ -63,6 +79,11 @@ impl CollectedFiles<'_> {
     pub const fn is_empty(&self) -> bool {
         self.to_download.is_empty()
     }
+}
+
+/// Returns the `.part` file path for a given final path.
+fn part_path(path: &str) -> PathBuf {
+    PathBuf::from(format!("{path}.part"))
 }
 
 /// Core downloader that handles MEGA file downloads.
@@ -102,8 +123,40 @@ impl<F: FileSystem> Downloader<F> {
         &mut self.client
     }
 
+    /// Returns a reference to the download configuration.
+    #[must_use]
+    pub const fn config(&self) -> &DownloadConfig {
+        &self.config
+    }
+
+    /// Classifies a file's current status on disk.
+    async fn classify_file(&self, path: &str, expected_size: u64) -> FileStatus {
+        if self.config.force_overwrite {
+            return FileStatus::Missing;
+        }
+        // Check final file first
+        if self
+            .fs
+            .file_size(Path::new(path))
+            .await
+            .is_some_and(|size| size == expected_size)
+        {
+            return FileStatus::Complete;
+        }
+        // Check for .part file
+        let pp = part_path(path);
+        if self.fs.file_exists(&pp).await {
+            return FileStatus::Partial;
+        }
+        FileStatus::Missing
+    }
+
     /// Collects files from nodes, checking which need to be downloaded.
-    pub async fn collect_files<'a>(&self, nodes: &'a mega::Nodes) -> CollectedFiles<'a> {
+    pub async fn collect_files<'a>(
+        &self,
+        nodes: &'a mega::Nodes,
+        progress: &dyn DownloadProgress,
+    ) -> CollectedFiles<'a> {
         let all_items: Vec<_> = nodes
             .roots()
             .flat_map(|root| {
@@ -120,30 +173,29 @@ impl<F: FileSystem> Downloader<F> {
 
         let mut to_download = Vec::new();
         let mut skipped = 0;
+        let mut partial = 0;
 
         for item in all_items {
-            if self.should_skip(&item.path, item.node.size()).await {
-                skipped += 1;
-            } else {
-                to_download.push(item);
+            match self.classify_file(&item.path, item.node.size()).await {
+                FileStatus::Complete => skipped += 1,
+                FileStatus::Partial => {
+                    let pp = part_path(&item.path);
+                    let existing_size = self.fs.file_size(&pp).await.unwrap_or(0);
+                    progress.on_partial_detected(item.node.name(), existing_size, item.node.size());
+                    partial += 1;
+                    to_download.push(item);
+                }
+                FileStatus::Missing => {
+                    to_download.push(item);
+                }
             }
         }
 
         CollectedFiles {
             to_download,
             skipped,
+            partial,
         }
-    }
-
-    /// Checks if a file should be skipped based on existence and size.
-    async fn should_skip(&self, path: &str, expected_size: u64) -> bool {
-        if self.config.force_overwrite {
-            return false;
-        }
-        self.fs
-            .file_size(Path::new(path))
-            .await
-            .is_some_and(|size| size == expected_size)
     }
 
     /// Ensures the parent directory exists for a file path.
@@ -157,9 +209,10 @@ impl<F: FileSystem> Downloader<F> {
         Ok(())
     }
 
-    /// Downloads a single file.
+    /// Downloads a single file using atomic `.part` file semantics.
     ///
-    /// Returns statistics about the download on success.
+    /// Writes to `{path}.part` during download, then renames to `{path}` on success.
+    /// On error, cleans up the `.part` file if `cleanup_on_error` is enabled.
     ///
     /// # Errors
     ///
@@ -172,13 +225,14 @@ impl<F: FileSystem> Downloader<F> {
     ) -> Result<FileStats> {
         self.ensure_parent_dir(path).await?;
 
+        let pp = part_path(path);
         let stats = Arc::new(DownloadStatsTracker::new(node.size()));
         let name = node.name().to_string();
 
         progress.on_file_start(&name, node.size());
 
-        // Create file with pre-allocated size
-        let file = self.fs.create_file(Path::new(path), node.size()).await?;
+        // Create .part file with pre-allocated size
+        let file = self.fs.create_file(&pp, node.size()).await?;
 
         let name_clone = name.clone();
         let stats_clone = Arc::clone(&stats);
@@ -191,16 +245,16 @@ impl<F: FileSystem> Downloader<F> {
                 file,
                 self.config.chunks_per_file,
                 Some(move |delta| {
-                    stats_clone.update_speed(delta * 4); // Rough speed estimate
-                    // Note: actual speed tracking happens in the CLI via indicatif
+                    stats_clone.update_speed(delta * 4);
                 }),
             )
             .await;
 
         match result {
             Ok(()) => {
-                // We need to reconstruct stats since we can't easily get indicatif's per_sec
-                // The CLI will handle detailed progress tracking
+                // Rename .part → final
+                self.fs.rename_file(&pp, Path::new(path)).await?;
+
                 let file_stats = FileStats {
                     size: node.size(),
                     elapsed: stats.elapsed(),
@@ -212,6 +266,10 @@ impl<F: FileSystem> Downloader<F> {
                 Ok(file_stats)
             }
             Err(e) => {
+                // Clean up .part file on error if configured
+                if self.config.cleanup_on_error {
+                    let _ = self.fs.remove_file(&pp).await;
+                }
                 progress.on_error(&name_clone, &e.to_string());
                 Err(Error::Mega(e))
             }
@@ -263,7 +321,6 @@ impl<F: FileSystem> Downloader<F> {
             match result {
                 Ok(file_stats) => builder.add_download(&file_stats),
                 Err(e) => {
-                    // Log error but continue with other files
                     log::error!("Download failed: {e}");
                 }
             }
@@ -320,12 +377,25 @@ mod tests {
 
     #[test]
     fn collected_files_total_size() {
-        // Can't easily test without mock nodes, but we can test the empty case
         let collected = CollectedFiles {
             to_download: vec![],
             skipped: 5,
+            partial: 0,
         };
         assert_eq!(collected.total_size(), 0);
         assert!(collected.is_empty());
+    }
+
+    #[test]
+    fn part_path_appends_extension() {
+        assert_eq!(part_path("foo/bar.zip"), PathBuf::from("foo/bar.zip.part"));
+        assert_eq!(part_path("file.txt"), PathBuf::from("file.txt.part"));
+    }
+
+    #[test]
+    fn file_status_variants() {
+        assert_ne!(FileStatus::Complete, FileStatus::Partial);
+        assert_ne!(FileStatus::Partial, FileStatus::Missing);
+        assert_ne!(FileStatus::Complete, FileStatus::Missing);
     }
 }
