@@ -1177,6 +1177,7 @@ name = "octo-dl"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "async-trait",
  "base64",
  "cbc",
  "console",
@@ -1190,6 +1191,7 @@ dependencies = [
  "sha2",
  "sluice",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
 ]

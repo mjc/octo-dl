@@ -1,9 +1,13 @@
+//! DLC file parsing for `JDownloader2` encrypted containers.
+
 use aes::Aes128;
 use aes::cipher::{BlockDecryptMut, KeyInit, KeyIvInit};
 use base64::Engine;
 use cbc::Decryptor;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+use crate::error::{Error, Result};
 
 // Hardcoded AES/ECB key from JDownloader (hex: 447e787351e60e2c6a96b3964be0c9bd)
 const JDOWNLOADER_KEY: &[u8] = &[
@@ -21,6 +25,7 @@ pub struct DlcKeyCache {
 }
 
 impl DlcKeyCache {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             cache: Arc::new(Mutex::new(HashMap::new())),
@@ -42,25 +47,35 @@ impl Default for DlcKeyCache {
     }
 }
 
-/// Extract MEGA links from a `JDownloader2` DLC file
+/// Extract MEGA links from a `JDownloader2` DLC file.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The file cannot be read
+/// - The file is too small or missing the encryption key
+/// - The encryption key or data is not valid base64
+/// - The decryption service is unavailable
+/// - No MEGA links are found in the decrypted content
 pub async fn parse_dlc_file(
     path: &str,
     http_client: &reqwest::Client,
     cache: &DlcKeyCache,
-) -> Option<Vec<String>> {
-    let content = std::fs::read_to_string(path).ok()?;
+) -> Result<Vec<String>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| Error::Dlc(format!("Failed to read file: {e}")))?;
 
     // Validate file size
     if content.trim().len() < MIN_DLC_SIZE {
-        eprintln!("DLC file too small (< {MIN_DLC_SIZE} bytes)");
-        return None;
+        return Err(Error::Dlc(format!(
+            "DLC file too small (< {MIN_DLC_SIZE} bytes)"
+        )));
     }
 
     // Split into encrypted data and key
     let trimmed = content.trim();
     if trimmed.len() < DLC_KEY_LENGTH {
-        eprintln!("DLC file missing encryption key");
-        return None;
+        return Err(Error::Dlc("DLC file missing encryption key".to_string()));
     }
 
     let dlc_key = trimmed[trimmed.len() - DLC_KEY_LENGTH..].to_string();
@@ -68,25 +83,30 @@ pub async fn parse_dlc_file(
 
     // Validate key format (should be base64)
     if !is_valid_base64(&dlc_key) {
-        eprintln!("DLC encryption key is not valid base64");
-        return None;
+        return Err(Error::Dlc(
+            "DLC encryption key is not valid base64".to_string(),
+        ));
     }
 
     if !is_valid_base64(encrypted_base64) {
-        eprintln!("DLC encrypted data is not valid base64");
-        return None;
+        return Err(Error::Dlc(
+            "DLC encrypted data is not valid base64".to_string(),
+        ));
     }
 
     // Get decryption key from service (with caching)
-    let decryption_key = get_decryption_key(&dlc_key, http_client, cache).await?;
+    let decryption_key = get_decryption_key(&dlc_key, http_client, cache)
+        .await
+        .ok_or_else(|| Error::Dlc("Failed to get decryption key from service".to_string()))?;
 
     // Decode the encrypted data
     let encrypted_bytes = base64::engine::general_purpose::STANDARD
         .decode(encrypted_base64)
-        .ok()?;
+        .map_err(|e| Error::Dlc(format!("Failed to decode encrypted data: {e}")))?;
 
     // Decrypt
-    let xml = decrypt_aes_cbc(&encrypted_bytes, &decryption_key)?;
+    let xml = decrypt_aes_cbc(&encrypted_bytes, &decryption_key)
+        .ok_or_else(|| Error::Dlc("Failed to decrypt DLC content".to_string()))?;
 
     // Extract MEGA links from XML
     let mut urls = extract_mega_links_from_xml(&xml);
@@ -94,11 +114,10 @@ pub async fn parse_dlc_file(
     urls.dedup();
 
     if urls.is_empty() {
-        eprintln!("No MEGA links found in DLC file");
-        return None;
+        return Err(Error::Dlc("No MEGA links found in DLC file".to_string()));
     }
 
-    Some(urls)
+    Ok(urls)
 }
 
 /// Get decryption key from `JDownloader` service with exponential backoff

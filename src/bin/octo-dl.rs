@@ -1,48 +1,102 @@
+//! octo-dl CLI - Command-line interface for downloading MEGA files.
+
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use std::{env, fs, path::Path};
+use std::{env, path::Path};
 
 use futures::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-mod dlc;
+use octo_dl::{CollectedFiles, DlcKeyCache, DownloadConfig, DownloadItem};
 
 const DEFAULT_CONCURRENT_FILES: usize = 4;
 const DEFAULT_CHUNKS_PER_FILE: usize = 2;
 
 // ============================================================================
-// Core Types
+// CLI Configuration
 // ============================================================================
 
-type Result<T> = std::result::Result<T, mega::Error>;
-
-struct Config {
+struct CliConfig {
     urls: Vec<String>,
     dlc_files: Vec<String>,
-    chunks_per_file: usize,
-    concurrent_files: usize,
-    force: bool,
-}
-
-struct DownloadItem<'a> {
-    path: String,
-    node: &'a mega::Node,
-}
-
-struct CollectedFiles<'a> {
-    to_download: Vec<DownloadItem<'a>>,
-    skipped: usize,
+    download_config: DownloadConfig,
 }
 
 // ============================================================================
-// Download Statistics
+// Formatting Helpers
 // ============================================================================
 
-/// Tracks download stats using indicatif's speed calculation
+#[allow(clippy::cast_precision_loss)]
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 3600 {
+        format!(
+            "{}h {:02}m {:02}s",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        )
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}.{:01}s", secs, d.subsec_millis() / 100)
+    }
+}
+
+// ============================================================================
+// Progress Bar Implementation
+// ============================================================================
+
+fn make_progress_bar(size: u64, name: &str) -> ProgressBar {
+    let bar = ProgressBar::new(size);
+    bar.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} - {msg}",
+        )
+        .expect("progress template is valid")
+        .progress_chars("━━╌"),
+    );
+    bar.set_message(name.to_string());
+    bar
+}
+
+fn make_total_progress_bar(size: u64) -> ProgressBar {
+    let bar = ProgressBar::new(size);
+    bar.set_style(
+        ProgressStyle::with_template(
+            "Total [{bar:40.green/white}] {bytes}/{total_bytes} @ {bytes_per_sec}",
+        )
+        .expect("template valid")
+        .progress_chars("━━╌"),
+    );
+    bar
+}
+
+// ============================================================================
+// Indicatif Progress Implementation
+// ============================================================================
+
+/// Per-file download statistics tracker using indicatif's speed calculation.
 struct DownloadStats {
     start_time: Instant,
     total_bytes: u64,
@@ -60,14 +114,13 @@ impl DownloadStats {
         }
     }
 
-    /// Called with indicatif's `per_sec()` value to track peak and ramp-up
+    /// Called with indicatif's `per_sec()` value to track peak and ramp-up.
     fn update_speed(&self, speed: u64) {
         let prev_peak = self.peak_speed.fetch_max(speed, Ordering::Relaxed);
         let peak = prev_peak.max(speed);
 
         // Track time to reach 80% of peak
         if self.time_to_80pct_ms.load(Ordering::Relaxed) == 0 && speed >= peak * 4 / 5 {
-            // u128 -> u64: saturate at MAX for durations > 584 million years
             let ms = self
                 .start_time
                 .elapsed()
@@ -82,8 +135,6 @@ impl DownloadStats {
         self.start_time.elapsed()
     }
 
-    /// Returns average speed in bytes/sec
-    /// f64 -> u64 casts saturate since Rust 1.45 (NaN->0, negative->0, overflow->MAX)
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -112,8 +163,8 @@ impl DownloadStats {
     }
 }
 
-#[derive(Debug)]
-struct SessionStats {
+/// Session statistics builder for CLI.
+struct CliSessionStats {
     files_downloaded: usize,
     files_skipped: usize,
     total_bytes: u64,
@@ -123,7 +174,7 @@ struct SessionStats {
     ramp_up_count: u64,
 }
 
-impl SessionStats {
+impl CliSessionStats {
     fn new() -> Self {
         Self {
             files_downloaded: 0,
@@ -207,95 +258,10 @@ impl SessionStats {
     }
 }
 
-#[allow(clippy::cast_precision_loss)]
-fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-fn format_duration(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs >= 3600 {
-        format!(
-            "{}h {:02}m {:02}s",
-            secs / 3600,
-            (secs % 3600) / 60,
-            secs % 60
-        )
-    } else if secs >= 60 {
-        format!("{}m {:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}.{:01}s", secs, d.subsec_millis() / 100)
-    }
-}
-
 // ============================================================================
-// Node Traversal (Functional Style)
+// Download Functions
 // ============================================================================
 
-fn collect_files<'a>(nodes: &'a mega::Nodes, node: &'a mega::Node) -> Vec<DownloadItem<'a>> {
-    let (folders, files): (Vec<_>, Vec<_>) = node
-        .children()
-        .iter()
-        .filter_map(|hash| nodes.get_node_by_handle(hash))
-        .partition(|n| n.kind().is_folder());
-
-    let current_files = files.into_iter().map(|file| DownloadItem {
-        path: build_path(nodes, node, file),
-        node: file,
-    });
-
-    let nested_files = folders
-        .into_iter()
-        .flat_map(|folder| collect_files(nodes, folder));
-
-    current_files.chain(nested_files).collect()
-}
-
-fn build_path(nodes: &mega::Nodes, parent: &mega::Node, file: &mega::Node) -> String {
-    // Try to build full path with grandparent, fallback to parent/file if no grandparent
-    if let Some(gp_handle) = parent.parent()
-        && let Some(grandparent) = nodes.get_node_by_handle(gp_handle)
-    {
-        return format!("{}/{}/{}", grandparent.name(), parent.name(), file.name());
-    }
-    // Parent is at root level, just use parent/file
-    format!("{}/{}", parent.name(), file.name())
-}
-
-// ============================================================================
-// File System Helpers
-// ============================================================================
-
-fn should_skip(path: &str, expected_size: u64, force: bool) -> bool {
-    !force && fs::metadata(path).is_ok_and(|m| m.len() == expected_size)
-}
-
-fn ensure_parent_dir(path: &str) {
-    if let Some(parent) = Path::new(path)
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-    {
-        let _ = fs::create_dir_all(parent);
-    }
-}
-
-// ============================================================================
-// Download Logic
-// ============================================================================
-
-// per_sec() returns f64; cast to u64 saturates (Rust 1.45+)
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 async fn download_file(
     client: &mega::Client,
@@ -303,7 +269,7 @@ async fn download_file(
     total_bar: &ProgressBar,
     item: &DownloadItem<'_>,
     chunks: usize,
-) -> Result<(u64, Option<Duration>)> {
+) -> octo_dl::Result<(u64, Option<Duration>)> {
     let DownloadItem { path, node } = item;
 
     ensure_parent_dir(path);
@@ -356,27 +322,17 @@ async fn download_file(
         Err(_) => bar.abandon(),
     }
 
-    result.map(|()| (node.size(), stats.time_to_80pct()))
+    result
+        .map(|()| (node.size(), stats.time_to_80pct()))
+        .map_err(octo_dl::Error::from)
 }
 
-fn collect_from_nodes(nodes: &mega::Nodes, force: bool) -> CollectedFiles<'_> {
-    let (to_download, to_skip): (Vec<_>, Vec<_>) = nodes
-        .roots()
-        .flat_map(|root| {
-            if root.kind().is_folder() {
-                collect_files(nodes, root)
-            } else {
-                vec![DownloadItem {
-                    path: root.name().to_string(),
-                    node: root,
-                }]
-            }
-        })
-        .partition(|item| !should_skip(&item.path, item.node.size(), force));
-
-    CollectedFiles {
-        to_download,
-        skipped: to_skip.len(),
+fn ensure_parent_dir(path: &str) {
+    if let Some(parent) = Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        let _ = std::fs::create_dir_all(parent);
     }
 }
 
@@ -413,9 +369,9 @@ async fn download_all(
     progress: &MultiProgress,
     total_bar: &ProgressBar,
     files: &[DownloadItem<'_>],
-    config: &Config,
-    session_stats: &mut SessionStats,
-) -> Result<()> {
+    config: &DownloadConfig,
+    session_stats: &mut CliSessionStats,
+) -> octo_dl::Result<()> {
     if files.is_empty() {
         return Ok(());
     }
@@ -457,53 +413,10 @@ async fn download_all(
 }
 
 // ============================================================================
-// Progress Bar
-// ============================================================================
-
-fn make_progress_bar(size: u64, name: &str) -> ProgressBar {
-    let bar = ProgressBar::new(size);
-    bar.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} - {msg}",
-        )
-        .expect("progress template is valid")
-        .progress_chars("━━╌"),
-    );
-    bar.set_message(name.to_string());
-    bar
-}
-
-fn make_total_progress_bar(size: u64) -> ProgressBar {
-    let bar = ProgressBar::new(size);
-    bar.set_style(
-        ProgressStyle::with_template(
-            "Total [{bar:40.green/white}] {bytes}/{total_bytes} @ {bytes_per_sec}",
-        )
-        .expect("template valid")
-        .progress_chars("━━╌"),
-    );
-    bar
-}
-
-// ============================================================================
-// DLC File Parsing
-// ============================================================================
-
-/// Extract MEGA links from a `JDownloader2` DLC file
-/// Handles encrypted DLC containers with `JDownloader` service integration
-async fn parse_dlc_file(
-    path: &str,
-    http_client: &reqwest::Client,
-    cache: &dlc::DlcKeyCache,
-) -> Option<Vec<String>> {
-    dlc::parse_dlc_file(path, http_client, cache).await
-}
-
-// ============================================================================
 // CLI Parsing
 // ============================================================================
 
-fn parse_args() -> Config {
+fn parse_args() -> CliConfig {
     let args: Vec<_> = env::args().skip(1).collect();
 
     let mut urls = Vec::new();
@@ -553,12 +466,13 @@ fn parse_args() -> Config {
         i += 1;
     }
 
-    Config {
+    CliConfig {
         urls,
         dlc_files,
-        chunks_per_file,
-        concurrent_files,
-        force,
+        download_config: DownloadConfig::new()
+            .with_chunks_per_file(chunks_per_file)
+            .with_concurrent_files(concurrent_files)
+            .with_force_overwrite(force),
     }
 }
 
@@ -592,11 +506,68 @@ fn get_credentials() -> (String, String, Option<String>) {
 }
 
 // ============================================================================
+// Node Collection (using library types)
+// ============================================================================
+
+fn collect_files<'a>(nodes: &'a mega::Nodes, node: &'a mega::Node) -> Vec<DownloadItem<'a>> {
+    let (folders, files): (Vec<_>, Vec<_>) = node
+        .children()
+        .iter()
+        .filter_map(|hash| nodes.get_node_by_handle(hash))
+        .partition(|n| n.kind().is_folder());
+
+    let current_files = files.into_iter().map(|file| DownloadItem {
+        path: build_path(nodes, node, file),
+        node: file,
+    });
+
+    let nested_files = folders
+        .into_iter()
+        .flat_map(|folder| collect_files(nodes, folder));
+
+    current_files.chain(nested_files).collect()
+}
+
+fn build_path(nodes: &mega::Nodes, parent: &mega::Node, file: &mega::Node) -> String {
+    if let Some(gp_handle) = parent.parent()
+        && let Some(grandparent) = nodes.get_node_by_handle(gp_handle)
+    {
+        return format!("{}/{}/{}", grandparent.name(), parent.name(), file.name());
+    }
+    format!("{}/{}", parent.name(), file.name())
+}
+
+fn should_skip(path: &str, expected_size: u64, force: bool) -> bool {
+    !force && std::fs::metadata(path).is_ok_and(|m| m.len() == expected_size)
+}
+
+fn collect_from_nodes(nodes: &mega::Nodes, force: bool) -> CollectedFiles<'_> {
+    let (to_download, to_skip): (Vec<_>, Vec<_>) = nodes
+        .roots()
+        .flat_map(|root| {
+            if root.kind().is_folder() {
+                collect_files(nodes, root)
+            } else {
+                vec![DownloadItem {
+                    path: root.name().to_string(),
+                    node: root,
+                }]
+            }
+        })
+        .partition(|item| !should_skip(&item.path, item.node.size(), force));
+
+    CollectedFiles {
+        to_download,
+        skipped: to_skip.len(),
+    }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> octo_dl::Result<()> {
     let mut config = parse_args();
 
     if config.urls.is_empty() && config.dlc_files.is_empty() {
@@ -617,15 +588,18 @@ async fn main() -> Result<()> {
     // Process DLC files before logging in
     if !config.dlc_files.is_empty() {
         println!("Processing DLC files...\n");
-        let dlc_cache = dlc::DlcKeyCache::new();
+        let dlc_cache = DlcKeyCache::new();
         for dlc_path in &config.dlc_files {
             print!("  {dlc_path} ... ");
-            if let Some(urls) = parse_dlc_file(dlc_path, &http, &dlc_cache).await {
-                println!("{} MEGA link(s)", urls.len());
-                config.urls.extend(urls);
-            } else {
-                eprintln!("Error: DLC file '{dlc_path}' failed to process");
-                std::process::exit(1);
+            match octo_dl::parse_dlc_file(dlc_path, &http, &dlc_cache).await {
+                Ok(urls) => {
+                    println!("{} MEGA link(s)", urls.len());
+                    config.urls.extend(urls);
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
             }
         }
         println!();
@@ -665,7 +639,7 @@ async fn main() -> Result<()> {
     let mut all_files: Vec<DownloadItem> = Vec::new();
     let mut total_skipped = 0;
     for (_url, nodes) in &all_nodes {
-        let collected = collect_from_nodes(nodes, config.force);
+        let collected = collect_from_nodes(nodes, config.download_config.force_overwrite);
         all_files.extend(collected.to_download);
         total_skipped += collected.skipped;
     }
@@ -686,7 +660,7 @@ async fn main() -> Result<()> {
     let total_bar = progress.add(make_total_progress_bar(total_size));
     total_bar.enable_steady_tick(Duration::from_millis(250));
 
-    let mut session_stats = SessionStats::new();
+    let mut session_stats = CliSessionStats::new();
     session_stats.files_skipped = total_skipped;
 
     download_all(
@@ -694,7 +668,7 @@ async fn main() -> Result<()> {
         &progress,
         &total_bar,
         &all_files,
-        &config,
+        &config.download_config,
         &mut session_stats,
     )
     .await?;
@@ -793,8 +767,6 @@ mod tests {
 
             #[test]
             fn format_bytes_monotonic(a in 0u64..1_000_000_000, b in 1_000_000_000u64..u64::MAX) {
-                // Larger byte count should produce numerically larger or equal unit value
-                // (not a perfect property but helps catch overflow bugs)
                 let _ = (format_bytes(a), format_bytes(b));
             }
 
@@ -822,12 +794,11 @@ mod tests {
                 bytes in 0u64..1_000_000_000_000,
                 ramp_up_ms in proptest::option::of(0u64..60_000)
             ) {
-                let mut stats = SessionStats::new();
+                let mut stats = CliSessionStats::new();
                 for _ in 0..files {
                     let ramp_up = ramp_up_ms.map(Duration::from_millis);
                     stats.add_download(bytes / (files.max(1) as u64), ramp_up);
                 }
-                // Should not panic when accessing stats
                 let _ = stats.elapsed();
                 let _ = stats.average_speed();
                 let _ = stats.average_ramp_up();
