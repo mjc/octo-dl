@@ -227,13 +227,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
         Popup::Config => {}
         Popup::None => {
             // Append pasted text to URL input, replacing newlines with spaces
-            for c in text.chars() {
-                if c == '\n' || c == '\r' {
-                    app.url_input.push(' ');
-                } else {
-                    app.url_input.push(c);
-                }
-            }
+            app.url_input.push_str(&text.replace(['\n', '\r'], " "));
         }
     }
 }

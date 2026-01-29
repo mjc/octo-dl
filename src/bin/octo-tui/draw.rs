@@ -25,16 +25,11 @@ fn draw_main(frame: &mut ratatui::Frame, app: &App) {
     let area = frame.area();
 
     // Outer block with title bar
-    let pause_indicator = if app.paused { " PAUSED " } else { "" };
     let title = " octo-dl ".to_string();
     let title_right = format!(
         " API: :{}{} ",
         app.api_port,
-        if pause_indicator.is_empty() {
-            String::new()
-        } else {
-            format!(" | {pause_indicator}")
-        }
+        if app.paused { " | PAUSED" } else { "" }
     );
 
     let outer = Block::default()
@@ -193,19 +188,18 @@ fn build_status_line(app: &App) -> Vec<Span<'_>> {
 
 fn draw_file_list(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     // Sort files: downloading first, then queued, then complete, then error
-    let mut sorted_indices: Vec<usize> = (0..app.files.len()).collect();
-    sorted_indices.sort_by_key(|&i| match &app.files[i].status {
+    let mut indexed: Vec<_> = app.files.iter().enumerate().collect();
+    indexed.sort_by_key(|(_, f)| match &f.status {
         FileStatus::Downloading => 0,
         FileStatus::Queued => 1,
         FileStatus::Complete => 2,
         FileStatus::Error(_) => 3,
     });
 
-    let items: Vec<ListItem> = sorted_indices
+    let items: Vec<ListItem> = indexed
         .iter()
-        .map(|&i| {
-            let f = &app.files[i];
-            let selected = app.file_list_state.selected() == Some(i);
+        .map(|(i, f)| {
+            let selected = app.file_list_state.selected() == Some(*i);
 
             let (icon, color) = match &f.status {
                 FileStatus::Downloading => ("\u{25cf}", Color::Yellow),
