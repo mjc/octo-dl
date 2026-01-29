@@ -15,6 +15,14 @@ use crate::app::{App, FileEntry, FileStatus, Popup};
 use crate::event::{DownloadChannels, DownloadEvent, DownloadSenders, TokenMessage, TuiProgress};
 use crate::input::add_url;
 
+fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(8)
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+}
+
 /// Spawns the login task which sends back `LoginResult`.
 ///
 /// On success, the authenticated `mega::Client` and `reqwest::Client` are sent
@@ -36,12 +44,7 @@ pub fn start_login(app: &mut App) {
     tokio::spawn(async move {
         let _ = tx.send(DownloadEvent::StatusMessage("Logging in...".to_string()));
 
-        let http = match reqwest::Client::builder()
-            .pool_idle_timeout(Duration::from_secs(60))
-            .pool_max_idle_per_host(8)
-            .tcp_keepalive(Duration::from_secs(30))
-            .build()
-        {
+        let http = match build_http_client() {
             Ok(http) => http,
             Err(e) => {
                 let _ = tx.send(DownloadEvent::LoginResult {
