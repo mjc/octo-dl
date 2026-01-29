@@ -1,11 +1,13 @@
 //! DLC file parsing for `JDownloader2` encrypted containers.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+
 use aes::Aes128;
 use aes::cipher::{BlockDecryptMut, KeyInit, KeyIvInit};
 use base64::Engine;
 use cbc::Decryptor;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use regex::Regex;
 
 use crate::error::{Error, Result};
 
@@ -292,31 +294,25 @@ fn decrypt_aes_cbc(encrypted: &[u8], key_str: &str) -> Option<String> {
 
 /// Extract all MEGA links from decrypted DLC XML
 fn extract_mega_links_from_xml(xml: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-
-    // Simple regex-free approach: find <url> tags
-    let mut content = xml;
-    while let Some(start) = content.find("<url>") {
-        let after_tag = &content[start + 5..];
-        if let Some(end) = after_tag.find("</url>") {
-            let encoded_url = &after_tag[..end];
-
-            // URLs inside DLC XML are base64 encoded
-            if let Ok(decoded_bytes) = base64::engine::general_purpose::STANDARD.decode(encoded_url)
-                && let Ok(url) = String::from_utf8(decoded_bytes)
-                && (url.starts_with("https://mega.nz/") || url.starts_with("http://mega.nz/"))
-                && !urls.contains(&url)
+    let tag_re = Regex::new(r"<url>([^<]+)</url>").expect("valid regex");
+    let mut seen = HashSet::new();
+    tag_re
+        .captures_iter(xml)
+        .filter_map(|cap| {
+            let encoded = cap.get(1)?.as_str();
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .ok()?;
+            let url = String::from_utf8(bytes).ok()?;
+            if (url.starts_with("https://mega.nz/") || url.starts_with("http://mega.nz/"))
+                && seen.insert(url.clone())
             {
-                urls.push(url);
+                Some(url)
+            } else {
+                None
             }
-
-            content = &after_tag[end + 6..];
-        } else {
-            break;
-        }
-    }
-
-    urls
+        })
+        .collect()
 }
 
 /// Check if a string is valid base64

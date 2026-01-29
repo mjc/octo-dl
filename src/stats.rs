@@ -3,6 +3,21 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// Computes average speed in bytes per second from total bytes and elapsed time.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn compute_average_speed(total_bytes: u64, elapsed: Duration) -> u64 {
+    let secs = elapsed.as_secs_f64();
+    if secs > 0.0 {
+        (total_bytes as f64 / secs) as u64
+    } else {
+        0
+    }
+}
+
 /// Statistics for a single file download.
 #[derive(Debug, Clone)]
 pub struct FileStats {
@@ -57,18 +72,8 @@ impl SessionStats {
 
     /// Returns the average download speed in bytes per second.
     #[must_use]
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
     pub fn average_speed(&self) -> u64 {
-        let secs = self.elapsed.as_secs_f64();
-        if secs > 0.0 {
-            (self.total_bytes as f64 / secs) as u64
-        } else {
-            0
-        }
+        compute_average_speed(self.total_bytes, self.elapsed)
     }
 }
 
@@ -142,18 +147,8 @@ impl DownloadStatsTracker {
 
     /// Returns the average speed in bytes per second.
     #[must_use]
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
     pub fn average_speed(&self) -> u64 {
-        let secs = self.elapsed().as_secs_f64();
-        if secs > 0.0 {
-            (self.total_bytes as f64 / secs) as u64
-        } else {
-            0
-        }
+        compute_average_speed(self.total_bytes, self.elapsed())
     }
 
     /// Returns the peak speed recorded.
@@ -165,12 +160,8 @@ impl DownloadStatsTracker {
     /// Returns the time to reach 80% of peak speed, if achieved.
     #[must_use]
     pub fn time_to_80pct(&self) -> Option<Duration> {
-        let ms = self.time_to_80pct_ms.load(Ordering::Relaxed);
-        if ms > 0 {
-            Some(Duration::from_millis(ms))
-        } else {
-            None
-        }
+        std::num::NonZeroU64::new(self.time_to_80pct_ms.load(Ordering::Relaxed))
+            .map(|ms| Duration::from_millis(ms.get()))
     }
 
     /// Converts this tracker into final file statistics.

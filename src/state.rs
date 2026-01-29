@@ -281,9 +281,7 @@ pub fn encrypt_credential(plaintext: &str) -> String {
 
     // PKCS7 padding
     let pad_byte = (padded_len - plaintext_bytes.len()) as u8;
-    for b in &mut buf[plaintext_bytes.len()..] {
-        *b = pad_byte;
-    }
+    buf[plaintext_bytes.len()..].fill(pad_byte);
 
     let cipher = Aes128CbcEnc::new(&key.into(), &iv.into());
     let encrypted = cipher
@@ -347,10 +345,7 @@ impl SavedCredentials {
     pub fn decrypt(&self) -> Option<(String, String, Option<String>)> {
         let email = decrypt_credential(&self.email)?;
         let password = decrypt_credential(&self.password)?;
-        let mfa = match self.mfa.as_ref() {
-            Some(m) => Some(decrypt_credential(m)?),
-            None => None,
-        };
+        let mfa = self.mfa.as_deref().and_then(decrypt_credential);
         Some((email, password, mfa))
     }
 }

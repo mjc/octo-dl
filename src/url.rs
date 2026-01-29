@@ -1,5 +1,6 @@
 //! URL extraction and DLC path detection utilities.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use base64::Engine;
@@ -19,12 +20,13 @@ use regex::Regex;
 #[must_use]
 pub fn extract_urls(input: &str) -> Vec<String> {
     let url_re = Regex::new(r"https?://mega\.nz/\S+").expect("valid regex");
+    let mut seen = HashSet::new();
     let mut result: Vec<String> = Vec::new();
 
     // First, pull full URLs directly out of the entire input.
     for m in url_re.find_iter(input) {
         let url = m.as_str().to_string();
-        if !result.contains(&url) {
+        if seen.insert(url.clone()) {
             result.push(url);
         }
     }
@@ -33,7 +35,7 @@ pub fn extract_urls(input: &str) -> Vec<String> {
     for token in input.split_whitespace() {
         if is_dlc_path(token) {
             let s = token.to_string();
-            if !result.contains(&s) {
+            if seen.insert(s.clone()) {
                 result.push(s);
             }
             continue;
@@ -45,7 +47,7 @@ pub fn extract_urls(input: &str) -> Vec<String> {
         }
 
         // Try base64 decoding up to 3 times
-        try_decode_base64(token, &url_re, 3, &mut result);
+        try_decode_base64(token, &url_re, 3, &mut seen, &mut result);
     }
 
     result
@@ -53,7 +55,13 @@ pub fn extract_urls(input: &str) -> Vec<String> {
 
 /// Attempts to base64-decode `token` up to `max_rounds` times, collecting
 /// any discovered MEGA URLs or DLC paths into `result`.
-fn try_decode_base64(token: &str, url_re: &Regex, max_rounds: usize, result: &mut Vec<String>) {
+fn try_decode_base64(
+    token: &str,
+    url_re: &Regex,
+    max_rounds: usize,
+    seen: &mut HashSet<String>,
+    result: &mut Vec<String>,
+) {
     let mut decoded = token.to_string();
     for _ in 0..max_rounds {
         let bytes = base64::engine::general_purpose::STANDARD
@@ -68,11 +76,11 @@ fn try_decode_base64(token: &str, url_re: &Regex, max_rounds: usize, result: &mu
         // Check for URLs in decoded result
         for m in url_re.find_iter(&decoded) {
             let url = m.as_str().to_string();
-            if !result.contains(&url) {
+            if seen.insert(url.clone()) {
                 result.push(url);
             }
         }
-        if is_dlc_path(&decoded) && !result.contains(&decoded) {
+        if is_dlc_path(&decoded) && seen.insert(decoded.clone()) {
             result.push(decoded.clone());
         }
     }

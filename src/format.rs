@@ -10,14 +10,11 @@ pub fn format_bytes(bytes: u64) -> String {
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
 
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
+    match bytes {
+        b if b >= GB => format!("{:.2} GB", b as f64 / GB as f64),
+        b if b >= MB => format!("{:.2} MB", b as f64 / MB as f64),
+        b if b >= KB => format!("{:.2} KB", b as f64 / KB as f64),
+        b => format!("{b} B"),
     }
 }
 
