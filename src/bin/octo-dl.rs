@@ -18,6 +18,23 @@ use octo_dl::{
 
 const DEFAULT_CONCURRENT_FILES: usize = 4;
 const DEFAULT_CHUNKS_PER_FILE: usize = 2;
+const SEPARATOR: &str = "────────────────────────────────────────────────────────────";
+
+fn build_http_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(8)
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+}
+
+fn dummy_downloader(config: &DownloadConfig) -> octo_dl::Downloader {
+    let http = reqwest::Client::new();
+    let client = mega::Client::builder()
+        .build(http)
+        .expect("client builder");
+    octo_dl::Downloader::new(client, config.clone())
+}
 
 // ============================================================================
 // CLI Configuration
@@ -153,15 +170,15 @@ fn print_file_list(files: &[DownloadItem], skipped: usize, partial: usize) {
 
     let total_size: u64 = files.iter().map(|i| i.node.size()).sum();
 
-    println!("\n{}", "─".repeat(60));
+    println!("\n{SEPARATOR}");
     println!("Files to download:");
-    println!("{}", "─".repeat(60));
+    println!("{SEPARATOR}");
 
     for item in files {
         println!("  {} ({})", item.path, format_bytes(item.node.size()));
     }
 
-    println!("{}", "─".repeat(60));
+    println!("{SEPARATOR}");
     println!(
         "  {} file(s), {} total",
         files.len(),
@@ -173,7 +190,7 @@ fn print_file_list(files: &[DownloadItem], skipped: usize, partial: usize) {
     if partial > 0 {
         println!("  {partial} file(s) with partial downloads (will re-download)");
     }
-    println!("{}\n", "─".repeat(60));
+    println!("{SEPARATOR}\n");
 }
 
 fn print_summary(stats: &SessionStats) {
@@ -181,9 +198,9 @@ fn print_summary(stats: &SessionStats) {
         return;
     }
 
-    println!("\n{}", "─".repeat(60));
+    println!("\n{SEPARATOR}");
     println!("Download Summary");
-    println!("{}", "─".repeat(60));
+    println!("{SEPARATOR}");
 
     if stats.files_downloaded > 0 {
         println!("  Files downloaded:  {}", stats.files_downloaded);
@@ -206,7 +223,7 @@ fn print_summary(stats: &SessionStats) {
         println!("  Files skipped:     {}", stats.files_skipped);
     }
 
-    println!("{}", "─".repeat(60));
+    println!("{SEPARATOR}");
 }
 
 #[allow(clippy::similar_names)]
@@ -398,12 +415,7 @@ async fn main() -> octo_dl::Result<()> {
     let (email, password, mfa) = get_credentials();
 
     // Create HTTP client with custom user agent for DLC service
-    let http = reqwest::Client::builder()
-        .pool_idle_timeout(Duration::from_secs(60))
-        .pool_max_idle_per_host(8)
-        .tcp_keepalive(Duration::from_secs(30))
-        .build()
-        .expect("Failed to build HTTP client");
+    let http = build_http_client()?;
 
     // Process DLC files before logging in
     if !config.dlc_files.is_empty() {
@@ -432,12 +444,7 @@ async fn main() -> octo_dl::Result<()> {
     println!("Logged in successfully.");
 
     // Create downloader for file collection
-    let downloader = octo_dl::Downloader::new(
-        mega::Client::builder()
-            .build(reqwest::Client::new())
-            .expect("dummy client"),
-        config.download_config.clone(),
-    );
+    let downloader = dummy_downloader(&config.download_config);
     let no_progress: Arc<dyn octo_dl::DownloadProgress> = Arc::new(NoProgress);
 
     // Create session state for persistence
@@ -549,12 +556,7 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> octo_d
         .decrypt()
         .expect("Failed to decrypt session credentials");
 
-    let http = reqwest::Client::builder()
-        .pool_idle_timeout(Duration::from_secs(60))
-        .pool_max_idle_per_host(8)
-        .tcp_keepalive(Duration::from_secs(30))
-        .build()
-        .expect("Failed to build HTTP client");
+    let http = build_http_client()?;
 
     let mut client = mega::Client::builder().build(http)?;
 
@@ -562,12 +564,7 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> octo_d
     client.login(&email, &password, mfa.as_deref()).await?;
     println!("Logged in successfully.");
 
-    let downloader = octo_dl::Downloader::new(
-        mega::Client::builder()
-            .build(reqwest::Client::new())
-            .expect("dummy client"),
-        config.download_config.clone(),
-    );
+    let downloader = dummy_downloader(&config.download_config);
     let no_progress: Arc<dyn octo_dl::DownloadProgress> = Arc::new(NoProgress);
 
     // Re-fetch URLs and collect remaining files
