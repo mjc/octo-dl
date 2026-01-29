@@ -21,7 +21,7 @@
 //! let nodes = downloader.client().fetch_public_nodes("https://mega.nz/...").await?;
 //!
 //! // Collect files to download
-//! let collected = downloader.collect_files(&nodes).await;
+//! let collected = downloader.collect_files(&nodes, &NoProgress).await;
 //!
 //! // Download with no progress reporting
 //! let stats = downloader.download_all(&collected.to_download, &NoProgress, collected.skipped).await?;
@@ -38,14 +38,20 @@ pub mod dlc;
 pub mod download;
 pub mod error;
 pub mod fs;
+pub mod state;
 pub mod stats;
 
 // Re-export main types for convenience
 pub use config::DownloadConfig;
 pub use dlc::{DlcKeyCache, parse_dlc_file};
-pub use download::{CollectedFiles, DownloadItem, DownloadProgress, Downloader, NoProgress};
+pub use download::{
+    CollectedFiles, DownloadItem, DownloadProgress, Downloader, FileStatus, NoProgress,
+};
 pub use error::{Error, Result};
 pub use fs::{FileSystem, TokioFileSystem};
+pub use state::{
+    FileEntry, FileEntryStatus, SavedCredentials, SessionState, SessionStatus, UrlEntry, UrlStatus,
+};
 pub use stats::{FileStats, SessionStats};
 
 // Re-export mega types used in the public API
