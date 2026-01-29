@@ -76,6 +76,7 @@ impl SessionStats {
 pub struct DownloadStatsTracker {
     start_time: Instant,
     total_bytes: u64,
+    downloaded: AtomicU64,
     peak_speed: AtomicU64,
     time_to_80pct_ms: AtomicU64,
 }
@@ -87,8 +88,30 @@ impl DownloadStatsTracker {
         Self {
             start_time: Instant::now(),
             total_bytes,
+            downloaded: AtomicU64::new(0),
             peak_speed: AtomicU64::new(0),
             time_to_80pct_ms: AtomicU64::new(0),
+        }
+    }
+
+    /// Records downloaded bytes and computes current speed (bytes/sec).
+    ///
+    /// Returns the computed speed.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    pub fn record_bytes(&self, bytes: u64) -> u64 {
+        self.downloaded.fetch_add(bytes, Ordering::Relaxed);
+        let total = self.downloaded.load(Ordering::Relaxed);
+        let secs = self.start_time.elapsed().as_secs_f64();
+        if secs > 0.0 {
+            let speed = (total as f64 / secs) as u64;
+            self.update_speed(speed);
+            speed
+        } else {
+            0
         }
     }
 

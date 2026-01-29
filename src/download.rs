@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::{StreamExt, stream};
+use tokio_util::sync::CancellationToken;
 
 use crate::config::DownloadConfig;
 use crate::error::{Error, Result};
@@ -79,6 +80,32 @@ impl CollectedFiles<'_> {
     pub const fn is_empty(&self) -> bool {
         self.to_download.is_empty()
     }
+
+    /// Converts borrowed download items into owned items by cloning the nodes.
+    ///
+    /// This is useful when the items need to be sent to a `tokio::spawn`'d task,
+    /// which requires `'static` data.
+    #[must_use]
+    pub fn into_owned(self) -> Vec<OwnedDownloadItem> {
+        self.to_download
+            .into_iter()
+            .map(|item| OwnedDownloadItem {
+                path: item.path,
+                node: item.node.clone(),
+            })
+            .collect()
+    }
+}
+
+/// A file to be downloaded with an owned node (no lifetime parameter).
+///
+/// Use this instead of [`DownloadItem`] when the items need to cross
+/// `tokio::spawn` boundaries (which require `'static` data).
+pub struct OwnedDownloadItem {
+    /// Local file path where the file will be saved.
+    pub path: String,
+    /// Owned copy of the MEGA node to download.
+    pub node: mega::Node,
 }
 
 /// Returns the `.part` file path for a given final path.
@@ -155,7 +182,7 @@ impl<F: FileSystem> Downloader<F> {
     pub async fn collect_files<'a>(
         &self,
         nodes: &'a mega::Nodes,
-        progress: &dyn DownloadProgress,
+        progress: &Arc<dyn DownloadProgress>,
     ) -> CollectedFiles<'a> {
         let all_items: Vec<_> = nodes
             .roots()
@@ -213,6 +240,7 @@ impl<F: FileSystem> Downloader<F> {
     ///
     /// Writes to `{path}.part` during download, then renames to `{path}` on success.
     /// On error, cleans up the `.part` file if `cleanup_on_error` is enabled.
+    /// If a `cancellation_token` is provided, the download can be cancelled.
     ///
     /// # Errors
     ///
@@ -221,7 +249,8 @@ impl<F: FileSystem> Downloader<F> {
         &self,
         node: &mega::Node,
         path: &str,
-        progress: &dyn DownloadProgress,
+        progress: &Arc<dyn DownloadProgress>,
+        cancellation_token: Option<CancellationToken>,
     ) -> Result<FileStats> {
         self.ensure_parent_dir(path).await?;
 
@@ -236,21 +265,41 @@ impl<F: FileSystem> Downloader<F> {
 
         let name_clone = name.clone();
         let stats_clone = Arc::clone(&stats);
+        let progress_clone = Arc::clone(progress);
+        let name_for_cb = name.clone();
 
-        // Download with progress callback
-        let result = self
-            .client
-            .download_node_parallel(
-                node,
-                file,
-                self.config.chunks_per_file,
-                Some(move |delta| {
-                    stats_clone.update_speed(delta * 4);
-                }),
-            )
-            .await;
+        // Download with progress callback, optionally with cancellation support
+        let download_result = if let Some(token) = cancellation_token {
+            tokio::select! {
+                res = self.client.download_node_parallel(
+                    node,
+                    file,
+                    self.config.chunks_per_file,
+                    Some(move |delta| {
+                        let speed = stats_clone.record_bytes(delta);
+                        progress_clone.on_progress(&name_for_cb, delta, speed);
+                    }),
+                ) => res.map_err(Error::Mega),
+                () = token.cancelled() => {
+                    Err(Error::Cancelled)
+                }
+            }
+        } else {
+            self.client
+                .download_node_parallel(
+                    node,
+                    file,
+                    self.config.chunks_per_file,
+                    Some(move |delta| {
+                        let speed = stats_clone.record_bytes(delta);
+                        progress_clone.on_progress(&name_for_cb, delta, speed);
+                    }),
+                )
+                .await
+                .map_err(Error::Mega)
+        };
 
-        match result {
+        match download_result {
             Ok(()) => {
                 // Rename .part → final
                 self.fs.rename_file(&pp, Path::new(path)).await?;
@@ -266,12 +315,12 @@ impl<F: FileSystem> Downloader<F> {
                 Ok(file_stats)
             }
             Err(e) => {
-                // Clean up .part file on error if configured
-                if self.config.cleanup_on_error {
-                    let _ = self.fs.remove_file(&pp).await;
+                // Clean up .part file on error/cancellation
+                let _ = self.fs.remove_file(&pp).await;
+                if !matches!(e, Error::Cancelled) {
+                    progress.on_error(&name_clone, &e.to_string());
                 }
-                progress.on_error(&name_clone, &e.to_string());
-                Err(Error::Mega(e))
+                Err(e)
             }
         }
     }
@@ -288,7 +337,7 @@ impl<F: FileSystem> Downloader<F> {
     pub async fn download_all(
         &self,
         files: &[DownloadItem<'_>],
-        progress: &dyn DownloadProgress,
+        progress: &Arc<dyn DownloadProgress>,
         skipped_count: usize,
     ) -> Result<SessionStats> {
         let mut builder = SessionStatsBuilder::new();
@@ -304,7 +353,66 @@ impl<F: FileSystem> Downloader<F> {
             .map(|item| {
                 let peak_tracker = Arc::clone(&peak_speed);
                 async move {
-                    let result = self.download_file(item.node, &item.path, progress).await;
+                    let result = self
+                        .download_file(item.node, &item.path, progress, None)
+                        .await;
+                    if let Ok(ref stats) = result {
+                        peak_tracker.fetch_max(stats.peak_speed, Ordering::Relaxed);
+                    }
+                    result
+                }
+            })
+            .buffer_unordered(self.config.concurrent_files)
+            .collect()
+            .await;
+
+        builder.set_peak_speed(peak_speed.load(Ordering::Relaxed));
+
+        for result in results {
+            match result {
+                Ok(file_stats) => builder.add_download(&file_stats),
+                Err(e) => {
+                    log::error!("Download failed: {e}");
+                }
+            }
+        }
+
+        Ok(builder.build())
+    }
+
+    /// Downloads all owned items with concurrent downloads.
+    ///
+    /// This is the same as [`download_all`](Self::download_all) but takes
+    /// [`OwnedDownloadItem`] values, making it safe to call from inside
+    /// `tokio::spawn` (which requires `'static` futures).
+    ///
+    /// # Errors
+    ///
+    /// Individual file download errors are logged but do not cause the
+    /// entire operation to fail. The returned stats will reflect which
+    /// files succeeded.
+    pub async fn download_all_owned(
+        &self,
+        files: &[OwnedDownloadItem],
+        progress: &Arc<dyn DownloadProgress>,
+        skipped_count: usize,
+    ) -> Result<SessionStats> {
+        let mut builder = SessionStatsBuilder::new();
+        builder.set_skipped(skipped_count);
+
+        if files.is_empty() {
+            return Ok(builder.build());
+        }
+
+        let peak_speed = Arc::new(AtomicU64::new(0));
+
+        let results: Vec<_> = stream::iter(files)
+            .map(|item| {
+                let peak_tracker = Arc::clone(&peak_speed);
+                async move {
+                    let result = self
+                        .download_file(&item.node, &item.path, progress, None)
+                        .await;
                     if let Ok(ref stats) = result {
                         peak_tracker.fetch_max(stats.peak_speed, Ordering::Relaxed);
                     }
@@ -397,5 +505,123 @@ mod tests {
         assert_ne!(FileStatus::Complete, FileStatus::Partial);
         assert_ne!(FileStatus::Partial, FileStatus::Missing);
         assert_ne!(FileStatus::Complete, FileStatus::Missing);
+    }
+
+    // =========================================================================
+    // Mock-based classify_file tests
+    // =========================================================================
+
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// A mock file system for testing classify_file behavior.
+    struct MockFileSystem {
+        /// Maps path → file size (if the file exists).
+        files: Mutex<HashMap<PathBuf, u64>>,
+    }
+
+    impl MockFileSystem {
+        fn new() -> Self {
+            Self {
+                files: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn add_file(&self, path: impl Into<PathBuf>, size: u64) {
+            self.files.lock().unwrap().insert(path.into(), size);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::fs::FileSystem for MockFileSystem {
+        async fn file_exists(&self, path: &Path) -> bool {
+            self.files.lock().unwrap().contains_key(path)
+        }
+
+        async fn file_size(&self, path: &Path) -> Option<u64> {
+            self.files.lock().unwrap().get(path).copied()
+        }
+
+        async fn create_dir_all(&self, _path: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn create_file(
+            &self,
+            _path: &Path,
+            _size: u64,
+        ) -> std::io::Result<tokio::fs::File> {
+            // Not needed for classify_file tests
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "mock",
+            ))
+        }
+
+        async fn rename_file(&self, _from: &Path, _to: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn remove_file(&self, _path: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn mock_downloader(fs: MockFileSystem) -> Downloader<MockFileSystem> {
+        let http = reqwest::Client::new();
+        let client = mega::Client::builder().build(http).unwrap();
+        Downloader::with_fs(client, DownloadConfig::default(), fs)
+    }
+
+    fn mock_downloader_force(fs: MockFileSystem) -> Downloader<MockFileSystem> {
+        let http = reqwest::Client::new();
+        let client = mega::Client::builder().build(http).unwrap();
+        let config = DownloadConfig {
+            force_overwrite: true,
+            ..DownloadConfig::default()
+        };
+        Downloader::with_fs(client, config, fs)
+    }
+
+    #[tokio::test]
+    async fn classify_file_complete() {
+        let fs = MockFileSystem::new();
+        fs.add_file("movie.mkv", 1_000_000);
+        let dl = mock_downloader(fs);
+        assert_eq!(dl.classify_file("movie.mkv", 1_000_000).await, FileStatus::Complete);
+    }
+
+    #[tokio::test]
+    async fn classify_file_size_mismatch_checks_part() {
+        let fs = MockFileSystem::new();
+        // File exists but wrong size, no .part file
+        fs.add_file("movie.mkv", 500);
+        let dl = mock_downloader(fs);
+        assert_eq!(dl.classify_file("movie.mkv", 1_000_000).await, FileStatus::Missing);
+    }
+
+    #[tokio::test]
+    async fn classify_file_partial() {
+        let fs = MockFileSystem::new();
+        // No final file, but .part file exists
+        fs.add_file("movie.mkv.part", 500_000);
+        let dl = mock_downloader(fs);
+        assert_eq!(dl.classify_file("movie.mkv", 1_000_000).await, FileStatus::Partial);
+    }
+
+    #[tokio::test]
+    async fn classify_file_missing() {
+        let fs = MockFileSystem::new();
+        let dl = mock_downloader(fs);
+        assert_eq!(dl.classify_file("movie.mkv", 1_000_000).await, FileStatus::Missing);
+    }
+
+    #[tokio::test]
+    async fn classify_file_force_overwrite() {
+        let fs = MockFileSystem::new();
+        // File exists with correct size, but force_overwrite is on
+        fs.add_file("movie.mkv", 1_000_000);
+        let dl = mock_downloader_force(fs);
+        assert_eq!(dl.classify_file("movie.mkv", 1_000_000).await, FileStatus::Missing);
     }
 }
