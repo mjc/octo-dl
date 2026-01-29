@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::State;
-use axum::response::IntoResponse;
+use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -16,6 +16,12 @@ use octo_dl::extract_urls;
 use crate::event::DownloadEvent;
 
 pub const DEFAULT_API_PORT: u16 = 9723;
+
+#[derive(Clone)]
+struct AppState {
+    tx: Arc<mpsc::UnboundedSender<DownloadEvent>>,
+    port: u16,
+}
 
 #[derive(Deserialize)]
 struct UrlRequest {
@@ -33,8 +39,6 @@ struct HealthResponse {
     status: String,
 }
 
-type ApiState = Arc<mpsc::UnboundedSender<DownloadEvent>>;
-
 async fn api_health() -> impl IntoResponse {
     axum::Json(HealthResponse {
         status: "ok".to_string(),
@@ -42,17 +46,52 @@ async fn api_health() -> impl IntoResponse {
 }
 
 async fn api_post_urls(
-    State(tx): State<ApiState>,
+    State(state): State<AppState>,
     axum::Json(payload): axum::Json<UrlRequest>,
 ) -> impl IntoResponse {
     let urls = extract_urls(&payload.text);
 
     let count = urls.len();
     if !urls.is_empty() {
-        let _ = tx.send(DownloadEvent::UrlsReceived { urls: urls.clone() });
+        let _ = state.tx.send(DownloadEvent::UrlsReceived { urls: urls.clone() });
     }
 
     axum::Json(UrlResponse { added: urls, count })
+}
+
+async fn bookmarklet_page(State(state): State<AppState>) -> impl IntoResponse {
+    let port = state.port;
+    Html(format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>octo-dl bookmarklet</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 480px; margin: 60px auto; color: #e0e0e0; background: #1a1a2e; }}
+  h1 {{ font-size: 1.4rem; }}
+  p {{ line-height: 1.5; }}
+  a.bookmarklet {{
+    display: inline-block; padding: 10px 20px; margin: 20px 0;
+    background: #0f3460; color: #e94560; border-radius: 6px;
+    text-decoration: none; font-weight: bold; font-size: 1.1rem;
+    border: 2px solid #e94560; cursor: grab;
+  }}
+  a.bookmarklet:hover {{ background: #16213e; }}
+  code {{ background: #16213e; padding: 2px 6px; border-radius: 3px; }}
+</style>
+</head>
+<body>
+<h1>octo-dl bookmarklet</h1>
+<p>Drag this link to your bookmarks bar:</p>
+<a class="bookmarklet" href="javascript:void(function(){{var t=window.getSelection().toString();if(!t){{t=window.location.href}}fetch('http://localhost:{port}/api/urls',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{text:t}})}}).then(function(r){{return r.json()}}).then(function(d){{alert('Sent '+d.count+' URL(s) to octo-dl')}}).catch(function(e){{alert('octo-dl not running: '+e)}})}})()">
+  Send to octo-dl
+</a>
+<p>Click it on any page to send the selected text (or the page URL) to octo-dl for download.</p>
+<p>API running on <code>localhost:{port}</code></p>
+</body>
+</html>"#
+    ))
 }
 
 /// Starts the HTTP API server for receiving URLs from the bookmarklet.
@@ -64,7 +103,10 @@ pub async fn run_api_server(
     tx: mpsc::UnboundedSender<DownloadEvent>,
     port: u16,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state: ApiState = Arc::new(tx);
+    let state = AppState {
+        tx: Arc::new(tx),
+        port,
+    };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -72,6 +114,7 @@ pub async fn run_api_server(
         .allow_headers(Any);
 
     let app = Router::new()
+        .route("/bookmarklet", get(bookmarklet_page))
         .route("/api/health", get(api_health))
         .route("/api/urls", post(api_post_urls))
         .layer(cors)
