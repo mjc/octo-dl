@@ -131,26 +131,21 @@ async fn get_decryption_key(
         return Some(cached);
     }
 
-    let mut retry_count = 0;
-
-    loop {
+    for attempt in 0..=MAX_RETRIES {
         match call_decryption_service(dlc_key, http_client).await {
             Some(key) => {
-                // Cache the result
                 cache.set(dlc_key.to_string(), key.clone());
                 return Some(key);
             }
-            None if retry_count < MAX_RETRIES => {
-                // Exponential backoff: 1s, 2s, 4s, 8s
-                let delay = std::time::Duration::from_secs(1 << retry_count);
+            None if attempt < MAX_RETRIES => {
+                let delay = std::time::Duration::from_secs(1 << attempt);
                 eprintln!(
                     "DLC service call failed, retrying in {:?}... (attempt {}/{})",
                     delay,
-                    retry_count + 1,
+                    attempt + 1,
                     MAX_RETRIES
                 );
                 tokio::time::sleep(delay).await;
-                retry_count += 1;
             }
             None => {
                 eprintln!("DLC service unreachable after {MAX_RETRIES} attempts");
@@ -158,6 +153,7 @@ async fn get_decryption_key(
             }
         }
     }
+    None
 }
 
 /// Call `JDownloader`'s DLC decryption service
@@ -231,9 +227,8 @@ fn decrypt_service_key(encrypted_key: &str) -> Option<String> {
     }
 
     // Strip null padding bytes (ECB NoPadding leaves them)
-    while !decrypted.is_empty() && decrypted.last() == Some(&0) {
-        decrypted.pop();
-    }
+    let end = decrypted.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    decrypted.truncate(end);
 
     // The decrypted result is base64 encoded again, decode it
     let decoded = String::from_utf8(decrypted).ok()?;
