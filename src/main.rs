@@ -60,14 +60,15 @@ impl DownloadStats {
         }
     }
 
-    /// Called with indicatif's per_sec() value to track peak and ramp-up
+    /// Called with indicatif's `per_sec()` value to track peak and ramp-up
     fn update_speed(&self, speed: u64) {
         let prev_peak = self.peak_speed.fetch_max(speed, Ordering::Relaxed);
         let peak = prev_peak.max(speed);
 
         // Track time to reach 80% of peak
         if self.time_to_80pct_ms.load(Ordering::Relaxed) == 0 && speed >= peak * 4 / 5 {
-            let ms = self.start_time.elapsed().as_millis() as u64;
+            // u128 -> u64: saturate at MAX for durations > 584 million years
+            let ms = self.start_time.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
             self.time_to_80pct_ms.store(ms, Ordering::Relaxed);
         }
     }
@@ -76,10 +77,13 @@ impl DownloadStats {
         self.start_time.elapsed()
     }
 
+    /// Returns average speed in bytes/sec
+    /// f64 -> u64 casts saturate since Rust 1.45 (NaN->0, negative->0, overflow->MAX)
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn average_speed(&self) -> u64 {
-        let elapsed = self.elapsed().as_secs_f64();
-        if elapsed > 0.0 {
-            (self.total_bytes as f64 / elapsed) as u64
+        let secs = self.elapsed().as_secs_f64();
+        if secs > 0.0 {
+            (self.total_bytes as f64 / secs) as u64
         } else {
             0
         }
@@ -123,7 +127,7 @@ impl SessionStats {
         self.files_downloaded += 1;
         self.total_bytes += bytes;
         if let Some(ramp) = ramp_up {
-            self.total_ramp_up_ms += ramp.as_millis() as u64;
+            self.total_ramp_up_ms += ramp.as_millis().try_into().unwrap_or(u64::MAX);
             self.ramp_up_count += 1;
         }
     }
@@ -132,16 +136,17 @@ impl SessionStats {
         self.start_time.elapsed()
     }
 
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn average_speed(&self) -> u64 {
-        let elapsed = self.elapsed().as_secs_f64();
-        if elapsed > 0.0 {
-            (self.total_bytes as f64 / elapsed) as u64
+        let secs = self.elapsed().as_secs_f64();
+        if secs > 0.0 {
+            (self.total_bytes as f64 / secs) as u64
         } else {
             0
         }
     }
 
-    fn average_ramp_up(&self) -> Option<Duration> {
+    const fn average_ramp_up(&self) -> Option<Duration> {
         if self.ramp_up_count > 0 {
             Some(Duration::from_millis(self.total_ramp_up_ms / self.ramp_up_count))
         } else {
@@ -177,6 +182,7 @@ impl SessionStats {
     }
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -215,11 +221,10 @@ fn collect_files<'a>(nodes: &'a mega::Nodes, node: &'a mega::Node) -> Vec<Downlo
         .filter_map(|hash| nodes.get_node_by_handle(hash))
         .partition(|n| n.kind().is_folder());
 
-    let current_files = files
-        .into_iter()
-        .filter_map(|file| {
-            build_path(nodes, node, file).map(|path| DownloadItem { path, node: file })
-        });
+    let current_files = files.into_iter().map(|file| DownloadItem {
+        path: build_path(nodes, node, file),
+        node: file,
+    });
 
     let nested_files = folders
         .into_iter()
@@ -228,15 +233,15 @@ fn collect_files<'a>(nodes: &'a mega::Nodes, node: &'a mega::Node) -> Vec<Downlo
     current_files.chain(nested_files).collect()
 }
 
-fn build_path(nodes: &mega::Nodes, parent: &mega::Node, file: &mega::Node) -> Option<String> {
+fn build_path(nodes: &mega::Nodes, parent: &mega::Node, file: &mega::Node) -> String {
     // Try to build full path with grandparent, fallback to parent/file if no grandparent
-    if let Some(gp_handle) = parent.parent() {
-        if let Some(grandparent) = nodes.get_node_by_handle(gp_handle) {
-            return Some(format!("{}/{}/{}", grandparent.name(), parent.name(), file.name()));
-        }
+    if let Some(gp_handle) = parent.parent()
+        && let Some(grandparent) = nodes.get_node_by_handle(gp_handle)
+    {
+        return format!("{}/{}/{}", grandparent.name(), parent.name(), file.name());
     }
     // Parent is at root level, just use parent/file
-    Some(format!("{}/{}", parent.name(), file.name()))
+    format!("{}/{}", parent.name(), file.name())
 }
 
 // ============================================================================
@@ -257,6 +262,8 @@ fn ensure_parent_dir(path: &str) {
 // Download Logic
 // ============================================================================
 
+// per_sec() returns f64; cast to u64 saturates (Rust 1.45+)
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 async fn download_file(
     client: &mega::Client,
     progress: &MultiProgress,
@@ -285,6 +292,7 @@ async fn download_file(
         .download_node_parallel(node, file, chunks, Some(move |delta| {
             bar_clone.inc(delta);
             total_bar_clone.inc(delta);
+            // per_sec() returns f64; as u64 saturates (Rust 1.45+)
             stats_clone.update_speed(bar_clone.per_sec() as u64);
             bar_clone.set_message(name_for_progress.clone());
         }))
@@ -293,9 +301,7 @@ async fn download_file(
     match &result {
         Ok(()) => {
             bar.finish_and_clear();
-            let ramp_up = stats.time_to_80pct()
-                .map(|d| format!("ramp {}", format_duration(d)))
-                .unwrap_or_else(|| "ramp <1s".to_string());
+            let ramp_up = stats.time_to_80pct().map_or_else(|| "ramp <1s".to_string(), |d| format!("ramp {}", format_duration(d)));
             let _ = progress.println(format!(
                 "  {} - {} in {} ({}/s avg, {}/s peak, {})",
                 node.name(),
@@ -312,8 +318,8 @@ async fn download_file(
     result.map(|()| (node.size(), stats.time_to_80pct()))
 }
 
-fn collect_from_nodes<'a>(nodes: &'a mega::Nodes, force: bool) -> CollectedFiles<'a> {
-    let all_items: Vec<_> = nodes
+fn collect_from_nodes(nodes: &mega::Nodes, force: bool) -> CollectedFiles<'_> {
+    let (to_download, to_skip): (Vec<_>, Vec<_>) = nodes
         .roots()
         .flat_map(|root| {
             if root.kind().is_folder() {
@@ -325,10 +331,6 @@ fn collect_from_nodes<'a>(nodes: &'a mega::Nodes, force: bool) -> CollectedFiles
                 }]
             }
         })
-        .collect();
-
-    let (to_download, to_skip): (Vec<_>, Vec<_>) = all_items
-        .into_iter()
         .partition(|item| !should_skip(&item.path, item.node.size(), force));
 
     CollectedFiles {
@@ -360,16 +362,16 @@ fn print_file_list(files: &[DownloadItem], skipped: usize) {
         format_bytes(total_size)
     );
     if skipped > 0 {
-        println!("  {} file(s) skipped (already exist)", skipped);
+        println!("  {skipped} file(s) skipped (already exist)");
     }
     println!("{}\n", "─".repeat(60));
 }
 
-async fn download_all<'a>(
+async fn download_all(
     client: &mega::Client,
     progress: &MultiProgress,
     total_bar: &ProgressBar,
-    files: &[DownloadItem<'a>],
+    files: &[DownloadItem<'_>],
     config: &Config,
     session_stats: &mut SessionStats,
 ) -> Result<()> {
@@ -387,6 +389,7 @@ async fn download_all<'a>(
             async move {
                 let result = download_file(client, progress, total_bar, item, config.chunks_per_file).await;
                 // Update session peak from total_bar's aggregate speed
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let current_speed = total_bar.per_sec() as u64;
                 peak_tracker.fetch_max(current_speed, Ordering::Relaxed);
                 result
@@ -444,8 +447,8 @@ fn make_total_progress_bar(size: u64) -> ProgressBar {
 // DLC File Parsing
 // ============================================================================
 
-/// Extract MEGA links from a JDownloader2 DLC file
-/// Handles encrypted DLC containers with JDownloader service integration
+/// Extract MEGA links from a `JDownloader2` DLC file
+/// Handles encrypted DLC containers with `JDownloader` service integration
 async fn parse_dlc_file(
     path: &str,
     http_client: &reqwest::Client,
@@ -490,8 +493,11 @@ fn parse_args() -> Config {
                 std::process::exit(0);
             }
             arg if !arg.starts_with('-') => {
-                // Check if it's a DLC file
-                if arg.ends_with(".dlc") {
+                // Check if it's a DLC file (case-insensitive)
+                if Path::new(arg)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("dlc"))
+                {
                     dlc_files.push(arg.to_string());
                 } else {
                     urls.push(arg.to_string());
@@ -521,8 +527,8 @@ fn print_usage() {
     eprintln!("  <url|dlc>           MEGA URL or JDownloader2 .dlc file (MEGA links only)");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  -j, --chunks <N>    Chunks per file for parallel download (default: {})", DEFAULT_CHUNKS_PER_FILE);
-    eprintln!("  -p, --parallel <N>  Concurrent file downloads (default: {})", DEFAULT_CONCURRENT_FILES);
+    eprintln!("  -j, --chunks <N>    Chunks per file for parallel download (default: {DEFAULT_CHUNKS_PER_FILE})");
+    eprintln!("  -p, --parallel <N>  Concurrent file downloads (default: {DEFAULT_CONCURRENT_FILES})");
     eprintln!("  -f, --force         Overwrite existing files");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
@@ -567,16 +573,13 @@ async fn main() -> Result<()> {
         println!("Processing DLC files...\n");
         let dlc_cache = dlc::DlcKeyCache::new();
         for dlc_path in &config.dlc_files {
-            print!("  {} ... ", dlc_path);
-            match parse_dlc_file(dlc_path, &http, &dlc_cache).await {
-                Some(urls) => {
-                    println!("{} MEGA link(s)", urls.len());
-                    config.urls.extend(urls);
-                }
-                None => {
-                    eprintln!("Error: DLC file '{}' failed to process", dlc_path);
-                    std::process::exit(1);
-                }
+            print!("  {dlc_path} ... ");
+            if let Some(urls) = parse_dlc_file(dlc_path, &http, &dlc_cache).await {
+                println!("{} MEGA link(s)", urls.len());
+                config.urls.extend(urls);
+            } else {
+                eprintln!("Error: DLC file '{dlc_path}' failed to process");
+                std::process::exit(1);
             }
         }
         println!();
@@ -592,13 +595,13 @@ async fn main() -> Result<()> {
     println!("Fetching file lists from {} URL(s)...\n", config.urls.len());
     let mut all_nodes: Vec<(String, mega::Nodes)> = Vec::new();
     for url in &config.urls {
-        print!("  {} ... ", url);
+        print!("  {url} ... ");
         match client.fetch_public_nodes(url).await {
             Ok(nodes) => {
                 let file_count: usize = nodes.roots().map(|r| {
                     if r.kind().is_folder() { collect_files(&nodes, r).len() } else { 1 }
                 }).sum();
-                println!("{} file(s)", file_count);
+                println!("{file_count} file(s)");
                 all_nodes.push((url.clone(), nodes));
             }
             Err(e) => println!("ERROR: {e:?}"),
