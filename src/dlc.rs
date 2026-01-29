@@ -14,6 +14,7 @@ const JDOWNLOADER_KEY: &[u8] = &[
 const DLC_SERVICE: &str = "https://service.jdownloader.org/dlcrypt/service.php";
 const MIN_DLC_SIZE: usize = 100;
 const DLC_KEY_LENGTH: usize = 88;
+const MAX_RETRIES: u32 = 3;
 
 /// Shared cache for decryption keys to avoid duplicate service calls
 pub struct DlcKeyCache {
@@ -42,7 +43,7 @@ impl Default for DlcKeyCache {
     }
 }
 
-/// Extract MEGA links from a JDownloader2 DLC file
+/// Extract MEGA links from a `JDownloader2` DLC file
 pub async fn parse_dlc_file(
     path: &str,
     http_client: &reqwest::Client,
@@ -52,7 +53,7 @@ pub async fn parse_dlc_file(
 
     // Validate file size
     if content.trim().len() < MIN_DLC_SIZE {
-        eprintln!("DLC file too small (< {} bytes)", MIN_DLC_SIZE);
+        eprintln!("DLC file too small (< {MIN_DLC_SIZE} bytes)");
         return None;
     }
 
@@ -101,7 +102,7 @@ pub async fn parse_dlc_file(
     Some(urls)
 }
 
-/// Get decryption key from JDownloader service with exponential backoff
+/// Get decryption key from `JDownloader` service with exponential backoff
 async fn get_decryption_key(
     dlc_key: &str,
     http_client: &reqwest::Client,
@@ -112,7 +113,6 @@ async fn get_decryption_key(
         return Some(cached);
     }
 
-    const MAX_RETRIES: u32 = 3;
     let mut retry_count = 0;
 
     loop {
@@ -135,17 +135,17 @@ async fn get_decryption_key(
                 retry_count += 1;
             }
             None => {
-                eprintln!("DLC service unreachable after {} attempts", MAX_RETRIES);
+                eprintln!("DLC service unreachable after {MAX_RETRIES} attempts");
                 return None;
             }
         }
     }
 }
 
-/// Call JDownloader's DLC decryption service
+/// Call `JDownloader`'s DLC decryption service
 async fn call_decryption_service(dlc_key: &str, http_client: &reqwest::Client) -> Option<String> {
     let version = env!("CARGO_PKG_VERSION");
-    let user_agent = format!("JDownloader/2.0 (octo-dl/{})", version);
+    let user_agent = format!("JDownloader/2.0 (octo-dl/{version})");
 
     // Build parameters matching JDownloader's actual format
     let params = [
@@ -188,7 +188,7 @@ async fn call_decryption_service(dlc_key: &str, http_client: &reqwest::Client) -
     decrypt_service_key(rc_value)
 }
 
-/// Decrypt the service response key using AES/ECB with JDownloader's key
+/// Decrypt the service response key using AES/ECB with `JDownloader`'s key
 fn decrypt_service_key(encrypted_key: &str) -> Option<String> {
     use aes::cipher::generic_array::GenericArray;
     use aes::cipher::BlockDecrypt;
@@ -204,7 +204,7 @@ fn decrypt_service_key(encrypted_key: &str) -> Option<String> {
     let cipher = Aes128::new(key);
 
     // Process in 16-byte blocks (AES block size)
-    let mut decrypted = encrypted_bytes.clone();
+    let mut decrypted = encrypted_bytes;
     let block_size = 16;
 
     if decrypted.len() % block_size != 0 {
@@ -293,15 +293,12 @@ fn extract_mega_links_from_xml(xml: &str) -> Vec<String> {
 
             // URLs inside DLC XML are base64 encoded
             if let Ok(decoded_bytes) = base64::engine::general_purpose::STANDARD.decode(encoded_url)
-            {
-                if let Ok(url) = String::from_utf8(decoded_bytes) {
-                    if (url.starts_with("https://mega.nz/") || url.starts_with("http://mega.nz/"))
+                && let Ok(url) = String::from_utf8(decoded_bytes)
+                    && (url.starts_with("https://mega.nz/") || url.starts_with("http://mega.nz/"))
                         && !urls.contains(&url)
                     {
                         urls.push(url);
                     }
-                }
-            }
 
             content = &after_tag[end + 6..];
         } else {
