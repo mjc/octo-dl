@@ -34,6 +34,34 @@ use crate::input::{handle_input, handle_paste};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    // Parse command-line arguments
+    let mut api_host = "127.0.0.1".to_string();
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--api-host" => {
+                if let Some(host) = args.next() {
+                    api_host = host;
+                } else {
+                    eprintln!("Error: --api-host requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "--help" => {
+                println!("octo-tui - Interactive TUI for downloading MEGA files");
+                println!("\nOptions:");
+                println!("  --api-host <HOST>  API server host (default: 127.0.0.1)");
+                println!("  --help              Show this help");
+                std::process::exit(0);
+            }
+            _ => {
+                eprintln!("Error: unknown option '{}'", arg);
+                eprintln!("Use --help for usage information");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Initialize terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -55,7 +83,7 @@ async fn main() -> io::Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(DEFAULT_API_PORT);
     tokio::spawn(async move {
-        if let Err(e) = api::run_api_server(api_tx, api_port).await {
+        if let Err(e) = api::run_api_server(api_tx, &api_host, api_port).await {
             log::error!("API server error: {e}");
         }
     });
