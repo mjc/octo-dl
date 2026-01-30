@@ -12,14 +12,69 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
-MODE="${1:-strace}"
-CHUNKS="${2:-8}"
-shift 2 2>/dev/null || true
-MEGA_URLS=("$@")
+# ============================================================================
+# Argument parsing
+# ============================================================================
 
-# Default URL if none provided
-if [ ${#MEGA_URLS[@]} -eq 0 ]; then
-    MEGA_URLS=("https://mega.nz/file/xxxxx#yyyyy")
+MODE=strace
+CHUNKS=8
+PARALLEL=4
+FORCE=false
+TUI=false
+URLS=()
+
+print_usage() {
+    echo "Usage: $0 [OPTIONS] <URL>..."
+    echo ""
+    echo "Profile octo-dl download latency and waiting patterns"
+    echo ""
+    echo "Options:"
+    echo "  -m, --mode <MODE>   Profiling mode: strace or offcpu (default: strace)"
+    echo "  -j, --chunks <N>    Chunks per file (default: $CHUNKS)"
+    echo "  -p, --parallel <N>  Concurrent file downloads (default: $PARALLEL)"
+    echo "  -f, --force         Overwrite existing files"
+    echo "  --tui               Launch the TUI binary instead of the CLI"
+    echo "  -h, --help          Show this help"
+    echo ""
+    echo "Modes:"
+    echo "  strace  - Record syscall latency (default)"
+    echo "  offcpu  - Off-CPU flamegraph (what we're waiting on)"
+    echo ""
+    echo "Arguments:"
+    echo "  URL...              One or more MEGA file/folder URLs"
+    echo ""
+    echo "Examples:"
+    echo "  $0 -j 8 'https://mega.nz/file/xxxxx#yyyyy'"
+    echo "  $0 -m offcpu -j 4 'https://mega.nz/folder/aaa#bbb'"
+    echo "  $0 --tui -m strace"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -m|--mode)
+            MODE="$2"; shift 2 ;;
+        -j|--chunks)
+            CHUNKS="$2"; shift 2 ;;
+        -p|--parallel)
+            PARALLEL="$2"; shift 2 ;;
+        -f|--force)
+            FORCE=true; shift ;;
+        --tui)
+            TUI=true; shift ;;
+        -h|--help)
+            print_usage; exit 0 ;;
+        -*)
+            echo "Unknown option: $1"; print_usage; exit 1 ;;
+        *)
+            URLS+=("$1"); shift ;;
+    esac
+done
+
+if [ ${#URLS[@]} -eq 0 ] && [ "$TUI" = false ]; then
+    echo "Error: No URLs provided"
+    echo ""
+    print_usage
+    exit 1
 fi
 
 # Trap Ctrl-C to continue with report generation
@@ -27,26 +82,6 @@ trap 'echo ""; echo "Stopping download, generating reports..."' INT
 
 echo "=== Download Latency Profile Mode: $MODE ==="
 echo ""
-
-if [ "$MODE" = "-h" ] || [ "$MODE" = "--help" ]; then
-    echo "Usage: $0 [MODE] [CHUNKS] [MEGA_URLs...]"
-    echo ""
-    echo "Profile octo-dl download latency and waiting patterns"
-    echo ""
-    echo "Modes:"
-    echo "  strace  - Record syscall latency (default)"
-    echo "  offcpu  - Off-CPU flamegraph (what we're waiting on)"
-    echo ""
-    echo "Arguments:"
-    echo "  CHUNKS     Number of parallel chunks (default: 8)"
-    echo "  MEGA_URLs  One or more MEGA file/folder URLs"
-    echo ""
-    echo "Examples:"
-    echo "  ./scripts/profile-latency.sh strace 8 'https://mega.nz/file/xxxxx#yyyyy'"
-    echo "  ./scripts/profile-latency.sh offcpu 4 'https://mega.nz/folder/aaa#bbb' 'https://mega.nz/file/ccc#ddd'"
-    echo ""
-    exit 0
-fi
 
 # Fix perf permissions
 echo 0 | sudo tee /proc/sys/kernel/kptr_restrict > /dev/null
@@ -57,6 +92,21 @@ sudo chmod -R a+rx /sys/kernel/debug/tracing 2>/dev/null || true
 
 # Build with profiling profile
 RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" cargo build --release
+
+# Select binary and build args
+if [ "$TUI" = true ]; then
+    BINARY="$PROJECT_DIR/target/release/octo-tui"
+    BIN_ARGS=()
+else
+    BINARY="$PROJECT_DIR/target/release/octo-dl"
+    BIN_ARGS=(-j "$CHUNKS" -p "$PARALLEL")
+    if [ "$FORCE" = true ]; then
+        BIN_ARGS+=(-f)
+    fi
+    BIN_ARGS+=("${URLS[@]}")
+fi
+
+echo "Profiling $(basename "$BINARY") (mode=$MODE, chunks=$CHUNKS, parallel=$PARALLEL)..."
 
 case "$MODE" in
   strace)
@@ -74,7 +124,7 @@ case "$MODE" in
     echo -ne "\033kocto-dl READY\033\\"
     strace -T -f -tt -e read,write,recvfrom,sendto,poll,epoll_wait,pselect6,open,openat,close \
       -o strace.log \
-      "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "${MEGA_URLS[@]}" || true
+      "$BINARY" "${BIN_ARGS[@]}" || true
 
     echo ""
     echo "=== Syscall Summary ==="
@@ -140,22 +190,19 @@ case "$MODE" in
     set +e
     case "$OFFCPU_METHOD" in
       bpftrace)
-        # Bpftrace doesn't support filtering by PID easily, so we record everything
         echo -ne "\033]0;octo-dl READY (offcpu-bpftrace)\007"
         echo -ne "\033kocto-dl READY\033\\"
         echo "Recording... (press Ctrl-C to stop)"
-        # This is a simplified approach - just run perf in the background
         perf record -e sched:sched_switch -g --call-graph fp -F 997 -o perf-offcpu.data \
-          "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "${MEGA_URLS[@]}" || true
+          "$BINARY" "${BIN_ARGS[@]}" || true
         ;;
 
       perf-sched)
-        # Use perf sched for proper scheduler analysis, filtering to just our process
         echo -ne "\033]0;octo-dl READY (offcpu-sched)\007"
         echo -ne "\033kocto-dl READY\033\\"
 
-        # Start octo-dl in background and capture its PID
-        "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "${MEGA_URLS[@]}" &
+        # Start binary in background and capture its PID
+        "$BINARY" "${BIN_ARGS[@]}" &
         APP_PID=$!
 
         # Give it a moment to start
@@ -172,8 +219,8 @@ case "$MODE" in
         echo -ne "\033]0;octo-dl READY (offcpu-cpu)\007"
         echo -ne "\033kocto-dl READY\033\\"
 
-        # Start octo-dl in background and capture its PID
-        "$PROJECT_DIR/target/release/octo-dl" -f -j "$CHUNKS" "${MEGA_URLS[@]}" &
+        # Start binary in background and capture its PID
+        "$BINARY" "${BIN_ARGS[@]}" &
         APP_PID=$!
 
         # Give it a moment to start
@@ -226,11 +273,9 @@ case "$MODE" in
     ;;
 
   *)
-    echo "Usage: $0 [strace|offcpu] [CHUNKS] [MEGA_URLs...]"
+    echo "Unknown mode: $MODE"
     echo ""
-    echo "Modes:"
-    echo "  strace  - Record syscall latency (default)"
-    echo "  offcpu  - Off-CPU flamegraph (tries perf)"
+    print_usage
     exit 1
     ;;
 esac
