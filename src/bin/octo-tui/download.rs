@@ -152,6 +152,24 @@ pub fn handle_file_error(app: &mut App, name: &str, error: &str) {
     }
 }
 
+/// Show error in UI without persisting to session.
+/// Used for URL-level errors that should never be retried.
+pub fn show_error_ui_only(app: &mut App, name: &str, error: &str) {
+    app.cancellation_tokens.remove(name);
+    if let Some(fp) = app.files.iter_mut().find(|f| f.name == name) {
+        fp.status = FileStatus::Error(error.to_string());
+        fp.speed = 0;
+    } else {
+        app.files.push(FileEntry {
+            name: name.to_string(),
+            size: 0,
+            downloaded: 0,
+            speed: 0,
+            status: FileStatus::Error(error.to_string()),
+        });
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
     match event {
@@ -222,7 +240,17 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 }
                 return;
             }
-            handle_file_error(app, &name, &error);
+            // Remove invalid URLs from session (they will never work)
+            if error.contains("InvalidPublicUrlFormat") {
+                if let Some(ref mut session) = app.session {
+                    let _ = session.remove_file(&name);
+                }
+                // Show error in UI but don't save to session
+                show_error_ui_only(app, &name, &error);
+            } else {
+                // For actual file download errors, mark as error and keep in session for retry
+                handle_file_error(app, &name, &error);
+            }
         }
         DownloadEvent::UrlQueued { url } => {
             if app.deleted_files.contains(&url) {
@@ -452,22 +480,26 @@ async fn resolve_urls(
             let _ = tx.send(DownloadEvent::StatusMessage(format!(
                 "Processing DLC: {url}"
             )));
-            // Expand ~ to home directory for local DLC files
-            let expanded_url = if url.starts_with('~') {
-                match dirs::home_dir() {
-                    Some(home) => url.replacen('~', home.to_string_lossy().as_ref(), 1),
-                    None => {
-                        let _ = tx.send(DownloadEvent::Error {
-                            name: url.clone(),
-                            error: "Could not determine home directory".to_string(),
-                        });
-                        continue;
+            // For local filesystem paths (starting with ~ or /), expand ~ to home directory
+            let dlc_path = if url.starts_with('~') || url.starts_with('/') {
+                if url.starts_with('~') {
+                    match dirs::home_dir() {
+                        Some(home) => url.replacen('~', home.to_string_lossy().as_ref(), 1),
+                        None => {
+                            let _ = tx.send(DownloadEvent::Error {
+                                name: url.clone(),
+                                error: "Could not determine home directory".to_string(),
+                            });
+                            continue;
+                        }
                     }
+                } else {
+                    url.clone()
                 }
             } else {
                 url.clone()
             };
-            match octo_dl::parse_dlc_file(&expanded_url, http, dlc_cache).await {
+            match octo_dl::parse_dlc_file(&dlc_path, http, dlc_cache).await {
                 Ok(dlc_urls) => {
                     let _ = tx.send(DownloadEvent::StatusMessage(format!(
                         "DLC {url}: {} MEGA link(s)",
