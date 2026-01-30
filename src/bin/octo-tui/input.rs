@@ -151,13 +151,21 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
                     FileStatus::Queued | FileStatus::Error(_) | FileStatus::Downloading
                 );
                 if can_remove {
+                    let file_name = file.name.clone();
                     // Cancel the download if active
                     if matches!(file.status, FileStatus::Downloading)
-                        && let Some(token) = app.cancellation_tokens.remove(&file.name)
+                        && let Some(token) = app.cancellation_tokens.remove(&file_name)
                     {
                         token.cancel();
                     }
+                    // Track so we can ignore stale events
+                    app.deleted_files.insert(file_name.clone());
                     app.files.remove(selected);
+                    app.recompute_totals();
+                    // Remove from session state
+                    if let Some(ref mut session) = app.session {
+                        let _ = session.remove_file(&file_name);
+                    }
                     if app.files.is_empty() {
                         app.file_list_state.select(None);
                     } else {

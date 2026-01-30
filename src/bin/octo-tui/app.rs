@@ -1,6 +1,6 @@
 //! Application state model.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 
 use ratatui::widgets::ListState;
@@ -141,13 +141,42 @@ pub struct App {
     pub client_rx: Option<tokio::sync::oneshot::Receiver<(mega::Client, reqwest::Client)>>,
     // Cancellation tokens for active downloads (maps file path to token)
     pub cancellation_tokens: HashMap<String, CancellationToken>,
+    // Files deleted from the UI — used to suppress stale download events
+    pub deleted_files: HashSet<String>,
     // Session
     pub session: Option<SessionState>,
     // API port for display
     pub api_port: u16,
+    // Resource usage
+    pub cpu_usage: f32,
+    pub memory_rss: u64,
 }
 
 impl App {
+    /// Recomputes aggregate totals from the current files list.
+    ///
+    /// Call after deleting files to keep counters consistent.
+    pub fn recompute_totals(&mut self) {
+        self.total_size = self.files.iter().map(|f| f.size).sum();
+        self.total_downloaded = self.files.iter().map(|f| f.downloaded).sum();
+        self.files_completed = self
+            .files
+            .iter()
+            .filter(|f| matches!(f.status, FileStatus::Complete))
+            .count();
+        self.files_total = self
+            .files
+            .iter()
+            .filter(|f| !matches!(f.status, FileStatus::Error(_)))
+            .count();
+        self.current_speed = self
+            .files
+            .iter()
+            .filter(|f| matches!(f.status, FileStatus::Downloading))
+            .map(|f| f.speed)
+            .sum();
+    }
+
     pub fn new(api_port: u16, event_tx: mpsc::UnboundedSender<DownloadEvent>) -> Self {
         Self {
             popup: Popup::None,
@@ -171,8 +200,11 @@ impl App {
             token_rx: None,
             client_rx: None,
             cancellation_tokens: HashMap::new(),
+            deleted_files: HashSet::new(),
             session: None,
             api_port,
+            cpu_usage: 0.0,
+            memory_rss: 0,
         }
     }
 }
