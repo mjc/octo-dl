@@ -97,6 +97,9 @@ else
     BIN_ARGS+=("${URLS[@]}")
 fi
 
+
+RUST_BACKTRACE=full
+
 echo "Profiling with $(basename "$BINARY") (chunks=$CHUNKS, parallel=$PARALLEL)..."
 
 # Record using frame pointers (not DWARF)
