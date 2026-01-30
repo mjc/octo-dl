@@ -6,6 +6,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::State;
 use axum::response::{Html, IntoResponse};
+use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -60,9 +61,14 @@ async fn api_post_urls(
     axum::Json(UrlResponse { added: urls, count })
 }
 
-async fn bookmarklet_page(State(state): State<AppState>) -> impl IntoResponse {
-    let host = &state.host;
-    let port = state.port;
+async fn bookmarklet_page(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    // Use the Host header from the browser's request to detect the actual address
+    let default_host = format!("{}:{}", state.host, state.port);
+    let host = headers
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or(&default_host);
+
     Html(format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -86,11 +92,11 @@ async fn bookmarklet_page(State(state): State<AppState>) -> impl IntoResponse {
 <body>
 <h1>octo-dl bookmarklet</h1>
 <p>Drag this link to your bookmarks bar:</p>
-<a class="bookmarklet" href="javascript:void(function(){{var t=window.getSelection().toString();if(!t){{t=window.location.href}}fetch('http://{host}:{port}/api/urls',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{text:t}})}}).then(function(r){{return r.json()}}).then(function(d){{alert('Sent '+d.count+' URL(s) to octo-dl')}}).catch(function(e){{alert('octo-dl not running: '+e)}})}})()">
+<a class="bookmarklet" href="javascript:void(function(){{var t=window.getSelection().toString();if(!t){{t=window.location.href}}fetch('http://{host}/api/urls',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{text:t}})}}).then(function(r){{return r.json()}}).then(function(d){{alert('Sent '+d.count+' URL(s) to octo-dl')}}).catch(function(e){{alert('octo-dl not running: '+e)}})}})()">
   Send to octo-dl
 </a>
 <p>Click it on any page to send the selected text (or the page URL) to octo-dl for download.</p>
-<p>API running on <code>{host}:{port}</code></p>
+<p>API running on <code>{host}</code></p>
 </body>
 </html>"#
     ))
