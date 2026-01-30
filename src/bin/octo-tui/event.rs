@@ -18,12 +18,6 @@ pub struct DownloadChannels {
     pub token_tx: mpsc::UnboundedSender<TokenMessage>,
 }
 
-/// Borrowed sender references passed into download helper functions.
-pub struct DownloadSenders<'a> {
-    pub event_tx: &'a mpsc::UnboundedSender<DownloadEvent>,
-    pub token_tx: &'a mpsc::UnboundedSender<TokenMessage>,
-}
-
 #[derive(Debug)]
 pub enum DownloadEvent {
     FileStart {
