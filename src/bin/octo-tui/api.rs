@@ -118,7 +118,7 @@ async fn bookmarklet_page(State(state): State<AppState>, headers: HeaderMap) -> 
 <body>
 <h1>octo-dl bookmarklet</h1>
 <p>Drag this link to your bookmarks bar:</p>
-<a class="bookmarklet" href="javascript:void(function(){{var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var h='http://{fallback_host}';fetch(h+'/api/parse',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{page:page,fallback:selected}})}}).then(function(r){{return r.json()}}).then(function(d){{alert('Sent '+d.count+' URL(s) to octo-dl')}}).catch(function(e){{alert('octo-dl not running: '+e)}})}})()">
+<a class="bookmarklet" href="javascript:void(function(){{var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var proto=window.location.protocol;var h=proto+'//{fallback_host}';fetch(h+'/api/parse',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{page:page,fallback:selected}})}}).then(function(r){{return r.json()}}).then(function(d){{if(d.count>0){{alert('Sent '+d.count+' URL(s) to octo-dl')}}else{{alert('No URLs found on this page')}}}}).catch(function(e){{alert('Error: '+e)}})}})()">
   Send to octo-dl
 </a>
 <p>Click it on any page to send the selected text (or the page URL) to octo-dl for download.</p>
