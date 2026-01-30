@@ -45,13 +45,15 @@ print_usage() {
     echo ""
     echo "Examples:"
     echo "  $0 -j 8 'https://mega.nz/folder/xxx#key1'"
-    echo "  $0 --tui -j 4 -p 2 'https://mega.nz/folder/xxx#key1'"
+    echo "  $0 --tui 'https://mega.nz/folder/xxx#key1'"
     echo "  $0 -j 8 -f 'https://mega.nz/folder/xxx#key1' 'https://mega.nz/file/yyy#key2'"
     echo ""
     echo "The profile will:"
     echo "  1. Build release binary with frame pointers"
     echo "  2. Record CPU samples with perf"
     echo "  3. Generate flamegraph.svg showing where time is spent"
+    echo ""
+    echo "For --tui mode: API server will be available on 0.0.0.0:9723"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -86,8 +88,8 @@ RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" cargo build --relea
 # Select binary and build args
 if [ "$TUI" = true ]; then
     BINARY="$PROJECT_DIR/target/release/octo-tui"
-    # TUI doesn't take CLI args for URLs — they're entered interactively
-    BIN_ARGS=()
+    # TUI takes --api-host flag for API server binding
+    BIN_ARGS=(--api-host 0.0.0.0)
 else
     BINARY="$PROJECT_DIR/target/release/octo-dl"
     BIN_ARGS=(-j "$CHUNKS" -p "$PARALLEL")
