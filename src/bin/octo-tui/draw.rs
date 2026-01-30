@@ -27,7 +27,9 @@ fn draw_main(frame: &mut ratatui::Frame, app: &App) {
     // Outer block with title bar
     let title = " octo-dl ".to_string();
     let title_right = format!(
-        " API: :{}{} ",
+        " {}% CPU | {} RAM | API: :{}{}",
+        (app.cpu_usage as u16).min(999),
+        format_bytes(app.memory_rss),
         app.api_port,
         if app.paused { " | PAUSED" } else { "" }
     );
