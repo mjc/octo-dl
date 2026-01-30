@@ -45,8 +45,17 @@ pub mod state;
 pub mod stats;
 pub mod url;
 
+#[cfg(feature = "api")]
+pub mod api;
+
+#[cfg(feature = "cli")]
+pub mod cli;
+
+#[cfg(feature = "tui")]
+pub mod tui;
+
 // Re-export main types for convenience
-pub use config::DownloadConfig;
+pub use config::{AppConfig, ApiConfig, DownloadConfig, PathConfig};
 pub use dlc::{DlcKeyCache, parse_dlc_file};
 pub use download::{
     CollectedFiles, DownloadItem, DownloadProgress, Downloader, FileStatus, NoProgress,
