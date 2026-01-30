@@ -86,45 +86,38 @@ async fn main() -> octo::Result<()> {
     config.api.port = cli.api_port;
 
     // Determine mode based on flags
-    match (cli.tui, cli.api, cli.urls.is_empty()) {
+    match (cli.tui, cli.api, cli.urls.is_empty(), cli.resume) {
         // TUI mode (with or without API)
         #[cfg(feature = "tui")]
-        (true, _, _) => {
+        (true, _, _, _) => {
             octo::tui::run(config).await?;
             Ok(())
         }
         #[cfg(not(feature = "tui"))]
-        (true, _, _) => {
+        (true, _, _, _) => {
             eprintln!("Error: TUI mode not available (compiled without 'tui' feature)");
             std::process::exit(1);
         }
 
-        // API-only mode
+        // API-only mode (no TUI, API enabled, no URLs, not resuming)
         #[cfg(feature = "api")]
-        (false, true, true) => {
+        (false, true, true, false) => {
             octo::api::run_standalone(config).await
         }
         #[cfg(not(feature = "api"))]
-        (false, true, true) => {
+        (false, true, true, false) => {
             eprintln!("Error: API mode not available (compiled without 'api' feature)");
             std::process::exit(1);
         }
 
-        // CLI mode (with or without API)
+        // CLI mode (with or without API, may have URLs or be resuming)
         #[cfg(feature = "cli")]
-        (false, _, false) => {
+        (false, _, _, _) => {
             octo::cli::run_download(config, cli.urls, cli.resume).await
         }
         #[cfg(not(feature = "cli"))]
-        (false, _, false) => {
+        (false, _, _, _) => {
             eprintln!("Error: CLI mode not available (compiled without 'cli' feature)");
-            std::process::exit(1);
-        }
-
-        // No URLs and no mode specified - print help
-        (false, false, true) => {
-            eprintln!("Error: no URLs provided and no mode specified");
-            eprintln!("Use --tui for interactive mode, --api for server mode, or provide URLs to download");
             std::process::exit(1);
         }
     }
