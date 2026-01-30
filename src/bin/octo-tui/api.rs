@@ -20,6 +20,7 @@ pub const DEFAULT_API_PORT: u16 = 9723;
 #[derive(Clone)]
 struct AppState {
     tx: Arc<mpsc::UnboundedSender<DownloadEvent>>,
+    host: String,
     port: u16,
 }
 
@@ -60,6 +61,7 @@ async fn api_post_urls(
 }
 
 async fn bookmarklet_page(State(state): State<AppState>) -> impl IntoResponse {
+    let host = &state.host;
     let port = state.port;
     Html(format!(
         r#"<!DOCTYPE html>
@@ -84,11 +86,11 @@ async fn bookmarklet_page(State(state): State<AppState>) -> impl IntoResponse {
 <body>
 <h1>octo-dl bookmarklet</h1>
 <p>Drag this link to your bookmarks bar:</p>
-<a class="bookmarklet" href="javascript:void(function(){{var t=window.getSelection().toString();if(!t){{t=window.location.href}}fetch('http://localhost:{port}/api/urls',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{text:t}})}}).then(function(r){{return r.json()}}).then(function(d){{alert('Sent '+d.count+' URL(s) to octo-dl')}}).catch(function(e){{alert('octo-dl not running: '+e)}})}})()">
+<a class="bookmarklet" href="javascript:void(function(){{var t=window.getSelection().toString();if(!t){{t=window.location.href}}fetch('http://{host}:{port}/api/urls',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{text:t}})}}).then(function(r){{return r.json()}}).then(function(d){{alert('Sent '+d.count+' URL(s) to octo-dl')}}).catch(function(e){{alert('octo-dl not running: '+e)}})}})()">
   Send to octo-dl
 </a>
 <p>Click it on any page to send the selected text (or the page URL) to octo-dl for download.</p>
-<p>API running on <code>localhost:{port}</code></p>
+<p>API running on <code>{host}:{port}</code></p>
 </body>
 </html>"#
     ))
@@ -98,13 +100,15 @@ async fn bookmarklet_page(State(state): State<AppState>) -> impl IntoResponse {
 ///
 /// # Errors
 ///
-/// Returns an error if the server cannot bind to the specified port.
+/// Returns an error if the server cannot bind to the specified address.
 pub async fn run_api_server(
     tx: mpsc::UnboundedSender<DownloadEvent>,
+    host: &str,
     port: u16,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = AppState {
         tx: Arc::new(tx),
+        host: host.to_string(),
         port,
     };
 
@@ -120,7 +124,7 @@ pub async fn run_api_server(
         .layer(cors)
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 
