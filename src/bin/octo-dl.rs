@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use dirs;
 use futures::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
@@ -423,7 +424,19 @@ async fn main() -> octo_dl::Result<()> {
         let dlc_cache = DlcKeyCache::new();
         for dlc_path in &config.dlc_files {
             print!("  {dlc_path} ... ");
-            match octo_dl::parse_dlc_file(dlc_path, &http, &dlc_cache).await {
+            // Expand ~ to home directory for local DLC files
+            let expanded_path = if dlc_path.starts_with('~') {
+                match dirs::home_dir() {
+                    Some(home) => dlc_path.replacen('~', home.to_string_lossy().as_ref(), 1),
+                    None => {
+                        eprintln!("Error: Could not determine home directory");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                dlc_path.to_string()
+            };
+            match octo_dl::parse_dlc_file(&expanded_path, &http, &dlc_cache).await {
                 Ok(urls) => {
                     println!("{} MEGA link(s)", urls.len());
                     config.urls.extend(urls);

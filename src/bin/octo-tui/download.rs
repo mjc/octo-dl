@@ -10,6 +10,7 @@ use octo_dl::{
     DlcKeyCache, DownloadConfig, DownloadProgress, SavedCredentials, SessionState, UrlEntry,
     UrlStatus, is_dlc_path,
 };
+use dirs;
 
 use crate::app::{App, FileEntry, FileStatus, Popup};
 use crate::event::{DownloadChannels, DownloadEvent, TokenMessage, TuiProgress};
@@ -451,7 +452,22 @@ async fn resolve_urls(
             let _ = tx.send(DownloadEvent::StatusMessage(format!(
                 "Processing DLC: {url}"
             )));
-            match octo_dl::parse_dlc_file(url, http, dlc_cache).await {
+            // Expand ~ to home directory for local DLC files
+            let expanded_url = if url.starts_with('~') {
+                match dirs::home_dir() {
+                    Some(home) => url.replacen('~', home.to_string_lossy().as_ref(), 1),
+                    None => {
+                        let _ = tx.send(DownloadEvent::Error {
+                            name: url.clone(),
+                            error: "Could not determine home directory".to_string(),
+                        });
+                        continue;
+                    }
+                }
+            } else {
+                url.clone()
+            };
+            match octo_dl::parse_dlc_file(&expanded_url, http, dlc_cache).await {
                 Ok(dlc_urls) => {
                     let _ = tx.send(DownloadEvent::StatusMessage(format!(
                         "DLC {url}: {} MEGA link(s)",
