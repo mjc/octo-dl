@@ -148,26 +148,35 @@ impl SessionState {
     }
 
     /// Finds the most recent incomplete session in the state directory.
+    ///
+    /// Older non-completed sessions are marked as completed and their files
+    /// are removed so they never interfere with future launches.
     #[must_use]
     pub fn latest() -> Option<Self> {
         let dir = Self::state_dir();
         let read_dir = std::fs::read_dir(&dir).ok()?;
 
-        let mut sessions: Vec<Self> = read_dir
+        let mut sessions: Vec<(PathBuf, Self)> = read_dir
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let path = entry.path();
                 if path.extension().is_some_and(|ext| ext == "toml") {
-                    Self::load(&path).ok()
+                    Self::load(&path).ok().map(|s| (path, s))
                 } else {
                     None
                 }
             })
-            .filter(|s| s.status != SessionStatus::Completed)
+            .filter(|(_, s)| s.status != SessionStatus::Completed)
             .collect();
 
-        sessions.sort_by(|a, b| b.created.cmp(&a.created));
-        sessions.into_iter().next()
+        sessions.sort_by(|a, b| b.1.created.cmp(&a.1.created));
+
+        // Clean up: remove all stale sessions except the newest
+        for (path, _) in sessions.iter().skip(1) {
+            let _ = std::fs::remove_file(path);
+        }
+
+        sessions.into_iter().next().map(|(_, s)| s)
     }
 
     /// Marks a file as completed by its path and saves the state.
@@ -191,6 +200,16 @@ impl SessionState {
         if let Some(entry) = self.files.iter_mut().find(|f| f.path == path) {
             entry.status = FileEntryStatus::Error(error.to_string());
         }
+        self.save()
+    }
+
+    /// Removes a file entry by path and saves the state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state file cannot be written.
+    pub fn remove_file(&mut self, path: &str) -> std::io::Result<()> {
+        self.files.retain(|f| f.path != path);
         self.save()
     }
 
