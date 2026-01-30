@@ -1,21 +1,17 @@
 [package]
-name = "octo-dl"
+name = "octo"
 version = "0.1.0"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-name = "octo_dl"
+name = "octo"
 path = "src/lib.rs"
 
 [[bin]]
-name = "octo-dl"
-path = "src/bin/octo-dl.rs"
-
-[[bin]]
-name = "octo-tui"
-path = "src/bin/octo-tui/main.rs"
+name = "octo"
+path = "src/bin/octo.rs"
 
 [dependencies]
 async-trait = "0.1"
@@ -36,16 +32,19 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
-ratatui = "0.29"
-crossterm = "0.28"
 uuid = { version = "1", features = ["v4"] }
 hostname = "0.4"
 whoami = "1"
-axum = "0.8"
-sysinfo = "0.31"
 regex = "1"
 serde_json = "1"
-tower-http = { version = "0.6", features = ["cors"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Optional dependencies for features
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
+axum = { version = "0.8", optional = true }
+sysinfo = { version = "0.31", optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
 # sha2 with target-specific asm optimizations (not available on Windows)
 [target.'cfg(all(any(target_arch = "x86_64", target_arch = "x86"), not(target_os = "windows")))'.dependencies]
 sha2 = { version = "0.10.8", features = ["asm"] }
@@ -57,6 +56,12 @@ sluice = "0.5.5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 sha2 = "0.10.8"
+
+[features]
+default = ["cli", "tui", "api"]
+cli = []
+tui = ["dep:ratatui", "dep:crossterm", "dep:sysinfo"]
+api = ["dep:axum", "dep:tower-http"]
 
 [dev-dependencies]
 tempfile = "3.24.0"
