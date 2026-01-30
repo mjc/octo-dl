@@ -116,16 +116,17 @@ async fn main() -> io::Result<()> {
 
     let mut tick_count: u32 = 0;
     let mut sys = System::new_all();
+    let pid = sysinfo::get_current_pid().ok();
 
     loop {
         terminal.draw(|f| draw(f, &app))?;
 
-        // Sample CPU/memory every 10 ticks (~1s)
+        // Sample CPU/memory every 50 ticks (~5s) to reduce /proc scanning overhead
         tick_count += 1;
-        if tick_count.is_multiple_of(10) {
-            sys.refresh_all();
-            let pid = sysinfo::get_current_pid().ok();
+        if tick_count.is_multiple_of(50) {
             if let Some(pid) = pid {
+                use sysinfo::ProcessesToUpdate;
+                sys.refresh_processes(ProcessesToUpdate::All);
                 if let Some(proc) = sys.process(pid) {
                     app.cpu_usage = proc.cpu_usage();
                     app.memory_rss = proc.memory() * 1024; // sysinfo returns KB, convert to bytes
