@@ -19,8 +19,8 @@ use regex::Regex;
 /// constant and will not happen in practice).
 #[must_use]
 pub fn extract_urls(input: &str) -> Vec<String> {
-    // Match MEGA URLs with valid characters only: alphanumeric, -, _, /, #
-    let url_re = Regex::new(r"https?://mega\.nz/[a-zA-Z0-9/_#\-]+").expect("valid regex");
+    // Match MEGA URLs with valid characters only: alphanumeric, -, _, /, #, !
+    let url_re = Regex::new(r"https?://mega\.nz/[a-zA-Z0-9/_#!\-]+").expect("valid regex");
     let mut seen = HashSet::new();
     let mut result: Vec<String> = Vec::new();
 
@@ -28,7 +28,7 @@ pub fn extract_urls(input: &str) -> Vec<String> {
     for m in url_re.find_iter(input) {
         let mut url = m.as_str().to_string();
         // Strip any trailing punctuation that shouldn't be in a URL
-        while url.ends_with(|c: char| c.is_ascii_punctuation() && c != '-' && c != '_' && c != '#') {
+        while url.ends_with(|c: char| c.is_ascii_punctuation() && c != '-' && c != '_' && c != '#' && c != '!') {
             url.pop();
         }
         if !url.is_empty() && seen.insert(url.clone()) {
