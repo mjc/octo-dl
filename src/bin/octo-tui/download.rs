@@ -12,7 +12,7 @@ use octo_dl::{
 };
 
 use crate::app::{App, FileEntry, FileStatus, Popup};
-use crate::event::{DownloadChannels, DownloadEvent, DownloadSenders, TokenMessage, TuiProgress};
+use crate::event::{DownloadChannels, DownloadEvent, TokenMessage, TuiProgress};
 use crate::input::add_url;
 
 fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
@@ -92,10 +92,17 @@ pub fn handle_login_result(app: &mut App, success: bool, error: Option<String>) 
         // Start the download task now that we're authenticated
         start_download_task(app);
 
-        // Send any queued URLs
+        // Send queued URLs — skip already-fetched URLs on resume
         for url in &app.urls {
-            if let Some(ref url_tx) = app.url_tx {
-                let _ = url_tx.send(url.clone());
+            let already_fetched = app.session.as_ref().is_some_and(|s| {
+                s.urls
+                    .iter()
+                    .any(|u| u.url == *url && u.status == UrlStatus::Fetched)
+            });
+            if !already_fetched {
+                if let Some(ref url_tx) = app.url_tx {
+                    let _ = url_tx.send(url.clone());
+                }
             }
         }
     } else {
@@ -114,7 +121,7 @@ pub fn handle_file_complete(app: &mut App, name: &str) {
     app.files_completed += 1;
 
     if let Some(ref mut session) = app.session {
-        let _ = session.mark_file_complete(name);
+        let _ = session.remove_file(name);
     }
 
     if app.files_completed == app.files_total && app.files_total > 0 {
@@ -144,6 +151,7 @@ pub fn handle_file_error(app: &mut App, name: &str, error: &str) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
     match event {
         DownloadEvent::LoginResult { success, error } => handle_login_result(app, success, error),
@@ -158,6 +166,9 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             app.status = format!("Found {total} files ({skipped} skipped, {partial} partial)");
         }
         DownloadEvent::FileStart { name, size } => {
+            if app.deleted_files.contains(&name) {
+                return;
+            }
             if let Some(fp) = app.files.iter_mut().find(|f| f.name == name) {
                 fp.status = FileStatus::Downloading;
                 fp.size = size;
@@ -176,6 +187,9 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             bytes_delta,
             speed,
         } => {
+            if app.deleted_files.contains(&name) {
+                return;
+            }
             if let Some(fp) = app.files.iter_mut().find(|f| f.name == name) {
                 fp.downloaded = fp.downloaded.saturating_add(bytes_delta);
                 fp.speed = speed;
@@ -189,9 +203,30 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 .map(|f| f.speed)
                 .sum();
         }
-        DownloadEvent::FileComplete { name } => handle_file_complete(app, &name),
-        DownloadEvent::Error { name, error } => handle_file_error(app, &name, &error),
+        DownloadEvent::FileComplete { name } => {
+            if app.deleted_files.remove(&name) {
+                app.cancellation_tokens.remove(&name);
+                if let Some(ref mut session) = app.session {
+                    let _ = session.remove_file(&name);
+                }
+                return;
+            }
+            handle_file_complete(app, &name);
+        }
+        DownloadEvent::Error { name, error } => {
+            if app.deleted_files.remove(&name) {
+                app.cancellation_tokens.remove(&name);
+                if let Some(ref mut session) = app.session {
+                    let _ = session.remove_file(&name);
+                }
+                return;
+            }
+            handle_file_error(app, &name, &error);
+        }
         DownloadEvent::UrlQueued { url } => {
+            if app.deleted_files.contains(&url) {
+                return;
+            }
             // Add a placeholder entry showing the URL while we fetch file info
             if !app.files.iter().any(|f| f.name == url) {
                 app.files.push(FileEntry {
@@ -204,6 +239,9 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             }
         }
         DownloadEvent::FileQueued { name, size } => {
+            if app.deleted_files.contains(&name) {
+                return;
+            }
             // Add a real file entry with name and size
             if let Some(fp) = app.files.iter_mut().find(|f| f.name == name) {
                 fp.size = size;
@@ -233,6 +271,13 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
         DownloadEvent::UrlResolved { url } => {
             // Remove the URL placeholder now that real file entries exist
             app.files.retain(|f| f.name != url);
+            // Mark URL as fetched in session so it's not re-sent on resume
+            if let Some(ref mut session) = app.session {
+                if let Some(entry) = session.urls.iter_mut().find(|u| u.url == url) {
+                    entry.status = UrlStatus::Fetched;
+                }
+                let _ = session.save();
+            }
         }
         DownloadEvent::StatusMessage(msg) => {
             app.status = msg;
@@ -259,30 +304,32 @@ fn start_download_task(app: &mut App) {
     let (token_tx, token_rx) = mpsc::unbounded_channel::<TokenMessage>();
     app.token_rx = Some(token_rx);
 
-    // Create session state
-    let email = app.login.email.clone();
-    let password = app.login.password.clone();
-    let mfa = if app.login.mfa.is_empty() {
-        None
-    } else {
-        Some(app.login.mfa.clone())
-    };
-    let url_entries: Vec<UrlEntry> = app
-        .urls
-        .iter()
-        .map(|url| UrlEntry {
-            url: url.clone(),
-            status: UrlStatus::Pending,
-        })
-        .collect();
+    // Reuse existing session on resume, or create a new one
+    if app.session.is_none() {
+        let email = app.login.email.clone();
+        let password = app.login.password.clone();
+        let mfa = if app.login.mfa.is_empty() {
+            None
+        } else {
+            Some(app.login.mfa.clone())
+        };
+        let url_entries: Vec<UrlEntry> = app
+            .urls
+            .iter()
+            .map(|url| UrlEntry {
+                url: url.clone(),
+                status: UrlStatus::Pending,
+            })
+            .collect();
 
-    let session = SessionState::new(
-        SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
-        config.clone(),
-        url_entries,
-    );
-    let _ = session.save();
-    app.session = Some(session);
+        let session = SessionState::new(
+            SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
+            config.clone(),
+            url_entries,
+        );
+        let _ = session.save();
+        app.session = Some(session);
+    }
 
     // Take the oneshot receiver with the pre-authenticated client
     let client_rx = app.client_rx.take();
@@ -330,39 +377,72 @@ async fn run_download(channels: DownloadChannels, config: DownloadConfig) {
 
     let _ = tx.send(DownloadEvent::StatusMessage("Ready".to_string()));
 
-    let downloader = Arc::new(octo_dl::Downloader::new(mega_client, config));
+    let downloader = Arc::new(octo_dl::Downloader::new(mega_client, config.clone()));
+    let http = Arc::new(http);
+    let dlc_cache = Arc::new(dlc_cache);
 
-    // Process URLs as they arrive, draining all queued URLs before downloading
-    while let Some(first_url) = url_rx.recv().await {
-        let mut batch = vec![first_url];
-        // Drain any additional URLs already in the channel
-        while let Ok(url) = url_rx.try_recv() {
-            batch.push(url);
+    // Shared semaphore across all batches so concurrent_files is a global limit
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(config.concurrent_files));
+    let mut join_set = tokio::task::JoinSet::new();
+
+    loop {
+        tokio::select! {
+            url_opt = url_rx.recv() => {
+                let Some(first_url) = url_opt else { break };
+                let mut batch = vec![first_url];
+                while let Ok(url) = url_rx.try_recv() {
+                    batch.push(url);
+                }
+
+                for url in &batch {
+                    let _ = tx.send(DownloadEvent::UrlQueued { url: url.clone() });
+                }
+
+                let _ = tx.send(DownloadEvent::StatusMessage(format!(
+                    "Processing {} URL(s)...",
+                    batch.len()
+                )));
+
+                // Resolve URLs inline (fast, just URL/DLC parsing)
+                let resolved = resolve_urls(&batch, &http, &dlc_cache, &tx).await;
+
+                // Spawn the download work so we can receive new URLs immediately
+                let dl = Arc::clone(&downloader);
+                let prog = Arc::clone(&progress);
+                let sem = Arc::clone(&semaphore);
+                let tx2 = tx.clone();
+                let token_tx2 = token_tx.clone();
+                join_set.spawn(async move {
+                    download_batch(&resolved, &dl, &prog, &sem, &tx2, &token_tx2, &batch).await;
+                });
+            }
+            Some(result) = join_set.join_next() => {
+                if let Err(e) = result {
+                    let _ = tx.send(DownloadEvent::Error {
+                        name: "download".to_string(),
+                        error: format!("Batch task panicked: {e}"),
+                    });
+                }
+            }
         }
+    }
 
-        for url in &batch {
-            let _ = tx.send(DownloadEvent::UrlQueued { url: url.clone() });
+    // Drain remaining batch tasks
+    while let Some(result) = join_set.join_next().await {
+        if let Err(e) = result {
+            let _ = tx.send(DownloadEvent::Error {
+                name: "download".to_string(),
+                error: format!("Batch task panicked: {e}"),
+            });
         }
-
-        let _ = tx.send(DownloadEvent::StatusMessage(format!(
-            "Processing {} URL(s)...",
-            batch.len()
-        )));
-
-        let resolved = resolve_urls(&batch, &http, &dlc_cache, &tx).await;
-        let senders = DownloadSenders {
-            event_tx: &tx,
-            token_tx: &token_tx,
-        };
-        download_urls(&resolved, &downloader, &progress, &senders, &batch).await;
     }
 }
 
 /// Resolves raw URL strings (including DLC files) into MEGA URLs.
 async fn resolve_urls(
     urls: &[String],
-    http: &reqwest::Client,
-    dlc_cache: &DlcKeyCache,
+    http: &Arc<reqwest::Client>,
+    dlc_cache: &Arc<DlcKeyCache>,
     tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) -> Vec<String> {
     let mut resolved = Vec::new();
@@ -394,24 +474,27 @@ async fn resolve_urls(
 }
 
 /// Fetches nodes from URLs, collects files, and downloads them.
-async fn download_urls(
+///
+/// The semaphore is shared across all batches to enforce a global concurrency
+/// limit for file downloads.
+async fn download_batch(
     urls: &[String],
     downloader: &Arc<octo_dl::Downloader>,
     progress: &Arc<dyn DownloadProgress>,
-    senders: &DownloadSenders<'_>,
+    semaphore: &Arc<tokio::sync::Semaphore>,
+    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
+    token_tx: &mpsc::UnboundedSender<TokenMessage>,
     source_urls: &[String],
 ) {
     let mut node_sets: Vec<mega::Nodes> = Vec::new();
     for url in urls {
-        let _ = senders
-            .event_tx
-            .send(DownloadEvent::StatusMessage(format!("Fetching: {url}")));
+        let _ = event_tx.send(DownloadEvent::StatusMessage(format!("Fetching: {url}")));
         match downloader.client().fetch_public_nodes(url).await {
             Ok(nodes) => {
                 node_sets.push(nodes);
             }
             Err(e) => {
-                let _ = senders.event_tx.send(DownloadEvent::Error {
+                let _ = event_tx.send(DownloadEvent::Error {
                     name: url.clone(),
                     error: format!("Fetch failed: {e}"),
                 });
@@ -433,7 +516,7 @@ async fn download_urls(
     let total_bytes: u64 = all_owned_items.iter().map(|i| i.node.size()).sum();
     let total_files = all_owned_items.len();
 
-    let _ = senders.event_tx.send(DownloadEvent::FilesCollected {
+    let _ = event_tx.send(DownloadEvent::FilesCollected {
         total: total_files,
         skipped: actual_skipped,
         partial: actual_partial,
@@ -442,7 +525,7 @@ async fn download_urls(
 
     // Queue all files so they appear in the list immediately
     for item in &all_owned_items {
-        let _ = senders.event_tx.send(DownloadEvent::FileQueued {
+        let _ = event_tx.send(DownloadEvent::FileQueued {
             name: item.node.name().to_string(),
             size: item.node.size(),
         });
@@ -450,15 +533,13 @@ async fn download_urls(
 
     // Remove URL placeholders now that real file entries exist
     for source_url in source_urls {
-        let _ = senders.event_tx.send(DownloadEvent::UrlResolved {
+        let _ = event_tx.send(DownloadEvent::UrlResolved {
             url: source_url.clone(),
         });
     }
 
-    // Download concurrently using JoinSet + Semaphore.
+    // Download concurrently using JoinSet + shared Semaphore.
     // Permits are acquired BEFORE spawning so files start in queue order.
-    let concurrent = downloader.config().concurrent_files;
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrent));
     let mut join_set = tokio::task::JoinSet::new();
 
     for item in all_owned_items {
@@ -468,10 +549,10 @@ async fn download_urls(
             file_path: item.node.name().to_string(),
             token: cancel_token.clone(),
         };
-        let _ = senders.token_tx.send(token_msg);
+        let _ = token_tx.send(token_msg);
 
         // Wait for a permit before spawning — this ensures files start in order.
-        let permit = Arc::clone(&semaphore)
+        let permit = Arc::clone(semaphore)
             .acquire_owned()
             .await
             .expect("semaphore not closed");
@@ -489,13 +570,13 @@ async fn download_urls(
             Ok(Ok(_stats)) => {}
             Ok(Err(octo_dl::Error::Cancelled)) => {} // user cancelled
             Ok(Err(e)) => {
-                let _ = senders.event_tx.send(DownloadEvent::Error {
+                let _ = event_tx.send(DownloadEvent::Error {
                     name: "download".to_string(),
                     error: format!("Download failed: {e}"),
                 });
             }
             Err(e) => {
-                let _ = senders.event_tx.send(DownloadEvent::Error {
+                let _ = event_tx.send(DownloadEvent::Error {
                     name: "download".to_string(),
                     error: format!("Task panicked: {e}"),
                 });
