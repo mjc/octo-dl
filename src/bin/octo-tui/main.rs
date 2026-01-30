@@ -129,7 +129,7 @@ async fn main() -> io::Result<()> {
                 sys.refresh_processes(ProcessesToUpdate::All);
                 if let Some(proc) = sys.process(pid) {
                     app.cpu_usage = proc.cpu_usage();
-                    app.memory_rss = proc.memory() * 1024; // sysinfo returns KB, convert to bytes
+                    app.memory_rss = proc.memory(); // sysinfo returns bytes
                 }
             }
         }
