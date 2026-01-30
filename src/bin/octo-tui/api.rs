@@ -62,12 +62,12 @@ async fn api_post_urls(
 }
 
 async fn bookmarklet_page(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    // Use the Host header from the browser's request to detect the actual address
-    let default_host = format!("{}:{}", state.host, state.port);
-    let host = headers
+    // Fallback for proxy scenarios where Host header might be wrong
+    let fallback_host = headers
         .get("host")
         .and_then(|h| h.to_str().ok())
-        .unwrap_or(&default_host);
+        .unwrap_or(&format!("{}:{}", state.host, state.port))
+        .to_string();
 
     Html(format!(
         r#"<!DOCTYPE html>
@@ -92,11 +92,11 @@ async fn bookmarklet_page(State(state): State<AppState>, headers: HeaderMap) -> 
 <body>
 <h1>octo-dl bookmarklet</h1>
 <p>Drag this link to your bookmarks bar:</p>
-<a class="bookmarklet" href="javascript:void(function(){{var t=window.getSelection().toString();if(!t){{t=window.location.href}}fetch('http://{host}/api/urls',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{text:t}})}}).then(function(r){{return r.json()}}).then(function(d){{alert('Sent '+d.count+' URL(s) to octo-dl')}}).catch(function(e){{alert('octo-dl not running: '+e)}})}})()">
+<a class="bookmarklet" href="javascript:void(function(){{var t=window.getSelection().toString();if(!t){{t=window.location.href}}var h='http://{fallback_host}';fetch(h+'/api/urls',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{text:t}})}}).then(function(r){{return r.json()}}).then(function(d){{alert('Sent '+d.count+' URL(s) to octo-dl')}}).catch(function(e){{alert('octo-dl not running: '+e)}})}})()">
   Send to octo-dl
 </a>
 <p>Click it on any page to send the selected text (or the page URL) to octo-dl for download.</p>
-<p>API running on <code>{host}</code></p>
+<p>Configured to use <code>{fallback_host}</code></p>
 </body>
 </html>"#
     ))
