@@ -30,6 +30,12 @@ struct UrlRequest {
     text: String,
 }
 
+#[derive(Deserialize)]
+struct ParseRequest {
+    page: String,
+    fallback: String,
+}
+
 #[derive(Serialize)]
 struct UrlResponse {
     added: Vec<String>,
@@ -52,6 +58,26 @@ async fn api_post_urls(
     axum::Json(payload): axum::Json<UrlRequest>,
 ) -> impl IntoResponse {
     let urls = extract_urls(&payload.text);
+
+    let count = urls.len();
+    if !urls.is_empty() {
+        let _ = state.tx.send(DownloadEvent::UrlsReceived { urls: urls.clone() });
+    }
+
+    axum::Json(UrlResponse { added: urls, count })
+}
+
+async fn api_parse_page(
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<ParseRequest>,
+) -> impl IntoResponse {
+    // Try to extract URLs from the full page HTML first
+    let mut urls = extract_urls(&payload.page);
+
+    // If none found, fall back to selected text
+    if urls.is_empty() && !payload.fallback.is_empty() {
+        urls = extract_urls(&payload.fallback);
+    }
 
     let count = urls.len();
     if !urls.is_empty() {
@@ -92,7 +118,7 @@ async fn bookmarklet_page(State(state): State<AppState>, headers: HeaderMap) -> 
 <body>
 <h1>octo-dl bookmarklet</h1>
 <p>Drag this link to your bookmarks bar:</p>
-<a class="bookmarklet" href="javascript:void(function(){{var t=window.getSelection().toString();if(!t){{t=window.location.href}}var h='http://{fallback_host}';fetch(h+'/api/urls',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{text:t}})}}).then(function(r){{return r.json()}}).then(function(d){{alert('Sent '+d.count+' URL(s) to octo-dl')}}).catch(function(e){{alert('octo-dl not running: '+e)}})}})()">
+<a class="bookmarklet" href="javascript:void(function(){{var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var h='http://{fallback_host}';fetch(h+'/api/parse',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{page:page,fallback:selected}})}}).then(function(r){{return r.json()}}).then(function(d){{alert('Sent '+d.count+' URL(s) to octo-dl')}}).catch(function(e){{alert('octo-dl not running: '+e)}})}})()">
   Send to octo-dl
 </a>
 <p>Click it on any page to send the selected text (or the page URL) to octo-dl for download.</p>
@@ -127,6 +153,7 @@ pub async fn run_api_server(
         .route("/bookmarklet", get(bookmarklet_page))
         .route("/api/health", get(api_health))
         .route("/api/urls", post(api_post_urls))
+        .route("/api/parse", post(api_parse_page))
         .layer(cors)
         .with_state(state);
 
