@@ -20,7 +20,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
-use crate::{ServiceConfig, SessionState, SessionStatus, format_bytes};
+use crate::{ServiceConfig, SessionState, SessionStatus, UrlStatus, format_bytes};
 use sysinfo::System;
 
 use self::api::DEFAULT_API_PORT;
@@ -67,7 +67,7 @@ pub async fn run(api_host: Option<String>) -> io::Result<()> {
     let mut app = App::new(api_port, download_tx);
 
     // Check for resumable session
-    if let Some(session) = SessionState::latest() {
+    if let Some(mut session) = SessionState::latest() {
         // Pre-fill from session
         if let Some((email, password, mfa)) = session.credentials.decrypt() {
             app.login.email = email;
@@ -77,6 +77,13 @@ pub async fn run(api_host: Option<String>) -> io::Result<()> {
 
         // Pre-fill URLs
         app.urls = session.urls.iter().map(|u| u.url.clone()).collect();
+        // Reset URL statuses so they get re-sent through the download pipeline.
+        // The downloader will skip files already complete on disk.
+        for entry in &mut session.urls {
+            if entry.status == UrlStatus::Fetched {
+                entry.status = UrlStatus::Pending;
+            }
+        }
         app.session = Some(session);
     }
 
@@ -225,9 +232,16 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     app.config.config = service_config.download;
 
     // Check for resumable session
-    if let Some(session) = SessionState::latest() {
+    if let Some(mut session) = SessionState::latest() {
         log::info!("Resuming session {}", session.id);
         app.urls = session.urls.iter().map(|u| u.url.clone()).collect();
+        // Reset URL statuses so they get re-sent through the download pipeline.
+        // The downloader will skip files already complete on disk.
+        for entry in &mut session.urls {
+            if entry.status == UrlStatus::Fetched {
+                entry.status = UrlStatus::Pending;
+            }
+        }
         app.session = Some(session);
     }
 
