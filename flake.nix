@@ -6,7 +6,7 @@
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
     mega-rs = {
-      url = "github:mjc/mega-rs";
+      url = "github:mjc/mega-rs/parallel-download";
       flake = false;
     };
   };
