@@ -171,13 +171,15 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     let mut service_config = ServiceConfig::load_or_create(config_path)?;
     log::info!("Loaded config from {}", config_path.display());
 
-    // Set working directory to download_dir
-    let download_dir = Path::new(&service_config.download_dir);
-    if !download_dir.exists() {
-        std::fs::create_dir_all(download_dir)?;
+    // Set working directory to [download] path
+    if let Some(ref dl_path) = service_config.download.path {
+        let download_dir = Path::new(dl_path);
+        if !download_dir.exists() {
+            std::fs::create_dir_all(download_dir)?;
+        }
+        std::env::set_current_dir(download_dir)?;
+        log::info!("Download directory: {dl_path}");
     }
-    std::env::set_current_dir(download_dir)?;
-    log::info!("Download directory: {}", service_config.download_dir);
 
     // Check credentials are present
     if !service_config.credentials.has_credentials() {

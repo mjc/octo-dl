@@ -6,9 +6,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::{decrypt_credential, encrypt_credential};
 
+fn default_download_path() -> Option<String> {
+    None
+}
+
 /// Configuration for download operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadConfig {
+    /// Download directory path (used in service mode).
+    #[serde(default = "default_download_path")]
+    pub path: Option<String>,
     /// Number of parallel chunks per file download.
     pub chunks_per_file: usize,
     /// Number of concurrent file downloads.
@@ -22,6 +29,7 @@ pub struct DownloadConfig {
 impl Default for DownloadConfig {
     fn default() -> Self {
         Self {
+            path: None,
             chunks_per_file: 2,
             concurrent_files: 4,
             force_overwrite: false,
@@ -186,16 +194,10 @@ impl Default for ApiConfig {
     }
 }
 
-fn default_download_dir() -> String {
-    "/var/lib/octo-dl/downloads".to_string()
-}
-
 /// Top-level service configuration loaded from a TOML file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
     pub credentials: ServiceCredentials,
-    #[serde(default = "default_download_dir")]
-    pub download_dir: String,
     #[serde(default)]
     pub api: ApiConfig,
     #[serde(default)]
@@ -236,9 +238,11 @@ impl ServiceConfig {
                 password: String::new(),
                 mfa: String::new(),
             },
-            download_dir: default_download_dir(),
             api: ApiConfig::default(),
-            download: DownloadConfig::default(),
+            download: DownloadConfig {
+                path: Some("/var/lib/octo-dl/downloads".to_string()),
+                ..DownloadConfig::default()
+            },
         };
         template.save(path)?;
         Ok(template)
@@ -278,7 +282,6 @@ mod service_config_tests {
                 password: "secret".to_string(),
                 mfa: String::new(),
             },
-            download_dir: "/tmp/downloads".to_string(),
             api: ApiConfig::default(),
             download: DownloadConfig::default(),
         };
@@ -326,7 +329,6 @@ mod service_config_tests {
                 password: "pass".to_string(),
                 mfa: String::new(),
             },
-            download_dir: "/tmp/dl".to_string(),
             api: ApiConfig::default(),
             download: DownloadConfig::default(),
         };
