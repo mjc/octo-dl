@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 
 fn print_usage() {
     eprintln!("Usage: octo [MODE] [OPTIONS] [url|dlc]...");
@@ -10,6 +11,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("Global options:");
     eprintln!("  --api-host <HOST>   API server bind address (default: 127.0.0.1)");
+    eprintln!("  --config <PATH>     Config file for headless/service mode");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
     eprintln!("Run 'octo --tui --help' or 'octo --help' for mode-specific options.");
@@ -17,9 +19,12 @@ fn print_usage() {
 
 #[tokio::main]
 async fn main() -> octo_dl::Result<()> {
+    env_logger::init();
+
     let mut tui = false;
     let mut api = false;
     let mut api_host = "127.0.0.1".to_string();
+    let mut config_path: Option<PathBuf> = None;
 
     // Scan for global flags without consuming — sub-modules re-parse for their own flags
     let args: Vec<String> = env::args().skip(1).collect();
@@ -34,6 +39,15 @@ async fn main() -> octo_dl::Result<()> {
                     api_host = args[i].clone();
                 } else {
                     eprintln!("Error: --api-host requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "--config" => {
+                i += 1;
+                if i < args.len() {
+                    config_path = Some(PathBuf::from(&args[i]));
+                } else {
+                    eprintln!("Error: --config requires a path");
                     std::process::exit(1);
                 }
             }
@@ -57,13 +71,17 @@ async fn main() -> octo_dl::Result<()> {
         }
     } else if api && !args.iter().any(|a| !a.starts_with('-') || a.starts_with("--api")) {
         // --api with no URLs/DLC = API-only mode (headless)
+        let config = config_path.unwrap_or_else(|| {
+            eprintln!("Error: --api mode requires --config <PATH>");
+            std::process::exit(1);
+        });
         #[cfg(feature = "tui")]
         {
-            octo_dl::tui::run_api_only(api_host.unwrap()).await.map_err(octo_dl::Error::Io)
+            octo_dl::tui::run_api_only(&config).await.map_err(octo_dl::Error::Io)
         }
         #[cfg(not(feature = "tui"))]
         {
-            let _ = api_host;
+            let _ = config;
             eprintln!("API support requires the 'tui' feature");
             std::process::exit(1);
         }

@@ -9,6 +9,7 @@ mod input;
 
 use std::env;
 use std::io;
+use std::path::Path;
 use std::time::Duration;
 
 use crossterm::event::Event;
@@ -19,7 +20,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
-use crate::{SessionState, SessionStatus};
+use crate::{ServiceConfig, SessionState, SessionStatus};
 use sysinfo::System;
 
 use self::api::DEFAULT_API_PORT;
@@ -162,17 +163,108 @@ pub async fn run(api_host: Option<String>) -> io::Result<()> {
 
 /// Run the API server in headless mode (no TUI, no CLI).
 ///
-/// Blocks until the server shuts down.
-pub async fn run_api_only(api_host: String) -> io::Result<()> {
-    let api_port = env::var("OCTO_API_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(DEFAULT_API_PORT);
+/// Loads configuration from `config_path`, encrypts plaintext credentials
+/// in-place, starts the API server, auto-logs in, and runs an event loop
+/// that processes download events until SIGTERM/SIGINT.
+pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
+    // Load service config
+    let mut service_config = ServiceConfig::load(config_path)?;
+    log::info!("Loaded config from {}", config_path.display());
 
-    let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
+    // Decrypt credentials (encrypt in-place if still plaintext)
+    let (email, password, mfa) = service_config
+        .credentials
+        .decrypt_if_needed()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Failed to decrypt credentials"))?;
 
-    eprintln!("Starting API server on {api_host}:{api_port}");
-    api::run_api_server(tx, &api_host, api_port)
-        .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    if !service_config.credentials.encrypted {
+        log::info!("Encrypting plaintext credentials in config file");
+        service_config.credentials.encrypt_in_place();
+        service_config.save(config_path)?;
+    }
+
+    let api_host = &service_config.api.host;
+    let api_port = service_config.api.port;
+
+    let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
+
+    // Start the API server
+    let api_tx = download_tx.clone();
+    let api_host_owned = api_host.clone();
+    tokio::spawn(async move {
+        log::info!("Starting API server on {api_host_owned}:{api_port}");
+        if let Err(e) = api::run_api_server(api_tx, &api_host_owned, api_port).await {
+            log::error!("API server error: {e}");
+        }
+    });
+
+    // Build App with download config from service config
+    let mut app = App::new(api_port, download_tx);
+    app.config.config = service_config.download;
+
+    // Check for resumable session
+    if let Some(session) = SessionState::latest() {
+        log::info!("Resuming session {}", session.id);
+        app.urls = session.urls.iter().map(|u| u.url.clone()).collect();
+        app.session = Some(session);
+    }
+
+    // Set credentials and auto-login
+    app.login.email = email;
+    app.login.password = password;
+    app.login.mfa = mfa;
+    app.login.logging_in = true;
+    app.status = "Logging in...".to_string();
+    start_login(&mut app);
+
+    log::info!("Entering headless event loop");
+
+    // Headless event loop — process download events until signal
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                log::info!("Received shutdown signal");
+                break;
+            }
+            event = download_rx.recv() => {
+                match event {
+                    Some(evt) => handle_download_event(&mut app, evt),
+                    None => {
+                        log::warn!("Event channel closed");
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Drain any remaining buffered events
+        while let Ok(event) = download_rx.try_recv() {
+            handle_download_event(&mut app, event);
+        }
+
+        // Drain token messages
+        if let Some(ref mut token_rx) = app.token_rx {
+            while let Ok(msg) = token_rx.try_recv() {
+                app.cancellation_tokens.insert(msg.file_path, msg.token);
+            }
+        }
+
+        // Update speeds periodically (for consistent state)
+        app.update_speeds();
+    }
+
+    // Save session state on shutdown
+    if let Some(ref mut session) = app.session {
+        if session.status != SessionStatus::Completed {
+            if session.files.is_empty() {
+                let _ = session.mark_completed();
+            } else {
+                log::info!("Marking session as paused for later resume");
+                let _ = session.mark_paused();
+            }
+        }
+    }
+
+    log::info!("Shutdown complete");
+    Ok(())
 }
