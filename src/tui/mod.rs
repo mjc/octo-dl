@@ -245,11 +245,21 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     let mut progress_interval = tokio::time::interval(Duration::from_secs(30));
     progress_interval.tick().await; // consume the immediate first tick
 
+    // Shutdown future: resolves on SIGINT or SIGTERM (systemd sends SIGTERM)
+    let shutdown = async {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => log::info!("Received SIGINT"),
+            _ = sigterm.recv() => log::info!("Received SIGTERM"),
+        }
+    };
+    tokio::pin!(shutdown);
+
     // Headless event loop — process download events until signal
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                log::info!("Received shutdown signal");
+            _ = &mut shutdown => {
                 break;
             }
             event = download_rx.recv() => {
