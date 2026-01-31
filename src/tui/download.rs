@@ -524,6 +524,100 @@ async fn resolve_urls(
 ///
 /// The semaphore is shared across all batches to enforce a global concurrency
 /// limit for file downloads.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::app::App;
+    use super::super::event::DownloadEvent;
+    use tokio::sync::mpsc;
+
+    fn test_app() -> App {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        App::new(9723, tx)
+    }
+
+    /// Regression test: the mega library reports *cumulative* bytes downloaded,
+    /// but `on_progress` must send true deltas.  If cumulative values leak
+    /// through as deltas, `downloaded` will vastly exceed `size`.
+    #[test]
+    fn progress_deltas_do_not_exceed_file_size() {
+        let mut app = test_app();
+        let file_size: u64 = 1_000_000;
+
+        // Simulate FileStart
+        handle_download_event(
+            &mut app,
+            DownloadEvent::FileStart {
+                name: "test.bin".to_string(),
+                size: file_size,
+            },
+        );
+
+        // Simulate a sequence of correct *delta* progress events
+        // (as they should arrive after the cumulative→delta fix in download.rs).
+        let deltas = [100_000u64, 250_000, 350_000, 200_000, 100_000]; // sum = 1_000_000
+        for d in deltas {
+            handle_download_event(
+                &mut app,
+                DownloadEvent::Progress {
+                    name: "test.bin".to_string(),
+                    bytes_delta: d,
+                    speed: 0,
+                },
+            );
+        }
+
+        let file = app.files.iter().find(|f| f.name == "test.bin").unwrap();
+        assert_eq!(file.downloaded, file_size, "downloaded should equal sum of deltas");
+        assert!(
+            file.downloaded <= file.size,
+            "downloaded ({}) must not exceed size ({})",
+            file.downloaded,
+            file.size,
+        );
+        assert_eq!(app.total_downloaded, file_size);
+    }
+
+    /// Verify that if buggy cumulative values were sent as deltas,
+    /// downloaded would blow past the file size (the pre-fix behaviour).
+    #[test]
+    fn cumulative_values_as_deltas_would_overshoot() {
+        let mut app = test_app();
+        let file_size: u64 = 1_000_000;
+
+        handle_download_event(
+            &mut app,
+            DownloadEvent::FileStart {
+                name: "test.bin".to_string(),
+                size: file_size,
+            },
+        );
+
+        // Simulate the OLD bug: cumulative totals sent as bytes_delta
+        let cumulatives = [100_000u64, 350_000, 700_000, 900_000, 1_000_000];
+        for c in cumulatives {
+            handle_download_event(
+                &mut app,
+                DownloadEvent::Progress {
+                    name: "test.bin".to_string(),
+                    bytes_delta: c, // wrong! these are cumulative
+                    speed: 0,
+                },
+            );
+        }
+
+        let file = app.files.iter().find(|f| f.name == "test.bin").unwrap();
+        // Sum of cumulatives = 3_050_000, which is 3x the file size
+        assert_eq!(file.downloaded, 3_050_000);
+        assert!(
+            file.downloaded > file.size,
+            "this demonstrates the bug: {} > {}",
+            file.downloaded,
+            file.size,
+        );
+    }
+}
+
 async fn download_batch(
     urls: &[String],
     downloader: &Arc<crate::Downloader>,
