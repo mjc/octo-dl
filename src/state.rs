@@ -92,12 +92,19 @@ impl SessionState {
     }
 
     /// Returns the directory where session state files are stored.
+    ///
+    /// Uses `STATE_DIRECTORY` (set by systemd when `StateDirectory=` is configured),
+    /// falling back to `$XDG_DATA_HOME/octo-dl` for interactive use.
     #[must_use]
     pub fn state_dir() -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("octo-dl")
-            .join("sessions")
+        if let Ok(state_dir) = std::env::var("STATE_DIRECTORY") {
+            PathBuf::from(state_dir).join("sessions")
+        } else {
+            dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("octo-dl")
+                .join("sessions")
+        }
     }
 
     /// Returns the file path for this session's state file.
