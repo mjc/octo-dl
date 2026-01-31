@@ -183,16 +183,15 @@ impl<F: FileSystem> Downloader<F> {
         &self,
         nodes: &'a mega::Nodes,
         progress: &Arc<dyn DownloadProgress>,
-        download_dir: &Path,
     ) -> CollectedFiles<'a> {
         let all_items: Vec<_> = nodes
             .roots()
             .flat_map(|root| {
                 if root.kind().is_folder() {
-                    collect_files_recursive(nodes, root, download_dir)
+                    collect_files_recursive(nodes, root)
                 } else {
                     vec![DownloadItem {
-                        path: download_dir.join(root.name()).display().to_string(),
+                        path: root.name().to_string(),
                         node: root,
                     }]
                 }
@@ -443,7 +442,6 @@ impl<F: FileSystem> Downloader<F> {
 fn collect_files_recursive<'a>(
     nodes: &'a mega::Nodes,
     node: &'a mega::Node,
-    download_dir: &Path,
 ) -> Vec<DownloadItem<'a>> {
     let (folders, files): (Vec<_>, Vec<_>) = node
         .children()
@@ -451,33 +449,28 @@ fn collect_files_recursive<'a>(
         .filter_map(|hash| nodes.get_node_by_handle(hash))
         .partition(|n| n.kind().is_folder());
 
-    let current_files = files.into_iter().map(|file| {
-        let rel_path = build_path(nodes, node, file);
-        DownloadItem {
-            path: download_dir.join(rel_path).display().to_string(),
-            node: file,
-        }
+    let current_files = files.into_iter().map(|file| DownloadItem {
+        path: build_path(nodes, node, file),
+        node: file,
     });
 
     let nested_files = folders
         .into_iter()
-        .flat_map(|folder| collect_files_recursive(nodes, folder, download_dir));
+        .flat_map(|folder| collect_files_recursive(nodes, folder));
 
     current_files.chain(nested_files).collect()
 }
 
-/// Builds the relative path for a file within a folder structure.
-fn build_path(nodes: &mega::Nodes, parent: &mega::Node, file: &mega::Node) -> PathBuf {
+/// Builds the full path for a file within a folder structure.
+fn build_path(nodes: &mega::Nodes, parent: &mega::Node, file: &mega::Node) -> String {
     // Try to build full path with grandparent, fallback to parent/file if no grandparent
     if let Some(gp_handle) = parent.parent()
         && let Some(grandparent) = nodes.get_node_by_handle(gp_handle)
     {
-        return PathBuf::from(grandparent.name())
-            .join(parent.name())
-            .join(file.name());
+        return format!("{}/{}/{}", grandparent.name(), parent.name(), file.name());
     }
     // Parent is at root level, just use parent/file
-    PathBuf::from(parent.name()).join(file.name())
+    format!("{}/{}", parent.name(), file.name())
 }
 
 #[cfg(test)]

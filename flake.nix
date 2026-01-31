@@ -10,9 +10,8 @@
     self,
     nixpkgs,
     flake-utils,
-  }: {
-    nixosModules.default = import ./nixos-module.nix;
-  } // flake-utils.lib.eachDefaultSystem (
+  }:
+    flake-utils.lib.eachDefaultSystem (
       system: let
         pkgs = nixpkgs.legacyPackages.${system};
         # Read the file relative to the flake's root
@@ -87,29 +86,6 @@
             ++ glibIncludePaths;
         };
 
-        packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = "octo";
-          version = "0.1.0";
-
-          src = ./.;
-
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-          };
-
-          nativeBuildInputs = with pkgs; [ pkg-config ];
-          buildInputs = with pkgs; [ openssl ];
-
-          # Build with all features
-          buildFeatures = [ "cli" "tui" "api" ];
-
-          meta = with pkgs.lib; {
-            description = "MEGA file downloader with CLI, TUI, and API modes";
-            license = licenses.mit;
-            maintainers = [ ];
-          };
-        };
-
         # Cross-compilation shell for release builds
         devShells.cross = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [
@@ -146,8 +122,4 @@
         };
       }
     );
-
-  overlays.default = final: prev: {
-    octo = final.callPackage ./. { };
-  };
 }

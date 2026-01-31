@@ -14,9 +14,13 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::extract_urls;
 
+use super::event::DownloadEvent;
+
+pub const DEFAULT_API_PORT: u16 = 9723;
+
 #[derive(Clone)]
 struct AppState {
-    tx: Arc<mpsc::UnboundedSender<Vec<String>>>,
+    tx: Arc<mpsc::UnboundedSender<DownloadEvent>>,
     host: String,
     port: u16,
 }
@@ -57,7 +61,7 @@ async fn api_post_urls(
 
     let count = urls.len();
     if !urls.is_empty() {
-        let _ = state.tx.send(urls.clone());
+        let _ = state.tx.send(DownloadEvent::UrlsReceived { urls: urls.clone() });
     }
 
     axum::Json(UrlResponse { added: urls, count })
@@ -77,7 +81,7 @@ async fn api_parse_page(
 
     let count = urls.len();
     if !urls.is_empty() {
-        let _ = state.tx.send(urls.clone());
+        let _ = state.tx.send(DownloadEvent::UrlsReceived { urls: urls.clone() });
     }
 
     axum::Json(UrlResponse { added: urls, count })
@@ -96,7 +100,7 @@ async fn bookmarklet_page(State(state): State<AppState>, headers: HeaderMap) -> 
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>octo bookmarklet</title>
+<title>octo-dl bookmarklet</title>
 <style>
   body {{ font-family: system-ui, sans-serif; max-width: 480px; margin: 60px auto; color: #e0e0e0; background: #1a1a2e; }}
   h1 {{ font-size: 1.4rem; }}
@@ -112,32 +116,28 @@ async fn bookmarklet_page(State(state): State<AppState>, headers: HeaderMap) -> 
 </style>
 </head>
 <body>
-<h1>octo bookmarklet</h1>
+<h1>octo-dl bookmarklet</h1>
 <p>Drag this link to your bookmarks bar:</p>
-<a class="bookmarklet" href="javascript:void(function(){{var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var proto=window.location.protocol;var h=proto+'//{fallback_host}';fetch(h+'/api/parse',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{page:page,fallback:selected}})}}).then(function(r){{return r.json()}}).then(function(d){{if(d.count>0){{alert('Sent '+d.count+' URL(s) to octo')}}else{{alert('No URLs found on this page')}}}}).catch(function(e){{alert('Error: '+e)}})}})()">
-  Send to octo
+<a class="bookmarklet" href="javascript:void(function(){{var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var proto=window.location.protocol;var h=proto+'//{fallback_host}';fetch(h+'/api/parse',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{page:page,fallback:selected}})}}).then(function(r){{return r.json()}}).then(function(d){{if(d.count>0){{alert('Sent '+d.count+' URL(s) to octo-dl')}}else{{alert('No URLs found on this page')}}}}).catch(function(e){{alert('Error: '+e)}})}})()">
+  Send to octo-dl
 </a>
-<p>Click it on any page to send the selected text (or the page URL) to octo for download.</p>
+<p>Click it on any page to send the selected text (or the page URL) to octo-dl for download.</p>
 <p>Configured to use <code>{fallback_host}</code></p>
 </body>
 </html>"#
     ))
 }
 
-/// Starts the HTTP API server and returns a receiver for URLs.
-///
-/// The API server will listen on the specified host and port and send
-/// received URLs through the returned channel.
+/// Starts the HTTP API server for receiving URLs from the bookmarklet.
 ///
 /// # Errors
 ///
 /// Returns an error if the server cannot bind to the specified address.
-pub async fn run_server(
+pub async fn run_api_server(
+    tx: mpsc::UnboundedSender<DownloadEvent>,
     host: &str,
     port: u16,
-) -> std::result::Result<mpsc::UnboundedReceiver<Vec<String>>, Box<dyn std::error::Error + Send + Sync>> {
-    let (tx, rx) = mpsc::unbounded_channel();
-
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = AppState {
         tx: Arc::new(tx),
         host: host.to_string(),
@@ -159,45 +159,7 @@ pub async fn run_server(
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
 
-    // Spawn the server in background
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            log::error!("API server error: {}", e);
-        }
-    });
-
-    Ok(rx)
-}
-
-/// Runs the API server standalone (without TUI or CLI).
-///
-/// This mode is useful for running octo as a background service.
-///
-/// # Errors
-///
-/// Returns an error if the server cannot be started.
-pub async fn run_standalone(config: crate::AppConfig) -> crate::Result<()> {
-    log::info!(
-        "Starting API server on {}:{}",
-        config.api.host,
-        config.api.port
-    );
-
-    match run_server(&config.api.host, config.api.port).await {
-        Ok(mut rx) => {
-            // Just keep the server running and ignore incoming URLs
-            while rx.recv().await.is_some() {
-                // URLs received but not processed in standalone mode
-            }
-            Ok(())
-        }
-        Err(e) => {
-            log::error!("Failed to start API server: {}", e);
-            Err(crate::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("API server error: {}", e),
-            )))
-        }
-    }
+    Ok(())
 }

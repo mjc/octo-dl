@@ -1,25 +1,23 @@
-//! CLI mode for octo - command-line interface for downloading MEGA files.
-
-mod progress;
+//! octo-dl CLI - Command-line interface for downloading MEGA files.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use std::collections::HashSet;
 
+use dirs;
 use futures::{StreamExt, stream};
-use indicatif::MultiProgress;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::{
-    AppConfig, DlcKeyCache, DownloadConfig, DownloadItem, FileEntry, FileEntryStatus,
-    NoProgress, SavedCredentials, SessionState, SessionStatsBuilder,
+    DlcKeyCache, DownloadConfig, DownloadItem, DownloadStatsTracker, FileEntry, FileEntryStatus,
+    FileStats, NoProgress, SavedCredentials, SessionState, SessionStats, SessionStatsBuilder,
     SessionStatus, UrlEntry, UrlStatus, format_bytes, format_duration, is_dlc_path,
-    parse_dlc_file, DownloadProgress,
 };
 
-use progress::{make_progress_bar, make_total_progress_bar, print_file_list, print_summary};
+const DEFAULT_CONCURRENT_FILES: usize = 4;
+const DEFAULT_CHUNKS_PER_FILE: usize = 2;
+const SEPARATOR: &str = "────────────────────────────────────────────────────────────";
 
-/// Builds a configured HTTP client for MEGA requests.
 fn build_http_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .pool_idle_timeout(Duration::from_secs(60))
@@ -28,7 +26,6 @@ fn build_http_client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
-/// Creates a dummy downloader for file collection without download progress.
 fn dummy_downloader(config: &DownloadConfig) -> crate::Downloader {
     let http = reqwest::Client::new();
     let client = mega::Client::builder()
@@ -37,15 +34,58 @@ fn dummy_downloader(config: &DownloadConfig) -> crate::Downloader {
     crate::Downloader::new(client, config.clone())
 }
 
-/// Downloads a single file with progress reporting.
+// ============================================================================
+// CLI Configuration
+// ============================================================================
+
+struct CliConfig {
+    urls: Vec<String>,
+    dlc_files: Vec<String>,
+    download_config: DownloadConfig,
+    resume: bool,
+}
+
+// ============================================================================
+// Progress Bar Implementation
+// ============================================================================
+
+fn make_progress_bar(size: u64, name: &str) -> ProgressBar {
+    let bar = ProgressBar::new(size);
+    bar.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.cyan} [{bar:40.cyan/blue}] {bytes}/{total_bytes} @ {bytes_per_sec} - {msg}",
+        )
+        .expect("progress template is valid")
+        .progress_chars("━━╌"),
+    );
+    bar.set_message(name.to_string());
+    bar
+}
+
+fn make_total_progress_bar(size: u64) -> ProgressBar {
+    let bar = ProgressBar::new(size);
+    bar.set_style(
+        ProgressStyle::with_template(
+            "Total [{bar:40.green/white}] {bytes}/{total_bytes} @ {bytes_per_sec}",
+        )
+        .expect("template valid")
+        .progress_chars("━━╌"),
+    );
+    bar
+}
+
+// ============================================================================
+// Download Functions
+// ============================================================================
+
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 async fn download_file(
     client: &mega::Client,
     progress: &MultiProgress,
-    total_bar: &indicatif::ProgressBar,
+    total_bar: &ProgressBar,
     item: &DownloadItem<'_>,
     chunks: usize,
-) -> crate::Result<crate::FileStats> {
+) -> crate::Result<FileStats> {
     let DownloadItem { path, node } = item;
 
     // Ensure parent directory exists
@@ -57,9 +97,9 @@ async fn download_file(
     }
 
     let part_file = format!("{path}.part");
-    let stats = Arc::new(crate::DownloadStatsTracker::new(node.size()));
+    let stats = Arc::new(DownloadStatsTracker::new(node.size()));
     let bar = progress.insert_before(total_bar, make_progress_bar(node.size(), node.name()));
-    bar.enable_steady_tick(Duration::from_millis(250));
+    bar.enable_steady_tick(std::time::Duration::from_millis(250));
 
     let bar_clone = bar.clone();
     let total_bar_clone = total_bar.clone();
@@ -89,7 +129,7 @@ async fn download_file(
         // Rename .part → final
         tokio::fs::rename(&part_file, path).await?;
         bar.finish_and_clear();
-        let file_stats = crate::FileStats {
+        let file_stats = FileStats {
             size: node.size(),
             elapsed: stats.elapsed(),
             average_speed: stats.average_speed(),
@@ -120,17 +160,79 @@ async fn download_file(
     }
 }
 
-/// Orchestrates downloading all files with progress reporting.
+fn print_file_list(files: &[DownloadItem], skipped: usize, partial: usize) {
+    if files.is_empty() && skipped == 0 {
+        println!("No files found.");
+        return;
+    }
+
+    let total_size: u64 = files.iter().map(|i| i.node.size()).sum();
+
+    println!("\n{SEPARATOR}");
+    println!("Files to download:");
+    println!("{SEPARATOR}");
+
+    for item in files {
+        println!("  {} ({})", item.path, format_bytes(item.node.size()));
+    }
+
+    println!("{SEPARATOR}");
+    println!(
+        "  {} file(s), {} total",
+        files.len(),
+        format_bytes(total_size)
+    );
+    if skipped > 0 {
+        println!("  {skipped} file(s) skipped (already exist)");
+    }
+    if partial > 0 {
+        println!("  {partial} file(s) with partial downloads (will re-download)");
+    }
+    println!("{SEPARATOR}\n");
+}
+
+fn print_summary(stats: &SessionStats) {
+    if stats.files_downloaded == 0 && stats.files_skipped == 0 {
+        return;
+    }
+
+    println!("\n{SEPARATOR}");
+    println!("Download Summary");
+    println!("{SEPARATOR}");
+
+    if stats.files_downloaded > 0 {
+        println!("  Files downloaded:  {}", stats.files_downloaded);
+        println!("  Total size:        {}", format_bytes(stats.total_bytes));
+        println!("  Total time:        {}", format_duration(stats.elapsed));
+        println!(
+            "  Average speed:     {}/s",
+            format_bytes(stats.average_speed())
+        );
+        println!("  Peak speed:        {}/s", format_bytes(stats.peak_speed));
+        if let Some(ramp) = stats.average_ramp_up {
+            println!(
+                "  Avg ramp-up:       {} to 80% of peak",
+                format_duration(ramp)
+            );
+        }
+    }
+
+    if stats.files_skipped > 0 {
+        println!("  Files skipped:     {}", stats.files_skipped);
+    }
+
+    println!("{SEPARATOR}");
+}
+
 #[allow(clippy::similar_names)]
 async fn download_all(
     client: &mega::Client,
     progress: &MultiProgress,
-    total_bar: &indicatif::ProgressBar,
+    total_bar: &ProgressBar,
     files: &[DownloadItem<'_>],
     config: &DownloadConfig,
     builder: &mut SessionStatsBuilder,
     mut session_state: Option<&mut SessionState>,
-    state_dir: &std::path::Path,
 ) -> crate::Result<()> {
     if files.is_empty() {
         return Ok(());
@@ -165,13 +267,13 @@ async fn download_all(
             Ok(file_stats) => {
                 builder.add_download(&file_stats);
                 if let Some(ref mut state) = session_state.as_deref_mut() {
-                    let _ = state.mark_file_complete(&path, state_dir);
+                    let _ = state.mark_file_complete(&path);
                 }
             }
             Err(e) => {
                 let _ = progress.println(format!("Download error: {e:?}"));
                 if let Some(ref mut state) = session_state.as_deref_mut() {
-                    let _ = state.mark_file_error(&path, &e.to_string(), state_dir);
+                    let _ = state.mark_file_error(&path, &e.to_string());
                 }
             }
         }
@@ -180,31 +282,115 @@ async fn download_all(
     Ok(())
 }
 
-/// Gets MEGA credentials from environment variables.
-fn get_credentials() -> crate::Result<(String, String, Option<String>)> {
-    let email = std::env::var("MEGA_EMAIL")
-        .map_err(|_| crate::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "MEGA_EMAIL environment variable not set"
-        )))?;
-    let password = std::env::var("MEGA_PASSWORD")
-        .map_err(|_| crate::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "MEGA_PASSWORD environment variable not set"
-        )))?;
-    let mfa = std::env::var("MEGA_MFA").ok();
-    Ok((email, password, mfa))
+// ============================================================================
+// CLI Parsing
+// ============================================================================
+
+fn parse_args() -> CliConfig {
+    let mut urls = Vec::new();
+    let mut dlc_files = Vec::new();
+    let mut chunks_per_file = DEFAULT_CHUNKS_PER_FILE;
+    let mut concurrent_files = DEFAULT_CONCURRENT_FILES;
+    let mut force = false;
+    let mut resume = false;
+
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-j" | "--chunks" => {
+                chunks_per_file = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(DEFAULT_CHUNKS_PER_FILE);
+            }
+            "-p" | "--parallel" => {
+                concurrent_files = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(DEFAULT_CONCURRENT_FILES);
+            }
+            "-f" | "--force" => {
+                force = true;
+            }
+            "-r" | "--resume" => {
+                resume = true;
+            }
+            "-h" | "--help" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            // Skip global flags handled by the unified binary
+            "--tui" | "--api" => {}
+            "--api-host" => {
+                let _ = args.next(); // consume the value
+            }
+            _ if !arg.starts_with('-') => {
+                if is_dlc_path(&arg) {
+                    dlc_files.push(arg);
+                } else {
+                    urls.push(arg);
+                }
+            }
+            _ => {
+                eprintln!("Unknown option: {arg}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    CliConfig {
+        urls,
+        dlc_files,
+        download_config: DownloadConfig::new()
+            .with_chunks_per_file(chunks_per_file)
+            .with_concurrent_files(concurrent_files)
+            .with_force_overwrite(force),
+        resume,
+    }
 }
 
-/// Runs the CLI download mode with the given URLs.
-///
-/// # Errors
-///
-/// Returns an error if the download fails.
-pub async fn run_download(config: AppConfig, urls: Vec<String>, resume: bool) -> crate::Result<()> {
+fn print_usage() {
+    eprintln!("Usage: octo [OPTIONS] <url|dlc>...");
+    eprintln!();
+    eprintln!("Arguments:");
+    eprintln!("  <url|dlc>           MEGA URL or JDownloader2 .dlc file (MEGA links only)");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!(
+        "  -j, --chunks <N>    Chunks per file for parallel download (default: {DEFAULT_CHUNKS_PER_FILE})"
+    );
+    eprintln!(
+        "  -p, --parallel <N>  Concurrent file downloads (default: {DEFAULT_CONCURRENT_FILES})"
+    );
+    eprintln!("  -f, --force         Overwrite existing files");
+    eprintln!("  -r, --resume        Resume a previous incomplete session");
+    eprintln!("  --tui               Launch interactive TUI mode");
+    eprintln!("  -h, --help          Show this help");
+    eprintln!();
+    eprintln!("Environment:");
+    eprintln!("  MEGA_EMAIL          MEGA account email");
+    eprintln!("  MEGA_PASSWORD       MEGA account password");
+    eprintln!("  MEGA_MFA            MEGA MFA code (optional)");
+}
+
+fn get_credentials() -> (String, String, Option<String>) {
+    let email = std::env::var("MEGA_EMAIL").expect("MEGA_EMAIL not set");
+    let password = std::env::var("MEGA_PASSWORD").expect("MEGA_PASSWORD not set");
+    let mfa = std::env::var("MEGA_MFA").ok();
+    (email, password, mfa)
+}
+
+// ============================================================================
+// Entry point
+// ============================================================================
+
+#[allow(clippy::too_many_lines, clippy::similar_names)]
+pub async fn run() -> crate::Result<()> {
+    let mut config = parse_args();
+
     // Check for resumable session
-    if resume {
-        if let Some(session) = SessionState::latest(&config.paths.state_dir) {
+    if config.resume {
+        if let Some(session) = SessionState::latest() {
             println!(
                 "Resuming session {} ({} files, {} completed)",
                 session.id,
@@ -214,65 +400,56 @@ pub async fn run_download(config: AppConfig, urls: Vec<String>, resume: bool) ->
             return resume_session(session, &config).await;
         }
         println!("No resumable session found, starting fresh.");
-    } else if urls.is_empty() {
+    } else if config.urls.is_empty() && config.dlc_files.is_empty() {
         // Check if there's a session to resume
-        if let Some(session) = SessionState::latest(&config.paths.state_dir) {
+        if let Some(session) = SessionState::latest() {
             println!(
                 "Found incomplete session: {} ({} remaining files)",
                 session.id,
                 session.remaining_count()
             );
             println!("Use --resume to continue, or provide URLs to start a new session.");
-            return Ok(());
+            std::process::exit(0);
         }
-        log::info!("No URLs provided and no resumable session found");
-        return Ok(());
+        print_usage();
+        std::process::exit(1);
     }
 
-    let (email, password, mfa) = get_credentials()?;
+    let (email, password, mfa) = get_credentials();
 
     // Create HTTP client with custom user agent for DLC service
     let http = build_http_client()?;
 
-    // Process any DLC files in the URLs
-    let mut all_urls = Vec::new();
-    let dlc_cache = DlcKeyCache::new();
-
-    for url in urls {
-        if is_dlc_path(&url) {
-            log::info!("Processing DLC file: {}", url);
+    // Process DLC files before logging in
+    if !config.dlc_files.is_empty() {
+        println!("Processing DLC files...\n");
+        let dlc_cache = DlcKeyCache::new();
+        for dlc_path in &config.dlc_files {
+            print!("  {dlc_path} ... ");
             // Expand ~ to home directory for local DLC files
-            let expanded_path = if url.starts_with('~') {
+            let expanded_path = if dlc_path.starts_with('~') {
                 match dirs::home_dir() {
-                    Some(home) => url.replacen('~', home.to_string_lossy().as_ref(), 1),
+                    Some(home) => dlc_path.replacen('~', home.to_string_lossy().as_ref(), 1),
                     None => {
-                        return Err(crate::Error::Io(std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            "Could not determine home directory"
-                        )));
+                        eprintln!("Error: Could not determine home directory");
+                        std::process::exit(1);
                     }
                 }
             } else {
-                url.clone()
+                dlc_path.to_string()
             };
-            match parse_dlc_file(&expanded_path, &http, &dlc_cache).await {
-                Ok(dlc_urls) => {
-                    log::info!("Extracted {} URLs from DLC file", dlc_urls.len());
-                    all_urls.extend(dlc_urls);
+            match crate::parse_dlc_file(&expanded_path, &http, &dlc_cache).await {
+                Ok(urls) => {
+                    println!("{} MEGA link(s)", urls.len());
+                    config.urls.extend(urls);
                 }
                 Err(e) => {
-                    log::error!("Error parsing DLC file: {}", e);
-                    return Err(e);
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
                 }
             }
-        } else {
-            all_urls.push(url);
         }
-    }
-
-    if all_urls.is_empty() {
-        log::info!("No URLs to download");
-        return Ok(());
+        println!();
     }
 
     let mut client = mega::Client::builder().build(http)?;
@@ -282,11 +459,12 @@ pub async fn run_download(config: AppConfig, urls: Vec<String>, resume: bool) ->
     println!("Logged in successfully.");
 
     // Create downloader for file collection
-    let downloader = dummy_downloader(&config.download);
-    let no_progress: Arc<dyn DownloadProgress> = Arc::new(NoProgress);
+    let downloader = dummy_downloader(&config.download_config);
+    let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
     // Create session state for persistence
-    let url_entries: Vec<UrlEntry> = all_urls
+    let url_entries: Vec<UrlEntry> = config
+        .urls
         .iter()
         .map(|url| UrlEntry {
             url: url.clone(),
@@ -296,18 +474,18 @@ pub async fn run_download(config: AppConfig, urls: Vec<String>, resume: bool) ->
 
     let mut session_state = SessionState::new(
         SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
-        config.download.clone(),
+        config.download_config.clone(),
         url_entries,
     );
 
     // Phase 1: Fetch all URLs and collect files
-    println!("Fetching file lists from {} URL(s)...\n", all_urls.len());
+    println!("Fetching file lists from {} URL(s)...\n", config.urls.len());
     let mut all_nodes: Vec<(String, mega::Nodes)> = Vec::new();
-    for (idx, url) in all_urls.iter().enumerate() {
+    for (idx, url) in config.urls.iter().enumerate() {
         print!("  {url} ... ");
         match client.fetch_public_nodes(url).await {
             Ok(nodes) => {
-                let collected_tmp = downloader.collect_files(&nodes, &no_progress, &config.paths.download_dir).await;
+                let collected_tmp = downloader.collect_files(&nodes, &no_progress).await;
                 let file_count = collected_tmp.to_download.len() + collected_tmp.skipped;
                 println!("{file_count} file(s)");
                 session_state.urls[idx].status = UrlStatus::Fetched;
@@ -325,7 +503,7 @@ pub async fn run_download(config: AppConfig, urls: Vec<String>, resume: bool) ->
     let mut total_skipped = 0;
     let mut total_partial = 0;
     for (url_idx, (_url, nodes)) in all_nodes.iter().enumerate() {
-        let collected = downloader.collect_files(nodes, &no_progress, &config.paths.download_dir).await;
+        let collected = downloader.collect_files(nodes, &no_progress).await;
         // Record files in session state
         for item in &collected.to_download {
             session_state.files.push(FileEntry {
@@ -341,7 +519,7 @@ pub async fn run_download(config: AppConfig, urls: Vec<String>, resume: bool) ->
     }
 
     // Save initial session state
-    let _ = session_state.save(&config.paths.state_dir);
+    let _ = session_state.save();
 
     // Phase 2: Print what we found
     print_file_list(&all_files, total_skipped, total_partial);
@@ -350,7 +528,7 @@ pub async fn run_download(config: AppConfig, urls: Vec<String>, resume: bool) ->
         if total_skipped > 0 {
             println!("All files already downloaded.");
         }
-        let _ = session_state.mark_completed(&config.paths.state_dir);
+        let _ = session_state.mark_completed();
         return Ok(());
     }
 
@@ -368,10 +546,9 @@ pub async fn run_download(config: AppConfig, urls: Vec<String>, resume: bool) ->
         &progress,
         &total_bar,
         &all_files,
-        &config.download,
+        &config.download_config,
         &mut builder,
         Some(&mut session_state),
-        &config.paths.state_dir,
     )
     .await?;
 
@@ -381,21 +558,18 @@ pub async fn run_download(config: AppConfig, urls: Vec<String>, resume: bool) ->
     print_summary(&session_stats);
 
     // Mark session as completed
-    let _ = session_state.mark_completed(&config.paths.state_dir);
+    let _ = session_state.mark_completed();
 
     Ok(())
 }
 
-/// Resumes a previous incomplete session.
-async fn resume_session(mut session: SessionState, config: &AppConfig) -> crate::Result<()> {
+/// Resume a previous incomplete session.
+async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate::Result<()> {
     // Decrypt credentials
     let (email, password, mfa) = session
         .credentials
         .decrypt()
-        .ok_or_else(|| crate::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Failed to decrypt session credentials"
-        )))?;
+        .expect("Failed to decrypt session credentials");
 
     let http = build_http_client()?;
 
@@ -405,8 +579,8 @@ async fn resume_session(mut session: SessionState, config: &AppConfig) -> crate:
     client.login(&email, &password, mfa.as_deref()).await?;
     println!("Logged in successfully.");
 
-    let downloader = dummy_downloader(&config.download);
-    let no_progress: Arc<dyn DownloadProgress> = Arc::new(NoProgress);
+    let downloader = dummy_downloader(&config.download_config);
+    let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
     // Re-fetch URLs and collect remaining files
     let remaining_urls: Vec<_> = session
@@ -425,7 +599,7 @@ async fn resume_session(mut session: SessionState, config: &AppConfig) -> crate:
         print!("  {url} ... ");
         match client.fetch_public_nodes(url).await {
             Ok(nodes) => {
-                let collected_tmp = downloader.collect_files(&nodes, &no_progress, &config.paths.download_dir).await;
+                let collected_tmp = downloader.collect_files(&nodes, &no_progress).await;
                 let file_count = collected_tmp.to_download.len() + collected_tmp.skipped;
                 println!("{file_count} file(s)");
                 all_nodes.push((url.clone(), nodes));
@@ -435,7 +609,7 @@ async fn resume_session(mut session: SessionState, config: &AppConfig) -> crate:
     }
 
     // Completed file paths from session state
-    let completed_paths: HashSet<String> = session
+    let completed_paths: std::collections::HashSet<String> = session
         .files
         .iter()
         .filter(|f| f.status == FileEntryStatus::Completed)
@@ -447,7 +621,7 @@ async fn resume_session(mut session: SessionState, config: &AppConfig) -> crate:
     let mut total_skipped = 0;
     let mut total_partial = 0;
     for (_url, nodes) in &all_nodes {
-        let collected = downloader.collect_files(nodes, &no_progress, &config.paths.download_dir).await;
+        let collected = downloader.collect_files(nodes, &no_progress).await;
         for item in collected.to_download {
             if completed_paths.contains(&item.path) {
                 total_skipped += 1;
@@ -463,12 +637,12 @@ async fn resume_session(mut session: SessionState, config: &AppConfig) -> crate:
 
     if all_files.is_empty() {
         println!("All files already downloaded.");
-        let _ = session.mark_completed(&config.paths.state_dir);
+        let _ = session.mark_completed();
         return Ok(());
     }
 
     session.status = SessionStatus::InProgress;
-    let _ = session.save(&config.paths.state_dir);
+    let _ = session.save();
 
     let progress = MultiProgress::new();
     let total_size: u64 = all_files.iter().map(|i| i.node.size()).sum();
@@ -483,10 +657,9 @@ async fn resume_session(mut session: SessionState, config: &AppConfig) -> crate:
         &progress,
         &total_bar,
         &all_files,
-        &config.download,
+        &config.download_config,
         &mut builder,
         Some(&mut session),
-        &config.paths.state_dir,
     )
     .await?;
 
@@ -495,7 +668,22 @@ async fn resume_session(mut session: SessionState, config: &AppConfig) -> crate:
     let session_stats = builder.build();
     print_summary(&session_stats);
 
-    let _ = session.mark_completed(&config.paths.state_dir);
+    let _ = session.mark_completed();
 
     Ok(())
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_bar_creation() {
+        let bar = make_progress_bar(1000, "test.txt");
+        assert_eq!(bar.length(), Some(1000));
+    }
 }

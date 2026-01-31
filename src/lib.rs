@@ -45,17 +45,8 @@ pub mod state;
 pub mod stats;
 pub mod url;
 
-#[cfg(feature = "api")]
-pub mod api;
-
-#[cfg(feature = "cli")]
-pub mod cli;
-
-#[cfg(feature = "tui")]
-pub mod tui;
-
 // Re-export main types for convenience
-pub use config::{AppConfig, ApiConfig, DownloadConfig, PathConfig};
+pub use config::DownloadConfig;
 pub use dlc::{DlcKeyCache, parse_dlc_file};
 pub use download::{
     CollectedFiles, DownloadItem, DownloadProgress, Downloader, FileStatus, NoProgress,
@@ -72,3 +63,9 @@ pub use url::{extract_urls, is_dlc_path};
 
 // Re-export mega types used in the public API
 pub use mega::{Client as MegaClient, Node, Nodes};
+
+#[cfg(feature = "tui")]
+pub mod tui;
+
+#[cfg(feature = "cli")]
+pub mod cli;

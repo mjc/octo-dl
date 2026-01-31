@@ -1,25 +1,30 @@
 [package]
-name = "octo"
+name = "octo-dl"
 version = "0.1.0"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-name = "octo"
+name = "octo_dl"
 path = "src/lib.rs"
 
 [[bin]]
 name = "octo"
 path = "src/bin/octo.rs"
 
+[features]
+default = ["cli", "tui"]
+cli = ["dep:indicatif", "dep:console"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:sysinfo", "dep:axum", "dep:tower-http"]
+
 [dependencies]
 async-trait = "0.1"
 thiserror = "2.0"
-console = "0.15.7"
+console = { version = "0.15.7", optional = true }
 env_logger = "0.11.8"
 futures = "0.3.29"
-indicatif = { version = "0.17.7", features = ["tokio", "improved_unicode"] }
+indicatif = { version = "0.17.7", features = ["tokio", "improved_unicode"], optional = true }
 log = "0.4.27"
 mega = { path = "../mega-rs", default-features = false, features = ["rustls-tls"] }
 reqwest = { version = "0.12.19", default-features = false, features = ["rustls-tls", "charset", "http2", "macos-system-configuration"] }
@@ -32,18 +37,15 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
 uuid = { version = "1", features = ["v4"] }
 hostname = "0.4"
 whoami = "1"
-regex = "1"
-serde_json = "1"
-clap = { version = "4.5", features = ["derive", "env"] }
-
-# Optional dependencies for features
-ratatui = { version = "0.29", optional = true }
-crossterm = { version = "0.28", optional = true }
 axum = { version = "0.8", optional = true }
 sysinfo = { version = "0.31", optional = true }
+regex = "1"
+serde_json = "1"
 tower-http = { version = "0.6", features = ["cors"], optional = true }
 # sha2 with target-specific asm optimizations (not available on Windows)
 [target.'cfg(all(any(target_arch = "x86_64", target_arch = "x86"), not(target_os = "windows")))'.dependencies]
@@ -56,12 +58,6 @@ sluice = "0.5.5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 sha2 = "0.10.8"
-
-[features]
-default = ["cli", "tui", "api"]
-cli = []
-tui = ["dep:ratatui", "dep:crossterm", "dep:sysinfo"]
-api = ["dep:axum", "dep:tower-http"]
 
 [dev-dependencies]
 tempfile = "3.24.0"
