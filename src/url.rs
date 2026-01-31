@@ -19,7 +19,7 @@ use regex::Regex;
 /// constant and will not happen in practice).
 #[must_use]
 pub fn extract_urls(input: &str) -> Vec<String> {
-    let url_re = Regex::new(r"https?://mega\.nz/\S+").expect("valid regex");
+    let url_re = Regex::new(r#"https?://mega\.nz/[^\s"'<>\[\](){}]+"#).expect("valid regex");
     let mut seen = HashSet::new();
     let mut result: Vec<String> = Vec::new();
 
