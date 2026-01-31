@@ -4,6 +4,7 @@
   ...
 }: let
   cfg = config.services.octo-dl;
+  stateDir = "/var/lib/octo-dl";
 in {
   options.services.octo-dl = {
     enable = lib.mkEnableOption "octo-dl MEGA download service";
@@ -15,7 +16,8 @@ in {
 
     configFile = lib.mkOption {
       type = lib.types.path;
-      description = "Path to config.toml (credentials, API bind, download settings). Service encrypts plaintext credentials in-place after first login.";
+      default = "${stateDir}/config.toml";
+      description = "Path to config.toml. Auto-created with defaults on first start; edit to add credentials.";
     };
 
     downloadDir = lib.mkOption {
@@ -57,6 +59,7 @@ in {
         Type = "simple";
         User = cfg.user;
         Group = cfg.group;
+        StateDirectory = "octo-dl";
         WorkingDirectory = cfg.downloadDir;
         ExecStart = "${cfg.package}/bin/octo --api --config ${cfg.configFile}";
         Restart = "on-failure";
