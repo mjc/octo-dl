@@ -268,16 +268,26 @@ impl<F: FileSystem> Downloader<F> {
         let progress_clone = Arc::clone(progress);
         let name_for_cb = name.clone();
 
+        // The mega library calls the progress callback with the *cumulative*
+        // total bytes downloaded so far, NOT a delta.  We track the previous
+        // value so we can compute the real delta for on_progress / record_bytes.
+        let prev_bytes = Arc::new(AtomicU64::new(0));
+
         // Download with progress callback, optionally with cancellation support
         let download_result = if let Some(token) = cancellation_token {
+            let prev = Arc::clone(&prev_bytes);
             tokio::select! {
                 res = self.client.download_node_parallel(
                     node,
                     file,
                     self.config.chunks_per_file,
-                    Some(move |delta| {
-                        let speed = stats_clone.record_bytes(delta);
-                        progress_clone.on_progress(&name_for_cb, delta, speed);
+                    Some(move |cumulative: u64| {
+                        let previous = prev.swap(cumulative, Ordering::Relaxed);
+                        let delta = cumulative.saturating_sub(previous);
+                        if delta > 0 {
+                            let speed = stats_clone.record_bytes(delta);
+                            progress_clone.on_progress(&name_for_cb, delta, speed);
+                        }
                     }),
                 ) => res.map_err(Error::Mega),
                 () = token.cancelled() => {
@@ -285,14 +295,19 @@ impl<F: FileSystem> Downloader<F> {
                 }
             }
         } else {
+            let prev = Arc::clone(&prev_bytes);
             self.client
                 .download_node_parallel(
                     node,
                     file,
                     self.config.chunks_per_file,
-                    Some(move |delta| {
-                        let speed = stats_clone.record_bytes(delta);
-                        progress_clone.on_progress(&name_for_cb, delta, speed);
+                    Some(move |cumulative: u64| {
+                        let previous = prev.swap(cumulative, Ordering::Relaxed);
+                        let delta = cumulative.saturating_sub(previous);
+                        if delta > 0 {
+                            let speed = stats_clone.record_bytes(delta);
+                            progress_clone.on_progress(&name_for_cb, delta, speed);
+                        }
                     }),
                 )
                 .await
