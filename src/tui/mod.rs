@@ -293,15 +293,17 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
                     } else {
                         0
                     };
-                    log::info!(
-                        "[progress] {}/{} files, {} / {} ({}%), {}/s",
-                        app.files_completed,
-                        app.files_total,
-                        format_bytes(app.total_downloaded),
-                        format_bytes(app.total_size),
-                        pct,
-                        format_bytes(app.current_speed),
-                    );
+                    if pct > 0 && pct < 100 {
+                        log::info!(
+                            "[progress] {}/{} files, {} / {} ({}%), {}/s",
+                            app.files_completed,
+                            app.files_total,
+                            format_bytes(app.total_downloaded),
+                            format_bytes(app.total_size),
+                            pct,
+                            format_bytes(app.current_speed),
+                        );
+                    }
                 }
             }
         }
