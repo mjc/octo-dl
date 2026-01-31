@@ -91,10 +91,19 @@ impl SessionState {
         }
     }
 
+    /// Returns the directory where session state files are stored.
+    #[must_use]
+    pub fn state_dir() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("octo-dl")
+            .join("sessions")
+    }
+
     /// Returns the file path for this session's state file.
     #[must_use]
-    pub fn state_path(&self, state_dir: &Path) -> PathBuf {
-        state_dir.join(format!("{}.toml", self.id))
+    pub fn state_path(&self) -> PathBuf {
+        Self::state_dir().join(format!("{}.toml", self.id))
     }
 
     /// Saves the session state to disk atomically (write tmp + rename).
@@ -103,10 +112,11 @@ impl SessionState {
     ///
     /// Returns an error if the state directory cannot be created or the file
     /// cannot be written.
-    pub fn save(&self, state_dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(state_dir)?;
+    pub fn save(&self) -> std::io::Result<()> {
+        let dir = Self::state_dir();
+        std::fs::create_dir_all(&dir)?;
 
-        let path = self.state_path(state_dir);
+        let path = self.state_path();
         let tmp_path = path.with_extension("toml.tmp");
 
         let toml_str = toml::to_string(self)
@@ -142,8 +152,9 @@ impl SessionState {
     /// Older non-completed sessions are marked as completed and their files
     /// are removed so they never interfere with future launches.
     #[must_use]
-    pub fn latest(state_dir: &Path) -> Option<Self> {
-        let read_dir = std::fs::read_dir(state_dir).ok()?;
+    pub fn latest() -> Option<Self> {
+        let dir = Self::state_dir();
+        let read_dir = std::fs::read_dir(&dir).ok()?;
 
         let mut sessions: Vec<(PathBuf, Self)> = read_dir
             .filter_map(|entry| {
@@ -173,11 +184,11 @@ impl SessionState {
     /// # Errors
     ///
     /// Returns an error if the state file cannot be written.
-    pub fn mark_file_complete(&mut self, path: &str, state_dir: &Path) -> std::io::Result<()> {
+    pub fn mark_file_complete(&mut self, path: &str) -> std::io::Result<()> {
         if let Some(entry) = self.files.iter_mut().find(|f| f.path == path) {
             entry.status = FileEntryStatus::Completed;
         }
-        self.save(state_dir)
+        self.save()
     }
 
     /// Marks a file as errored by its path and saves the state.
@@ -185,11 +196,11 @@ impl SessionState {
     /// # Errors
     ///
     /// Returns an error if the state file cannot be written.
-    pub fn mark_file_error(&mut self, path: &str, error: &str, state_dir: &Path) -> std::io::Result<()> {
+    pub fn mark_file_error(&mut self, path: &str, error: &str) -> std::io::Result<()> {
         if let Some(entry) = self.files.iter_mut().find(|f| f.path == path) {
             entry.status = FileEntryStatus::Error(error.to_string());
         }
-        self.save(state_dir)
+        self.save()
     }
 
     /// Removes a file entry by path and saves the state.
@@ -197,9 +208,9 @@ impl SessionState {
     /// # Errors
     ///
     /// Returns an error if the state file cannot be written.
-    pub fn remove_file(&mut self, path: &str, state_dir: &Path) -> std::io::Result<()> {
+    pub fn remove_file(&mut self, path: &str) -> std::io::Result<()> {
         self.files.retain(|f| f.path != path);
-        self.save(state_dir)
+        self.save()
     }
 
     /// Marks the session as completed and saves.
@@ -207,9 +218,9 @@ impl SessionState {
     /// # Errors
     ///
     /// Returns an error if the state file cannot be written.
-    pub fn mark_completed(&mut self, state_dir: &Path) -> std::io::Result<()> {
+    pub fn mark_completed(&mut self) -> std::io::Result<()> {
         self.status = SessionStatus::Completed;
-        self.save(state_dir)
+        self.save()
     }
 
     /// Marks the session as paused and saves.
@@ -217,9 +228,9 @@ impl SessionState {
     /// # Errors
     ///
     /// Returns an error if the state file cannot be written.
-    pub fn mark_paused(&mut self, state_dir: &Path) -> std::io::Result<()> {
+    pub fn mark_paused(&mut self) -> std::io::Result<()> {
         self.status = SessionStatus::Paused;
-        self.save(state_dir)
+        self.save()
     }
 
     /// Returns the number of completed files.
@@ -486,4 +497,10 @@ mod tests {
         assert_eq!(state.remaining_count(), 2);
     }
 
+    #[test]
+    fn state_dir_is_under_data_dir() {
+        let dir = SessionState::state_dir();
+        assert!(dir.to_string_lossy().contains("octo-dl"));
+        assert!(dir.to_string_lossy().contains("sessions"));
+    }
 }
