@@ -1,0 +1,67 @@
+{
+  config,
+  lib,
+  ...
+}: let
+  cfg = config.services.octo-dl;
+in {
+  options.services.octo-dl = {
+    enable = lib.mkEnableOption "octo-dl MEGA download service";
+
+    package = lib.mkOption {
+      type = lib.types.package;
+      description = "The octo-dl package to use.";
+    };
+
+    configFile = lib.mkOption {
+      type = lib.types.path;
+      description = "Path to config.toml (credentials, API bind, download settings). Service encrypts plaintext credentials in-place after first login.";
+    };
+
+    downloadDir = lib.mkOption {
+      type = lib.types.path;
+      default = "/var/lib/octo-dl/downloads";
+      description = "Directory where downloads are stored.";
+    };
+
+    user = lib.mkOption {
+      type = lib.types.str;
+      default = "octo-dl";
+      description = "User account under which the service runs.";
+    };
+
+    group = lib.mkOption {
+      type = lib.types.str;
+      default = "media";
+      description = "Group under which the service runs.";
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    users.users.${cfg.user} = {
+      isSystemUser = true;
+      group = cfg.group;
+      home = cfg.downloadDir;
+      createHome = true;
+    };
+
+    systemd.services.octo-dl = {
+      description = "octo-dl MEGA download service";
+      after = ["network-online.target"];
+      wants = ["network-online.target"];
+      wantedBy = ["multi-user.target"];
+
+      environment.RUST_LOG = lib.mkDefault "info";
+
+      serviceConfig = {
+        Type = "simple";
+        User = cfg.user;
+        Group = cfg.group;
+        WorkingDirectory = cfg.downloadDir;
+        ExecStart = "${cfg.package}/bin/octo --api --config ${cfg.configFile}";
+        Restart = "on-failure";
+        RestartSec = 10;
+      };
+    };
+  };
+}

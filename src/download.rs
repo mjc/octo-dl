@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::{StreamExt, stream};
+use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::DownloadConfig;
@@ -272,6 +273,9 @@ impl<F: FileSystem> Downloader<F> {
         // total bytes downloaded so far, NOT a delta.  We track the previous
         // value so we can compute the real delta for on_progress / record_bytes.
         let prev_bytes = Arc::new(AtomicU64::new(0));
+
+        // Wrap tokio file for futures::AsyncWrite/AsyncSeek compatibility
+        let file = file.compat_write();
 
         // Download with progress callback, optionally with cancellation support
         let download_result = if let Some(token) = cancellation_token {

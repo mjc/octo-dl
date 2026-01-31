@@ -175,18 +175,27 @@ pub fn show_error_ui_only(app: &mut App, name: &str, error: &str) {
 #[allow(clippy::too_many_lines)]
 pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
     match event {
-        DownloadEvent::LoginResult { success, error } => handle_login_result(app, success, error),
+        DownloadEvent::LoginResult { success, error } => {
+            if success {
+                log::info!("Login successful");
+            } else {
+                log::error!("Login failed: {}", error.as_deref().unwrap_or("unknown"));
+            }
+            handle_login_result(app, success, error);
+        }
         DownloadEvent::FilesCollected {
             total,
             skipped,
             partial,
             total_bytes,
         } => {
+            log::info!("Files collected: {total} total, {skipped} skipped, {partial} partial, {total_bytes} bytes");
             app.files_total += total;
             app.total_size += total_bytes;
             app.status = format!("Found {total} files ({skipped} skipped, {partial} partial)");
         }
         DownloadEvent::FileStart { name, size } => {
+            log::info!("Download started: {name} ({size} bytes)");
             if app.deleted_files.contains(&name) {
                 return;
             }
@@ -220,6 +229,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             app.total_downloaded = app.total_downloaded.saturating_add(bytes_delta);
         }
         DownloadEvent::FileComplete { name } => {
+            log::info!("Download complete: {name}");
             if app.deleted_files.remove(&name) {
                 app.cancellation_tokens.remove(&name);
                 if let Some(ref mut session) = app.session {
@@ -230,6 +240,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             handle_file_complete(app, &name);
         }
         DownloadEvent::Error { name, error } => {
+            log::error!("Download error: {name}: {error}");
             if app.deleted_files.remove(&name) {
                 app.cancellation_tokens.remove(&name);
                 if let Some(ref mut session) = app.session {
@@ -308,6 +319,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             }
         }
         DownloadEvent::StatusMessage(msg) => {
+            log::info!("Status: {msg}");
             app.status = msg;
         }
         DownloadEvent::UrlsReceived { urls } => {

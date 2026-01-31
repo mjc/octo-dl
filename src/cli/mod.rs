@@ -7,6 +7,7 @@ use std::time::Duration;
 use dirs;
 use futures::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 use crate::{
     DlcKeyCache, DownloadConfig, DownloadItem, DownloadStatsTracker, FileEntry, FileEntryStatus,
@@ -108,6 +109,7 @@ async fn download_file(
     // Open .part file for parallel chunk download with MAC verification
     let file = tokio::fs::File::create(&part_file).await?;
     file.set_len(node.size()).await?;
+    let file = file.compat_write();
 
     let name_for_progress = node.name().to_string();
     let result = client
