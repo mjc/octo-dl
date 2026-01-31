@@ -129,6 +129,12 @@ pub struct ServiceCredentials {
 }
 
 impl ServiceCredentials {
+    /// Returns `true` if both email and password are non-empty.
+    #[must_use]
+    pub fn has_credentials(&self) -> bool {
+        !self.email.is_empty() && !self.password.is_empty()
+    }
+
     /// Returns decrypted `(email, password, mfa)`.
     ///
     /// If `encrypted` is true, decrypts each field first.
@@ -200,6 +206,35 @@ impl ServiceConfig {
         let contents = std::fs::read_to_string(path)?;
         toml::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    /// Loads from `path`, or creates a template config file if it doesn't exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read/written or parsed.
+    pub fn load_or_create(path: &Path) -> std::io::Result<Self> {
+        if path.exists() {
+            return Self::load(path);
+        }
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let template = Self {
+            credentials: ServiceCredentials {
+                encrypted: false,
+                email: String::new(),
+                password: String::new(),
+                mfa: String::new(),
+            },
+            api: ApiConfig::default(),
+            download: DownloadConfig::default(),
+        };
+        template.save(path)?;
+        Ok(template)
     }
 
     /// Saves the config back to disk with 0o600 permissions.

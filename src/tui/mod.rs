@@ -167,9 +167,21 @@ pub async fn run(api_host: Option<String>) -> io::Result<()> {
 /// in-place, starts the API server, auto-logs in, and runs an event loop
 /// that processes download events until SIGTERM/SIGINT.
 pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
-    // Load service config
-    let mut service_config = ServiceConfig::load(config_path)?;
+    // Load service config (creates template if missing)
+    let mut service_config = ServiceConfig::load_or_create(config_path)?;
     log::info!("Loaded config from {}", config_path.display());
+
+    // Check credentials are present
+    if !service_config.credentials.has_credentials() {
+        log::error!(
+            "No credentials configured. Edit {} and set email/password under [credentials], then restart.",
+            config_path.display()
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("No credentials in {}", config_path.display()),
+        ));
+    }
 
     // Decrypt credentials (encrypt in-place if still plaintext)
     let (email, password, mfa) = service_config
