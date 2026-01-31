@@ -20,7 +20,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
-use crate::{ServiceConfig, SessionState, SessionStatus};
+use crate::{ServiceConfig, SessionState, SessionStatus, format_bytes};
 use sysinfo::System;
 
 use self::api::DEFAULT_API_PORT;
@@ -241,6 +241,10 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
 
     log::info!("Entering headless event loop");
 
+    // Periodic progress summary (every 30s)
+    let mut progress_interval = tokio::time::interval(Duration::from_secs(30));
+    progress_interval.tick().await; // consume the immediate first tick
+
     // Headless event loop — process download events until signal
     loop {
         tokio::select! {
@@ -257,6 +261,25 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
                     }
                 }
             }
+            _ = progress_interval.tick() => {
+                app.update_speeds();
+                if app.files_total > 0 {
+                    let pct = if app.total_size > 0 {
+                        app.total_downloaded * 100 / app.total_size
+                    } else {
+                        0
+                    };
+                    log::info!(
+                        "[progress] {}/{} files, {} / {} ({}%), {}/s",
+                        app.files_completed,
+                        app.files_total,
+                        format_bytes(app.total_downloaded),
+                        format_bytes(app.total_size),
+                        pct,
+                        format_bytes(app.current_speed),
+                    );
+                }
+            }
         }
 
         // Drain any remaining buffered events
@@ -270,9 +293,6 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
                 app.cancellation_tokens.insert(msg.file_path, msg.token);
             }
         }
-
-        // Update speeds periodically (for consistent state)
-        app.update_speeds();
     }
 
     // Save session state on shutdown
