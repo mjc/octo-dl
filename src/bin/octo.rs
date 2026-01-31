@@ -1,6 +1,26 @@
 use std::env;
 use std::path::PathBuf;
 
+/// Flags that consume the next argument as a value (not a positional arg).
+const FLAGS_WITH_VALUES: &[&str] = &["--api-host", "--config"];
+
+/// Returns true if `args` contains positional arguments (URLs, DLC paths, etc.)
+/// as opposed to just flags and their values.
+fn has_positional_args(args: &[String]) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if FLAGS_WITH_VALUES.contains(&arg) {
+            i += 2; // skip flag + its value
+        } else if arg.starts_with('-') {
+            i += 1; // skip bare flag
+        } else {
+            return true; // positional arg found
+        }
+    }
+    false
+}
+
 fn print_usage() {
     eprintln!("Usage: octo [MODE] [OPTIONS] [url|dlc]...");
     eprintln!();
@@ -69,7 +89,7 @@ async fn main() -> octo_dl::Result<()> {
             eprintln!("TUI support not compiled in");
             std::process::exit(1);
         }
-    } else if api && !args.iter().any(|a| !a.starts_with('-') || a.starts_with("--api")) {
+    } else if api && !has_positional_args(&args) {
         // --api with no URLs/DLC = API-only mode (headless)
         let config = config_path.unwrap_or_else(|| {
             eprintln!("Error: --api mode requires --config <PATH>");
@@ -87,7 +107,7 @@ async fn main() -> octo_dl::Result<()> {
         }
     } else {
         // CLI mode — check if there are any positional args (URLs/DLC)
-        let has_positional = args.iter().any(|a| !a.starts_with('-'));
+        let has_positional = has_positional_args(&args);
         if !has_positional && !args.iter().any(|a| a == "-r" || a == "--resume") {
             // No URLs, no --resume, and not TUI/API — show help
             if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
