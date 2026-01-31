@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     DlcKeyCache, DownloadConfig, DownloadProgress, SavedCredentials, SessionState, UrlEntry,
-    UrlStatus, is_dlc_path,
+    UrlStatus, format_bytes, is_dlc_path,
 };
 use dirs;
 
@@ -189,13 +189,13 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             partial,
             total_bytes,
         } => {
-            log::info!("Files collected: {total} total, {skipped} skipped, {partial} partial, {total_bytes} bytes");
+            log::info!("Files collected: {total} total, {skipped} skipped, {partial} partial, {}", format_bytes(total_bytes));
             app.files_total += total;
             app.total_size += total_bytes;
             app.status = format!("Found {total} files ({skipped} skipped, {partial} partial)");
         }
         DownloadEvent::FileStart { name, size } => {
-            log::info!("Download started: {name} ({size} bytes)");
+            log::info!("Download started: {name} ({})", format_bytes(size));
             if app.deleted_files.contains(&name) {
                 return;
             }
