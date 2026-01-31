@@ -94,18 +94,6 @@ pub fn handle_login_result(app: &mut App, success: bool, error: Option<String>) 
         start_download_task(app);
 
         // Send queued URLs — skip already-fetched URLs on resume
-        log::info!(
-            "Sending {} queued URL(s), session has {} URL entries",
-            app.urls.len(),
-            app.session.as_ref().map_or(0, |s| s.urls.len()),
-        );
-        if let Some(ref session) = app.session {
-            for entry in &session.urls {
-                log::info!("  session URL: {} status={:?}", entry.url, entry.status);
-            }
-        }
-        let mut sent = 0usize;
-        let mut skipped = 0usize;
         for url in &app.urls {
             let already_fetched = app.session.as_ref().is_some_and(|s| {
                 s.urls
@@ -115,13 +103,9 @@ pub fn handle_login_result(app: &mut App, success: bool, error: Option<String>) 
             if !already_fetched {
                 if let Some(ref url_tx) = app.url_tx {
                     let _ = url_tx.send(url.clone());
-                    sent += 1;
                 }
-            } else {
-                skipped += 1;
             }
         }
-        log::info!("URL dispatch: {sent} sent, {skipped} skipped");
     } else {
         app.login.error = error;
         app.popup = Popup::Login;
