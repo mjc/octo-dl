@@ -59,7 +59,7 @@ pub use state::{
 };
 pub use format::{format_bytes, format_duration};
 pub use stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBuilder};
-pub use url::{extract_urls, is_dlc_path};
+pub use url::{extract_urls, is_dlc_path, normalize_mega_url};
 
 // Re-export mega types used in the public API
 pub use mega::{Client as MegaClient, Node, Nodes};
