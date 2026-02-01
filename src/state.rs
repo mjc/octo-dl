@@ -156,34 +156,39 @@ impl SessionState {
 
     /// Finds the most recent incomplete session in the state directory.
     ///
-    /// Older non-completed sessions are marked as completed and their files
-    /// are removed so they never interfere with future launches.
+    /// All completed sessions and all but the newest incomplete session are
+    /// removed so they never accumulate on disk.
     #[must_use]
     pub fn latest() -> Option<Self> {
         let dir = Self::state_dir();
         let read_dir = std::fs::read_dir(&dir).ok()?;
 
-        let mut sessions: Vec<(PathBuf, Self)> = read_dir
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "toml") {
-                    Self::load(&path).ok().map(|s| (path, s))
-                } else {
-                    None
-                }
-            })
-            .filter(|(_, s)| s.status != SessionStatus::Completed)
-            .collect();
+        let mut incomplete: Vec<(PathBuf, Self)> = Vec::new();
 
-        sessions.sort_by(|a, b| b.1.created.cmp(&a.1.created));
+        for entry in read_dir.filter_map(Result::ok) {
+            let path = entry.path();
+            if !path.extension().is_some_and(|ext| ext == "toml") {
+                continue;
+            }
+            let Ok(session) = Self::load(&path) else {
+                continue;
+            };
+            if session.status == SessionStatus::Completed {
+                // Completed sessions are no longer needed — clean up.
+                let _ = std::fs::remove_file(&path);
+            } else {
+                incomplete.push((path, session));
+            }
+        }
 
-        // Clean up: remove all stale sessions except the newest
-        for (path, _) in sessions.iter().skip(1) {
+        incomplete.sort_by(|a, b| b.1.created.cmp(&a.1.created));
+
+        // Clean up: remove all stale incomplete sessions except the newest
+        for (path, _) in incomplete.iter().skip(1) {
             let _ = std::fs::remove_file(path);
         }
 
-        sessions.into_iter().next().map(|(_, s)| s)
+        incomplete.into_iter().next().map(|(_, s)| s)
     }
 
     /// Marks a file as completed by its path and saves the state.
