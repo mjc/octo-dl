@@ -21,6 +21,7 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use crate::{ServiceConfig, SessionState, SessionStatus, UrlStatus, format_bytes};
+use app::FileStatus;
 use sysinfo::System;
 
 use self::api::DEFAULT_API_PORT;
@@ -142,10 +143,24 @@ pub async fn run(api_host: Option<String>) -> io::Result<()> {
         }
 
         if app.should_quit {
-            // Save session state on quit
+            // Sync session files with what the user actually sees — the
+            // download pipeline may have added entries the user already
+            // deleted from the visible list.
             if let Some(ref mut session) = app.session
                 && session.status != SessionStatus::Completed
             {
+                let visible: std::collections::HashSet<&str> = app
+                    .files
+                    .iter()
+                    .filter(|f| {
+                        matches!(
+                            f.status,
+                            FileStatus::Queued | FileStatus::Downloading | FileStatus::Error(_)
+                        )
+                    })
+                    .map(|f| f.name.as_str())
+                    .collect();
+                session.files.retain(|f| visible.contains(f.path.as_str()));
                 if session.files.is_empty() {
                     let _ = session.mark_completed();
                 } else {
@@ -321,9 +336,21 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
         }
     }
 
-    // Save session state on shutdown
+    // Sync session files with what was visible, then save
     if let Some(ref mut session) = app.session {
         if session.status != SessionStatus::Completed {
+            let visible: std::collections::HashSet<&str> = app
+                .files
+                .iter()
+                .filter(|f| {
+                    matches!(
+                        f.status,
+                        FileStatus::Queued | FileStatus::Downloading | FileStatus::Error(_)
+                    )
+                })
+                .map(|f| f.name.as_str())
+                .collect();
+            session.files.retain(|f| visible.contains(f.path.as_str()));
             if session.files.is_empty() {
                 let _ = session.mark_completed();
             } else {
