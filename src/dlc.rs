@@ -303,10 +303,13 @@ fn extract_mega_links_from_xml(xml: &str) -> Vec<String> {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(encoded)
                 .ok()?;
-            let url = String::from_utf8(bytes).ok()?;
-            if (url.starts_with("https://mega.nz/") || url.starts_with("http://mega.nz/"))
-                && seen.insert(url.clone())
+            let raw_url = String::from_utf8(bytes).ok()?;
+            if !raw_url.starts_with("https://mega.nz/") && !raw_url.starts_with("http://mega.nz/")
             {
+                return None;
+            }
+            let url = crate::normalize_mega_url(&raw_url);
+            if seen.insert(url.clone()) {
                 Some(url)
             } else {
                 None
@@ -674,5 +677,23 @@ mod tests {
         // This might be empty since we look for exact "<url>" match
         // That's okay - we're testing it doesn't crash
         let _ = urls;
+    }
+
+    #[tokio::test]
+    async fn parse_dlc_converts_legacy_urls() {
+        let http = reqwest::Client::builder()
+            .user_agent("JDownloader/2.0 (octo-dl/test)")
+            .build()
+            .unwrap();
+        let cache = DlcKeyCache::new();
+        let result = parse_dlc_file("/home/mjc/chuck_s01.dlc", &http, &cache).await;
+        let urls = result.expect("parse_dlc_file should succeed");
+        assert!(!urls.is_empty(), "should find MEGA links");
+        for url in &urls {
+            assert!(
+                url.starts_with("https://mega.nz/folder/") || url.starts_with("https://mega.nz/file/"),
+                "URL should be modern format, got: {url}"
+            );
+        }
     }
 }
