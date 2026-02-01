@@ -86,12 +86,11 @@ fi
 RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" cargo build --release
 
 # Select binary and build args
+BINARY="$PROJECT_DIR/target/release/octo"
 if [ "$TUI" = true ]; then
-    BINARY="$PROJECT_DIR/target/release/octo-tui"
     # TUI takes --api-host flag for API server binding
-    BIN_ARGS=(--api-host 0.0.0.0)
+    BIN_ARGS=(--tui --api-host 0.0.0.0)
 else
-    BINARY="$PROJECT_DIR/target/release/octo-dl"
     BIN_ARGS=(-j "$CHUNKS" -p "$PARALLEL")
     if [ "$FORCE" = true ]; then
         BIN_ARGS+=(-f)

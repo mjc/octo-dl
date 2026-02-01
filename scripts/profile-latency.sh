@@ -94,11 +94,10 @@ sudo chmod -R a+rx /sys/kernel/debug/tracing 2>/dev/null || true
 RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" cargo build --release
 
 # Select binary and build args
+BINARY="$PROJECT_DIR/target/release/octo"
 if [ "$TUI" = true ]; then
-    BINARY="$PROJECT_DIR/target/release/octo-tui"
-    BIN_ARGS=()
+    BIN_ARGS=(--tui)
 else
-    BINARY="$PROJECT_DIR/target/release/octo-dl"
     BIN_ARGS=(-j "$CHUNKS" -p "$PARALLEL")
     if [ "$FORCE" = true ]; then
         BIN_ARGS+=(-f)
