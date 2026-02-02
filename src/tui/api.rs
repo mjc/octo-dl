@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::State;
-use axum::response::{Html, IntoResponse};
 use axum::http::HeaderMap;
+use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -61,7 +61,9 @@ async fn api_post_urls(
 
     let count = urls.len();
     if !urls.is_empty() {
-        let _ = state.tx.send(DownloadEvent::UrlsReceived { urls: urls.clone() });
+        let _ = state
+            .tx
+            .send(DownloadEvent::UrlsReceived { urls: urls.clone() });
     }
 
     axum::Json(UrlResponse { added: urls, count })
@@ -81,7 +83,9 @@ async fn api_parse_page(
 
     let count = urls.len();
     if !urls.is_empty() {
-        let _ = state.tx.send(DownloadEvent::UrlsReceived { urls: urls.clone() });
+        let _ = state
+            .tx
+            .send(DownloadEvent::UrlsReceived { urls: urls.clone() });
     }
 
     axum::Json(UrlResponse { added: urls, count })
@@ -157,7 +161,7 @@ pub async fn run_api_server(
         .layer(cors)
         .with_state(state);
 
-    let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
+    let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 

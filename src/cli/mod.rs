@@ -29,9 +29,7 @@ fn build_http_client() -> reqwest::Result<reqwest::Client> {
 
 fn dummy_downloader(config: &DownloadConfig) -> crate::Downloader {
     let http = reqwest::Client::new();
-    let client = mega::Client::builder()
-        .build(http)
-        .expect("client builder");
+    let client = mega::Client::builder().build(http).expect("client builder");
     crate::Downloader::new(client, config.clone())
 }
 
@@ -156,9 +154,7 @@ async fn download_file(
         // Clean up .part file on error
         let _ = tokio::fs::remove_file(&part_file).await;
         bar.abandon();
-        result
-            .map(|()| unreachable!())
-            .map_err(crate::Error::from)
+        result.map(|()| unreachable!()).map_err(crate::Error::from)
     }
 }
 
@@ -386,6 +382,10 @@ fn get_credentials() -> (String, String, Option<String>) {
 // Entry point
 // ============================================================================
 
+/// Run the CLI application.
+///
+/// # Errors
+/// Returns an error if download operations fail or configuration loading fails.
 #[allow(clippy::too_many_lines, clippy::similar_names)]
 pub async fn run() -> crate::Result<()> {
     let mut config = parse_args();
@@ -429,16 +429,16 @@ pub async fn run() -> crate::Result<()> {
         for dlc_path in &config.dlc_files {
             print!("  {dlc_path} ... ");
             // Expand ~ to home directory for local DLC files
+            #[allow(clippy::option_if_let_else)]
             let expanded_path = if dlc_path.starts_with('~') {
-                match dirs::home_dir() {
-                    Some(home) => dlc_path.replacen('~', home.to_string_lossy().as_ref(), 1),
-                    None => {
-                        eprintln!("Error: Could not determine home directory");
-                        std::process::exit(1);
-                    }
+                if let Some(home) = dirs::home_dir() {
+                    dlc_path.replacen('~', home.to_string_lossy().as_ref(), 1)
+                } else {
+                    eprintln!("Error: Could not determine home directory");
+                    std::process::exit(1);
                 }
             } else {
-                dlc_path.to_string()
+                dlc_path.clone()
             };
             match crate::parse_dlc_file(&expanded_path, &http, &dlc_cache).await {
                 Ok(urls) => {

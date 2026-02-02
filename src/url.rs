@@ -79,11 +79,11 @@ fn try_decode_base64(
     for _ in 0..max_rounds {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(decoded.trim())
-            .or_else(|_| {
-                base64::engine::general_purpose::URL_SAFE.decode(decoded.trim())
-            });
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(decoded.trim()));
         let Ok(bytes) = bytes else { break };
-        let Ok(s) = String::from_utf8(bytes) else { break };
+        let Ok(s) = String::from_utf8(bytes) else {
+            break;
+        };
         decoded = s;
 
         // Check for URLs in decoded result
@@ -111,18 +111,16 @@ pub fn normalize_mega_url(url: &str) -> String {
     if let Some(rest) = url
         .strip_prefix("https://mega.nz/#F!")
         .or_else(|| url.strip_prefix("http://mega.nz/#F!"))
+        && let Some((id, key)) = rest.split_once('!')
     {
-        if let Some((id, key)) = rest.split_once('!') {
-            return format!("https://mega.nz/folder/{id}#{key}");
-        }
+        return format!("https://mega.nz/folder/{id}#{key}");
     }
     if let Some(rest) = url
         .strip_prefix("https://mega.nz/#!")
         .or_else(|| url.strip_prefix("http://mega.nz/#!"))
+        && let Some((id, key)) = rest.split_once('!')
     {
-        if let Some((id, key)) = rest.split_once('!') {
-            return format!("https://mega.nz/file/{id}#{key}");
-        }
+        return format!("https://mega.nz/file/{id}#{key}");
     }
     url.to_string()
 }

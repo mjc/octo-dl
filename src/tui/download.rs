@@ -100,10 +100,8 @@ pub fn handle_login_result(app: &mut App, success: bool, error: Option<String>) 
                     .iter()
                     .any(|u| u.url == *url && u.status == UrlStatus::Fetched)
             });
-            if !already_fetched {
-                if let Some(ref url_tx) = app.url_tx {
-                    let _ = url_tx.send(url.clone());
-                }
+            if !already_fetched && let Some(ref url_tx) = app.url_tx {
+                let _ = url_tx.send(url.clone());
             }
         }
     } else {
@@ -189,7 +187,10 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             partial,
             total_bytes,
         } => {
-            log::info!("Files collected: {total} total, {skipped} skipped, {partial} partial, {}", format_bytes(total_bytes));
+            log::info!(
+                "Files collected: {total} total, {skipped} skipped, {partial} partial, {}",
+                format_bytes(total_bytes)
+            );
             app.files_total += total;
             app.total_size += total_bytes;
             app.status = format!("Found {total} files ({skipped} skipped, {partial} partial)");
@@ -494,15 +495,14 @@ async fn resolve_urls(
             // For local filesystem paths (starting with ~ or /), expand ~ to home directory
             let dlc_path = if url.starts_with('~') || url.starts_with('/') {
                 if url.starts_with('~') {
-                    match dirs::home_dir() {
-                        Some(home) => url.replacen('~', home.to_string_lossy().as_ref(), 1),
-                        None => {
-                            let _ = tx.send(DownloadEvent::Error {
-                                name: url.clone(),
-                                error: "Could not determine home directory".to_string(),
-                            });
-                            continue;
-                        }
+                    if let Some(home) = dirs::home_dir() {
+                        url.replacen('~', home.to_string_lossy().as_ref(), 1)
+                    } else {
+                        let _ = tx.send(DownloadEvent::Error {
+                            name: url.clone(),
+                            error: "Could not determine home directory".to_string(),
+                        });
+                        continue;
                     }
                 } else {
                     url.clone()
@@ -537,10 +537,11 @@ async fn resolve_urls(
 /// The semaphore is shared across all batches to enforce a global concurrency
 /// limit for file downloads.
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::*;
     use super::super::app::App;
     use super::super::event::DownloadEvent;
+    use super::*;
     use tokio::sync::mpsc;
 
     fn test_app() -> App {
@@ -580,7 +581,10 @@ mod tests {
         }
 
         let file = app.files.iter().find(|f| f.name == "test.bin").unwrap();
-        assert_eq!(file.downloaded, file_size, "downloaded should equal sum of deltas");
+        assert_eq!(
+            file.downloaded, file_size,
+            "downloaded should equal sum of deltas"
+        );
         assert!(
             file.downloaded <= file.size,
             "downloaded ({}) must not exceed size ({})",
