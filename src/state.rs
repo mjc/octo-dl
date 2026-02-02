@@ -97,14 +97,15 @@ impl SessionState {
     /// falling back to `$XDG_DATA_HOME/octo-dl` for interactive use.
     #[must_use]
     pub fn state_dir() -> PathBuf {
-        if let Ok(state_dir) = std::env::var("STATE_DIRECTORY") {
-            PathBuf::from(state_dir).join("sessions")
-        } else {
-            dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("octo-dl")
-                .join("sessions")
-        }
+        std::env::var("STATE_DIRECTORY").map_or_else(
+            |_| {
+                dirs::data_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("octo-dl")
+                    .join("sessions")
+            },
+            |state_dir| PathBuf::from(state_dir).join("sessions"),
+        )
     }
 
     /// Returns the file path for this session's state file.
@@ -167,7 +168,7 @@ impl SessionState {
 
         for entry in read_dir.filter_map(Result::ok) {
             let path = entry.path();
-            if !path.extension().is_some_and(|ext| ext == "toml") {
+            if path.extension().is_none_or(|ext| ext != "toml") {
                 continue;
             }
             let Ok(session) = Self::load(&path) else {

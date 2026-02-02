@@ -527,7 +527,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    /// A mock file system for testing classify_file behavior.
+    /// A mock file system for testing `classify_file` behavior.
     struct MockFileSystem {
         /// Maps path → file size (if the file exists).
         files: Mutex<HashMap<PathBuf, u64>>,
@@ -559,16 +559,9 @@ mod tests {
             Ok(())
         }
 
-        async fn create_file(
-            &self,
-            _path: &Path,
-            _size: u64,
-        ) -> std::io::Result<tokio::fs::File> {
+        async fn create_file(&self, _path: &Path, _size: u64) -> std::io::Result<tokio::fs::File> {
             // Not needed for classify_file tests
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "mock",
-            ))
+            Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "mock"))
         }
 
         async fn rename_file(&self, _from: &Path, _to: &Path) -> std::io::Result<()> {
@@ -601,7 +594,10 @@ mod tests {
         let fs = MockFileSystem::new();
         fs.add_file("movie.mkv", 1_000_000);
         let dl = mock_downloader(fs);
-        assert_eq!(dl.classify_file("movie.mkv", 1_000_000).await, FileStatus::Complete);
+        assert_eq!(
+            dl.classify_file("movie.mkv", 1_000_000).await,
+            FileStatus::Complete
+        );
     }
 
     #[tokio::test]
@@ -610,7 +606,10 @@ mod tests {
         // File exists but wrong size, no .part file
         fs.add_file("movie.mkv", 500);
         let dl = mock_downloader(fs);
-        assert_eq!(dl.classify_file("movie.mkv", 1_000_000).await, FileStatus::Missing);
+        assert_eq!(
+            dl.classify_file("movie.mkv", 1_000_000).await,
+            FileStatus::Missing
+        );
     }
 
     #[tokio::test]
@@ -619,14 +618,20 @@ mod tests {
         // No final file, but .part file exists
         fs.add_file("movie.mkv.part", 500_000);
         let dl = mock_downloader(fs);
-        assert_eq!(dl.classify_file("movie.mkv", 1_000_000).await, FileStatus::Partial);
+        assert_eq!(
+            dl.classify_file("movie.mkv", 1_000_000).await,
+            FileStatus::Partial
+        );
     }
 
     #[tokio::test]
     async fn classify_file_missing() {
         let fs = MockFileSystem::new();
         let dl = mock_downloader(fs);
-        assert_eq!(dl.classify_file("movie.mkv", 1_000_000).await, FileStatus::Missing);
+        assert_eq!(
+            dl.classify_file("movie.mkv", 1_000_000).await,
+            FileStatus::Missing
+        );
     }
 
     #[tokio::test]
@@ -635,6 +640,9 @@ mod tests {
         // File exists with correct size, but force_overwrite is on
         fs.add_file("movie.mkv", 1_000_000);
         let dl = mock_downloader_force(fs);
-        assert_eq!(dl.classify_file("movie.mkv", 1_000_000).await, FileStatus::Missing);
+        assert_eq!(
+            dl.classify_file("movie.mkv", 1_000_000).await,
+            FileStatus::Missing
+        );
     }
 }

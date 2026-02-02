@@ -246,14 +246,14 @@ pub fn add_url(app: &mut App, url: String) {
         app.urls.push(url.clone());
     }
     // Persist the URL in the session so it survives restarts
-    if let Some(ref mut session) = app.session {
-        if !session.urls.iter().any(|u| u.url == url) {
-            session.urls.push(crate::UrlEntry {
-                url: url.clone(),
-                status: crate::UrlStatus::Pending,
-            });
-            let _ = session.save();
-        }
+    if let Some(ref mut session) = app.session
+        && !session.urls.iter().any(|u| u.url == url)
+    {
+        session.urls.push(crate::UrlEntry {
+            url: url.clone(),
+            status: crate::UrlStatus::Pending,
+        });
+        let _ = session.save();
     }
     if let Some(ref url_tx) = app.url_tx {
         let _ = url_tx.send(url);
@@ -262,8 +262,8 @@ pub fn add_url(app: &mut App, url: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::app::{App, FileEntry, FileStatus, Popup};
+    use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use tokio::sync::mpsc;
 

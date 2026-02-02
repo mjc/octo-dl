@@ -53,11 +53,11 @@ pub use download::{
     OwnedDownloadItem,
 };
 pub use error::{Error, Result};
+pub use format::{format_bytes, format_duration};
 pub use fs::{FileSystem, TokioFileSystem};
 pub use state::{
     FileEntry, FileEntryStatus, SavedCredentials, SessionState, SessionStatus, UrlEntry, UrlStatus,
 };
-pub use format::{format_bytes, format_duration};
 pub use stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBuilder};
 pub use url::{extract_urls, is_dlc_path, normalize_mega_url};
 

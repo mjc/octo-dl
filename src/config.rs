@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::{decrypt_credential, encrypt_credential};
 
-fn default_download_path() -> Option<String> {
+const fn default_download_path() -> Option<String> {
     None
 }
 
@@ -139,7 +139,7 @@ pub struct ServiceCredentials {
 impl ServiceCredentials {
     /// Returns `true` if both email and password are non-empty.
     #[must_use]
-    pub fn has_credentials(&self) -> bool {
+    pub const fn has_credentials(&self) -> bool {
         !self.email.is_empty() && !self.password.is_empty()
     }
 

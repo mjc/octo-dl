@@ -3,9 +3,7 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table,
-};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table};
 
 use crate::format_bytes;
 
@@ -26,6 +24,7 @@ fn draw_main(frame: &mut ratatui::Frame, app: &App) {
 
     // Outer block with title bar
     let title = " octo-dl ".to_string();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let title_right = format!(
         " {}% CPU | {} RAM | API: :{}{}",
         (app.cpu_usage as u16).min(999),

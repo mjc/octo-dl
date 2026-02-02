@@ -35,6 +35,10 @@ use self::input::{handle_input, handle_paste};
 ///
 /// If `api_host` is `Some`, the HTTP API server is started on that address.
 /// If `None`, no API server is spawned.
+///
+/// # Errors
+/// Returns an error if terminal setup fails or TUI operations encounter I/O errors.
+#[allow(clippy::too_many_lines, clippy::unused_async)]
 pub async fn run(api_host: Option<String>) -> io::Result<()> {
     // Initialize terminal
     enable_raw_mode()?;
@@ -107,14 +111,14 @@ pub async fn run(api_host: Option<String>) -> io::Result<()> {
 
         // Sample CPU/memory every 50 ticks (~5s) to reduce /proc scanning overhead
         tick_count += 1;
-        if tick_count.is_multiple_of(50) {
-            if let Some(pid) = pid {
-                use sysinfo::ProcessesToUpdate;
-                sys.refresh_processes(ProcessesToUpdate::All);
-                if let Some(proc) = sys.process(pid) {
-                    app.cpu_usage = proc.cpu_usage();
-                    app.memory_rss = proc.memory(); // sysinfo returns bytes
-                }
+        if tick_count.is_multiple_of(50)
+            && let Some(pid) = pid
+        {
+            use sysinfo::ProcessesToUpdate;
+            sys.refresh_processes(ProcessesToUpdate::All);
+            if let Some(proc) = sys.process(pid) {
+                app.cpu_usage = proc.cpu_usage();
+                app.memory_rss = proc.memory(); // sysinfo returns bytes
             }
         }
 
@@ -188,6 +192,13 @@ pub async fn run(api_host: Option<String>) -> io::Result<()> {
 /// Loads configuration from `config_path`, encrypts plaintext credentials
 /// in-place, starts the API server, auto-logs in, and runs an event loop
 /// that processes download events until SIGTERM/SIGINT.
+///
+/// # Errors
+/// Returns an error if configuration loading fails, server startup fails, or I/O operations fail.
+///
+/// # Panics
+/// Panics if SIGTERM signal handler registration fails on Unix platforms.
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
 pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     // Load service config (creates template if missing)
     let mut service_config = ServiceConfig::load_or_create(config_path)?;
@@ -216,10 +227,13 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     }
 
     // Decrypt credentials (encrypt in-place if still plaintext)
-    let (email, password, mfa) = service_config
-        .credentials
-        .decrypt_if_needed()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Failed to decrypt credentials"))?;
+    let (email, password, mfa) =
+        service_config
+            .credentials
+            .decrypt_if_needed()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "Failed to decrypt credentials")
+            })?;
 
     if !service_config.credentials.encrypted {
         log::info!("Encrypting plaintext credentials in config file");
@@ -288,16 +302,15 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     // Headless event loop — process download events until signal
     loop {
         tokio::select! {
-            _ = &mut shutdown => {
+            () = &mut shutdown => {
                 break;
             }
             event = download_rx.recv() => {
-                match event {
-                    Some(evt) => handle_download_event(&mut app, evt),
-                    None => {
-                        log::warn!("Event channel closed");
-                        break;
-                    }
+                if let Some(evt) = event {
+                    handle_download_event(&mut app, evt);
+                } else {
+                    log::warn!("Event channel closed");
+                    break;
                 }
             }
             _ = progress_interval.tick() => {
@@ -337,26 +350,26 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     }
 
     // Sync session files with what was visible, then save
-    if let Some(ref mut session) = app.session {
-        if session.status != SessionStatus::Completed {
-            let visible: std::collections::HashSet<&str> = app
-                .files
-                .iter()
-                .filter(|f| {
-                    matches!(
-                        f.status,
-                        FileStatus::Queued | FileStatus::Downloading | FileStatus::Error(_)
-                    )
-                })
-                .map(|f| f.name.as_str())
-                .collect();
-            session.files.retain(|f| visible.contains(f.path.as_str()));
-            if session.files.is_empty() {
-                let _ = session.mark_completed();
-            } else {
-                log::info!("Marking session as paused for later resume");
-                let _ = session.mark_paused();
-            }
+    if let Some(ref mut session) = app.session
+        && session.status != SessionStatus::Completed
+    {
+        let visible: std::collections::HashSet<&str> = app
+            .files
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.status,
+                    FileStatus::Queued | FileStatus::Downloading | FileStatus::Error(_)
+                )
+            })
+            .map(|f| f.name.as_str())
+            .collect();
+        session.files.retain(|f| visible.contains(f.path.as_str()));
+        if session.files.is_empty() {
+            let _ = session.mark_completed();
+        } else {
+            log::info!("Marking session as paused for later resume");
+            let _ = session.mark_paused();
         }
     }
 

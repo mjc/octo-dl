@@ -81,7 +81,9 @@ async fn main() -> octo_dl::Result<()> {
     if tui {
         #[cfg(feature = "tui")]
         {
-            octo_dl::tui::run(api_host).await.map_err(octo_dl::Error::Io)
+            octo_dl::tui::run(api_host)
+                .await
+                .map_err(octo_dl::Error::Io)
         }
         #[cfg(not(feature = "tui"))]
         {
@@ -97,7 +99,9 @@ async fn main() -> octo_dl::Result<()> {
         });
         #[cfg(feature = "tui")]
         {
-            octo_dl::tui::run_api_only(&config).await.map_err(octo_dl::Error::Io)
+            octo_dl::tui::run_api_only(&config)
+                .await
+                .map_err(octo_dl::Error::Io)
         }
         #[cfg(not(feature = "tui"))]
         {
