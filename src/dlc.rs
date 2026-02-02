@@ -672,6 +672,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires local DLC file
     async fn parse_dlc_converts_legacy_urls() {
         let http = reqwest::Client::builder()
             .user_agent("JDownloader/2.0 (octo-dl/test)")
