@@ -113,7 +113,7 @@ async fn download_file(
 
     let name_for_progress = node.name().to_string();
     let result = client
-        .download_node_parallel(
+        .download_node_parallel_with_progress(
             node,
             file,
             chunks,
