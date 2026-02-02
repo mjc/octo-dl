@@ -67,7 +67,7 @@
                 chmod -R u+w mega-rs
               '';
 
-              cargoLock.lockFile = ./Cargo.lock;
+              cargoHash = "sha256-ncbjDEeH2lCY8aThCz1lMU2X02F9fLw+k246aP6/uFY=";
 
               nativeBuildInputs = [pkgs.pkg-config];
               buildInputs = [pkgs.openssl];
