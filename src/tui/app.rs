@@ -300,6 +300,10 @@ mod tests {
     #[test]
     fn login_state_active_value_mut() {
         let mut login = LoginState::new();
+        login.email.clear();
+        login.password.clear();
+        login.mfa.clear();
+
         login.active_field = 0;
         login.active_value_mut().push_str("test@example.com");
         assert_eq!(login.email, "test@example.com");

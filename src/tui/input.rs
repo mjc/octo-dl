@@ -404,6 +404,7 @@ mod tests {
         let mut app = test_app();
         app.popup = Popup::Login;
         app.login.active_field = 0;
+        app.login.email.clear();
         handle_paste(&mut app, "  user@example.com  ");
         assert_eq!(app.login.email, "user@example.com");
     }
