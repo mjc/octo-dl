@@ -43,6 +43,8 @@
           if pkgs.stdenv.isLinux
           then [''-I${pkgs.glibc.dev}/include'']
           else [];
+
+        cargoTargetEnvPrefix = pkgs.lib.toUpper (builtins.replaceStrings ["-"] ["_"] pkgs.rust.toRustTargetSpec pkgs.stdenv.hostPlatform);
       in {
         packages = {
           default = self.packages.${system}.octo-dl;
@@ -95,12 +97,14 @@
               gh
               gnuplot
               bc
+              sccache
             ]
             ++ (
               if pkgs.stdenv.isLinux
               then [
                 linuxPackages_latest.perf
                 strace
+                mold
               ]
               else []
             );
@@ -111,6 +115,9 @@
           shellHook =
             ''
               export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
+              export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
+              export "CARGO_TARGET_''${cargoTargetEnvPrefix}_LINKER"="${pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.mold}/bin/mold -run "}${pkgs.stdenv.cc}/bin/cc"
+              export "CARGO_TARGET_''${cargoTargetEnvPrefix}_RUSTFLAGS"="-C target-cpu=native"
             ''
             + (
               if pkgs.stdenv.isLinux
