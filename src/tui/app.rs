@@ -284,6 +284,7 @@ impl From<&FileEntry> for FileEntrySnapshot {
 pub struct AppSnapshot {
     pub authenticated: bool,
     pub logging_in: bool,
+    pub login_error: Option<String>,
     pub paused: bool,
     pub status: String,
     pub files: Vec<FileEntrySnapshot>,
@@ -324,6 +325,7 @@ impl App {
         AppSnapshot {
             authenticated: self.authenticated,
             logging_in: self.login.logging_in,
+            login_error: self.login.error.clone(),
             paused: self.paused,
             status: self.status.clone(),
             files: self.files.iter().map(FileEntrySnapshot::from).collect(),
@@ -376,6 +378,7 @@ impl Default for AppSnapshot {
         Self {
             authenticated: false,
             logging_in: false,
+            login_error: None,
             paused: false,
             status: String::new(),
             files: Vec::new(),

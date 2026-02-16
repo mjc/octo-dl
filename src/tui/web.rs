@@ -34,6 +34,7 @@ pub fn index_html(_host: &str, _port: u16) -> String {
   --radius: 8px;
 }}
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+html {{ font-size: clamp(14px, 2vw, 16px); }}
 body {{
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   background: var(--bg);
@@ -43,11 +44,13 @@ body {{
   display: flex;
   flex-direction: column;
   -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
 }}
 /* Header */
 .header {{
   background: var(--bg2);
-  padding: 12px 16px;
+  padding: clamp(8px, 2vw, 12px) clamp(12px, 3vw, 16px);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -55,26 +58,30 @@ body {{
   position: sticky;
   top: 0;
   z-index: 10;
+  flex-shrink: 0;
 }}
 .header h1 {{
-  font-size: 1.1rem;
+  font-size: clamp(1rem, 5vw, 1.2rem);
   color: var(--cyan);
   font-weight: 700;
+  letter-spacing: -0.5px;
 }}
 .header .stats {{
-  font-size: 0.75rem;
+  font-size: clamp(0.65rem, 1.5vw, 0.8rem);
   color: var(--fg2);
   text-align: right;
+  line-height: 1.3;
 }}
 /* URL input */
 .url-bar {{
-  padding: 12px 16px;
+  padding: clamp(8px, 2vw, 12px) clamp(12px, 3vw, 16px);
   background: var(--bg2);
   border-bottom: 1px solid var(--bg3);
+  flex-shrink: 0;
 }}
 .url-bar form {{
   display: flex;
-  gap: 8px;
+  gap: clamp(6px, 2vw, 8px);
 }}
 .url-bar input {{
   flex: 1;
@@ -82,49 +89,62 @@ body {{
   color: var(--fg);
   border: 1px solid var(--bg3);
   border-radius: var(--radius);
-  padding: 12px;
-  font-size: 16px; /* prevents iOS zoom */
+  padding: clamp(10px, 2vw, 12px);
+  font-size: 16px;
   outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}}
+@media (max-width: 480px) {{
+  .url-bar input {{ font-size: 18px; }}
 }}
 .url-bar input:focus {{
   border-color: var(--cyan);
+  box-shadow: 0 0 0 2px rgba(0,188,212,0.1);
 }}
 .url-bar button {{
   background: var(--accent);
   color: #fff;
   border: none;
   border-radius: var(--radius);
-  padding: 12px 20px;
-  font-size: 0.9rem;
+  padding: clamp(10px, 2vw, 12px) clamp(16px, 3vw, 20px);
+  font-size: clamp(0.8rem, 2vw, 0.9rem);
   font-weight: 600;
   cursor: pointer;
-  min-width: 44px;
   min-height: 44px;
+  min-width: 44px;
+  white-space: nowrap;
+  transition: background 0.2s;
 }}
-/* Progress */
+.url-bar button:active {{
+  opacity: 0.8;
+}}
+/* Progress bar */
 .progress-section {{
-  padding: 12px 16px;
+  padding: clamp(6px, 1.5vw, 10px) clamp(12px, 3vw, 16px);
+  background: var(--bg2);
+  border-bottom: 1px solid var(--bg3);
+  flex-shrink: 0;
 }}
 .progress-bar-outer {{
-  background: var(--bg3);
-  border-radius: var(--radius);
-  height: 28px;
-  overflow: hidden;
   position: relative;
+  background: var(--bg3);
+  border-radius: 4px;
+  height: 24px;
+  overflow: hidden;
 }}
 .progress-bar-inner {{
-  background: var(--green);
+  background: linear-gradient(90deg, var(--cyan), var(--green));
   height: 100%;
+  width: 0%;
   transition: width 0.3s ease;
-  border-radius: var(--radius);
 }}
 .progress-label {{
   position: absolute;
-  top: 0; left: 0; right: 0; bottom: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.8rem;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 0.75rem;
   font-weight: 600;
   color: #fff;
   text-shadow: 0 1px 2px rgba(0,0,0,0.5);
@@ -133,101 +153,126 @@ body {{
 .file-list {{
   flex: 1;
   overflow-y: auto;
-  padding: 8px 16px;
+  overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
 }}
 .file-item {{
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px;
-  background: var(--bg2);
-  border-radius: var(--radius);
-  margin-bottom: 6px;
+  gap: clamp(8px, 2vw, 12px);
+  padding: clamp(10px, 2vw, 12px) clamp(12px, 3vw, 16px);
+  border-bottom: 1px solid var(--bg3);
   position: relative;
   overflow: hidden;
-  touch-action: pan-y;
-  min-height: 56px;
+  background: var(--bg);
 }}
-.file-item .file-progress-bg {{
+.file-item.error {{ background: rgba(239, 83, 80, 0.05); }}
+.file-progress-bg {{
   position: absolute;
   top: 0; left: 0; bottom: 0;
-  background: rgba(76, 175, 80, 0.15);
+  background: rgba(0,188,212,0.1);
   transition: width 0.3s ease;
-  pointer-events: none;
 }}
 .file-icon {{
-  font-size: 1.1rem;
-  flex-shrink: 0;
-  width: 24px;
+  font-size: clamp(1rem, 3vw, 1.2rem);
+  min-width: 1.2em;
   text-align: center;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 1;
 }}
 .file-info {{
   flex: 1;
   min-width: 0;
+  position: relative;
   z-index: 1;
 }}
 .file-name {{
-  font-size: 0.85rem;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-weight: 600;
+  font-size: clamp(0.9rem, 2vw, 1rem);
+  color: var(--fg);
+  word-break: break-word;
+  margin-bottom: 2px;
 }}
 .file-detail {{
-  font-size: 0.75rem;
+  font-size: clamp(0.7rem, 1.5vw, 0.8rem);
   color: var(--fg2);
-  margin-top: 2px;
+}}
+.file-item.error .file-detail {{
+  color: var(--red);
+  font-weight: 500;
 }}
 .file-actions {{
   display: flex;
-  gap: 6px;
+  gap: 4px;
+  flex-shrink: 0;
+  position: relative;
   z-index: 1;
 }}
 .file-actions button {{
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
   background: transparent;
   border: 1px solid var(--fg2);
-  color: var(--fg2);
   border-radius: 4px;
-  padding: 6px 10px;
-  font-size: 0.7rem;
+  color: var(--fg2);
+  font-size: 1rem;
   cursor: pointer;
-  min-width: 44px;
-  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
 }}
-.file-actions button:hover {{
-  border-color: var(--accent);
-  color: var(--accent);
+@media (max-width: 480px) {{
+  .file-actions button {{
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
+  }}
+}}
+.file-actions button:active {{
+  transform: scale(0.95);
 }}
 .file-actions button.retry {{ border-color: var(--yellow); color: var(--yellow); }}
 .file-actions button.delete {{ border-color: var(--red); color: var(--red); }}
-/* Status + controls */
+/* Status bar */
 .status-bar {{
-  padding: 8px 16px;
-  font-size: 0.8rem;
+  padding: clamp(8px, 1.5vw, 10px) clamp(12px, 3vw, 16px);
+  font-size: clamp(0.7rem, 1.5vw, 0.8rem);
   color: var(--fg2);
   background: var(--bg2);
   border-top: 1px solid var(--bg3);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  flex-shrink: 0;
 }}
 .status-bar .dot {{
   width: 8px;
   height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
+  animation: pulse 2s infinite;
 }}
-.dot.green {{ background: var(--green); }}
-.dot.yellow {{ background: var(--yellow); }}
-.dot.gray {{ background: var(--fg2); }}
+@keyframes pulse {{
+  0%, 100% {{ opacity: 1; }}
+  50% {{ opacity: 0.5; }}
+}}
+.dot.green {{ background: var(--green); animation: none; }}
+.dot.yellow {{ background: var(--yellow); animation: none; }}
+.dot.gray {{ background: var(--fg2); animation: none; }}
+.dot.red {{ background: var(--red); animation: none; }}
+/* Controls */
 .controls {{
-  padding: 8px 16px;
-  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  padding: clamp(8px, 2vw, 10px) clamp(12px, 3vw, 16px);
+  padding-bottom: max(clamp(8px, 2vw, 10px), env(safe-area-inset-bottom));
   display: flex;
-  gap: 8px;
+  gap: clamp(6px, 2vw, 8px);
   background: var(--bg2);
   border-top: 1px solid var(--bg3);
+  flex-shrink: 0;
 }}
 .controls button {{
   flex: 1;
@@ -235,47 +280,64 @@ body {{
   color: var(--fg);
   border: none;
   border-radius: var(--radius);
-  padding: 12px;
-  font-size: 0.85rem;
+  padding: clamp(10px, 2vw, 12px);
+  font-size: clamp(0.8rem, 1.5vw, 0.85rem);
   cursor: pointer;
   min-height: 44px;
   font-weight: 500;
+  transition: background 0.2s, transform 0.1s;
+  -webkit-appearance: none;
+  appearance: none;
 }}
 .controls button:active {{
-  opacity: 0.7;
+  transform: scale(0.98);
+  opacity: 0.8;
 }}
 .controls button.pause {{ background: var(--yellow); color: #000; }}
 .controls button.resume {{ background: var(--green); color: #fff; }}
-/* Login popup */
+.controls button:disabled {{
+  opacity: 0.5;
+  cursor: not-allowed;
+}}
+/* Overlays */
 .overlay {{
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0,0,0,0.6);
+  background: rgba(0,0,0,0.7);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 100;
-  padding: 16px;
+  padding: clamp(12px, 3vw, 20px);
 }}
 .popup {{
   background: var(--bg2);
   border: 1px solid var(--cyan);
   border-radius: 12px;
-  padding: 24px;
+  padding: clamp(16px, 4vw, 24px);
   width: 100%;
-  max-width: 400px;
+  max-width: 420px;
+  max-height: 90vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.3);
 }}
 .popup h2 {{
   color: var(--cyan);
-  margin-bottom: 16px;
-  font-size: 1.1rem;
+  margin-bottom: clamp(12px, 2vw, 16px);
+  font-size: clamp(1rem, 3vw, 1.2rem);
 }}
 .popup label {{
   display: block;
-  font-size: 0.8rem;
+  font-size: clamp(0.75rem, 1.5vw, 0.8rem);
   color: var(--fg2);
   margin-bottom: 4px;
-  margin-top: 12px;
+  margin-top: clamp(10px, 2vw, 12px);
+  font-weight: 500;
+}}
+.popup input, .popup button {{
+  -webkit-appearance: none;
+  appearance: none;
 }}
 .popup input {{
   width: 100%;
@@ -283,51 +345,74 @@ body {{
   color: var(--fg);
   border: 1px solid var(--bg3);
   border-radius: var(--radius);
-  padding: 12px;
+  padding: clamp(10px, 2vw, 12px);
   font-size: 16px;
   outline: none;
+  transition: border-color 0.2s;
 }}
 .popup input:focus {{
   border-color: var(--cyan);
+  box-shadow: 0 0 0 2px rgba(0,188,212,0.1);
+}}
+.popup .error {{
+  background: rgba(239, 83, 80, 0.1);
+  color: var(--red);
+  border: 1px solid rgba(239, 83, 80, 0.3);
+  border-radius: var(--radius);
+  padding: clamp(8px, 1.5vw, 12px);
+  font-size: clamp(0.75rem, 1.5vw, 0.85rem);
+  margin-top: clamp(8px, 1.5vw, 12px);
+  margin-bottom: clamp(8px, 1.5vw, 12px);
 }}
 .popup .btn-row {{
-  margin-top: 20px;
+  margin-top: clamp(16px, 3vw, 20px);
   display: flex;
-  gap: 8px;
+  gap: clamp(6px, 2vw, 8px);
 }}
 .popup button {{
   flex: 1;
-  padding: 12px;
+  padding: clamp(10px, 2vw, 12px);
   border: none;
   border-radius: var(--radius);
-  font-size: 0.9rem;
+  font-size: clamp(0.85rem, 2vw, 0.9rem);
   font-weight: 600;
   cursor: pointer;
   min-height: 44px;
+  transition: background 0.2s, opacity 0.2s;
+}}
+.popup button:not(.primary) {{
+  background: var(--bg3);
+  color: var(--fg);
 }}
 .popup button.primary {{
   background: var(--cyan);
   color: #000;
 }}
-.popup .error {{
-  color: var(--red);
-  font-size: 0.8rem;
-  margin-top: 8px;
+.popup button:active {{
+  opacity: 0.8;
+}}
+.popup button:disabled {{
+  opacity: 0.5;
+  cursor: not-allowed;
 }}
 /* Config popup */
 .config-row {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 0;
+  padding: clamp(8px, 1.5vw, 10px) 0;
   border-bottom: 1px solid var(--bg3);
 }}
 .config-row:last-child {{ border-bottom: none; }}
-.config-row label {{ margin: 0; flex: 1; }}
+.config-row label {{
+  margin: 0;
+  flex: 1;
+  font-size: clamp(0.8rem, 1.5vw, 0.9rem);
+}}
 .config-row .config-control {{
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }}
 .config-row button {{
   width: 36px;
@@ -338,11 +423,19 @@ body {{
   border-radius: 4px;
   font-size: 1rem;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+  -webkit-appearance: none;
+  appearance: none;
 }}
+.config-row button:active {{ background: var(--cyan); color: #000; }}
 .config-row .val {{
   min-width: 32px;
   text-align: center;
   font-weight: 600;
+  font-size: clamp(0.9rem, 2vw, 1rem);
 }}
 /* Empty state */
 .empty {{
@@ -352,11 +445,14 @@ body {{
   align-items: center;
   justify-content: center;
   color: var(--fg2);
-  gap: 8px;
-  padding: 40px 16px;
+  gap: clamp(6px, 1.5vw, 12px);
+  padding: clamp(30px, 5vw, 50px) clamp(16px, 3vw, 24px);
+  text-align: center;
 }}
-.empty .icon {{ font-size: 3rem; opacity: 0.5; }}
-/* Connection status */
+.empty .icon {{ font-size: clamp(2rem, 10vw, 4rem); opacity: 0.3; }}
+.empty > div:nth-child(2) {{ font-size: clamp(0.9rem, 2vw, 1rem); color: var(--fg); font-weight: 500; }}
+.empty > div:nth-child(3) {{ font-size: clamp(0.75rem, 1.5vw, 0.85rem); }}
+/* Disconnected badge */
 .conn-badge {{
   position: fixed;
   top: 50%;
@@ -364,13 +460,33 @@ body {{
   transform: translate(-50%, -50%);
   background: var(--red);
   color: #fff;
-  padding: 12px 24px;
+  padding: clamp(12px, 2vw, 16px) clamp(20px, 3vw, 28px);
   border-radius: var(--radius);
   font-weight: 600;
+  font-size: clamp(0.85rem, 2vw, 1rem);
   z-index: 200;
   display: none;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  animation: slideIn 0.3s ease;
+}}
+@keyframes slideIn {{
+  from {{ transform: translate(-50%, -60%); opacity: 0; }}
+  to {{ transform: translate(-50%, -50%); opacity: 1; }}
 }}
 .conn-badge.show {{ display: block; }}
+/* Loading spinner */
+.spinner {{
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}}
+@keyframes spin {{
+  to {{ transform: rotate(360deg); }}
+}}
 </style>
 </head>
 <body>
@@ -398,8 +514,8 @@ body {{
   <div class="file-list" id="file-list">
     <div class="empty" id="empty-state">
       <div class="icon">&#128194;</div>
-      <div>No files yet</div>
-      <div style="font-size:0.75rem">Add MEGA URLs above or share from another app</div>
+      <div>No files in queue</div>
+      <div>Add MEGA URLs above or share from another app</div>
     </div>
   </div>
 
@@ -420,15 +536,15 @@ body {{
   <div class="popup">
     <h2>Login to MEGA</h2>
     <label for="login-email">Email</label>
-    <input type="email" id="login-email" autocomplete="email">
+    <input type="email" id="login-email" autocomplete="email" placeholder="your@email.com">
     <label for="login-pass">Password</label>
-    <input type="password" id="login-pass" autocomplete="current-password">
-    <label for="login-mfa">MFA (optional)</label>
-    <input type="text" id="login-mfa" inputmode="numeric" autocomplete="one-time-code">
-    <div class="error" id="login-error"></div>
+    <input type="password" id="login-pass" autocomplete="current-password" placeholder="••••••••">
+    <label for="login-mfa">MFA Code <span style="color:var(--fg2);font-weight:normal">(optional)</span></label>
+    <input type="text" id="login-mfa" inputmode="numeric" autocomplete="one-time-code" placeholder="123456">
+    <div class="error" id="login-error" style="display:none"></div>
     <div class="btn-row">
       <button onclick="hideLogin()">Cancel</button>
-      <button class="primary" onclick="doLogin()">Login</button>
+      <button class="primary" id="login-btn" onclick="doLogin()">Login</button>
     </div>
   </div>
 </div>
@@ -450,7 +566,7 @@ body {{
 (function() {{
   'use strict';
 
-  const API = '';  // same origin
+  const API = '';
   let state = null;
   let evtSource = null;
   let reconnectTimer = null;
@@ -474,7 +590,6 @@ body {{
     }};
     evtSource.onopen = function() {{
       hideDisconnected();
-      // Fetch initial state
       fetch(API + '/api/state').then(r => r.json()).then(s => {{ state = s; render(s); }}).catch(() => {{}});
     }};
   }}
@@ -498,114 +613,86 @@ body {{
       cpu + '% CPU | ' + formatBytes(s.memory_rss) + ' RAM' + (s.paused ? ' | PAUSED' : '');
 
     // Progress
-    const ratio = s.total_size > 0 ? s.total_downloaded / s.total_size : 0;
-    const pct = Math.min(Math.round(ratio * 100), 100);
-    document.getElementById('progress-bar').style.width = pct + '%';
-    document.getElementById('progress-label').textContent =
-      pct + '%  ' + s.files_completed + '/' + s.files_total + ' files  ' + formatBytes(s.current_speed) + '/s';
-
-    // Pause button
-    const btnPause = document.getElementById('btn-pause');
-    if (s.paused) {{
-      btnPause.textContent = 'Resume';
-      btnPause.className = 'resume';
-    }} else {{
-      btnPause.textContent = 'Pause';
-      btnPause.className = 'pause';
+    let pct = 0;
+    if (s.total_size > 0) {{
+      pct = Math.min(Math.round(s.total_downloaded / s.total_size * 100), 100);
     }}
+    document.getElementById('progress-bar').style.width = pct + '%';
+    document.getElementById('progress-label').textContent = pct + '%';
 
-    // Login button visibility
-    document.getElementById('btn-login').style.display = s.authenticated ? 'none' : '';
-
-    // Status
+    // Status dot and text
     const dot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
-    if (s.authenticated) {{
-      dot.className = 'dot green';
-      statusText.textContent = 'Logged in \u2713';
+    if (!s.authenticated) {{
+      dot.className = 'dot red';
+      statusText.textContent = 'Not logged in';
     }} else if (s.logging_in) {{
       dot.className = 'dot yellow';
       statusText.textContent = 'Logging in...';
+    }} else if (s.paused) {{
+      dot.className = 'dot yellow';
+      statusText.textContent = 'Paused';
+    }} else if (s.current_speed > 0) {{
+      dot.className = 'dot green';
+      statusText.textContent = formatBytes(s.current_speed) + '/s';
     }} else {{
       dot.className = 'dot gray';
-      statusText.textContent = 'Not logged in';
+      statusText.textContent = s.files_total > 0 ? 'Idle' : 'Ready';
     }}
-    if (s.status) {{
-      statusText.textContent += ' | ' + s.status;
-    }}
-    const errCount = s.files.filter(f => f.status === 'error').length;
-    if (errCount > 0) {{
-      statusText.textContent += ' | ' + errCount + ' failed';
-    }}
+
+    // Update login button text
+    document.getElementById('btn-login').textContent = s.authenticated ? 'Account' : 'Login';
 
     // File list
-    renderFiles(s.files);
-  }}
+    renderFiles(s);
 
-  // Sort order matching TUI
-  function statusOrder(s) {{
-    switch(s) {{
-      case 'downloading': return 0;
-      case 'queued': return 1;
-      case 'complete': return 2;
-      case 'error': return 3;
-      default: return 4;
+    // Login error display (update the popup)
+    const loginError = document.getElementById('login-error');
+    if (s.login_error) {{
+      loginError.textContent = s.login_error;
+      loginError.style.display = 'block';
+    }} else {{
+      loginError.style.display = 'none';
     }}
   }}
 
-  function renderFiles(files) {{
+  function renderFiles(s) {{
     const list = document.getElementById('file-list');
     const empty = document.getElementById('empty-state');
 
-    if (files.length === 0) {{
-      empty.style.display = '';
-      // Remove all file items
-      list.querySelectorAll('.file-item').forEach(el => el.remove());
+    if (s.files.length === 0) {{
+      if (!list.contains(empty)) {{
+        list.innerHTML = '';
+        list.appendChild(empty);
+      }}
       return;
     }}
-    empty.style.display = 'none';
 
-    // Sort files
-    const sorted = files.slice().sort((a,b) => statusOrder(a.status) - statusOrder(b.status));
+    if (list.contains(empty)) list.removeChild(empty);
 
-    // Build a map of existing DOM elements by name
-    const existing = {{}};
-    list.querySelectorAll('.file-item').forEach(el => {{
-      existing[el.dataset.name] = el;
-    }});
-
-    // Track which names are in the new list
-    const currentNames = new Set(sorted.map(f => f.name));
-
-    // Remove items no longer in the list
-    for (const name of Object.keys(existing)) {{
-      if (!currentNames.has(name)) {{
-        existing[name].remove();
-        delete existing[name];
-      }}
-    }}
-
-    // Update or create items in order
     let prevEl = null;
-    for (const f of sorted) {{
-      let el = existing[f.name];
+    for (const f of s.files) {{
+      let el = list.querySelector('[data-name="' + f.name.replace(/"/g, '&quot;') + '"]');
       if (!el) {{
         el = createFileItem(f);
-        existing[f.name] = el;
       }} else {{
         updateFileItem(el, f);
       }}
-      // Ensure correct order
-      if (prevEl) {{
-        if (prevEl.nextElementSibling !== el) {{
-          prevEl.after(el);
-        }}
-      }} else {{
-        if (list.firstElementChild !== el || list.firstElementChild === empty) {{
-          list.insertBefore(el, list.firstElementChild);
-        }}
+
+      if (prevEl && prevEl.nextElementSibling !== el) {{
+        prevEl.after(el);
+      }} else if (!prevEl && list.firstElementChild !== el) {{
+        list.insertBefore(el, list.firstElementChild);
       }}
       prevEl = el;
+    }}
+
+    // Remove deleted files
+    const fileNames = new Set(s.files.map(f => f.name));
+    for (const el of list.querySelectorAll('[data-name]')) {{
+      if (!fileNames.has(el.dataset.name)) {{
+        el.remove();
+      }}
     }}
   }}
 
@@ -632,11 +719,11 @@ body {{
       detail = pct + '%  ' + formatBytes(f.speed) + '/s';
       bgWidth = pct + '%';
     }} else if (f.status === 'queued') {{
-      detail = 'queued';
+      detail = 'queued  •  ' + formatBytes(f.size);
     }} else if (f.status === 'complete') {{
-      detail = formatBytes(f.size) + '  done';
+      detail = formatBytes(f.size) + '  •  done';
     }} else {{
-      detail = f.error || 'error';
+      detail = f.error ? f.error : 'error';
     }}
 
     let actions = '';
@@ -647,12 +734,15 @@ body {{
       actions += '<button class="delete" onclick="deleteFile(\'' + escHtml(f.name) + '\')">\u2717</button>';
     }}
 
+    if (f.status === 'error') el.classList.add('error');
+    else el.classList.remove('error');
+
     el.innerHTML =
       '<div class="file-progress-bg" style="width:' + bgWidth + '"></div>' +
       '<span class="file-icon" style="color:' + color + '">' + icon + '</span>' +
       '<div class="file-info">' +
         '<div class="file-name">' + escHtml(f.name) + '</div>' +
-        '<div class="file-detail">' + detail + '</div>' +
+        '<div class="file-detail">' + escHtml(detail) + '</div>' +
       '</div>' +
       '<div class="file-actions">' + actions + '</div>';
   }}
@@ -680,16 +770,25 @@ body {{
   window.hideLogin = function() {{ document.getElementById('login-overlay').style.display = 'none'; }};
 
   window.doLogin = function() {{
-    const email = document.getElementById('login-email').value;
+    const email = document.getElementById('login-email').value.trim();
     const password = document.getElementById('login-pass').value;
-    const mfa = document.getElementById('login-mfa').value;
+    const mfa = document.getElementById('login-mfa').value.trim();
     if (!email || !password) {{
       document.getElementById('login-error').textContent = 'Email and password are required';
+      document.getElementById('login-error').style.display = 'block';
       return;
     }}
-    document.getElementById('login-error').textContent = '';
-    post('/api/login', {{email: email, password: password, mfa: mfa}});
-    hideLogin();
+    document.getElementById('login-error').style.display = 'none';
+    const btn = document.getElementById('login-btn');
+    const oldText = btn.textContent;
+    btn.textContent = '';
+    btn.innerHTML = '<span class="spinner"></span>';
+    btn.disabled = true;
+    post('/api/login', {{email: email, password: password, mfa: mfa}}).finally(() => {{
+      btn.textContent = oldText;
+      btn.disabled = false;
+      hideLogin();
+    }});
   }};
 
   window.showConfig = function() {{
@@ -708,7 +807,7 @@ body {{
   function configRow(label, key, val, type) {{
     if (type === 'number') {{
       return '<div class="config-row"><label>' + label + '</label><div class="config-control">' +
-        '<button onclick="cfgDec(\'' + key + '\')">-</button>' +
+        '<button onclick="cfgDec(\'' + key + '\')">−</button>' +
         '<span class="val" id="cfg-' + key + '">' + val + '</span>' +
         '<button onclick="cfgInc(\'' + key + '\')">+</button></div></div>';
     }} else {{
@@ -738,6 +837,7 @@ body {{
     if (text) {{
       post('/api/urls', {{text: text}});
       input.value = '';
+      input.focus();
     }}
   }});
 
@@ -758,18 +858,28 @@ body {{
     )
 }
 
-/// Returns the PWA manifest JSON.
-pub fn manifest_json(_host: &str, _port: u16) -> String {
+/// Returns the PWA manifest JSON with reverse proxy support.
+pub fn manifest_json(host: &str, _port: u16) -> String {
+    let start_url = if host != "127.0.0.1" && host != "0.0.0.0" && !host.is_empty() {
+        // When using a custom public host, the app is likely behind a reverse proxy
+        // serving at a root path, so use "/" relative to that
+        "/"
+    } else {
+        "/"
+    };
+
     format!(
         r##"{{
   "name": "octo-dl",
-  "short_name": "octo-dl",
-  "description": "MEGA file downloader",
-  "start_url": "/",
+  "short_name": "octo",
+  "description": "MEGA file download manager",
+  "start_url": "{start_url}",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#1a1a2e",
   "theme_color": "#1a1a2e",
-  "orientation": "any",
+  "orientation": "portrait-primary",
+  "prefer_related_applications": false,
   "icons": [
     {{
       "src": "/icon-192.svg",
@@ -800,13 +910,16 @@ pub fn manifest_json(_host: &str, _port: u16) -> String {
 /// Returns the service worker JavaScript for PWA offline support and share target.
 pub fn service_worker_js() -> &'static str {
     r##"// octo-dl Service Worker
-const CACHE_NAME = 'octo-dl-v1';
-const PRECACHE = ['/', '/manifest.json', '/icon-192.svg'];
+const CACHE_NAME = 'octo-dl-v2';
+const PRECACHE = ['/', '/manifest.json', '/icon-192.svg', '/icon-512.svg'];
 
 self.addEventListener('install', function(event) {
   event.waitUntil(
     caches.open(CACHE_NAME).then(function(cache) {
-      return cache.addAll(PRECACHE);
+      return cache.addAll(PRECACHE).catch(function() {
+        // Graceful failure if some assets aren't available on install
+        return cache.addAll(['/', '/manifest.json']);
+      });
     })
   );
   self.skipWaiting();
@@ -827,13 +940,10 @@ self.addEventListener('activate', function(event) {
 self.addEventListener('fetch', function(event) {
   const url = new URL(event.request.url);
 
-  // Handle share target — forward to the app and let the server process it
+  // Handle share target — forward to the app
   if (url.pathname === '/share') {
     event.respondWith(
-      fetch(event.request).then(function(response) {
-        // If the server redirects to /, follow it
-        return response;
-      }).catch(function() {
+      fetch(event.request).catch(function() {
         // Offline fallback: redirect to cached index
         return caches.match('/').then(function(cached) {
           return cached || new Response('Offline — could not process shared URLs', {
@@ -846,18 +956,26 @@ self.addEventListener('fetch', function(event) {
     return;
   }
 
-  // API and SSE requests should always go to network
+  // API and SSE requests: network-first, always skip cache
   if (url.pathname.startsWith('/api/')) {
+    event.respondWith(
+      fetch(event.request).catch(function() {
+        return new Response(
+          JSON.stringify({ error: 'Offline' }),
+          { status: 503, headers: { 'Content-Type': 'application/json' } }
+        );
+      })
+    );
     return;
   }
 
-  // Cache-first for static assets, network-first for the SPA shell
+  // Static assets: cache-first with network update
   event.respondWith(
     caches.match(event.request).then(function(cached) {
       if (cached) {
         // Update cache in background
         fetch(event.request).then(function(response) {
-          if (response.ok) {
+          if (response && response.status === 200) {
             caches.open(CACHE_NAME).then(function(cache) {
               cache.put(event.request, response);
             });
@@ -866,7 +984,7 @@ self.addEventListener('fetch', function(event) {
         return cached;
       }
       return fetch(event.request).then(function(response) {
-        if (response.ok) {
+        if (response && response.status === 200) {
           var clone = response.clone();
           caches.open(CACHE_NAME).then(function(cache) {
             cache.put(event.request, clone);
@@ -874,7 +992,10 @@ self.addEventListener('fetch', function(event) {
         }
         return response;
       }).catch(function() {
-        return new Response('Offline', { status: 503 });
+        // Fallback for missing resources
+        return caches.match('/').then(function(index) {
+          return index || new Response('Offline', { status: 503 });
+        });
       });
     })
   );
@@ -885,12 +1006,20 @@ self.addEventListener('fetch', function(event) {
 /// Returns an SVG icon for the PWA.
 pub fn icon_svg() -> &'static str {
     r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
-  <rect width="192" height="192" rx="32" fill="#1a1a2e"/>
+  <defs>
+    <style>
+      .icon-bg { fill: #1a1a2e; }
+      .icon-ring { stroke: #00bcd4; stroke-width: 6; fill: none; }
+      .icon-arrow { stroke: #e94560; fill: none; stroke-width: 6; stroke-linecap: round; stroke-linejoin: round; }
+      .icon-stem { stroke: #e94560; stroke-width: 6; stroke-linecap: round; }
+    </style>
+  </defs>
+  <rect class="icon-bg" width="192" height="192" rx="32"/>
   <g transform="translate(96,96)">
-    <circle r="60" fill="none" stroke="#00bcd4" stroke-width="6"/>
-    <path d="M-20,-15 L0,15 L20,-15" fill="none" stroke="#e94560" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
-    <line x1="0" y1="15" x2="0" y2="35" stroke="#e94560" stroke-width="6" stroke-linecap="round"/>
-    <line x1="-25" y1="35" x2="25" y2="35" stroke="#e94560" stroke-width="6" stroke-linecap="round"/>
+    <circle class="icon-ring" r="60"/>
+    <path class="icon-arrow" d="M-20,-15 L0,15 L20,-15"/>
+    <line class="icon-stem" x1="0" y1="15" x2="0" y2="40"/>
+    <line class="icon-stem" x1="-30" y1="45" x2="30" y2="45"/>
   </g>
 </svg>"##
 }
