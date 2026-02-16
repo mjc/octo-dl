@@ -5,6 +5,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
+    crane.url = "github:ipetkov/crane";
     mega-rs = {
       url = "github:mjc/mega-rs/parallel-download";
       flake = false;
@@ -16,6 +17,7 @@
     nixpkgs,
     flake-utils,
     rust-overlay,
+    crane,
     mega-rs,
     ...
   }:
@@ -45,42 +47,66 @@
           else [];
 
         cargoTargetEnvPrefix = pkgs.lib.toUpper (builtins.replaceStrings ["-"] ["_"] pkgs.rust.toRustTargetSpec pkgs.stdenv.hostPlatform);
+
+        # Crane setup with nightly rust
+        rustNightly = pkgs.rust-bin.nightly.latest.default.override {
+          extensions = ["rust-src"];
+        };
+        craneLib = (crane.mkLib pkgs).overrideToolchain rustNightly;
+
+        # Source filtering - only include Rust-relevant files
+        src = let
+          # Include standard Rust files plus any extra assets
+          filteredSrc = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter = path: type:
+              (craneLib.filterCargoSources path type)
+              || builtins.match ".*\\.toml$" path != null;
+          };
+        in
+          filteredSrc;
+
+        # Common arguments shared between dep and source builds
+        commonArgs = {
+          inherit src;
+          pname = "octo-dl";
+          version = "0.1.0";
+          strictDeps = true;
+
+          nativeBuildInputs = [pkgs.pkg-config];
+          buildInputs = [pkgs.openssl];
+
+          # Place mega-rs next to octo-dl so `path = "../mega-rs"` resolves
+          postUnpack = ''
+            cp -r ${mega-rs} mega-rs
+            chmod -R u+w mega-rs
+          '';
+        };
+
+        # Build only the cargo dependencies — cached when Cargo.lock is unchanged
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
       in {
         packages = {
           default = self.packages.${system}.octo-dl;
 
-          octo-dl = let
-            rustNightly = pkgs.rust-bin.nightly.latest.default.override {
-              extensions = ["rust-src"];
-            };
-            rustPlatform = pkgs.makeRustPlatform {
-              cargo = rustNightly;
-              rustc = rustNightly;
-            };
-          in
-            rustPlatform.buildRustPackage {
-              pname = "octo-dl";
-              version = "0.1.0";
-              src = ./.;
-
-              # Place mega-rs next to octo-dl so `path = "../mega-rs"` resolves
-              postUnpack = ''
-                cp -r ${mega-rs} mega-rs
-                chmod -R u+w mega-rs
-              '';
-
-              cargoHash = "sha256-fk119DqbZ0XHebelLlQfn+EHnruhihbbv/8XFYpnvek=";
-
-              nativeBuildInputs = [pkgs.pkg-config];
-              buildInputs = [pkgs.openssl];
+          octo-dl = craneLib.buildPackage (commonArgs
+            // {
+              inherit cargoArtifacts;
 
               meta = with pkgs.lib; {
                 description = "MEGA download manager with TUI and headless service mode";
                 homepage = "https://github.com/mjc/octo-dl";
                 mainProgram = "octo";
               };
-            };
+            });
         };
+
+        # Clippy check as a separate cacheable derivation
+        checks.clippy = craneLib.cargoClippy (commonArgs
+          // {
+            inherit cargoArtifacts;
+            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+          });
 
         devShells.default = pkgs.mkShell rec {
           nativeBuildInputs = [pkgs.pkg-config];
