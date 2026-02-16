@@ -43,6 +43,38 @@ in {
       default = "media";
       description = "Group under which the service runs.";
     };
+
+    web = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Whether to serve the web UI. When false, runs in headless API-only mode.";
+      };
+
+      host = lib.mkOption {
+        type = lib.types.str;
+        default = "0.0.0.0";
+        description = "Bind address for the web/API server.";
+      };
+
+      publicHost = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Public hostname for the PWA manifest and share target (e.g. 'octo.example.com'). Defaults to the bind host if unset.";
+      };
+
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 9723;
+        description = "Port for the web/API server.";
+      };
+
+      openFirewall = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Whether to open the web UI port in the firewall.";
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -53,13 +85,22 @@ in {
       createHome = true;
     };
 
-    systemd.services.octo-dl = {
+    networking.firewall.allowedTCPPorts = lib.mkIf cfg.web.openFirewall [cfg.web.port];
+
+    systemd.services.octo-dl = let
+      mode = if cfg.web.enable then "--web" else "--api";
+      webHostFlag = lib.optionalString (cfg.web.enable && cfg.web.publicHost != null) " --web-host ${cfg.web.publicHost}";
+      apiHostFlag = " --api-host ${cfg.web.host}";
+    in {
       description = "octo-dl MEGA download service";
       after = ["network-online.target"];
       wants = ["network-online.target"];
       wantedBy = ["multi-user.target"];
 
-      environment.RUST_LOG = lib.mkDefault "info";
+      environment = {
+        RUST_LOG = lib.mkDefault "info";
+        OCTO_API_PORT = toString cfg.web.port;
+      };
 
       serviceConfig = {
         Type = "simple";
@@ -67,7 +108,7 @@ in {
         Group = cfg.group;
         StateDirectory = "octo-dl";
         WorkingDirectory = cfg.downloadDir;
-        ExecStart = "${cfg.package}/bin/octo --api --config ${cfg.configFile}";
+        ExecStart = "${cfg.package}/bin/octo ${mode}${apiHostFlag}${webHostFlag} --config ${cfg.configFile}";
         Restart = "on-failure";
         RestartSec = 10;
       };

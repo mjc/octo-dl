@@ -94,7 +94,7 @@
               inherit cargoArtifacts;
 
               meta = with pkgs.lib; {
-                description = "MEGA download manager with TUI and headless service mode";
+                description = "MEGA download manager with TUI, web UI, and headless service mode";
                 homepage = "https://github.com/mjc/octo-dl";
                 mainProgram = "octo";
               };

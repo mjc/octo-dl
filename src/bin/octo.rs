@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 /// Flags that consume the next argument as a value (not a positional arg).
-const FLAGS_WITH_VALUES: &[&str] = &["--api-host", "--config"];
+const FLAGS_WITH_VALUES: &[&str] = &["--api-host", "--config", "--web-host"];
 
 /// Returns true if `args` contains positional arguments (URLs, DLC paths, etc.)
 /// as opposed to just flags and their values.
@@ -25,12 +25,18 @@ fn print_usage() {
     eprintln!("Usage: octo [MODE] [OPTIONS] [url|dlc]...");
     eprintln!();
     eprintln!("Modes:");
-    eprintln!("  --tui               Launch interactive TUI");
-    eprintln!("  --api               Start HTTP API server (combinable with --tui or standalone)");
+    eprintln!("  --tui               Launch interactive terminal TUI");
+    eprintln!("  --web               Launch web UI in browser (PWA with mobile share support)");
+    eprintln!("  --api               Start headless API server (requires --config)");
     eprintln!("  (default)           CLI download mode when URLs/DLC files are provided");
     eprintln!();
+    eprintln!("Combinable:");
+    eprintln!("  --tui --api         Terminal TUI with API server");
+    eprintln!("  --tui --web         Terminal TUI with web UI alongside");
+    eprintln!();
     eprintln!("Global options:");
-    eprintln!("  --api-host <HOST>   API server bind address (default: 127.0.0.1)");
+    eprintln!("  --api-host <HOST>   Bind address (default: 127.0.0.1)");
+    eprintln!("  --web-host <HOST>   Public host for PWA manifest (default: same as --api-host)");
     eprintln!("  --config <PATH>     Config file for headless/service mode");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
@@ -43,7 +49,9 @@ async fn main() -> octo_dl::Result<()> {
 
     let mut tui = false;
     let mut api = false;
+    let mut web = false;
     let mut api_host = "127.0.0.1".to_string();
+    let mut web_host: Option<String> = None;
     let mut config_path: Option<PathBuf> = None;
 
     // Scan for global flags without consuming — sub-modules re-parse for their own flags
@@ -53,12 +61,22 @@ async fn main() -> octo_dl::Result<()> {
         match args[i].as_str() {
             "--tui" => tui = true,
             "--api" => api = true,
+            "--web" => web = true,
             "--api-host" => {
                 i += 1;
                 if i < args.len() {
                     api_host = args[i].clone();
                 } else {
                     eprintln!("Error: --api-host requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "--web-host" => {
+                i += 1;
+                if i < args.len() {
+                    web_host = Some(args[i].clone());
+                } else {
+                    eprintln!("Error: --web-host requires a value");
                     std::process::exit(1);
                 }
             }
@@ -76,12 +94,21 @@ async fn main() -> octo_dl::Result<()> {
         i += 1;
     }
 
-    let api_host = if api { Some(api_host) } else { None };
+    let api_host_str = api_host.clone();
+    let web_opts = if web {
+        Some(octo_dl::tui::WebOptions {
+            public_host: web_host.unwrap_or_else(|| api_host_str.clone()),
+        })
+    } else {
+        None
+    };
 
     if tui {
+        // Terminal TUI mode, optionally with --api and/or --web alongside
+        let api_host = if api { Some(api_host) } else { None };
         #[cfg(feature = "tui")]
         {
-            octo_dl::tui::run(api_host)
+            octo_dl::tui::run(api_host, web_opts)
                 .await
                 .map_err(octo_dl::Error::Io)
         }
@@ -91,10 +118,27 @@ async fn main() -> octo_dl::Result<()> {
             eprintln!("TUI support not compiled in");
             std::process::exit(1);
         }
+    } else if web && !has_positional_args(&args) {
+        // --web without --tui = web UI as the primary interface
+        #[cfg(feature = "tui")]
+        {
+            octo_dl::tui::run_web(
+                &api_host,
+                web_opts.expect("web_opts set when web=true"),
+                config_path.as_deref(),
+            )
+            .await
+            .map_err(octo_dl::Error::Io)
+        }
+        #[cfg(not(feature = "tui"))]
+        {
+            eprintln!("Web UI requires the 'tui' feature");
+            std::process::exit(1);
+        }
     } else if api && !has_positional_args(&args) {
-        // --api with no URLs/DLC = API-only mode (headless)
+        // --api without --tui = headless API-only mode, requires --config
         let config = config_path.unwrap_or_else(|| {
-            eprintln!("Error: --api mode requires --config <PATH>");
+            eprintln!("Error: --api mode requires --config <PATH> (or use --web for browser UI)");
             std::process::exit(1);
         });
         #[cfg(feature = "tui")]

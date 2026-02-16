@@ -2,10 +2,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::sync::Arc;
 use std::time::Instant;
 
 use ratatui::widgets::ListState;
-use tokio::sync::mpsc;
+use serde::Serialize;
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::{DownloadConfig, SessionState};
@@ -239,6 +241,158 @@ impl App {
             cpu_usage: 0.0,
             last_tick: Instant::now(),
             memory_rss: 0,
+        }
+    }
+}
+
+// =============================================================================
+// Web UI shared state types
+// =============================================================================
+
+/// Serializable snapshot of a file entry for the web UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct FileEntrySnapshot {
+    pub name: String,
+    pub size: u64,
+    pub downloaded: u64,
+    pub speed: u64,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+impl From<&FileEntry> for FileEntrySnapshot {
+    fn from(f: &FileEntry) -> Self {
+        let (status, error) = match &f.status {
+            FileStatus::Queued => ("queued".to_string(), None),
+            FileStatus::Downloading => ("downloading".to_string(), None),
+            FileStatus::Complete => ("complete".to_string(), None),
+            FileStatus::Error(e) => ("error".to_string(), Some(e.clone())),
+        };
+        Self {
+            name: f.name.clone(),
+            size: f.size,
+            downloaded: f.downloaded,
+            speed: f.speed,
+            status,
+            error,
+        }
+    }
+}
+
+/// Serializable snapshot of the full application state for the web UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct AppSnapshot {
+    pub authenticated: bool,
+    pub logging_in: bool,
+    pub paused: bool,
+    pub status: String,
+    pub files: Vec<FileEntrySnapshot>,
+    pub total_downloaded: u64,
+    pub total_size: u64,
+    pub files_completed: usize,
+    pub files_total: usize,
+    pub current_speed: u64,
+    pub cpu_usage: f32,
+    pub memory_rss: u64,
+    pub config: DownloadConfigSnapshot,
+    pub url_input: String,
+}
+
+/// Serializable snapshot of download configuration.
+#[derive(Debug, Clone, Serialize)]
+pub struct DownloadConfigSnapshot {
+    pub chunks_per_file: usize,
+    pub concurrent_files: usize,
+    pub force_overwrite: bool,
+    pub cleanup_on_error: bool,
+}
+
+impl From<&DownloadConfig> for DownloadConfigSnapshot {
+    fn from(c: &DownloadConfig) -> Self {
+        Self {
+            chunks_per_file: c.chunks_per_file,
+            concurrent_files: c.concurrent_files,
+            force_overwrite: c.force_overwrite,
+            cleanup_on_error: c.cleanup_on_error,
+        }
+    }
+}
+
+impl App {
+    /// Creates a serializable snapshot of the current application state.
+    pub fn snapshot(&self) -> AppSnapshot {
+        AppSnapshot {
+            authenticated: self.authenticated,
+            logging_in: self.login.logging_in,
+            paused: self.paused,
+            status: self.status.clone(),
+            files: self.files.iter().map(FileEntrySnapshot::from).collect(),
+            total_downloaded: self.total_downloaded,
+            total_size: self.total_size,
+            files_completed: self.files_completed,
+            files_total: self.files_total,
+            current_speed: self.current_speed,
+            cpu_usage: self.cpu_usage,
+            memory_rss: self.memory_rss,
+            config: DownloadConfigSnapshot::from(&self.config.config),
+            url_input: self.url_input.clone(),
+        }
+    }
+}
+
+/// Actions that the web UI can send to the backend event loop.
+#[derive(Debug, Clone)]
+pub enum UiAction {
+    Login {
+        email: String,
+        password: String,
+        mfa: String,
+    },
+    AddUrls(Vec<String>),
+    TogglePause,
+    DeleteFile(String),
+    RetryFile(String),
+    UpdateConfig {
+        chunks_per_file: Option<usize>,
+        concurrent_files: Option<usize>,
+        force_overwrite: Option<bool>,
+        cleanup_on_error: Option<bool>,
+    },
+}
+
+/// Shared state container accessible from both the event loop and API handlers.
+#[derive(Clone)]
+pub struct SharedAppState {
+    /// Latest application snapshot, updated each tick.
+    pub snapshot: Arc<RwLock<AppSnapshot>>,
+    /// Broadcast channel for SSE — subscribers receive snapshots.
+    pub broadcast_tx: broadcast::Sender<AppSnapshot>,
+    /// Channel for web UI actions directed at the event loop.
+    pub action_tx: mpsc::UnboundedSender<UiAction>,
+}
+
+impl Default for AppSnapshot {
+    fn default() -> Self {
+        Self {
+            authenticated: false,
+            logging_in: false,
+            paused: false,
+            status: String::new(),
+            files: Vec::new(),
+            total_downloaded: 0,
+            total_size: 0,
+            files_completed: 0,
+            files_total: 0,
+            current_speed: 0,
+            cpu_usage: 0.0,
+            memory_rss: 0,
+            config: DownloadConfigSnapshot {
+                chunks_per_file: 2,
+                concurrent_files: 4,
+                force_overwrite: false,
+                cleanup_on_error: true,
+            },
+            url_input: String::new(),
         }
     }
 }
