@@ -69,7 +69,7 @@
                 chmod -R u+w mega-rs
               '';
 
-              cargoHash = "sha256-ncbjDEeH2lCY8aThCz1lMU2X02F9fLw+k246aP6/uFY=";
+              cargoHash = "sha256-fk119DqbZ0XHebelLlQfn+EHnruhihbbv/8XFYpnvek=";
 
               nativeBuildInputs = [pkgs.pkg-config];
               buildInputs = [pkgs.openssl];
