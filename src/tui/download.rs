@@ -1,4 +1,17 @@
 //! Download task management and event handling.
+//!
+//! # TODO: Package-based download grouping
+//!
+//! Currently, downloads are tracked as a flat list of files keyed by filename.
+//! This causes collisions when different MEGA folders contain files with the
+//! same name. Instead, downloads should be grouped into **packages** (similar
+//! to JDownloader2), where each MEGA URL/folder submission becomes a package
+//! that contains its files. This would:
+//!
+//! - Eliminate filename collisions across different sources
+//! - Allow per-package progress, pause/resume, and cancellation
+//! - Enable collapsible package groups in the TUI file list
+//! - Make session persistence more robust (key by package+path, not filename)
 
 use std::sync::Arc;
 use std::time::Duration;
