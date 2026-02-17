@@ -29,6 +29,19 @@ use super::app::{App, FileEntry, FileStatus, Popup};
 use super::event::{DownloadChannels, DownloadEvent, TokenMessage, TuiProgress};
 use super::input::add_url;
 
+/// Computes the full session file path for a given name, using the download
+/// directory from the config when available.
+fn session_file_path(config: &DownloadConfig, name: &str) -> String {
+    if let Some(ref download_dir) = config.path {
+        std::path::Path::new(download_dir)
+            .join(name)
+            .to_string_lossy()
+            .to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .pool_idle_timeout(Duration::from_secs(60))
@@ -133,14 +146,7 @@ pub fn handle_file_complete(app: &mut App, name: &str) {
     app.files_completed += 1;
 
     if let Some(ref mut session) = app.session {
-        let full_path = if let Some(ref download_dir) = app.config.config.path {
-            std::path::Path::new(download_dir)
-                .join(name)
-                .to_string_lossy()
-                .to_string()
-        } else {
-            name.to_string()
-        };
+        let full_path = session_file_path(&app.config.config, name);
         let _ = session.remove_file(&full_path);
     }
 
@@ -168,14 +174,7 @@ pub fn handle_file_error(app: &mut App, name: &str, error: &str) {
     }
 
     if let Some(ref mut session) = app.session {
-        let full_path = if let Some(ref download_dir) = app.config.config.path {
-            std::path::Path::new(download_dir)
-                .join(name)
-                .to_string_lossy()
-                .to_string()
-        } else {
-            name.to_string()
-        };
+        let full_path = session_file_path(&app.config.config, name);
         let _ = session.mark_file_error(&full_path, error);
     }
 }
@@ -263,7 +262,8 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             if app.deleted_files.remove(&name) {
                 app.cancellation_tokens.remove(&name);
                 if let Some(ref mut session) = app.session {
-                    let _ = session.remove_file(&name);
+                    let full_path = session_file_path(&app.config.config, &name);
+                    let _ = session.remove_file(&full_path);
                 }
                 return;
             }
@@ -274,16 +274,21 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             if app.deleted_files.remove(&name) {
                 app.cancellation_tokens.remove(&name);
                 if let Some(ref mut session) = app.session {
-                    let _ = session.remove_file(&name);
+                    let full_path = session_file_path(&app.config.config, &name);
+                    let _ = session.remove_file(&full_path);
                 }
                 return;
             }
-            // Remove invalid URLs from session (they will never work)
+            // Invalid URL errors: mark URL as terminal error so it won't be retried
             if error.contains("InvalidPublicUrlFormat") {
                 if let Some(ref mut session) = app.session {
-                    let _ = session.remove_file(&name);
+                    if let Some(url_entry) = session.urls.iter_mut().find(|u| u.url == name) {
+                        url_entry.status = UrlStatus::Error(error.clone());
+                    }
+                    let _ = session.save();
                 }
-                // Show error in UI but don't save to session
+                // Remove URL placeholder from UI and show error without persisting as file
+                app.files.retain(|f| f.name != name);
                 show_error_ui_only(app, &name, &error);
             } else {
                 // For actual file download errors, mark as error and keep in session for retry
@@ -325,16 +330,11 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             }
 
             // Track file in session for resume support
-            // Use full path: download directory + filename
+            // NOTE: url_index is hard-coded to 0 because the TUI does not currently
+            // track which URL each file belongs to. This will be fixed when package
+            // grouping is implemented (see module-level TODO).
             if let Some(ref mut session) = app.session {
-                let full_path = if let Some(ref download_dir) = app.config.config.path {
-                    std::path::Path::new(download_dir)
-                        .join(&name)
-                        .to_string_lossy()
-                        .to_string()
-                } else {
-                    name.clone()
-                };
+                let full_path = session_file_path(&app.config.config, &name);
 
                 if !session.files.iter().any(|f| f.path == full_path) {
                     session.files.push(crate::FileEntry {
