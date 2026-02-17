@@ -117,8 +117,13 @@ mod tests {
 // Service configuration (headless / systemd mode)
 // ============================================================================
 
+/// Default API host.
+///
+/// Binds to loopback only by default so the unauthenticated API is not
+/// exposed on external interfaces. To expose externally, configure a
+/// non-loopback address and place behind an auth-protecting proxy or VPN.
 fn default_api_host() -> String {
-    "0.0.0.0".to_string()
+    "127.0.0.1".to_string()
 }
 
 const fn default_api_port() -> u16 {

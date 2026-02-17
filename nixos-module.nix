@@ -17,7 +17,13 @@ in {
     configFile = lib.mkOption {
       type = lib.types.path;
       default = "${stateDir}/config.toml";
-      description = "Path to config.toml. Auto-created with defaults on first start; edit to add credentials.";
+      description = ''
+        Path to config.toml. Auto-created with defaults on first start; edit to add credentials.
+
+        The API server binds to 127.0.0.1 by default. To expose externally, set
+        `api_host = "0.0.0.0"` in the config file and place behind an
+        auth-protecting reverse proxy or VPN (e.g., Tailscale).
+      '';
     };
 
     downloadDir = lib.mkOption {
