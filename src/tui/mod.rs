@@ -29,6 +29,33 @@ use self::app::App;
 use self::download::{handle_download_event, start_login};
 use self::draw::draw;
 use self::event::DownloadEvent;
+
+/// RAII guard that ensures terminal cleanup on drop.
+/// Restores terminal to normal mode even if a panic occurs.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn new() -> io::Result<Self> {
+        enable_raw_mode()?;
+        crossterm::execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            crossterm::event::EnableBracketedPaste
+        )?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = crossterm::execute!(
+            io::stdout(),
+            crossterm::event::DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
+    }
+}
 use self::input::{handle_input, handle_paste};
 
 /// Run the interactive TUI.
@@ -40,15 +67,10 @@ use self::input::{handle_input, handle_paste};
 /// Returns an error if terminal setup fails or TUI operations encounter I/O errors.
 #[allow(clippy::too_many_lines, clippy::unused_async)]
 pub async fn run(api_host: Option<String>) -> io::Result<()> {
-    // Initialize terminal
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    crossterm::execute!(
-        stdout,
-        EnterAlternateScreen,
-        crossterm::event::EnableBracketedPaste
-    )?;
-    let backend = CrosstermBackend::new(stdout);
+    // Initialize terminal with RAII guard for automatic cleanup
+    let _terminal_guard = TerminalGuard::new()?;
+    
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
@@ -175,13 +197,7 @@ pub async fn run(api_host: Option<String>) -> io::Result<()> {
         }
     }
 
-    // Restore terminal
-    disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        crossterm::event::DisableBracketedPaste,
-        LeaveAlternateScreen
-    )?;
+    // Show cursor before exit (terminal cleanup handled by RAII guard)
     terminal.show_cursor()?;
 
     Ok(())

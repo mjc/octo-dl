@@ -295,6 +295,9 @@ fn derive_machine_key() -> [u8; 16] {
 /// Encrypts a plaintext string using AES-128-CBC with the machine key.
 /// Returns the encrypted data as a base64-encoded string.
 ///
+/// This provides basic obfuscation for credentials stored in session files (0o600).
+/// Not cryptographically secure (uses key as IV), but acceptable for the threat model.
+///
 /// # Panics
 ///
 /// Panics if the encryption buffer size is incorrect (should never happen).
