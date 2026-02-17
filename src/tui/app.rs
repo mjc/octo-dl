@@ -4,14 +4,16 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use ratatui::widgets::ListState;
-use tokio::sync::mpsc;
+use serde::Serialize;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::{DownloadConfig, SessionState};
 
 use super::event::{DownloadEvent, TokenMessage};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Popup {
     None,
     Login,
@@ -155,7 +157,8 @@ impl ConfigState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FileStatus {
     Queued,
     Downloading,
@@ -163,13 +166,14 @@ pub enum FileStatus {
     Error(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileEntry {
     pub name: String,
     pub size: u64,
     pub downloaded: u64,
     pub speed: u64,
     /// Bytes received since the last speed calculation (reset each tick).
+    #[serde(skip)]
     pub speed_accum: u64,
     pub status: FileStatus,
 }
@@ -313,6 +317,86 @@ impl App {
             memory_rss: 0,
         }
     }
+
+    /// Serialises UI-visible state to a JSON string.
+    ///
+    /// Called by the event loop *only* when state has changed and at least
+    /// one SSE/API client is connected — never on a blind timer.
+    pub fn to_json(&self) -> String {
+        #[derive(Serialize)]
+        struct Snapshot<'a> {
+            authenticated: bool,
+            paused: bool,
+            logging_in: bool,
+            login_error: Option<&'a str>,
+            popup: Popup,
+            files: &'a [FileEntry],
+            total_downloaded: u64,
+            total_size: u64,
+            files_completed: usize,
+            files_total: usize,
+            current_speed: u64,
+            cpu_usage: f32,
+            memory_rss: u64,
+            api_port: u16,
+            config: &'a DownloadConfig,
+        }
+
+        let snap = Snapshot {
+            authenticated: self.authenticated,
+            paused: self.paused,
+            logging_in: self.login.logging_in,
+            login_error: self.login.error.as_deref(),
+            popup: self.popup,
+            files: &self.files,
+            total_downloaded: self.total_downloaded,
+            total_size: self.total_size,
+            files_completed: self.files_completed,
+            files_total: self.files_total,
+            current_speed: self.current_speed,
+            cpu_usage: self.cpu_usage,
+            memory_rss: self.memory_rss,
+            api_port: self.api_port,
+            config: &self.config.config,
+        };
+        serde_json::to_string(&snap).unwrap_or_default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Types shared with the API server (channel-based, no locks)
+// ---------------------------------------------------------------------------
+
+/// An action sent from an API handler into the single-owner event loop.
+#[derive(Debug)]
+pub enum UiAction {
+    AddUrls(Vec<String>),
+    Login {
+        email: String,
+        password: String,
+        mfa: String,
+    },
+    TogglePause,
+    DeleteFile(String),
+    RetryFile(String),
+    UpdateConfig {
+        chunks_per_file: Option<usize>,
+        concurrent_files: Option<usize>,
+        force_overwrite: Option<bool>,
+        cleanup_on_error: Option<bool>,
+    },
+}
+
+/// Cheaply cloneable handle given to API handlers.
+///
+/// * `action_tx` — fire-and-forget mutations into the event loop.
+/// * `state_rx`  — latest JSON snapshot; `borrow()` is lock-free.
+///
+/// No `Mutex`, no `RwLock`, no `broadcast` cloning.
+#[derive(Clone)]
+pub struct SharedAppState {
+    pub action_tx: mpsc::UnboundedSender<UiAction>,
+    pub state_rx: watch::Receiver<String>,
 }
 
 #[cfg(test)]

@@ -352,7 +352,7 @@ email = "x@y.com"
 password = "pw"
 "#;
         let config: ServiceConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.api.host, "0.0.0.0");
+        assert_eq!(config.api.host, "127.0.0.1");
         assert_eq!(config.api.port, 9723);
         assert_eq!(config.download.concurrent_files, 4);
         assert!(!config.credentials.encrypted);

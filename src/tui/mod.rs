@@ -1,6 +1,5 @@
 //! octo-tui - Interactive TUI for downloading MEGA files.
 
-pub(crate) mod ansi_input;
 mod api;
 mod app;
 mod download;
@@ -9,43 +8,9 @@ mod event;
 mod input;
 pub mod web;
 
-// ---------------------------------------------------------------------------
-// In-memory writer for server-side ratatui rendering
-// ---------------------------------------------------------------------------
-
-/// A [`std::io::Write`] target that buffers ANSI output in memory.
-///
-/// Used with [`ratatui::backend::CrosstermBackend<BufWriter>`] so that
-/// `Terminal::draw()` writes ANSI escape sequences into a `Vec<u8>`
-/// instead of stdout.  Call [`drain()`](BufWriter::drain) after each
-/// frame to extract the bytes and send them over WebSocket.
-#[derive(Default)]
-pub(crate) struct BufWriter {
-    buf: Vec<u8>,
-}
-
-impl BufWriter {
-    /// Takes all buffered bytes, leaving the internal buffer empty.
-    pub fn drain(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.buf)
-    }
-}
-
-impl std::io::Write for BufWriter {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.buf.extend_from_slice(data);
-        Ok(data.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 use std::env;
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::Event;
@@ -61,10 +26,20 @@ use app::FileStatus;
 use sysinfo::System;
 
 use self::api::DEFAULT_API_PORT;
-use self::app::App;
+use self::app::{App, SharedAppState, UiAction};
 use self::download::{handle_download_event, start_login};
 use self::draw::draw;
 use self::event::DownloadEvent;
+
+/// Options for the web UI server.
+///
+/// Passed to [`api::run_api_server`] when `--web` is enabled so that the
+/// bookmarklet page and PWA manifest use the correct publicly-reachable host
+/// (which may differ from the bind address when behind a reverse proxy).
+#[derive(Clone)]
+pub struct WebOptions {
+    pub public_host: String,
+}
 
 /// RAII guard that ensures terminal cleanup on drop.
 /// Restores terminal to normal mode even if a panic occurs.
@@ -343,19 +318,24 @@ async fn run_headless_loop(
     }
 }
 
-/// Variant of the headless event loop for shared-App mode (`--web`).
+/// Event loop for `--web` mode.  The event loop is the **single owner** of
+/// `App` — no `Arc<Mutex>`.  API handlers communicate through:
 ///
-/// Same as [`run_headless_loop`] but locks the `Arc<Mutex<App>>` around
-/// each batch of work so WebSocket handlers can interleave rendering and
-/// input processing.
-async fn run_headless_loop_shared(
-    app: &Arc<tokio::sync::Mutex<App>>,
+/// * `action_rx` — inbound [`UiAction`] commands (login, pause, etc.)
+/// * `state_tx`  — outbound JSON snapshot pushed via [`tokio::sync::watch`]
+///
+/// Serialisation happens only when state is dirty **and** at least one API
+/// client holds a receiver (`receiver_count() > 1`, since the
+/// [`SharedAppState`] template receiver always counts as one).
+async fn run_web_loop(
+    app: &mut App,
     download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
+    action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
+    state_tx: &tokio::sync::watch::Sender<String>,
 ) {
     let mut progress_interval = tokio::time::interval(Duration::from_secs(30));
     progress_interval.tick().await;
 
-    // Also tick at 100ms to keep download state fresh for WS renderers
     let mut fast_tick = tokio::time::interval(Duration::from_millis(100));
     fast_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -364,6 +344,8 @@ async fn run_headless_loop_shared(
     resource_tick.tick().await;
     let mut sys = System::new();
     let pid = sysinfo::get_current_pid().ok();
+
+    let mut dirty = true; // publish initial state
 
     let shutdown = async {
         let mut sigterm =
@@ -381,35 +363,108 @@ async fn run_headless_loop_shared(
             () = &mut shutdown => break,
             event = download_rx.recv() => {
                 if let Some(evt) = event {
-                    let mut app = app.lock().await;
-                    handle_download_event(&mut app, evt);
-                    drain_download_events(&mut app, download_rx);
-                    drain_token_messages(&mut app);
+                    handle_download_event(app, evt);
+                    drain_download_events(app, download_rx);
+                    drain_token_messages(app);
+                    dirty = true;
                 } else {
                     log::warn!("Event channel closed");
                     break;
                 }
             }
+            Some(action) = action_rx.recv() => {
+                handle_ui_action(app, action);
+                dirty = true;
+            }
             _ = fast_tick.tick() => {
-                let mut app = app.lock().await;
-                drain_download_events(&mut app, download_rx);
+                drain_download_events(app, download_rx);
                 app.update_speeds();
-                drain_token_messages(&mut app);
+                drain_token_messages(app);
             }
             _ = resource_tick.tick() => {
                 if let Some(pid) = pid {
                     use sysinfo::ProcessesToUpdate;
                     sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
                     if let Some(proc) = sys.process(pid) {
-                        let mut app = app.lock().await;
                         app.cpu_usage = proc.cpu_usage();
                         app.memory_rss = proc.memory();
                     }
                 }
+                dirty = true;
             }
             _ = progress_interval.tick() => {
-                let mut app = app.lock().await;
-                log_progress(&mut app);
+                log_progress(app);
+            }
+        }
+
+        // Publish state only when dirty and someone is listening.
+        // receiver_count() > 1 because SharedAppState's template rx is always 1.
+        if dirty && state_tx.receiver_count() > 1 {
+            state_tx.send_replace(app.to_json());
+            dirty = false;
+        }
+    }
+}
+
+/// Translates a [`UiAction`] from an API handler into mutations on `App`.
+fn handle_ui_action(app: &mut App, action: UiAction) {
+    match action {
+        UiAction::AddUrls(urls) => {
+            for url in &urls {
+                let _ = app.url_tx.send(url.clone());
+            }
+            app.urls.extend(urls.iter().cloned());
+            let _ = app.event_tx.send(DownloadEvent::UrlsReceived { urls });
+        }
+        UiAction::Login {
+            email,
+            password,
+            mfa,
+        } => {
+            if app.login.set_credentials(email, password, mfa) {
+                start_login(app);
+            }
+        }
+        UiAction::TogglePause => {
+            app.paused = !app.paused;
+        }
+        UiAction::DeleteFile(name) => {
+            if let Some(token) = app.cancellation_tokens.remove(&name) {
+                token.cancel();
+            }
+            app.deleted_files.insert(name.clone());
+            app.files.retain(|f| f.name != name);
+            app.recompute_totals();
+        }
+        UiAction::RetryFile(name) => {
+            if let Some(f) = app.files.iter_mut().find(|f| f.name == name) {
+                f.status = FileStatus::Queued;
+                f.downloaded = 0;
+                f.speed = 0;
+                f.speed_accum = 0;
+            }
+            // Re-send URL so the download pipeline picks it up
+            if let Some(url) = app.urls.iter().find(|u| u.contains(&name)).cloned() {
+                let _ = app.url_tx.send(url);
+            }
+        }
+        UiAction::UpdateConfig {
+            chunks_per_file,
+            concurrent_files,
+            force_overwrite,
+            cleanup_on_error,
+        } => {
+            if let Some(v) = chunks_per_file {
+                app.config.config.chunks_per_file = v.max(1);
+            }
+            if let Some(v) = concurrent_files {
+                app.config.config.concurrent_files = v.max(1);
+            }
+            if let Some(v) = force_overwrite {
+                app.config.config.force_overwrite = v;
+            }
+            if let Some(v) = cleanup_on_error {
+                app.config.config.cleanup_on_error = v;
             }
         }
     }
@@ -467,9 +522,18 @@ pub async fn run(
     // Start the API server (if enabled)
     if let Some(explicit_host) = api_host {
         let host = explicit_host.unwrap_or(api_bind_host);
+        let web_opts = if web {
+            Some(WebOptions {
+                public_host: host.clone(),
+            })
+        } else {
+            None
+        };
         let api_tx = app.event_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = api::run_api_server(api_tx, &host, api_port, web, None).await {
+            if let Err(e) =
+                api::run_api_server(api_tx, &host, api_port, web_opts.as_ref(), None).await
+            {
                 log::error!("API server error: {e}");
             }
         });
@@ -564,7 +628,9 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     let api_host_owned = api_host.clone();
     tokio::spawn(async move {
         log::info!("Starting API server on {api_host_owned}:{api_port}");
-        if let Err(e) = api::run_api_server(api_tx, &api_host_owned, api_port, false, None).await {
+        if let Err(e) =
+            api::run_api_server(api_tx, &api_host_owned, api_port, None, None).await
+        {
             log::error!("API server error: {e}");
         }
     });
@@ -613,75 +679,42 @@ pub async fn run_web(
 
     app.api_port = api_port;
 
-    // Wrap the App in Arc<Mutex> for sharing with WebSocket handlers
-    let shared_app = Arc::new(tokio::sync::Mutex::new(app));
+    // Channel-based shared state — no locks, no Arc<Mutex<App>>.
+    let (action_tx, mut action_rx) = mpsc::unbounded_channel::<UiAction>();
+    let (state_tx, state_rx) = tokio::sync::watch::channel(String::new());
+    let shared = SharedAppState {
+        action_tx,
+        state_rx,
+    };
+    let web_opts = WebOptions {
+        public_host: api_host.clone(),
+    };
 
     // Start the API + web server
-    let api_tx = {
-        let app = shared_app.lock().await;
-        app.event_tx.clone()
-    };
+    let api_tx = app.event_tx.clone();
     let api_host_owned = api_host.clone();
-    let shared_app_clone = shared_app.clone();
     tokio::spawn(async move {
         log::info!("Starting web TUI on {api_host_owned}:{api_port}");
         if let Err(e) =
-            api::run_api_server(api_tx, &api_host_owned, api_port, true, Some(shared_app_clone))
+            api::run_api_server(api_tx, &api_host_owned, api_port, Some(&web_opts), Some(shared))
                 .await
         {
             log::error!("API server error: {e}");
         }
     });
 
-    {
-        let mut app = shared_app.lock().await;
-        resume_session(&mut app);
-        load_credentials_from_env(&mut app);
-        auto_login(&mut app, app::NoCredentialsFallback::ShowPopup);
-    }
+    resume_session(&mut app);
+    load_credentials_from_env(&mut app);
+    auto_login(&mut app, app::NoCredentialsFallback::ShowPopup);
 
     eprintln!("octo-dl web TUI running at http://{api_host}:{api_port}");
     log::info!("Entering web TUI event loop");
 
-    run_headless_loop_shared(&shared_app, &mut download_rx).await;
+    run_web_loop(&mut app, &mut download_rx, &mut action_rx, &state_tx).await;
 
-    {
-        let mut app = shared_app.lock().await;
-        sync_session_on_shutdown(&mut app);
-    }
+    sync_session_on_shutdown(&mut app);
     log::info!("Shutdown complete");
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::layout::Rect;
 
-    #[test]
-    fn buf_writer_drain() {
-        let mut w = BufWriter::default();
-        std::io::Write::write_all(&mut w, b"hello").unwrap();
-        let data = w.drain();
-        assert_eq!(data, b"hello");
-        assert!(w.drain().is_empty(), "drain should leave buffer empty");
-    }
-
-    #[test]
-    fn buf_writer_with_crossterm_backend() {
-        let buf = BufWriter::default();
-        let backend = CrosstermBackend::new(buf);
-        let mut terminal = Terminal::with_options(
-            backend,
-            ratatui::TerminalOptions {
-                viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 80, 24)),
-            },
-        )
-        .unwrap();
-
-        terminal.draw(|_frame| {}).unwrap();
-        let data = terminal.backend_mut().writer_mut().drain();
-        // First frame should produce ANSI output (cursor movement, clear, etc.)
-        assert!(!data.is_empty(), "first draw should produce ANSI output");
-    }
-}
