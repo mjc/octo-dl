@@ -107,7 +107,7 @@ pub async fn run(api_host: Option<String>) -> io::Result<()> {
     let pid = sysinfo::get_current_pid().ok();
 
     loop {
-        terminal.draw(|f| draw(f, &app))?;
+        terminal.draw(|f| draw(f, &mut app))?;
 
         // Sample CPU/memory every 50 ticks (~5s) to reduce /proc scanning overhead
         tick_count += 1;
@@ -289,6 +289,7 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     progress_interval.tick().await; // consume the immediate first tick
 
     // Shutdown future: resolves on SIGINT or SIGTERM (systemd sends SIGTERM)
+    #[cfg(unix)]
     let shutdown = async {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("failed to register SIGTERM handler");
@@ -297,6 +298,13 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
             _ = sigterm.recv() => log::info!("Received SIGTERM"),
         }
     };
+    
+    #[cfg(not(unix))]
+    let shutdown = async {
+        tokio::signal::ctrl_c().await.ok();
+        log::info!("Received SIGINT");
+    };
+    
     tokio::pin!(shutdown);
 
     // Headless event loop — process download events until signal

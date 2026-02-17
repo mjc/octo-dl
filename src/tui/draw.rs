@@ -9,7 +9,7 @@ use crate::format_bytes;
 
 use super::app::{App, ConfigField, FileStatus, Popup};
 
-pub fn draw(frame: &mut ratatui::Frame, app: &App) {
+pub fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     draw_main(frame, app);
     match app.popup {
         Popup::None => {}
@@ -19,14 +19,14 @@ pub fn draw(frame: &mut ratatui::Frame, app: &App) {
 }
 
 #[allow(clippy::too_many_lines)]
-fn draw_main(frame: &mut ratatui::Frame, app: &App) {
+fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
     let area = frame.area();
 
     // Outer block with title bar
     let title = " octo-dl ".to_string();
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let title_right = format!(
-        " {}% CPU | {} RAM | API: :{}{}",
+        " {}% CPU | {} RAM | API: {}{}",
         (app.cpu_usage as u16).min(999),
         format_bytes(app.memory_rss),
         app.api_port,
@@ -187,7 +187,7 @@ fn build_status_line(app: &App) -> Vec<Span<'_>> {
     spans
 }
 
-fn draw_file_list(frame: &mut ratatui::Frame, app: &App, area: Rect) {
+fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     // Sort files: downloading first, then queued, then complete, then error
     let mut indexed: Vec<_> = app.files.iter().enumerate().collect();
     indexed.sort_by_key(|(_, f)| match &f.status {
@@ -243,7 +243,7 @@ fn draw_file_list(frame: &mut ratatui::Frame, app: &App, area: Rect) {
         .collect();
 
     let file_list = List::new(items).block(Block::default().borders(Borders::ALL));
-    frame.render_stateful_widget(file_list, area, &mut app.file_list_state.clone());
+    frame.render_stateful_widget(file_list, area, &mut app.file_list_state);
 }
 
 fn progress_bar(downloaded: u64, total: u64, width: usize) -> String {

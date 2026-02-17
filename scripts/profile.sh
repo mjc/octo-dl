@@ -83,10 +83,10 @@ if [ ${#URLS[@]} -eq 0 ] && [ "$TUI" = false ]; then
 fi
 
 # Build with native CPU + frame pointers
-RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" cargo build --release
+RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" cargo build --profile profiling
 
 # Select binary and build args
-BINARY="$PROJECT_DIR/target/release/octo"
+BINARY="$PROJECT_DIR/target/profiling/octo"
 if [ "$TUI" = true ]; then
     # TUI takes --api-host flag for API server binding
     BIN_ARGS=(--tui --api-host 0.0.0.0)

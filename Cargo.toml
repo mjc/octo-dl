@@ -70,9 +70,13 @@ split-debuginfo = "unpacked"
 opt-level = 1
 
 [profile.release]
-#lto = true
-#codegen-units = 1
-#panic = "abort"
-#strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
 overflow-checks = true
+
+[profile.profiling]
+inherits = "release"
 debug = true
+strip = false

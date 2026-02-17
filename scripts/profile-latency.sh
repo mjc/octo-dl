@@ -91,10 +91,10 @@ sudo chmod -R a+rx /sys/kernel/tracing 2>/dev/null || true
 sudo chmod -R a+rx /sys/kernel/debug/tracing 2>/dev/null || true
 
 # Build with profiling profile
-RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" cargo build --release
+RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" cargo build --profile profiling
 
 # Select binary and build args
-BINARY="$PROJECT_DIR/target/release/octo"
+BINARY="$PROJECT_DIR/target/profiling/octo"
 if [ "$TUI" = true ]; then
     BIN_ARGS=(--tui)
 else
