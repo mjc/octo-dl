@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
@@ -125,7 +125,7 @@ async fn bookmarklet_page(State(state): State<AppState>, headers: HeaderMap) -> 
 <a class="bookmarklet" href="javascript:void(function(){{var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var proto=window.location.protocol;var h=proto+'//{fallback_host}';fetch(h+'/api/parse',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{page:page,fallback:selected}})}}).then(function(r){{return r.json()}}).then(function(d){{if(d.count>0){{alert('Sent '+d.count+' URL(s) to octo-dl')}}else{{alert('No URLs found on this page')}}}}).catch(function(e){{alert('Error: '+e)}})}})()">
   Send to octo-dl
 </a>
-<p>Click it on any page to send the selected text (or the page URL) to octo-dl for download.</p>
+<p>Click it on any page to send the page HTML (with selected text as fallback) to octo-dl for download.</p>
 <p>Configured to use <code>{fallback_host}</code></p>
 </body>
 </html>"#
@@ -159,6 +159,7 @@ pub async fn run_api_server(
         .route("/api/urls", post(api_post_urls))
         .route("/api/parse", post(api_parse_page))
         .layer(cors)
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB limit
         .with_state(state);
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;

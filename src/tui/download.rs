@@ -120,7 +120,15 @@ pub fn handle_file_complete(app: &mut App, name: &str) {
     app.files_completed += 1;
 
     if let Some(ref mut session) = app.session {
-        let _ = session.remove_file(name);
+        let full_path = if let Some(ref download_dir) = app.config.config.path {
+            std::path::Path::new(download_dir)
+                .join(name)
+                .to_string_lossy()
+                .to_string()
+        } else {
+            name.to_string()
+        };
+        let _ = session.remove_file(&full_path);
     }
 
     if app.files_completed == app.files_total && app.files_total > 0 {
@@ -147,7 +155,15 @@ pub fn handle_file_error(app: &mut App, name: &str, error: &str) {
     }
 
     if let Some(ref mut session) = app.session {
-        let _ = session.mark_file_error(name, error);
+        let full_path = if let Some(ref download_dir) = app.config.config.path {
+            std::path::Path::new(download_dir)
+                .join(name)
+                .to_string_lossy()
+                .to_string()
+        } else {
+            name.to_string()
+        };
+        let _ = session.mark_file_error(&full_path, error);
     }
 }
 
@@ -281,7 +297,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             if app.deleted_files.contains(&name) {
                 return;
             }
-            // Add a real file entry with name and size
+            // Add a realfile entry with name and size
             if let Some(fp) = app.files.iter_mut().find(|f| f.name == name) {
                 fp.size = size;
             } else {
@@ -296,16 +312,26 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             }
 
             // Track file in session for resume support
-            if let Some(ref mut session) = app.session
-                && !session.files.iter().any(|f| f.path == name)
-            {
-                session.files.push(crate::FileEntry {
-                    url_index: 0,
-                    path: name,
-                    size,
-                    status: crate::FileEntryStatus::Pending,
-                });
-                let _ = session.save();
+            // Use full path: download directory + filename
+            if let Some(ref mut session) = app.session {
+                let full_path = if let Some(ref download_dir) = app.config.config.path {
+                    std::path::Path::new(download_dir)
+                        .join(&name)
+                        .to_string_lossy()
+                        .to_string()
+                } else {
+                    name.clone()
+                };
+
+                if !session.files.iter().any(|f| f.path == full_path) {
+                    session.files.push(crate::FileEntry {
+                        url_index: 0,
+                        path: full_path,
+                        size,
+                        status: crate::FileEntryStatus::Pending,
+                    });
+                    let _ = session.save();
+                }
             }
         }
         DownloadEvent::UrlResolved { url } => {

@@ -2,9 +2,16 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use base64::Engine;
 use regex::Regex;
+
+static URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"https?://mega\.nz/[^\s"'<>\[\](){}]+"#).expect("valid regex"));
+
+static LEGACY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"https?://mega\.nz/#[F!][^\s"'<>\[\](){}]+"#).expect("valid regex"));
 
 /// Extracts MEGA URLs and DLC file paths from raw input text.
 ///
@@ -19,15 +26,12 @@ use regex::Regex;
 /// constant and will not happen in practice).
 #[must_use]
 pub fn extract_urls(input: &str) -> Vec<String> {
-    let url_re = Regex::new(r#"https?://mega\.nz/[^\s"'<>\[\](){}]+"#).expect("valid regex");
-    let legacy_re =
-        Regex::new(r#"https?://mega\.nz/#[F!][^\s"'<>\[\](){}]+"#).expect("valid regex");
     let mut seen = HashSet::new();
     let mut result: Vec<String> = Vec::new();
 
     // Match legacy URLs first so they get normalized before the modern regex
     // would capture them as raw (unusable) strings.
-    for m in legacy_re.find_iter(input) {
+    for m in LEGACY_RE.find_iter(input) {
         let url = normalize_mega_url(m.as_str());
         if seen.insert(url.clone()) {
             result.push(url);
@@ -37,7 +41,7 @@ pub fn extract_urls(input: &str) -> Vec<String> {
     }
 
     // Pull modern-format URLs out of the entire input.
-    for m in url_re.find_iter(input) {
+    for m in URL_RE.find_iter(input) {
         let url = m.as_str().to_string();
         if seen.insert(url.clone()) {
             result.push(url);
@@ -55,12 +59,12 @@ pub fn extract_urls(input: &str) -> Vec<String> {
         }
 
         // If the token already matched a URL above, skip decode attempts
-        if url_re.is_match(token) {
+        if URL_RE.is_match(token) {
             continue;
         }
 
         // Try base64 decoding up to 3 times
-        try_decode_base64(token, &url_re, 3, &mut seen, &mut result);
+        try_decode_base64(token, 3, &mut seen, &mut result);
     }
 
     result
@@ -70,7 +74,6 @@ pub fn extract_urls(input: &str) -> Vec<String> {
 /// any discovered MEGA URLs or DLC paths into `result`.
 fn try_decode_base64(
     token: &str,
-    url_re: &Regex,
     max_rounds: usize,
     seen: &mut HashSet<String>,
     result: &mut Vec<String>,
@@ -86,8 +89,16 @@ fn try_decode_base64(
         };
         decoded = s;
 
-        // Check for URLs in decoded result
-        for m in url_re.find_iter(&decoded) {
+        // Check for legacy URLs first and normalize them
+        for m in LEGACY_RE.find_iter(&decoded) {
+            let url = normalize_mega_url(m.as_str());
+            if seen.insert(url.clone()) {
+                result.push(url);
+            }
+        }
+
+        // Check for modern URLs in decoded result
+        for m in URL_RE.find_iter(&decoded) {
             let url = m.as_str().to_string();
             if seen.insert(url.clone()) {
                 result.push(url);
