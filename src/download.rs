@@ -328,8 +328,10 @@ impl<F: FileSystem> Downloader<F> {
                 Ok(file_stats)
             }
             Err(e) => {
-                // Clean up .part file on error/cancellation
-                let _ = self.fs.remove_file(&pp).await;
+                // Clean up .part file on error/cancellation only if configured
+                if self.config.cleanup_on_error {
+                    let _ = self.fs.remove_file(&pp).await;
+                }
                 if !matches!(e, Error::Cancelled) {
                     progress.on_error(&name_clone, &e.to_string());
                 }

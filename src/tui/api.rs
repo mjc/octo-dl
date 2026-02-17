@@ -1,4 +1,16 @@
 //! HTTP API server for receiving URLs from the bookmarklet.
+//!
+//! # Security Notice
+//!
+//! This API server has **no authentication** and accepts requests from any origin (CORS: `*`).
+//! It should only be used:
+//! - On `localhost` / `127.0.0.1` for local-only access
+//! - Behind Tailscale or similar VPN for trusted network access
+//! - **Never** exposed directly to the public internet
+//!
+//! The server accepts arbitrary HTML content and URL lists from clients. While request bodies
+//! are limited to 10MB, this is not a substitute for authentication. For production deployments,
+//! consider adding reverse proxy authentication (e.g., Tailscale, Caddy with auth middleware).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -133,6 +145,11 @@ async fn bookmarklet_page(State(state): State<AppState>, headers: HeaderMap) -> 
 }
 
 /// Starts the HTTP API server for receiving URLs from the bookmarklet.
+///
+/// # Security
+///
+/// This server has no authentication. Only bind to `localhost` or use behind
+/// a trusted network (e.g., Tailscale). Never expose directly to the internet.
 ///
 /// # Errors
 ///
