@@ -328,9 +328,8 @@ impl<F: FileSystem> Downloader<F> {
                 Ok(file_stats)
             }
             Err(e) => {
-                // Always clean up .part file on cancellation; otherwise respect config
-                let should_cleanup = matches!(e, Error::Cancelled) || self.config.cleanup_on_error;
-                if should_cleanup {
+                // Keep .part files for future resume support; only clean up if configured
+                if self.config.cleanup_on_error && !matches!(e, Error::Cancelled) {
                     let _ = self.fs.remove_file(&pp).await;
                 }
                 if !matches!(e, Error::Cancelled) {
