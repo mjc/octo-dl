@@ -42,7 +42,7 @@ fn handle_login_input(app: &mut App, key: KeyEvent) {
             };
         }
         KeyCode::Enter => {
-            if app.login.email.is_empty() || app.login.password.is_empty() {
+            if !app.login.has_credentials() {
                 app.login.error = Some("Email and password are required".to_string());
             } else {
                 app.login.error = None;
@@ -255,9 +255,8 @@ pub fn add_url(app: &mut App, url: String) {
         });
         let _ = session.save();
     }
-    if let Some(ref url_tx) = app.url_tx {
-        let _ = url_tx.send(url);
-    }
+    // Always succeeds — URLs buffer in the channel until the download task starts.
+    let _ = app.url_tx.send(url);
 }
 
 #[cfg(test)]
@@ -363,8 +362,7 @@ mod tests {
     fn handle_login_input_validates_empty() {
         let mut app = test_app();
         app.popup = Popup::Login;
-        app.login.email.clear();
-        app.login.password.clear();
+        // LoginState starts with empty credentials by default
         handle_input(&mut app, key(KeyCode::Enter));
         assert_eq!(
             app.login.error,
@@ -404,9 +402,8 @@ mod tests {
         let mut app = test_app();
         app.popup = Popup::Login;
         app.login.active_field = 0;
-        app.login.email.clear();
         handle_paste(&mut app, "  user@example.com  ");
-        assert_eq!(app.login.email, "user@example.com");
+        assert_eq!(app.login.email(), "user@example.com");
     }
 
     #[test]
@@ -420,8 +417,9 @@ mod tests {
     #[test]
     fn handle_main_input_url_submit() {
         let mut app = test_app();
+        // Replace the url_tx so we can observe what's sent
         let (url_tx, mut url_rx) = mpsc::unbounded_channel();
-        app.url_tx = Some(url_tx);
+        app.url_tx = url_tx;
         app.url_input = "https://mega.nz/file/test123".to_string();
 
         handle_input(&mut app, key(KeyCode::Enter));
