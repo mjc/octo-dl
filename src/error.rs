@@ -31,6 +31,10 @@ pub enum Error {
     /// HTTP request error.
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
+
+    /// Download was cancelled by user.
+    #[error("Download cancelled")]
+    Cancelled,
 }
 
 /// A specialized `Result` type for octo-dl operations.

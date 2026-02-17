@@ -1,11 +1,13 @@
 //! DLC file parsing for `JDownloader2` encrypted containers.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+
 use aes::Aes128;
 use aes::cipher::{BlockDecryptMut, KeyInit, KeyIvInit};
 use base64::Engine;
 use cbc::Decryptor;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use regex::Regex;
 
 use crate::error::{Error, Result};
 
@@ -131,26 +133,21 @@ async fn get_decryption_key(
         return Some(cached);
     }
 
-    let mut retry_count = 0;
-
-    loop {
+    for attempt in 0..=MAX_RETRIES {
         match call_decryption_service(dlc_key, http_client).await {
             Some(key) => {
-                // Cache the result
                 cache.set(dlc_key.to_string(), key.clone());
                 return Some(key);
             }
-            None if retry_count < MAX_RETRIES => {
-                // Exponential backoff: 1s, 2s, 4s, 8s
-                let delay = std::time::Duration::from_secs(1 << retry_count);
+            None if attempt < MAX_RETRIES => {
+                let delay = std::time::Duration::from_secs(1 << attempt);
                 eprintln!(
                     "DLC service call failed, retrying in {:?}... (attempt {}/{})",
                     delay,
-                    retry_count + 1,
+                    attempt + 1,
                     MAX_RETRIES
                 );
                 tokio::time::sleep(delay).await;
-                retry_count += 1;
             }
             None => {
                 eprintln!("DLC service unreachable after {MAX_RETRIES} attempts");
@@ -158,6 +155,7 @@ async fn get_decryption_key(
             }
         }
     }
+    None
 }
 
 /// Call `JDownloader`'s DLC decryption service
@@ -231,9 +229,8 @@ fn decrypt_service_key(encrypted_key: &str) -> Option<String> {
     }
 
     // Strip null padding bytes (ECB NoPadding leaves them)
-    while !decrypted.is_empty() && decrypted.last() == Some(&0) {
-        decrypted.pop();
-    }
+    let end = decrypted.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    decrypted.truncate(end);
 
     // The decrypted result is base64 encoded again, decode it
     let decoded = String::from_utf8(decrypted).ok()?;
@@ -297,31 +294,27 @@ fn decrypt_aes_cbc(encrypted: &[u8], key_str: &str) -> Option<String> {
 
 /// Extract all MEGA links from decrypted DLC XML
 fn extract_mega_links_from_xml(xml: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-
-    // Simple regex-free approach: find <url> tags
-    let mut content = xml;
-    while let Some(start) = content.find("<url>") {
-        let after_tag = &content[start + 5..];
-        if let Some(end) = after_tag.find("</url>") {
-            let encoded_url = &after_tag[..end];
-
-            // URLs inside DLC XML are base64 encoded
-            if let Ok(decoded_bytes) = base64::engine::general_purpose::STANDARD.decode(encoded_url)
-                && let Ok(url) = String::from_utf8(decoded_bytes)
-                && (url.starts_with("https://mega.nz/") || url.starts_with("http://mega.nz/"))
-                && !urls.contains(&url)
-            {
-                urls.push(url);
+    let tag_re = Regex::new(r"<url>([^<]+)</url>").expect("valid regex");
+    let mut seen = HashSet::new();
+    tag_re
+        .captures_iter(xml)
+        .filter_map(|cap| {
+            let encoded = cap.get(1)?.as_str();
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .ok()?;
+            let raw_url = String::from_utf8(bytes).ok()?;
+            if !raw_url.starts_with("https://mega.nz/") && !raw_url.starts_with("http://mega.nz/") {
+                return None;
             }
-
-            content = &after_tag[end + 6..];
-        } else {
-            break;
-        }
-    }
-
-    urls
+            let url = crate::normalize_mega_url(&raw_url);
+            if seen.insert(url.clone()) {
+                Some(url)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Check if a string is valid base64
@@ -445,10 +438,7 @@ mod tests {
         // Base64 encode "https://mega.nz/file/abc123#key456"
         let encoded =
             base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/abc123#key456");
-        let xml = format!(
-            "<dlc><content><file><url>{}</url></file></content></dlc>",
-            encoded
-        );
+        let xml = format!("<dlc><content><file><url>{encoded}</url></file></content></dlc>");
         let urls = extract_mega_links_from_xml(&xml);
         assert_eq!(urls.len(), 1);
         assert_eq!(urls[0], "https://mega.nz/file/abc123#key456");
@@ -460,11 +450,11 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/test1#key1");
         let url2 =
             base64::engine::general_purpose::STANDARD.encode("https://mega.nz/folder/test2#key2");
-        let xml = format!("<dlc><url>{}</url><url>{}</url></dlc>", url1, url2);
-        let urls = extract_mega_links_from_xml(&xml);
-        assert_eq!(urls.len(), 2);
-        assert!(urls.contains(&"https://mega.nz/file/test1#key1".to_string()));
-        assert!(urls.contains(&"https://mega.nz/folder/test2#key2".to_string()));
+        let xml = format!("<dlc><url>{url1}</url><url>{url2}</url></dlc>");
+        let extracted_urls = extract_mega_links_from_xml(&xml);
+        assert_eq!(extracted_urls.len(), 2);
+        assert!(extracted_urls.contains(&"https://mega.nz/file/test1#key1".to_string()));
+        assert!(extracted_urls.contains(&"https://mega.nz/folder/test2#key2".to_string()));
     }
 
     #[test]
@@ -473,10 +463,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/abc#123");
         let google_url =
             base64::engine::general_purpose::STANDARD.encode("https://google.com/search");
-        let xml = format!(
-            "<dlc><url>{}</url><url>{}</url></dlc>",
-            mega_url, google_url
-        );
+        let xml = format!("<dlc><url>{mega_url}</url><url>{google_url}</url></dlc>");
         let urls = extract_mega_links_from_xml(&xml);
         assert_eq!(urls.len(), 1);
         assert!(urls[0].starts_with("https://mega.nz/"));
@@ -486,7 +473,7 @@ mod tests {
     fn extract_handles_http_mega_links() {
         let url =
             base64::engine::general_purpose::STANDARD.encode("http://mega.nz/file/oldformat#key");
-        let xml = format!("<dlc><url>{}</url></dlc>", url);
+        let xml = format!("<dlc><url>{url}</url></dlc>");
         let urls = extract_mega_links_from_xml(&xml);
         assert_eq!(urls.len(), 1);
         assert!(urls[0].starts_with("http://mega.nz/"));
@@ -495,7 +482,7 @@ mod tests {
     #[test]
     fn extract_deduplicates_urls() {
         let url = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/same#key");
-        let xml = format!("<dlc><url>{}</url><url>{}</url></dlc>", url, url);
+        let xml = format!("<dlc><url>{url}</url><url>{url}</url></dlc>");
         let urls = extract_mega_links_from_xml(&xml);
         assert_eq!(urls.len(), 1);
     }
@@ -524,8 +511,7 @@ mod tests {
         let url =
             base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/nested#key");
         let xml = format!(
-            r#"<dlc><header></header><content><package name="test"><file><url>{}</url></file></package></content></dlc>"#,
-            url
+            r#"<dlc><header></header><content><package name="test"><file><url>{url}</url></file></package></content></dlc>"#
         );
         let urls = extract_mega_links_from_xml(&xml);
         assert_eq!(urls.len(), 1);
@@ -579,7 +565,7 @@ mod tests {
     fn decrypt_service_key_handles_empty_input() {
         // Empty base64 decodes to empty bytes, which produces empty key
         let result = decrypt_service_key("");
-        assert_eq!(result, Some("".to_string()));
+        assert_eq!(result, Some(String::new()));
     }
 
     // =========================================================================
@@ -624,7 +610,7 @@ mod tests {
         // MEGA URLs can have # and other special chars
         let url = base64::engine::general_purpose::STANDARD
             .encode("https://mega.nz/file/ABC123#key!@#$%^&*()");
-        let xml = format!("<dlc><url>{}</url></dlc>", url);
+        let xml = format!("<dlc><url>{url}</url></dlc>");
         let urls = extract_mega_links_from_xml(&xml);
         assert_eq!(urls.len(), 1);
     }
@@ -633,8 +619,8 @@ mod tests {
     fn extract_handles_very_long_url() {
         let long_key = "x".repeat(200);
         let url = base64::engine::general_purpose::STANDARD
-            .encode(format!("https://mega.nz/file/ABC123#{}", long_key));
-        let xml = format!("<dlc><url>{}</url></dlc>", url);
+            .encode(format!("https://mega.nz/file/ABC123#{long_key}"));
+        let xml = format!("<dlc><url>{url}</url></dlc>");
         let urls = extract_mega_links_from_xml(&xml);
         assert_eq!(urls.len(), 1);
     }
@@ -648,13 +634,13 @@ mod tests {
 
         let t1 = thread::spawn(move || {
             for i in 0..100 {
-                cache1.set(format!("key{}", i), format!("value{}", i));
+                cache1.set(format!("key{i}"), format!("value{i}"));
             }
         });
 
         let t2 = thread::spawn(move || {
             for i in 0..100 {
-                let _ = cache2.get(&format!("key{}", i));
+                let _ = cache2.get(&format!("key{i}"));
             }
         });
 
@@ -667,7 +653,7 @@ mod tests {
     fn extract_handles_malformed_xml() {
         // Missing closing tag
         let url = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/abc#key");
-        let xml = format!("<dlc><url>{}", url);
+        let xml = format!("<dlc><url>{url}");
         let urls = extract_mega_links_from_xml(&xml);
         assert!(urls.is_empty());
     }
@@ -677,11 +663,31 @@ mod tests {
         // Real DLC files might have attributes we ignore
         let url = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/abc#key");
         // Note: our simple parser won't handle attributes, just testing it doesn't crash
-        let xml = format!("<dlc><url type=\"http\">{}</url></dlc>", url);
+        let xml = format!("<dlc><url type=\"http\">{url}</url></dlc>");
         // Current implementation will find "<url>" without attributes
         let urls = extract_mega_links_from_xml(&xml);
         // This might be empty since we look for exact "<url>" match
         // That's okay - we're testing it doesn't crash
         let _ = urls;
+    }
+
+    #[tokio::test]
+    #[ignore] // requires local DLC file
+    async fn parse_dlc_converts_legacy_urls() {
+        let http = reqwest::Client::builder()
+            .user_agent("JDownloader/2.0 (octo-dl/test)")
+            .build()
+            .unwrap();
+        let cache = DlcKeyCache::new();
+        let result = parse_dlc_file("/home/mjc/chuck_s01.dlc", &http, &cache).await;
+        let urls = result.expect("parse_dlc_file should succeed");
+        assert!(!urls.is_empty(), "should find MEGA links");
+        for url in &urls {
+            assert!(
+                url.starts_with("https://mega.nz/folder/")
+                    || url.starts_with("https://mega.nz/file/"),
+                "URL should be modern format, got: {url}"
+            );
+        }
     }
 }
