@@ -1,13 +1,10 @@
 //! Application state model.
 
 use std::collections::{HashMap, HashSet};
-use std::env;
-use std::sync::Arc;
 use std::time::Instant;
 
 use ratatui::widgets::ListState;
-use serde::Serialize;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{DownloadConfig, SessionState};
@@ -21,10 +18,19 @@ pub enum Popup {
     Config,
 }
 
+/// What to do when `auto_login` finds no credentials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoCredentialsFallback {
+    /// Open the login popup so the user can type them in.
+    ShowPopup,
+    /// Do nothing — used by headless API mode.
+    Silent,
+}
+
 pub struct LoginState {
-    pub email: String,
-    pub password: String,
-    pub mfa: String,
+    email: String,
+    password: String,
+    mfa: String,
     pub active_field: usize,
     pub error: Option<String>,
     pub logging_in: bool,
@@ -33,12 +39,66 @@ pub struct LoginState {
 impl LoginState {
     pub fn new() -> Self {
         Self {
-            email: env::var("MEGA_EMAIL").unwrap_or_default(),
-            password: env::var("MEGA_PASSWORD").unwrap_or_default(),
-            mfa: env::var("MEGA_MFA").unwrap_or_default(),
+            email: String::new(),
+            password: String::new(),
+            mfa: String::new(),
             active_field: 0,
             error: None,
             logging_in: false,
+        }
+    }
+
+    /// Sets credentials, rejecting empty strings.
+    ///
+    /// Returns `true` if both email and password were non-empty and stored.
+    pub fn set_credentials(&mut self, email: String, password: String, mfa: String) -> bool {
+        if email.is_empty() || password.is_empty() {
+            return false;
+        }
+        self.email = email;
+        self.password = password;
+        self.mfa = mfa;
+        true
+    }
+
+    /// Fills in credentials only where the current value is empty.
+    ///
+    /// Used for fallback sources (env vars) that should not override
+    /// explicit sources (config file, session).
+    pub fn set_credentials_if_missing(&mut self, email: &str, password: &str, mfa: &str) {
+        if self.email.is_empty() && !email.is_empty() {
+            self.email = email.to_owned();
+        }
+        if self.password.is_empty() && !password.is_empty() {
+            self.password = password.to_owned();
+        }
+        if self.mfa.is_empty() && !mfa.is_empty() {
+            self.mfa = mfa.to_owned();
+        }
+    }
+
+    pub fn has_credentials(&self) -> bool {
+        !self.email.is_empty() && !self.password.is_empty()
+    }
+
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+
+    pub fn mfa(&self) -> &str {
+        &self.mfa
+    }
+
+    /// Returns `Some(mfa)` when non-empty, `None` otherwise.
+    pub fn mfa_option(&self) -> Option<&str> {
+        if self.mfa.is_empty() {
+            None
+        } else {
+            Some(&self.mfa)
         }
     }
 
@@ -140,8 +200,14 @@ pub struct App {
     pub config: ConfigState,
     // Channels
     pub event_tx: mpsc::UnboundedSender<DownloadEvent>,
-    pub url_tx: Option<mpsc::UnboundedSender<String>>,
-    pub token_rx: Option<mpsc::UnboundedReceiver<TokenMessage>>,
+    /// Always valid — URLs buffer in the channel until the download task starts.
+    pub url_tx: mpsc::UnboundedSender<String>,
+    /// Taken by `start_download_task` to give the receiver to the download task.
+    pub(super) url_rx: Option<mpsc::UnboundedReceiver<String>>,
+    /// Always valid — tokens arrive once the download task is running.
+    pub token_rx: mpsc::UnboundedReceiver<TokenMessage>,
+    /// Taken by `start_download_task` to give the sender to the download task.
+    pub(super) token_tx: Option<mpsc::UnboundedSender<TokenMessage>>,
     /// Receives the authenticated client from the login task.
     pub client_rx: Option<tokio::sync::oneshot::Receiver<(mega::Client, reqwest::Client)>>,
     // Cancellation tokens for active downloads (maps file path to token)
@@ -213,6 +279,8 @@ impl App {
     }
 
     pub fn new(api_port: u16, event_tx: mpsc::UnboundedSender<DownloadEvent>) -> Self {
+        let (url_tx, url_rx) = mpsc::unbounded_channel::<String>();
+        let (token_tx, token_rx) = mpsc::unbounded_channel::<TokenMessage>();
         Self {
             popup: Popup::None,
             should_quit: false,
@@ -231,8 +299,10 @@ impl App {
             paused: false,
             config: ConfigState::new(),
             event_tx,
-            url_tx: None,
-            token_rx: None,
+            url_tx,
+            url_rx: Some(url_rx),
+            token_rx,
+            token_tx: Some(token_tx),
             client_rx: None,
             cancellation_tokens: HashMap::new(),
             deleted_files: HashSet::new(),
@@ -241,161 +311,6 @@ impl App {
             cpu_usage: 0.0,
             last_tick: Instant::now(),
             memory_rss: 0,
-        }
-    }
-}
-
-// =============================================================================
-// Web UI shared state types
-// =============================================================================
-
-/// Serializable snapshot of a file entry for the web UI.
-#[derive(Debug, Clone, Serialize)]
-pub struct FileEntrySnapshot {
-    pub name: String,
-    pub size: u64,
-    pub downloaded: u64,
-    pub speed: u64,
-    pub status: String,
-    pub error: Option<String>,
-}
-
-impl From<&FileEntry> for FileEntrySnapshot {
-    fn from(f: &FileEntry) -> Self {
-        let (status, error) = match &f.status {
-            FileStatus::Queued => ("queued".to_string(), None),
-            FileStatus::Downloading => ("downloading".to_string(), None),
-            FileStatus::Complete => ("complete".to_string(), None),
-            FileStatus::Error(e) => ("error".to_string(), Some(e.clone())),
-        };
-        Self {
-            name: f.name.clone(),
-            size: f.size,
-            downloaded: f.downloaded,
-            speed: f.speed,
-            status,
-            error,
-        }
-    }
-}
-
-/// Serializable snapshot of the full application state for the web UI.
-#[derive(Debug, Clone, Serialize)]
-pub struct AppSnapshot {
-    pub authenticated: bool,
-    pub logging_in: bool,
-    pub login_error: Option<String>,
-    pub paused: bool,
-    pub status: String,
-    pub files: Vec<FileEntrySnapshot>,
-    pub total_downloaded: u64,
-    pub total_size: u64,
-    pub files_completed: usize,
-    pub files_total: usize,
-    pub current_speed: u64,
-    pub cpu_usage: f32,
-    pub memory_rss: u64,
-    pub config: DownloadConfigSnapshot,
-    pub url_input: String,
-}
-
-/// Serializable snapshot of download configuration.
-#[derive(Debug, Clone, Serialize)]
-pub struct DownloadConfigSnapshot {
-    pub chunks_per_file: usize,
-    pub concurrent_files: usize,
-    pub force_overwrite: bool,
-    pub cleanup_on_error: bool,
-}
-
-impl From<&DownloadConfig> for DownloadConfigSnapshot {
-    fn from(c: &DownloadConfig) -> Self {
-        Self {
-            chunks_per_file: c.chunks_per_file,
-            concurrent_files: c.concurrent_files,
-            force_overwrite: c.force_overwrite,
-            cleanup_on_error: c.cleanup_on_error,
-        }
-    }
-}
-
-impl App {
-    /// Creates a serializable snapshot of the current application state.
-    pub fn snapshot(&self) -> AppSnapshot {
-        AppSnapshot {
-            authenticated: self.authenticated,
-            logging_in: self.login.logging_in,
-            login_error: self.login.error.clone(),
-            paused: self.paused,
-            status: self.status.clone(),
-            files: self.files.iter().map(FileEntrySnapshot::from).collect(),
-            total_downloaded: self.total_downloaded,
-            total_size: self.total_size,
-            files_completed: self.files_completed,
-            files_total: self.files_total,
-            current_speed: self.current_speed,
-            cpu_usage: self.cpu_usage,
-            memory_rss: self.memory_rss,
-            config: DownloadConfigSnapshot::from(&self.config.config),
-            url_input: self.url_input.clone(),
-        }
-    }
-}
-
-/// Actions that the web UI can send to the backend event loop.
-#[derive(Debug, Clone)]
-pub enum UiAction {
-    Login {
-        email: String,
-        password: String,
-        mfa: String,
-    },
-    AddUrls(Vec<String>),
-    TogglePause,
-    DeleteFile(String),
-    RetryFile(String),
-    UpdateConfig {
-        chunks_per_file: Option<usize>,
-        concurrent_files: Option<usize>,
-        force_overwrite: Option<bool>,
-        cleanup_on_error: Option<bool>,
-    },
-}
-
-/// Shared state container accessible from both the event loop and API handlers.
-#[derive(Clone)]
-pub struct SharedAppState {
-    /// Latest application snapshot, updated each tick.
-    pub snapshot: Arc<RwLock<AppSnapshot>>,
-    /// Broadcast channel for SSE — subscribers receive snapshots.
-    pub broadcast_tx: broadcast::Sender<AppSnapshot>,
-    /// Channel for web UI actions directed at the event loop.
-    pub action_tx: mpsc::UnboundedSender<UiAction>,
-}
-
-impl Default for AppSnapshot {
-    fn default() -> Self {
-        Self {
-            authenticated: false,
-            logging_in: false,
-            login_error: None,
-            paused: false,
-            status: String::new(),
-            files: Vec::new(),
-            total_downloaded: 0,
-            total_size: 0,
-            files_completed: 0,
-            files_total: 0,
-            current_speed: 0,
-            cpu_usage: 0.0,
-            memory_rss: 0,
-            config: DownloadConfigSnapshot {
-                chunks_per_file: 2,
-                concurrent_files: 4,
-                force_overwrite: false,
-                cleanup_on_error: true,
-            },
-            url_input: String::new(),
         }
     }
 }
@@ -457,21 +372,55 @@ mod tests {
     #[test]
     fn login_state_active_value_mut() {
         let mut login = LoginState::new();
-        login.email.clear();
-        login.password.clear();
-        login.mfa.clear();
 
         login.active_field = 0;
         login.active_value_mut().push_str("test@example.com");
-        assert_eq!(login.email, "test@example.com");
+        assert_eq!(login.email(), "test@example.com");
 
         login.active_field = 1;
         login.active_value_mut().push_str("password123");
-        assert_eq!(login.password, "password123");
+        assert_eq!(login.password(), "password123");
 
         login.active_field = 2;
         login.active_value_mut().push_str("123456");
-        assert_eq!(login.mfa, "123456");
+        assert_eq!(login.mfa(), "123456");
+    }
+
+    #[test]
+    fn set_credentials_rejects_empty() {
+        let mut login = LoginState::new();
+        assert!(!login.set_credentials(String::new(), "pass".into(), String::new()));
+        assert!(!login.set_credentials("user".into(), String::new(), String::new()));
+        assert!(!login.has_credentials());
+        assert!(login.set_credentials("user@example.com".into(), "pass".into(), String::new()));
+        assert!(login.has_credentials());
+    }
+
+    #[test]
+    fn set_credentials_if_missing_does_not_override() {
+        let mut login = LoginState::new();
+        login.set_credentials("orig@example.com".into(), "origpass".into(), String::new());
+        login.set_credentials_if_missing("new@example.com", "newpass", "123456");
+        assert_eq!(login.email(), "orig@example.com");
+        assert_eq!(login.password(), "origpass");
+        assert_eq!(login.mfa(), "123456"); // mfa was empty, so it gets filled
+    }
+
+    #[test]
+    fn set_credentials_if_missing_fills_empty() {
+        let mut login = LoginState::new();
+        login.set_credentials_if_missing("user@example.com", "pass", "");
+        assert_eq!(login.email(), "user@example.com");
+        assert_eq!(login.password(), "pass");
+        assert!(login.has_credentials());
+    }
+
+    #[test]
+    fn mfa_option_returns_none_when_empty() {
+        let mut login = LoginState::new();
+        assert!(login.mfa_option().is_none());
+        login.set_credentials("u".into(), "p".into(), "123".into());
+        assert_eq!(login.mfa_option(), Some("123"));
     }
 
     #[test]

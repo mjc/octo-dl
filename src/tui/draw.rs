@@ -283,9 +283,9 @@ fn draw_login_popup(frame: &mut ratatui::Frame, app: &App) {
         .split(inner);
 
     let fields = [
-        ("Email", &app.login.email, false),
-        ("Password", &app.login.password, true),
-        ("MFA (optional)", &app.login.mfa, false),
+        ("Email", app.login.email(), false),
+        ("Password", app.login.password(), true),
+        ("MFA (optional)", app.login.mfa(), false),
     ];
 
     for (i, (label, value, masked)) in fields.iter().enumerate() {
@@ -299,7 +299,7 @@ fn draw_login_popup(frame: &mut ratatui::Frame, app: &App) {
         let display_value = if *masked && !value.is_empty() {
             "*".repeat(value.len())
         } else {
-            (*value).clone()
+            (*value).to_string()
         };
 
         let input = Paragraph::new(display_value)

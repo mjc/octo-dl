@@ -57,13 +57,9 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
 /// them without logging in a second time.
 pub fn start_login(app: &mut App) {
     let tx = app.event_tx.clone();
-    let email = app.login.email.clone();
-    let password = app.login.password.clone();
-    let mfa = if app.login.mfa.is_empty() {
-        None
-    } else {
-        Some(app.login.mfa.clone())
-    };
+    let email = app.login.email().to_owned();
+    let password = app.login.password().to_owned();
+    let mfa = app.login.mfa_option().map(str::to_owned);
 
     let (client_tx, client_rx) = tokio::sync::oneshot::channel();
     app.client_rx = Some(client_rx);
@@ -116,20 +112,9 @@ pub fn handle_login_result(app: &mut App, success: bool, error: Option<String>) 
         app.popup = Popup::None;
         app.status = "Login successful".to_string();
 
-        // Start the download task now that we're authenticated
+        // Start the download task — it takes the url_rx and immediately
+        // receives any URLs that were already buffered in the channel.
         start_download_task(app);
-
-        // Send queued URLs — skip already-fetched URLs on resume
-        for url in &app.urls {
-            let already_fetched = app.session.as_ref().is_some_and(|s| {
-                s.urls
-                    .iter()
-                    .any(|u| u.url == *url && u.status == UrlStatus::Fetched)
-            });
-            if !already_fetched && let Some(ref url_tx) = app.url_tx {
-                let _ = url_tx.send(url.clone());
-            }
-        }
     } else {
         app.login.error = error;
         app.popup = Popup::Login;
@@ -379,20 +364,20 @@ fn start_download_task(app: &mut App) {
     let tx = app.event_tx.clone();
     let config = app.config.config.clone();
 
-    let (url_tx, url_rx) = mpsc::unbounded_channel::<String>();
-    app.url_tx = Some(url_tx);
-    let (token_tx, token_rx) = mpsc::unbounded_channel::<TokenMessage>();
-    app.token_rx = Some(token_rx);
+    let url_rx = app
+        .url_rx
+        .take()
+        .expect("start_download_task called twice");
+    let token_tx = app
+        .token_tx
+        .take()
+        .expect("start_download_task called twice");
 
     // Reuse existing session on resume, or create a new one
     if app.session.is_none() {
-        let email = app.login.email.clone();
-        let password = app.login.password.clone();
-        let mfa = if app.login.mfa.is_empty() {
-            None
-        } else {
-            Some(app.login.mfa.clone())
-        };
+        let email = app.login.email().to_owned();
+        let password = app.login.password().to_owned();
+        let mfa = app.login.mfa_option().map(str::to_owned);
         let url_entries: Vec<UrlEntry> = app
             .urls
             .iter()

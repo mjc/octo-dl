@@ -1,5 +1,6 @@
 //! octo-tui - Interactive TUI for downloading MEGA files.
 
+pub(crate) mod ansi_input;
 mod api;
 mod app;
 mod download;
@@ -7,6 +8,39 @@ mod draw;
 mod event;
 mod input;
 pub mod web;
+
+// ---------------------------------------------------------------------------
+// In-memory writer for server-side ratatui rendering
+// ---------------------------------------------------------------------------
+
+/// A [`std::io::Write`] target that buffers ANSI output in memory.
+///
+/// Used with [`ratatui::backend::CrosstermBackend<BufWriter>`] so that
+/// `Terminal::draw()` writes ANSI escape sequences into a `Vec<u8>`
+/// instead of stdout.  Call [`drain()`](BufWriter::drain) after each
+/// frame to extract the bytes and send them over WebSocket.
+#[derive(Default)]
+pub(crate) struct BufWriter {
+    buf: Vec<u8>,
+}
+
+impl BufWriter {
+    /// Takes all buffered bytes, leaving the internal buffer empty.
+    pub fn drain(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buf)
+    }
+}
+
+impl std::io::Write for BufWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 use std::env;
 use std::io;
@@ -20,14 +54,14 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::mpsc;
 
 use crate::{ServiceConfig, SessionState, SessionStatus, UrlStatus, format_bytes};
 use app::FileStatus;
 use sysinfo::System;
 
 use self::api::DEFAULT_API_PORT;
-use self::app::{App, AppSnapshot, SharedAppState, UiAction};
+use self::app::App;
 use self::download::{handle_download_event, start_login};
 use self::draw::draw;
 use self::event::DownloadEvent;
@@ -60,13 +94,6 @@ impl Drop for TerminalGuard {
 }
 use self::input::{handle_input, handle_paste};
 
-/// Options for the web UI frontend.
-#[derive(Debug, Clone)]
-pub struct WebOptions {
-    /// Public hostname for the PWA manifest and share target.
-    pub public_host: String,
-}
-
 // ---------------------------------------------------------------------------
 // Helpers — small, focused functions extracted from the three run variants
 // ---------------------------------------------------------------------------
@@ -75,16 +102,14 @@ pub struct WebOptions {
 ///
 /// Previously-fetched URLs are reset to pending so the download pipeline
 /// re-evaluates them (files already on disk are skipped automatically).
-fn resume_session(app: &mut App) {
+pub(crate) fn resume_session(app: &mut App) {
     let Some(mut session) = SessionState::latest() else {
         return;
     };
     log::info!("Resuming session {}", session.id);
 
     if let Some((email, password, mfa)) = session.credentials.decrypt() {
-        app.login.email = email;
-        app.login.password = password;
-        app.login.mfa = mfa.unwrap_or_default();
+        app.login.set_credentials(email, password, mfa.unwrap_or_default());
     }
 
     app.urls = session.urls.iter().map(|u| u.url.clone()).collect();
@@ -100,7 +125,7 @@ fn resume_session(app: &mut App) {
 ///
 /// Removes files the user deleted, marks the session completed if nothing
 /// remains, or paused otherwise.
-fn sync_session_on_shutdown(app: &mut App) {
+pub(crate) fn sync_session_on_shutdown(app: &mut App) {
     let Some(ref mut session) = app.session else {
         return;
     };
@@ -131,7 +156,7 @@ fn sync_session_on_shutdown(app: &mut App) {
 }
 
 /// Drains all pending download events from the channel (non-blocking).
-fn drain_download_events(
+pub(crate) fn drain_download_events(
     app: &mut App,
     download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
 ) {
@@ -141,11 +166,9 @@ fn drain_download_events(
 }
 
 /// Drains all pending token messages (non-blocking).
-fn drain_token_messages(app: &mut App) {
-    if let Some(ref mut token_rx) = app.token_rx {
-        while let Ok(msg) = token_rx.try_recv() {
-            app.cancellation_tokens.insert(msg.file_path, msg.token);
-        }
+pub(crate) fn drain_token_messages(app: &mut App) {
+    while let Ok(msg) = app.token_rx.try_recv() {
+        app.cancellation_tokens.insert(msg.file_path, msg.token);
     }
 }
 
@@ -175,19 +198,37 @@ fn log_progress(app: &mut App) {
 
 /// Initiates login if credentials are available.
 ///
-/// When `show_popup` is true and no credentials are found, the login
-/// popup is shown (used by the terminal TUI).  Returns `true` when
-/// login was initiated.
-fn auto_login(app: &mut App, show_popup: bool) -> bool {
-    let has_credentials = !app.login.email.is_empty() && !app.login.password.is_empty();
-    if has_credentials {
+/// When no credentials are found, `fallback` determines what happens:
+/// - [`NoCredentialsFallback::ShowPopup`] opens the login form (TUI / web).
+/// - [`NoCredentialsFallback::Silent`] does nothing (headless API).
+///
+/// Returns `true` when login was initiated.
+pub(crate) fn auto_login(app: &mut App, fallback: app::NoCredentialsFallback) -> bool {
+    if app.login.has_credentials() {
         app.login.logging_in = true;
         app.status = "Logging in...".to_string();
         start_login(app);
-    } else if show_popup {
-        app.popup = app::Popup::Login;
+        true
+    } else {
+        if fallback == app::NoCredentialsFallback::ShowPopup {
+            app.popup = app::Popup::Login;
+        }
+        false
     }
-    has_credentials
+}
+
+/// Fills in credentials from environment variables if not already set.
+///
+/// Call this after `apply_service_config` / `resume_session` so that
+/// env vars act as a fallback, never silently overriding explicit sources.
+fn load_credentials_from_env(app: &mut App) {
+    let email = env::var("MEGA_EMAIL").unwrap_or_default();
+    let password = env::var("MEGA_PASSWORD").unwrap_or_default();
+    let mfa = env::var("MEGA_MFA").unwrap_or_default();
+    if !email.is_empty() || !password.is_empty() {
+        log::info!("Using MEGA credentials from environment variables");
+    }
+    app.login.set_credentials_if_missing(&email, &password, &mfa);
 }
 
 /// Loads and validates a `ServiceConfig` from disk, applying download
@@ -215,69 +256,42 @@ fn apply_service_config(
 
     app.config.config = service_config.download.clone();
 
-    // Decrypt / encrypt credentials if present
+    // Try to load credentials from config file first
+    let mut credentials_from_config = false;
     if service_config.credentials.has_credentials() {
-        let (email, password, mfa) =
-            service_config
-                .credentials
-                .decrypt_if_needed()
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "Failed to decrypt credentials")
-                })?;
+        if let Some((email, password, mfa)) = service_config.credentials.decrypt_if_needed() {
+            log::info!("Loaded credentials from config file");
+            credentials_from_config = app.login.set_credentials(email, password, mfa);
 
-        if !service_config.credentials.encrypted {
-            log::info!("Encrypting plaintext credentials in config file");
-            service_config.credentials.encrypt_in_place();
-            service_config.save(config_path)?;
+            // Encrypt plaintext credentials in-place
+            if !service_config.credentials.encrypted {
+                log::info!("Encrypting plaintext credentials in config file");
+                service_config.credentials.encrypt_in_place();
+                service_config.save(config_path)?;
+            }
+        } else {
+            log::warn!("Failed to decrypt credentials from config (machine key mismatch?). Falling back to environment variables.");
         }
+    }
 
-        // Config credentials override anything from the session
-        app.login.email = email;
-        app.login.password = password;
-        app.login.mfa = mfa;
+    // Fall back to environment variables if config credentials unavailable
+    if !credentials_from_config {
+        if let (Ok(email), Ok(password)) = (env::var("MEGA_EMAIL"), env::var("MEGA_PASSWORD")) {
+            log::info!("Using credentials from MEGA_EMAIL and MEGA_PASSWORD environment variables");
+            app.login.set_credentials(email, password, env::var("MEGA_MFA").unwrap_or_default());
+        } else if service_config.credentials.has_credentials() {
+            // Config had credentials but decryption failed, and no env vars provided
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Failed to decrypt credentials from config file. Set MEGA_EMAIL and MEGA_PASSWORD environment variables, or re-create the config file as the current user.",
+            ));
+        }
     }
 
     Ok((service_config.api.host, service_config.api.port))
 }
 
-// ---------------------------------------------------------------------------
-// Web UI shared state bundle
-// ---------------------------------------------------------------------------
 
-/// Bundles the channels and shared state needed for web UI broadcasting.
-struct WebState {
-    shared: SharedAppState,
-    action_rx: mpsc::UnboundedReceiver<UiAction>,
-    broadcast_tx: broadcast::Sender<AppSnapshot>,
-}
-
-impl WebState {
-    /// Creates a new `WebState` with fresh channels.
-    fn new() -> Self {
-        let (action_tx, action_rx) = mpsc::unbounded_channel::<UiAction>();
-        let (broadcast_tx, _) = broadcast::channel::<AppSnapshot>(16);
-        let shared = SharedAppState {
-            snapshot: Arc::new(RwLock::new(AppSnapshot::default())),
-            broadcast_tx: broadcast_tx.clone(),
-            action_tx,
-        };
-        Self {
-            shared,
-            action_rx,
-            broadcast_tx,
-        }
-    }
-
-    /// Drains pending web UI actions and broadcasts the latest snapshot.
-    async fn process_tick(&mut self, app: &mut App) {
-        while let Ok(action) = self.action_rx.try_recv() {
-            process_ui_action(app, action);
-        }
-        let snap = app.snapshot();
-        let _ = self.broadcast_tx.send(snap.clone());
-        *self.shared.snapshot.write().await = snap;
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Headless event loop (shared by --api and --web modes)
@@ -285,16 +299,14 @@ impl WebState {
 
 /// Async event loop for headless modes (`--api` and `--web`).
 ///
-/// Processes download events, optionally processes web UI actions and
-/// broadcasts state, and logs periodic progress summaries.  Runs until
-/// SIGINT or SIGTERM.
+/// Processes download events and logs periodic progress summaries.
+/// Runs until SIGINT or SIGTERM.
 ///
 /// # Panics
 /// Panics if SIGTERM signal handler registration fails on Unix platforms.
 async fn run_headless_loop(
     app: &mut App,
     download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
-    web: &mut Option<WebState>,
 ) {
     let mut progress_interval = tokio::time::interval(Duration::from_secs(30));
     progress_interval.tick().await; // consume the immediate first tick
@@ -328,9 +340,77 @@ async fn run_headless_loop(
 
         drain_download_events(app, download_rx);
         drain_token_messages(app);
+    }
+}
 
-        if let Some(ws) = web {
-            ws.process_tick(app).await;
+/// Variant of the headless event loop for shared-App mode (`--web`).
+///
+/// Same as [`run_headless_loop`] but locks the `Arc<Mutex<App>>` around
+/// each batch of work so WebSocket handlers can interleave rendering and
+/// input processing.
+async fn run_headless_loop_shared(
+    app: &Arc<tokio::sync::Mutex<App>>,
+    download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
+) {
+    let mut progress_interval = tokio::time::interval(Duration::from_secs(30));
+    progress_interval.tick().await;
+
+    // Also tick at 100ms to keep download state fresh for WS renderers
+    let mut fast_tick = tokio::time::interval(Duration::from_millis(100));
+    fast_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    // CPU/RAM sampling every 5 seconds
+    let mut resource_tick = tokio::time::interval(Duration::from_secs(5));
+    resource_tick.tick().await;
+    let mut sys = System::new();
+    let pid = sysinfo::get_current_pid().ok();
+
+    let shutdown = async {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => log::info!("Received SIGINT"),
+            _ = sigterm.recv() => log::info!("Received SIGTERM"),
+        }
+    };
+    tokio::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            () = &mut shutdown => break,
+            event = download_rx.recv() => {
+                if let Some(evt) = event {
+                    let mut app = app.lock().await;
+                    handle_download_event(&mut app, evt);
+                    drain_download_events(&mut app, download_rx);
+                    drain_token_messages(&mut app);
+                } else {
+                    log::warn!("Event channel closed");
+                    break;
+                }
+            }
+            _ = fast_tick.tick() => {
+                let mut app = app.lock().await;
+                drain_download_events(&mut app, download_rx);
+                app.update_speeds();
+                drain_token_messages(&mut app);
+            }
+            _ = resource_tick.tick() => {
+                if let Some(pid) = pid {
+                    use sysinfo::ProcessesToUpdate;
+                    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
+                    if let Some(proc) = sys.process(pid) {
+                        let mut app = app.lock().await;
+                        app.cpu_usage = proc.cpu_usage();
+                        app.memory_rss = proc.memory();
+                    }
+                }
+            }
+            _ = progress_interval.tick() => {
+                let mut app = app.lock().await;
+                log_progress(&mut app);
+            }
         }
     }
 }
@@ -341,50 +421,66 @@ async fn run_headless_loop(
 
 /// Run the interactive terminal TUI.
 ///
-/// If `api_host` is `Some`, the HTTP API server is started on that address.
-/// If `web_opts` is `Some`, the web UI frontend is served alongside the API.
+/// If `api_host` is `Some`, the HTTP API server is started. When the inner
+/// `Option` is `None`, the host from config (or default) is used. When `Some(host)`,
+/// that explicit host is used.
+/// When `web` is true the web UI is served alongside the API.
+/// When `config_path` is provided, credentials and download settings are
+/// loaded from the config file.
 ///
 /// # Errors
 /// Returns an error if terminal setup fails or TUI operations encounter I/O errors.
 #[allow(clippy::too_many_lines, clippy::unused_async)]
-pub async fn run(api_host: Option<String>, web_opts: Option<WebOptions>) -> io::Result<()> {
+pub async fn run(
+    api_host: Option<Option<String>>,
+    web: bool,
+    config_path: Option<&Path>,
+) -> io::Result<()> {
     // Initialize terminal with RAII guard for automatic cleanup
     let _terminal_guard = TerminalGuard::new()?;
-    
+
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
     let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
 
-    let api_port = env::var("OCTO_API_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(DEFAULT_API_PORT);
-
-    // Set up shared state for web UI (if enabled)
-    let mut web_state = web_opts.as_ref().map(|_| WebState::new());
+    // Load service config if provided (credentials, download settings, api bind)
+    let api_port;
+    let api_bind_host;
+    let mut app;
+    if let Some(path) = config_path {
+        app = App::new(0, download_tx);
+        let (host, port) = apply_service_config(&mut app, path)?;
+        api_port = port;
+        api_bind_host = host;
+        app.api_port = api_port;
+    } else {
+        api_port = env::var("OCTO_API_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(DEFAULT_API_PORT);
+        api_bind_host = "127.0.0.1".to_string();
+        app = App::new(api_port, download_tx);
+    }
 
     // Start the API server (if enabled)
-    if let Some(host) = api_host {
-        let api_tx = download_tx.clone();
-        let shared = web_state.as_ref().map(|w| w.shared.clone());
-        let web = web_opts.clone();
+    if let Some(explicit_host) = api_host {
+        let host = explicit_host.unwrap_or(api_bind_host);
+        let api_tx = app.event_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                api::run_api_server(api_tx, &host, api_port, web.as_ref(), shared).await
-            {
+            if let Err(e) = api::run_api_server(api_tx, &host, api_port, web, None).await {
                 log::error!("API server error: {e}");
             }
         });
     }
 
-    let mut app = App::new(api_port, download_tx);
     resume_session(&mut app);
-    auto_login(&mut app, true);
+    load_credentials_from_env(&mut app);
+    auto_login(&mut app, app::NoCredentialsFallback::ShowPopup);
 
     let mut tick_count: u32 = 0;
-    let mut sys = System::new_all();
+    let mut sys = System::new();
     let pid = sysinfo::get_current_pid().ok();
 
     loop {
@@ -396,7 +492,7 @@ pub async fn run(api_host: Option<String>, web_opts: Option<WebOptions>) -> io::
             && let Some(pid) = pid
         {
             use sysinfo::ProcessesToUpdate;
-            sys.refresh_processes(ProcessesToUpdate::All);
+            sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
             if let Some(proc) = sys.process(pid) {
                 app.cpu_usage = proc.cpu_usage();
                 app.memory_rss = proc.memory();
@@ -415,10 +511,6 @@ pub async fn run(api_host: Option<String>, web_opts: Option<WebOptions>) -> io::
         drain_download_events(&mut app, &mut download_rx);
         app.update_speeds();
         drain_token_messages(&mut app);
-
-        if let Some(ref mut ws) = web_state {
-            ws.process_tick(&mut app).await;
-        }
 
         if app.should_quit {
             sync_session_on_shutdown(&mut app);
@@ -448,8 +540,9 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     let mut app = App::new(0, download_tx);
 
     let (api_host, api_port) = apply_service_config(&mut app, config_path)?;
+    load_credentials_from_env(&mut app);
 
-    if !app.login.email.is_empty() || !app.login.password.is_empty() {
+    if app.login.has_credentials() {
         // credentials loaded — good
     } else {
         log::error!(
@@ -464,20 +557,20 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
 
     app.api_port = api_port;
     resume_session(&mut app);
-    auto_login(&mut app, false);
+    auto_login(&mut app, app::NoCredentialsFallback::Silent);
 
     // Start the API server (headless — no web UI)
     let api_tx = app.event_tx.clone();
     let api_host_owned = api_host.clone();
     tokio::spawn(async move {
         log::info!("Starting API server on {api_host_owned}:{api_port}");
-        if let Err(e) = api::run_api_server(api_tx, &api_host_owned, api_port, None, None).await {
+        if let Err(e) = api::run_api_server(api_tx, &api_host_owned, api_port, false, None).await {
             log::error!("API server error: {e}");
         }
     });
 
     log::info!("Entering headless event loop");
-    run_headless_loop(&mut app, &mut download_rx, &mut None).await;
+    run_headless_loop(&mut app, &mut download_rx).await;
 
     sync_session_on_shutdown(&mut app);
     log::info!("Shutdown complete");
@@ -501,7 +594,6 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
 /// Panics if SIGTERM signal handler registration fails on Unix platforms.
 pub async fn run_web(
     api_host: &str,
-    web_opts: WebOptions,
     config_path: Option<&Path>,
 ) -> io::Result<()> {
     let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
@@ -521,112 +613,75 @@ pub async fn run_web(
 
     app.api_port = api_port;
 
-    let web_state = WebState::new();
+    // Wrap the App in Arc<Mutex> for sharing with WebSocket handlers
+    let shared_app = Arc::new(tokio::sync::Mutex::new(app));
 
     // Start the API + web server
-    let api_tx = app.event_tx.clone();
+    let api_tx = {
+        let app = shared_app.lock().await;
+        app.event_tx.clone()
+    };
     let api_host_owned = api_host.clone();
-    let shared = web_state.shared.clone();
-    let web = web_opts.clone();
+    let shared_app_clone = shared_app.clone();
     tokio::spawn(async move {
         log::info!("Starting web TUI on {api_host_owned}:{api_port}");
         if let Err(e) =
-            api::run_api_server(api_tx, &api_host_owned, api_port, Some(&web), Some(shared)).await
+            api::run_api_server(api_tx, &api_host_owned, api_port, true, Some(shared_app_clone))
+                .await
         {
             log::error!("API server error: {e}");
         }
     });
 
-    resume_session(&mut app);
-    auto_login(&mut app, false);
+    {
+        let mut app = shared_app.lock().await;
+        resume_session(&mut app);
+        load_credentials_from_env(&mut app);
+        auto_login(&mut app, app::NoCredentialsFallback::ShowPopup);
+    }
 
     eprintln!("octo-dl web TUI running at http://{api_host}:{api_port}");
     log::info!("Entering web TUI event loop");
 
-    run_headless_loop(&mut app, &mut download_rx, &mut Some(web_state)).await;
+    run_headless_loop_shared(&shared_app, &mut download_rx).await;
 
-    sync_session_on_shutdown(&mut app);
+    {
+        let mut app = shared_app.lock().await;
+        sync_session_on_shutdown(&mut app);
+    }
     log::info!("Shutdown complete");
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Web UI action processing
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
 
-/// Applies a `UiAction` from the web UI to the application state.
-fn process_ui_action(app: &mut App, action: UiAction) {
-    match action {
-        UiAction::Login {
-            email,
-            password,
-            mfa,
-        } => {
-            app.login.email = email;
-            app.login.password = password;
-            app.login.mfa = mfa;
-            app.login.error = None;
-            app.login.logging_in = true;
-            app.status = "Logging in...".to_string();
-            start_login(app);
-        }
-        UiAction::AddUrls(urls) => {
-            for url in urls {
-                input::add_url(app, url);
-            }
-        }
-        UiAction::TogglePause => {
-            app.paused = !app.paused;
-        }
-        UiAction::DeleteFile(name) => {
-            if let Some(idx) = app.files.iter().position(|f| f.name == name) {
-                let file = &app.files[idx];
-                let can_remove = matches!(
-                    file.status,
-                    FileStatus::Queued | FileStatus::Error(_) | FileStatus::Downloading
-                );
-                if can_remove {
-                    if matches!(file.status, FileStatus::Downloading) {
-                        if let Some(token) = app.cancellation_tokens.remove(&name) {
-                            token.cancel();
-                        }
-                    }
-                    app.deleted_files.insert(name.clone());
-                    app.files.remove(idx);
-                    app.recompute_totals();
-                    if let Some(ref mut session) = app.session {
-                        let _ = session.remove_file(&name);
-                    }
-                }
-            }
-        }
-        UiAction::RetryFile(name) => {
-            if let Some(file) = app.files.iter_mut().find(|f| f.name == name) {
-                if matches!(file.status, FileStatus::Error(_)) {
-                    file.status = FileStatus::Queued;
-                    file.downloaded = 0;
-                    file.speed = 0;
-                }
-            }
-        }
-        UiAction::UpdateConfig {
-            chunks_per_file,
-            concurrent_files,
-            force_overwrite,
-            cleanup_on_error,
-        } => {
-            if let Some(v) = chunks_per_file {
-                app.config.config.chunks_per_file = v.max(1);
-            }
-            if let Some(v) = concurrent_files {
-                app.config.config.concurrent_files = v.max(1);
-            }
-            if let Some(v) = force_overwrite {
-                app.config.config.force_overwrite = v;
-            }
-            if let Some(v) = cleanup_on_error {
-                app.config.config.cleanup_on_error = v;
-            }
-        }
+    #[test]
+    fn buf_writer_drain() {
+        let mut w = BufWriter::default();
+        std::io::Write::write_all(&mut w, b"hello").unwrap();
+        let data = w.drain();
+        assert_eq!(data, b"hello");
+        assert!(w.drain().is_empty(), "drain should leave buffer empty");
+    }
+
+    #[test]
+    fn buf_writer_with_crossterm_backend() {
+        let buf = BufWriter::default();
+        let backend = CrosstermBackend::new(buf);
+        let mut terminal = Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+            },
+        )
+        .unwrap();
+
+        terminal.draw(|_frame| {}).unwrap();
+        let data = terminal.backend_mut().writer_mut().drain();
+        // First frame should produce ANSI output (cursor movement, clear, etc.)
+        assert!(!data.is_empty(), "first draw should produce ANSI output");
     }
 }
