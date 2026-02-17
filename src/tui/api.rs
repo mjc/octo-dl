@@ -14,7 +14,6 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -26,7 +25,7 @@ use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt as _;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::WatchStream;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::extract_urls;
@@ -40,7 +39,7 @@ pub const DEFAULT_API_PORT: u16 = 9723;
 
 #[derive(Clone)]
 struct ApiState {
-    tx: Arc<mpsc::UnboundedSender<DownloadEvent>>,
+    tx: mpsc::UnboundedSender<DownloadEvent>,
     host: String,
     port: u16,
     shared: Option<SharedAppState>,
@@ -215,11 +214,15 @@ async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> 
 // New web UI endpoints
 // ---------------------------------------------------------------------------
 
-/// GET /api/state — returns the full application snapshot as JSON.
+/// GET /api/state — returns the latest application snapshot as JSON.
 async fn api_get_state(State(state): State<ApiState>) -> impl IntoResponse {
     if let Some(ref shared) = state.shared {
-        let snap = shared.snapshot.read().await;
-        axum::Json((*snap).clone()).into_response()
+        let json = shared.state_rx.borrow().clone();
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            json,
+        )
+            .into_response()
     } else {
         (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Web UI not enabled").into_response()
     }
@@ -232,18 +235,11 @@ async fn api_events(
     let rx = state
         .shared
         .as_ref()
-        .map(|s| s.broadcast_tx.subscribe())
-        .expect("SSE requires shared state");
+        .expect("SSE requires shared state")
+        .state_rx
+        .clone();
 
-    let stream = BroadcastStream::new(rx).filter_map(|result| {
-        match result {
-            Ok(snapshot) => {
-                let json = serde_json::to_string(&snapshot).unwrap_or_default();
-                Some(Ok(SseEvent::default().data(json)))
-            }
-            Err(_) => None, // lagged — skip
-        }
-    });
+    let stream = WatchStream::new(rx).map(|json| Ok(SseEvent::default().data(json)));
 
     Sse::new(stream).keep_alive(
         KeepAlive::new()
@@ -390,7 +386,7 @@ pub async fn run_api_server(
     shared: Option<SharedAppState>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = ApiState {
-        tx: Arc::new(tx),
+        tx,
         host: host.to_string(),
         port,
         shared,
