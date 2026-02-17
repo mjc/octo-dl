@@ -17,7 +17,7 @@ set -euo pipefail
 
 # Determine version from argument or Cargo.toml
 VERSION=${1:-$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)}
-BINARY_NAME="octo-dl"
+BINARY_NAME="octo"
 
 # Detect host platform
 HOST_OS=$(uname -s | tr '[:upper:]' '[:lower:]')

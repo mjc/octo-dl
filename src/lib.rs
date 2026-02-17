@@ -6,7 +6,8 @@
 //! # Example
 //!
 //! ```no_run
-//! use octo_dl::{Downloader, DownloadConfig, NoProgress};
+//! use std::sync::Arc;
+//! use octo_dl::{Downloader, DownloadConfig, DownloadProgress, NoProgress};
 //!
 //! # async fn example() -> octo_dl::Result<()> {
 //! // Create a MEGA client
@@ -21,10 +22,11 @@
 //! let nodes = downloader.client().fetch_public_nodes("https://mega.nz/...").await?;
 //!
 //! // Collect files to download
-//! let collected = downloader.collect_files(&nodes).await;
+//! let progress: Arc<dyn DownloadProgress> = Arc::new(NoProgress);
+//! let collected = downloader.collect_files(&nodes, &progress).await;
 //!
 //! // Download with no progress reporting
-//! let stats = downloader.download_all(&collected.to_download, &NoProgress, collected.skipped).await?;
+//! let stats = downloader.download_all(&collected.to_download, &progress, collected.skipped).await?;
 //! println!("Downloaded {} files", stats.files_downloaded);
 //! # Ok(())
 //! # }
@@ -37,16 +39,33 @@ pub mod config;
 pub mod dlc;
 pub mod download;
 pub mod error;
+pub mod format;
 pub mod fs;
+pub mod state;
 pub mod stats;
+pub mod url;
 
 // Re-export main types for convenience
-pub use config::DownloadConfig;
+pub use config::{ApiConfig, DownloadConfig, ServiceConfig, ServiceCredentials};
 pub use dlc::{DlcKeyCache, parse_dlc_file};
-pub use download::{CollectedFiles, DownloadItem, DownloadProgress, Downloader, NoProgress};
+pub use download::{
+    CollectedFiles, DownloadItem, DownloadProgress, Downloader, FileStatus, NoProgress,
+    OwnedDownloadItem,
+};
 pub use error::{Error, Result};
+pub use format::{format_bytes, format_duration};
 pub use fs::{FileSystem, TokioFileSystem};
-pub use stats::{FileStats, SessionStats};
+pub use state::{
+    FileEntry, FileEntryStatus, SavedCredentials, SessionState, SessionStatus, UrlEntry, UrlStatus,
+};
+pub use stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBuilder};
+pub use url::{extract_urls, is_dlc_path, normalize_mega_url};
 
 // Re-export mega types used in the public API
 pub use mega::{Client as MegaClient, Node, Nodes};
+
+#[cfg(feature = "tui")]
+pub mod tui;
+
+#[cfg(feature = "cli")]
+pub mod cli;

@@ -1,27 +1,37 @@
 {
-  description = "Rust development environment";
+  description = "octo-dl - MEGA download manager";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    rust-overlay.url = "github:oxalica/rust-overlay";
+    crane.url = "github:ipetkov/crane";
+    mega-rs = {
+      url = "github:mjc/mega-rs/parallel-download";
+      flake = false;
+    };
   };
 
   outputs = {
     self,
     nixpkgs,
     flake-utils,
+    rust-overlay,
+    crane,
+    mega-rs,
+    ...
   }:
     flake-utils.lib.eachDefaultSystem (
       system: let
-        pkgs = nixpkgs.legacyPackages.${system};
-        # Read the file relative to the flake's root
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [(import rust-overlay)];
+        };
         overrides = builtins.fromTOML (builtins.readFile (self + "/rust-toolchain.toml"));
         libPath = with pkgs;
-          lib.makeLibraryPath [
-            # load external libraries that you need in your rust project here
-          ];
+          lib.makeLibraryPath [];
 
-        # Define reusable variables for paths
+        # glib include paths for bindgen
         glibIncludePaths = [
           ''-I${pkgs.glib.dev}/include/glib-2.0''
           ''-I${pkgs.glib.out}/lib/glib-2.0/include''
@@ -31,55 +41,123 @@
           ''-I${pkgs.llvmPackages_latest.libclang.lib}/lib/clang/${pkgs.llvmPackages_latest.libclang.version}/include''
         ];
 
-        # glibc is Linux-only; include it only on Linux systems
-        commonIncludePaths = if pkgs.stdenv.isLinux then [
-          ''-I${pkgs.glibc.dev}/include''
-        ] else [];
+        commonIncludePaths =
+          if pkgs.stdenv.isLinux
+          then [''-I${pkgs.glibc.dev}/include'']
+          else [];
+
+        cargoTargetEnvPrefix = pkgs.lib.toUpper (builtins.replaceStrings ["-"] ["_"] pkgs.rust.toRustTargetSpec pkgs.stdenv.hostPlatform);
+
+        # Crane setup with nightly rust
+        rustNightly = pkgs.rust-bin.nightly.latest.default.override {
+          extensions = ["rust-src"];
+        };
+        craneLib = (crane.mkLib pkgs).overrideToolchain rustNightly;
+
+        # Source filtering - only include Rust-relevant files
+        src = let
+          # Include standard Rust files plus any extra assets
+          filteredSrc = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter = path: type:
+              (craneLib.filterCargoSources path type)
+              || builtins.match ".*\\.toml$" path != null;
+          };
+        in
+          filteredSrc;
+
+        # Common arguments shared between dep and source builds
+        commonArgs = {
+          inherit src;
+          pname = "octo-dl";
+          version = "0.1.0";
+          strictDeps = true;
+
+          nativeBuildInputs = [pkgs.pkg-config];
+          buildInputs = [pkgs.openssl];
+
+          # Place mega-rs next to octo-dl so `path = "../mega-rs"` resolves
+          postUnpack = ''
+            cp -r ${mega-rs} mega-rs
+            chmod -R u+w mega-rs
+          '';
+        };
+
+        # Build only the cargo dependencies — cached when Cargo.lock is unchanged
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
       in {
+        packages = {
+          default = self.packages.${system}.octo-dl;
+
+          octo-dl = craneLib.buildPackage (commonArgs
+            // {
+              inherit cargoArtifacts;
+
+              meta = with pkgs.lib; {
+                description = "MEGA download manager with TUI and headless service mode";
+                homepage = "https://github.com/mjc/octo-dl";
+                mainProgram = "octo";
+              };
+            });
+        };
+
+        # Clippy check as a separate cacheable derivation
+        checks.clippy = craneLib.cargoClippy (commonArgs
+          // {
+            inherit cargoArtifacts;
+            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+          });
+
         devShells.default = pkgs.mkShell rec {
           nativeBuildInputs = [pkgs.pkg-config];
-          buildInputs = with pkgs; [
-            clang
-            llvmPackages.bintools
-            rustup
-            openssl
-            openssl.dev
-            pkg-config
-            par2cmdline
-            xxd
-            gh
-            gnuplot
-            bc
-          ] ++ (
-            if pkgs.stdenv.isLinux then [
-              # Linux-only profiling tools
-              linuxPackages_latest.perf
-              strace
-            ] else []
-          );
+          buildInputs = with pkgs;
+            [
+              clang
+              llvmPackages.bintools
+              rustup
+              openssl
+              openssl.dev
+              pkg-config
+              par2cmdline
+              xxd
+              gh
+              gnuplot
+              bc
+              sccache
+            ]
+            ++ (
+              if pkgs.stdenv.isLinux
+              then [
+                linuxPackages_latest.perf
+                strace
+                mold
+              ]
+              else []
+            );
 
           RUSTC_VERSION = overrides.toolchain.channel;
-
-          # https://github.com/rust-lang/rust-bindgen#environment-variables
           LIBCLANG_PATH = pkgs.lib.makeLibraryPath [pkgs.llvmPackages_latest.libclang.lib];
 
-          shellHook = ''
-            export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
-          '' + (if pkgs.stdenv.isLinux then ''
-            export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-x86_64-unknown-linux-gnu/bin/
-            # Only set LD_LIBRARY_PATH for cargo/rustc, not globally (breaks system nix)
-            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (buildInputs ++ nativeBuildInputs)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          '' else ''
-            # On macOS, rustup manages toolchains automatically
-            true
-          '');
+          shellHook =
+            ''
+              export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
+              export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
+              export "CARGO_TARGET_''${cargoTargetEnvPrefix}_LINKER"="${pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.mold}/bin/mold -run "}${pkgs.stdenv.cc}/bin/cc"
+              export "CARGO_TARGET_''${cargoTargetEnvPrefix}_RUSTFLAGS"="-C target-cpu=native"
+            ''
+            + (
+              if pkgs.stdenv.isLinux
+              then ''
+                export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-x86_64-unknown-linux-gnu/bin/
+                export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (buildInputs ++ nativeBuildInputs)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              ''
+              else ''
+                true
+              ''
+            );
 
-          # Add precompiled library to rustc search path
-          RUSTFLAGS = builtins.map (a: ''-L ${a}/lib'') [
-            # add libraries here (e.g. pkgs.libvmi)
-          ];
+          RUSTFLAGS = builtins.map (a: ''-L ${a}/lib'') [];
 
-          # Add glibc, clang, glib, and other headers to bindgen search path
           BINDGEN_EXTRA_CLANG_ARGS =
             (builtins.map (a: ''-I${a}/include'') commonIncludePaths)
             ++ clangIncludePaths
@@ -93,20 +171,17 @@
             cargo-zigbuild
             zig
             pkg-config
-            # For Windows cross-compilation
             pkgsCross.mingwW64.stdenv.cc
           ];
 
           shellHook = ''
             export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
 
-            # Clean environment - let Zig be the linker for cross-compilation
             unset CC
             unset CXX
             unset AR
             unset RANLIB
 
-            # Set Zig cache to a writable location
             export ZIG_GLOBAL_CACHE_DIR="$HOME/.cache/zig"
             export ZIG_LOCAL_CACHE_DIR="$PWD/.zig-cache"
 
@@ -121,5 +196,9 @@
           '';
         };
       }
-    );
+    )
+    // {
+      # NixOS module (system-independent, outside eachDefaultSystem)
+      nixosModules.default = import ./nixos-module.nix;
+    };
 }
