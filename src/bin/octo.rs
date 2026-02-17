@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 /// Flags that consume the next argument as a value (not a positional arg).
-const FLAGS_WITH_VALUES: &[&str] = &["--api-host", "--config", "--web-host"];
+const FLAGS_WITH_VALUES: &[&str] = &["--host", "--config"];
 
 /// Returns true if `args` contains positional arguments (URLs, DLC paths, etc.)
 /// as opposed to just flags and their values.
@@ -35,8 +35,7 @@ fn print_usage() {
     eprintln!("  --tui --web         Terminal TUI with web UI alongside");
     eprintln!();
     eprintln!("Global options:");
-    eprintln!("  --api-host <HOST>   Bind address (default: 127.0.0.1)");
-    eprintln!("  --web-host <HOST>   Public host for PWA manifest (default: same as --api-host)");
+    eprintln!("  --host <HOST>       Bind address for API/web (default: 127.0.0.1, or from config)");
     eprintln!("  --config <PATH>     Config file for headless/service mode");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
@@ -45,13 +44,16 @@ fn print_usage() {
 
 #[tokio::main]
 async fn main() -> octo_dl::Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("octo_dl=info"),
+    )
+    .init();
 
     let mut tui = false;
     let mut api = false;
     let mut web = false;
-    let mut api_host = "127.0.0.1".to_string();
-    let mut web_host: Option<String> = None;
+    let mut host = "127.0.0.1".to_string();
+    let mut host_explicit = false;
     let mut config_path: Option<PathBuf> = None;
 
     // Scan for global flags without consuming — sub-modules re-parse for their own flags
@@ -62,21 +64,13 @@ async fn main() -> octo_dl::Result<()> {
             "--tui" => tui = true,
             "--api" => api = true,
             "--web" => web = true,
-            "--api-host" => {
+            "--host" => {
                 i += 1;
                 if i < args.len() {
-                    api_host = args[i].clone();
+                    host = args[i].clone();
+                    host_explicit = true;
                 } else {
-                    eprintln!("Error: --api-host requires a value");
-                    std::process::exit(1);
-                }
-            }
-            "--web-host" => {
-                i += 1;
-                if i < args.len() {
-                    web_host = Some(args[i].clone());
-                } else {
-                    eprintln!("Error: --web-host requires a value");
+                    eprintln!("Error: --host requires a value");
                     std::process::exit(1);
                 }
             }
@@ -94,27 +88,26 @@ async fn main() -> octo_dl::Result<()> {
         i += 1;
     }
 
-    let api_host_str = api_host.clone();
-    let web_opts = if web {
-        Some(octo_dl::tui::WebOptions {
-            public_host: web_host.unwrap_or_else(|| api_host_str.clone()),
-        })
-    } else {
-        None
-    };
-
     if tui {
         // Terminal TUI mode, optionally with --api and/or --web alongside
-        let api_host = if api { Some(api_host) } else { None };
+        let host_param = if api || web {
+            if host_explicit {
+                Some(Some(host))
+            } else {
+                Some(None) // Let config provide the host
+            }
+        } else {
+            None // No API server
+        };
         #[cfg(feature = "tui")]
         {
-            octo_dl::tui::run(api_host, web_opts)
+            octo_dl::tui::run(host_param, web, config_path.as_deref())
                 .await
                 .map_err(octo_dl::Error::Io)
         }
         #[cfg(not(feature = "tui"))]
         {
-            let _ = api_host;
+            let _ = host_param;
             eprintln!("TUI support not compiled in");
             std::process::exit(1);
         }
@@ -123,8 +116,7 @@ async fn main() -> octo_dl::Result<()> {
         #[cfg(feature = "tui")]
         {
             octo_dl::tui::run_web(
-                &api_host,
-                web_opts.expect("web_opts set when web=true"),
+                &host,
                 config_path.as_deref(),
             )
             .await
