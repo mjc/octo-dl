@@ -79,7 +79,6 @@ fn parse_resize_message(data: &[u8]) -> Option<(u16, u16)> {
     Some((cols, rows))
 }
 
-#[allow(dead_code)]
 fn visible_file_names(app: &App) -> std::collections::HashSet<String> {
     app.files
         .iter()
@@ -93,9 +92,7 @@ fn visible_file_names(app: &App) -> std::collections::HashSet<String> {
         .collect()
 }
 
-#[allow(dead_code)]
-fn sync_session_files(session: &mut SessionState, app: &App) {
-    let visible = visible_file_names(app);
+fn sync_session_files(session: &mut SessionState, visible: &std::collections::HashSet<String>) {
     session.files.retain(|file| visible.contains(file.path.as_str()));
 }
 
@@ -241,21 +238,11 @@ pub async fn run(api_host: Option<String>) -> io::Result<()> {
             // Sync session files with what the user actually sees — the
             // download pipeline may have added entries the user already
             // deleted from the visible list.
+            let visible = visible_file_names(&app);
             if let Some(ref mut session) = app.session
                 && session.status != SessionStatus::Completed
             {
-                let visible: std::collections::HashSet<&str> = app
-                    .files
-                    .iter()
-                    .filter(|f| {
-                        matches!(
-                            f.status,
-                            FileStatus::Queued | FileStatus::Downloading | FileStatus::Error(_)
-                        )
-                    })
-                    .map(|f| f.name.as_str())
-                    .collect();
-                session.files.retain(|f| visible.contains(f.path.as_str()));
+                sync_session_files(session, &visible);
                 if session.files.is_empty() {
                     let _ = session.mark_completed();
                 } else {
@@ -443,21 +430,11 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     }
 
     // Sync session files with what was visible, then save
+    let visible = visible_file_names(&app);
     if let Some(ref mut session) = app.session
         && session.status != SessionStatus::Completed
     {
-        let visible: std::collections::HashSet<&str> = app
-            .files
-            .iter()
-            .filter(|f| {
-                matches!(
-                    f.status,
-                    FileStatus::Queued | FileStatus::Downloading | FileStatus::Error(_)
-                )
-            })
-            .map(|f| f.name.as_str())
-            .collect();
-        session.files.retain(|f| visible.contains(f.path.as_str()));
+        sync_session_files(session, &visible);
         if session.files.is_empty() {
             let _ = session.mark_completed();
         } else {
@@ -640,21 +617,11 @@ pub async fn run_web(api_host: Option<String>) -> io::Result<()> {
     }
 
     // Session cleanup (same as other modes)
+    let visible = visible_file_names(&app);
     if let Some(ref mut session) = app.session
         && session.status != SessionStatus::Completed
     {
-        let visible: std::collections::HashSet<&str> = app
-            .files
-            .iter()
-            .filter(|f| {
-                matches!(
-                    f.status,
-                    FileStatus::Queued | FileStatus::Downloading | FileStatus::Error(_)
-                )
-            })
-            .map(|f| f.name.as_str())
-            .collect();
-        session.files.retain(|f| visible.contains(f.path.as_str()));
+        sync_session_files(session, &visible);
         if session.files.is_empty() {
             let _ = session.mark_completed();
         } else {
@@ -895,7 +862,8 @@ mod tests {
             },
         ];
 
-        sync_session_files(&mut session, &app);
+        let visible = visible_file_names(&app);
+        sync_session_files(&mut session, &visible);
 
         let names = session
             .files
