@@ -64,7 +64,6 @@ use self::download::{handle_download_event, start_login};
 use self::draw::draw;
 use self::event::DownloadEvent;
 
-#[allow(dead_code)]
 fn parse_resize_message(data: &[u8]) -> Option<(u16, u16)> {
     if data.first() != Some(&b'{') {
         return None;
@@ -588,18 +587,11 @@ pub async fn run_web(api_host: Option<String>) -> io::Result<()> {
 
         // Drain WebSocket keyboard input
         while let Ok(data) = ws_input_rx.try_recv() {
-            // Resize messages are JSON: {"type":"resize","cols":80,"rows":24}
-            if data.first() == Some(&b'{') {
-                if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(&data) {
-                    if msg.get("type").and_then(|t| t.as_str()) == Some("resize") {
-                        let cols = msg.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
-                        let rows = msg.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
-                        let rect = Rect::new(0, 0, cols, rows);
-                        terminal.resize(rect)?;
-                        log::debug!("Terminal resized to {cols}x{rows}");
-                        continue;
-                    }
-                }
+            if let Some((cols, rows)) = parse_resize_message(&data) {
+                let rect = Rect::new(0, 0, cols, rows);
+                terminal.resize(rect)?;
+                log::debug!("Terminal resized to {cols}x{rows}");
+                continue;
             }
 
             // Raw keyboard bytes → crossterm events
