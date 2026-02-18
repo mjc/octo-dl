@@ -85,7 +85,6 @@ async fn api_health(State(state): State<AppState>) -> impl IntoResponse {
     })
 }
 
-#[allow(dead_code)]
 fn emit_urls_event(tx: &mpsc::UnboundedSender<DownloadEvent>, urls: Vec<String>) -> UrlResponse {
     let count = urls.len();
     if !urls.is_empty() {
@@ -100,15 +99,7 @@ async fn api_post_urls(
     axum::Json(payload): axum::Json<UrlRequest>,
 ) -> impl IntoResponse {
     let urls = extract_urls(&payload.text);
-
-    let count = urls.len();
-    if !urls.is_empty() {
-        let _ = state
-            .tx
-            .send(DownloadEvent::UrlsReceived { urls: urls.clone() });
-    }
-
-    axum::Json(UrlResponse { added: urls, count })
+    axum::Json(emit_urls_event(&state.tx, urls))
 }
 
 async fn api_parse_page(
@@ -123,14 +114,7 @@ async fn api_parse_page(
         urls = extract_urls(&payload.fallback);
     }
 
-    let count = urls.len();
-    if !urls.is_empty() {
-        let _ = state
-            .tx
-            .send(DownloadEvent::UrlsReceived { urls: urls.clone() });
-    }
-
-    axum::Json(UrlResponse { added: urls, count })
+    axum::Json(emit_urls_event(&state.tx, urls))
 }
 
 async fn bookmarklet_page(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
