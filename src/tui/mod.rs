@@ -79,6 +79,26 @@ fn parse_resize_message(data: &[u8]) -> Option<(u16, u16)> {
     Some((cols, rows))
 }
 
+#[allow(dead_code)]
+fn visible_file_names(app: &App) -> std::collections::HashSet<String> {
+    app.files
+        .iter()
+        .filter(|file| {
+            matches!(
+                file.status,
+                FileStatus::Queued | FileStatus::Downloading | FileStatus::Error(_)
+            )
+        })
+        .map(|file| file.name.clone())
+        .collect()
+}
+
+#[allow(dead_code)]
+fn sync_session_files(session: &mut SessionState, app: &App) {
+    let visible = visible_file_names(app);
+    session.files.retain(|file| visible.contains(file.path.as_str()));
+}
+
 /// RAII guard that ensures terminal cleanup on drop.
 /// Restores terminal to normal mode even if a panic occurs.
 struct TerminalGuard;
@@ -795,5 +815,125 @@ mod tests {
     fn resize_ignores_raw_keyboard_bytes() {
         // Arrow key sequence should NOT be parsed as resize
         assert_eq!(parse_resize_message(b"\x1b[A"), None);
+    }
+
+    #[test]
+    fn session_sync_retains_only_visible_files() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx);
+        app.files = vec![
+            app::FileEntry {
+                name: "queued.bin".to_string(),
+                size: 0,
+                downloaded: 0,
+                speed: 0,
+                speed_accum: 0,
+                status: FileStatus::Queued,
+            },
+            app::FileEntry {
+                name: "downloading.bin".to_string(),
+                size: 0,
+                downloaded: 0,
+                speed: 0,
+                speed_accum: 0,
+                status: FileStatus::Downloading,
+            },
+            app::FileEntry {
+                name: "errored.bin".to_string(),
+                size: 0,
+                downloaded: 0,
+                speed: 0,
+                speed_accum: 0,
+                status: FileStatus::Error("boom".to_string()),
+            },
+            app::FileEntry {
+                name: "complete.bin".to_string(),
+                size: 0,
+                downloaded: 0,
+                speed: 0,
+                speed_accum: 0,
+                status: FileStatus::Complete,
+            },
+        ];
+
+        let creds = crate::state::SavedCredentials {
+            email: "e".to_string(),
+            password: "p".to_string(),
+            mfa: None,
+        };
+        let mut session = SessionState::new(creds, crate::DownloadConfig::default(), vec![]);
+        session.files = vec![
+            crate::state::FileEntry {
+                url_index: 0,
+                path: "queued.bin".to_string(),
+                size: 0,
+                status: crate::state::FileEntryStatus::Pending,
+            },
+            crate::state::FileEntry {
+                url_index: 0,
+                path: "downloading.bin".to_string(),
+                size: 0,
+                status: crate::state::FileEntryStatus::Downloading,
+            },
+            crate::state::FileEntry {
+                url_index: 0,
+                path: "errored.bin".to_string(),
+                size: 0,
+                status: crate::state::FileEntryStatus::Error("x".to_string()),
+            },
+            crate::state::FileEntry {
+                url_index: 0,
+                path: "complete.bin".to_string(),
+                size: 0,
+                status: crate::state::FileEntryStatus::Completed,
+            },
+            crate::state::FileEntry {
+                url_index: 0,
+                path: "stale.bin".to_string(),
+                size: 0,
+                status: crate::state::FileEntryStatus::Pending,
+            },
+        ];
+
+        sync_session_files(&mut session, &app);
+
+        let names = session
+            .files
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(names.contains("queued.bin"));
+        assert!(names.contains("downloading.bin"));
+        assert!(names.contains("errored.bin"));
+        assert!(!names.contains("complete.bin"));
+        assert!(!names.contains("stale.bin"));
+    }
+
+    #[test]
+    fn visible_file_names_excludes_completed() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx);
+        app.files = vec![
+            app::FileEntry {
+                name: "queued.bin".to_string(),
+                size: 0,
+                downloaded: 0,
+                speed: 0,
+                speed_accum: 0,
+                status: FileStatus::Queued,
+            },
+            app::FileEntry {
+                name: "complete.bin".to_string(),
+                size: 0,
+                downloaded: 0,
+                speed: 0,
+                speed_accum: 0,
+                status: FileStatus::Complete,
+            },
+        ];
+
+        let visible = visible_file_names(&app);
+        assert!(visible.contains("queued.bin"));
+        assert!(!visible.contains("complete.bin"));
     }
 }
