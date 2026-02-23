@@ -90,7 +90,7 @@ in {
     systemd.services.octo-dl = let
       mode = if cfg.web.enable then "--web" else "--api";
       webHostFlag = lib.optionalString (cfg.web.enable && cfg.web.publicHost != null) " --web-host ${cfg.web.publicHost}";
-      apiHostFlag = " --api-host ${cfg.web.host}";
+      apiHostFlag = " --host ${cfg.web.host}";
     in {
       description = "octo-dl MEGA download service";
       after = ["network-online.target"];
