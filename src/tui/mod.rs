@@ -12,7 +12,6 @@ pub mod web;
 
 use std::env;
 use std::io::{self, Read, Write};
-use std::net::TcpListener;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -151,7 +150,7 @@ mod tests {
         session.save().unwrap();
 
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(0, event_tx);
+        let mut app = App::new(0, event_tx, true);
 
         resume_session(&mut app);
 
@@ -261,11 +260,11 @@ mod progress_tests {
 
     fn build_test_app() -> App {
         let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
-        App::new(9723, tx)
+        App::new(9723, tx, true)
     }
 
     #[test]
-    fn log_progress_skips_when_no_files() {
+    fn log_progress_skips_logging_but_still_updates_speeds() {
         let mut app = build_test_app();
         app.files.push(FileEntry {
             name: "test".to_string(),
@@ -275,10 +274,12 @@ mod progress_tests {
             speed_accum: 42,
             status: FileStatus::Downloading,
         });
-        let previous_speed = app.current_speed;
+        app.last_tick = Instant::now() - Duration::from_secs(1);
+
         log_progress(&mut app);
-        assert_eq!(app.current_speed, previous_speed);
-        assert_eq!(app.files[0].speed_accum, 42);
+
+        assert!(app.current_speed > 0);
+        assert_eq!(app.files[0].speed_accum, 0);
     }
 
     #[test]
@@ -622,6 +623,7 @@ pub async fn run(
     api_host: Option<Option<String>>,
     web: bool,
     config_path: Option<&Path>,
+    quit_enabled: bool,
 ) -> io::Result<()> {
     // Initialize terminal with RAII guard for automatic cleanup
     let _terminal_guard = TerminalGuard::new()?;
@@ -637,7 +639,7 @@ pub async fn run(
     let api_bind_host;
     let mut app;
     if let Some(path) = config_path {
-        app = App::new(0, download_tx);
+        app = App::new(0, download_tx, quit_enabled);
         let (host, port) = apply_service_config(&mut app, path)?;
         api_port = port;
         api_bind_host = host;
@@ -648,7 +650,7 @@ pub async fn run(
             .and_then(|p| p.parse().ok())
             .unwrap_or(DEFAULT_API_PORT);
         api_bind_host = "127.0.0.1".to_string();
-        app = App::new(api_port, download_tx);
+        app = App::new(api_port, download_tx, quit_enabled);
     }
 
     // Start the API server (if enabled)
@@ -736,7 +738,7 @@ pub async fn run(
 /// Panics if SIGTERM signal handler registration fails on Unix platforms.
 pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
-    let mut app = App::new(0, download_tx);
+    let mut app = App::new(0, download_tx, true);
 
     let (api_host, api_port) = apply_service_config(&mut app, config_path)?;
     load_credentials_from_env(&mut app);
@@ -803,15 +805,12 @@ pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<(
         (api_host.to_string(), port)
     };
 
-    let listener = TcpListener::bind(("127.0.0.1", 0))?;
-    let log_addr = listener.local_addr()?;
-    let log_addr_string = log_addr.to_string();
+    let (bridge, child, mut log_reader) = terminal::spawn_tui_process(config_path, false)?;
     let log_forwarder = tokio::task::spawn_blocking(move || -> io::Result<()> {
-        let (mut stream, _) = listener.accept()?;
         let stderr = std::io::stderr();
         let mut buf = [0u8; 4096];
         loop {
-            match stream.read(&mut buf) {
+            match log_reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     let mut handle = stderr.lock();
@@ -824,8 +823,6 @@ pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<(
         }
         Ok(())
     });
-
-    let (bridge, child) = terminal::spawn_tui_process(config_path, Some(log_addr_string), true)?;
     let bridge = Arc::new(bridge);
 
     log::debug!("Starting terminal web UI on {host}:{port}");

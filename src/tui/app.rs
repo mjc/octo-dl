@@ -1,7 +1,6 @@
 //! Application state model.
 
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::time::Instant;
 
 use ratatui::widgets::ListState;
@@ -284,13 +283,17 @@ impl App {
             .sum();
     }
 
-    pub fn new(api_port: u16, event_tx: mpsc::UnboundedSender<DownloadEvent>) -> Self {
+    pub fn new(
+        api_port: u16,
+        event_tx: mpsc::UnboundedSender<DownloadEvent>,
+        quit_enabled: bool,
+    ) -> Self {
         let (url_tx, url_rx) = mpsc::unbounded_channel::<String>();
         let (token_tx, token_rx) = mpsc::unbounded_channel::<TokenMessage>();
         Self {
             popup: Popup::None,
             should_quit: false,
-            quit_enabled: env::var("OCTO_TUI_DISABLE_QUIT").is_err(),
+            quit_enabled,
             login: LoginState::new(),
             authenticated: false,
             url_input: String::new(),
@@ -411,7 +414,7 @@ mod tests {
 
     fn test_app() -> App {
         let (tx, _rx) = mpsc::unbounded_channel();
-        App::new(9723, tx)
+        App::new(9723, tx, true)
     }
 
     #[test]

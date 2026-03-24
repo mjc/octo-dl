@@ -1,5 +1,6 @@
 //! Terminal-focused HTTP server that streams the real `ratatui` TUI via xterm.js.
 
+use std::io::Read;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -10,9 +11,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use futures_util::{SinkExt, StreamExt};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{DlcKeyCache, extract_urls, parse_dlc_data};
@@ -42,10 +44,13 @@ mod tests {
             .expect("failed to take writer from PTY");
         let bridge = Arc::new(TerminalBridge::new(pair.master, writer));
         let reader = bridge.try_clone_reader().expect("failed to clone reader");
+        let session = Arc::new(TerminalSession::new(bridge.clone()));
         let state = TerminalApiState {
             host: "127.0.0.1".to_string(),
             port: 9723,
-            bridge,
+            session,
+            http_client: Arc::new(build_http_client().expect("failed to build HTTP client")),
+            dlc_cache: Arc::new(DlcKeyCache::new()),
         };
         let _slave = pair.slave; // keep slave alive so the PTY stays usable
         (state, std::io::BufReader::new(reader))
@@ -71,15 +76,75 @@ mod tests {
             assert_eq!(trimmed, url);
         }
     }
+
+    #[test]
+    fn terminal_session_records_output_and_snapshots_screen() {
+        let (state, _reader) = build_test_state();
+        let session = state.session;
+
+        session.record(b"hello");
+
+        let snapshot = String::from_utf8(session.snapshot()).expect("snapshot should be utf8");
+        assert!(snapshot.contains("hello"));
+        assert!(session.initial_frame().starts_with(b"\x1bc"));
+    }
+
+    #[test]
+    fn terminal_session_broadcasts_recorded_bytes() {
+        let (state, _reader) = build_test_state();
+        let session = state.session;
+        let mut rx = session.subscribe();
+
+        session.record(b"abc");
+
+        let chunk = rx.try_recv().expect("broadcast should receive bytes");
+        assert_eq!(chunk, b"abc");
+    }
 }
 
 #[derive(Clone)]
 struct TerminalApiState {
     host: String,
     port: u16,
-    bridge: Arc<TerminalBridge>,
+    session: Arc<TerminalSession>,
     http_client: Arc<reqwest::Client>,
     dlc_cache: Arc<DlcKeyCache>,
+}
+
+struct TerminalSession {
+    bridge: Arc<TerminalBridge>,
+    parser: Mutex<vt100::Parser>,
+    output_tx: broadcast::Sender<Vec<u8>>,
+}
+
+impl TerminalSession {
+    fn new(bridge: Arc<TerminalBridge>) -> Self {
+        let (output_tx, _) = broadcast::channel(256);
+        Self {
+            bridge,
+            parser: Mutex::new(vt100::Parser::new(40, 120, 0)),
+            output_tx,
+        }
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
+        self.output_tx.subscribe()
+    }
+
+    fn snapshot(&self) -> Vec<u8> {
+        self.parser.lock().screen().state_formatted()
+    }
+
+    fn initial_frame(&self) -> Vec<u8> {
+        let mut frame = b"\x1bc".to_vec();
+        frame.extend_from_slice(&self.snapshot());
+        frame
+    }
+
+    fn record(&self, bytes: &[u8]) {
+        self.parser.lock().process(bytes);
+        let _ = self.output_tx.send(bytes.to_vec());
+    }
 }
 
 fn header_to_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -185,10 +250,27 @@ pub async fn run_terminal_server(
 
     let http_client = Arc::new(build_http_client()?);
     let dlc_cache = Arc::new(DlcKeyCache::new());
+    let session = Arc::new(TerminalSession::new(bridge));
+    let reader = session.bridge.try_clone_reader()?;
+    let reader_session = session.clone();
+    let _reader_task = tokio::task::spawn_blocking(move || {
+        let mut reader = reader;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => reader_session.record(&buf[..n]),
+                Err(e) => {
+                    log::error!("PTY read error: {e}");
+                    break;
+                }
+            }
+        }
+    });
     let state = TerminalApiState {
         host: host.to_string(),
         port,
-        bridge,
+        session,
         http_client,
         dlc_cache,
     };
@@ -243,7 +325,7 @@ fn dispatch_urls(state: &TerminalApiState, urls: Vec<String>) {
         return;
     }
     for url in urls {
-        let _ = state.bridge.write_line(&url);
+        let _ = state.session.bridge.write_line(&url);
     }
 }
 
@@ -380,37 +462,11 @@ async fn ws_handler(
 }
 
 async fn handle_ws(state: TerminalApiState, ws: WebSocket) {
-    let bridge = state.bridge.clone();
-    let reader = match bridge.try_clone_reader() {
-        Ok(reader) => reader,
-        Err(e) => {
-            log::error!("Failed to clone PTY reader: {e}");
-            return;
-        }
-    };
+    let bridge = state.session.bridge.clone();
+    let mut output_rx = state.session.subscribe();
     let (mut sink, mut stream) = ws.split();
     let (write_tx, mut write_rx) = mpsc::unbounded_channel::<Message>();
-
-    let reader_tx = write_tx.clone();
-    let reader_task = tokio::task::spawn_blocking(move || {
-        let mut buf = [0u8; 4096];
-        let mut reader = reader;
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let chunk = buf[..n].to_vec();
-                    if reader_tx.send(Message::Binary(chunk.into())).is_err() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    log::error!("PTY read error: {e}");
-                    break;
-                }
-            }
-        }
-    });
+    let _ = write_tx.send(Message::Binary(state.session.initial_frame().into()));
 
     let writer = tokio::spawn(async move {
         while let Some(msg) = write_rx.recv().await {
@@ -420,12 +476,25 @@ async fn handle_ws(state: TerminalApiState, ws: WebSocket) {
         }
     });
 
+    let reader_tx = write_tx.clone();
+    let fanout = tokio::spawn(async move {
+        loop {
+            match output_rx.recv().await {
+                Ok(chunk) => {
+                    if reader_tx.send(Message::Binary(chunk.into())).is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
     while let Some(msg) = stream.next().await {
         match msg {
             Ok(Message::Text(text)) => {
-                let mut data = text.to_string().into_bytes();
-                data.push(b'\n');
-                let _ = bridge.write(&data);
+                let _ = bridge.write(text.as_bytes());
             }
             Ok(Message::Binary(data)) => {
                 let _ = bridge.write(&data);
@@ -440,5 +509,5 @@ async fn handle_ws(state: TerminalApiState, ws: WebSocket) {
 
     drop(write_tx);
     let _ = writer.await;
-    let _ = reader_task.await;
+    let _ = fanout.await;
 }
