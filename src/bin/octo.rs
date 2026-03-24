@@ -1,17 +1,16 @@
 use env_logger::Target;
 use std::env;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Write;
+use std::net::TcpStream;
 #[cfg(unix)]
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::unix::io::{FromRawFd, RawFd};
+#[cfg(windows)]
+use std::os::windows::io::{FromRawHandle, RawHandle};
 use std::path::PathBuf;
 
 /// Flags that consume the next argument as a value (not a positional arg).
 const FLAGS_WITH_VALUES: &[&str] = &["--host", "--config"];
-#[cfg(unix)]
-const TUI_LOG_FD: RawFd = 100;
-#[cfg(unix)]
-const TUI_CONTROL_FD: RawFd = 101;
 
 /// Returns true if `args` contains positional arguments (URLs, DLC paths, etc.)
 /// as opposed to just flags and their values.
@@ -63,39 +62,61 @@ fn init_logger() {
 }
 
 fn log_pipe_writer() -> Option<Box<dyn Write + Send>> {
-    #[cfg(unix)]
-    {
-        let fd = nix::unistd::dup(TUI_LOG_FD).ok()?;
-        return Some(Box::new(unsafe { File::from_raw_fd(fd) }));
+    if let Ok(addr) = env::var("OCTO_TUI_LOG_ADDR") {
+        if let Some(writer) = log_pipe_writer_from_addr(&addr) {
+            return Some(writer);
+        }
     }
-    #[cfg(windows)]
-    {
-        None
-    }
+    let raw_fd = env::var_os("OCTO_TUI_LOG_FD")?;
+    let fd = raw_fd.to_string_lossy().parse::<usize>().ok()?;
+    log_pipe_writer_from_raw(fd)
+}
+
+fn log_pipe_writer_from_addr(addr: &str) -> Option<Box<dyn Write + Send>> {
+    TcpStream::connect(addr)
+        .ok()
+        .map(|stream| Box::new(stream) as Box<dyn Write + Send>)
 }
 
 #[cfg(unix)]
-fn inherited_quit_enabled() -> bool {
-    let Ok(fd) = nix::unistd::dup(TUI_CONTROL_FD) else {
-        return true;
-    };
-    let mut file = unsafe { File::from_raw_fd(fd) };
-    let mut flag = [1u8; 1];
-    match file.read(&mut flag) {
-        Ok(1) => flag[0] != 0,
-        _ => true,
+fn log_pipe_writer_from_raw(fd: usize) -> Option<Box<dyn Write + Send>> {
+    if fd > i32::MAX as usize {
+        return None;
+    }
+    unsafe {
+        let file = File::from_raw_fd(fd as RawFd);
+        Some(Box::new(file))
     }
 }
 
 #[cfg(windows)]
-fn inherited_quit_enabled() -> bool {
-    true
+fn log_pipe_writer_from_raw(fd: usize) -> Option<Box<dyn Write + Send>> {
+    unsafe {
+        let file = File::from_raw_handle(fd as RawHandle);
+        Some(Box::new(file))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[test]
+    fn log_pipe_writer_handles_missing_and_invalid_values() {
+        env::remove_var("OCTO_TUI_LOG_FD");
+        assert!(log_pipe_writer().is_none());
+
+        env::set_var("OCTO_TUI_LOG_FD", "invalid");
+        assert!(log_pipe_writer().is_none());
+
+        env::remove_var("OCTO_TUI_LOG_FD");
+    }
 }
 
 #[tokio::main]
 async fn main() -> octo_dl::Result<()> {
     init_logger();
-    let quit_enabled = inherited_quit_enabled();
 
     let mut tui = false;
     let mut api = false;
@@ -149,7 +170,7 @@ async fn main() -> octo_dl::Result<()> {
         };
         #[cfg(feature = "tui")]
         {
-            octo_dl::tui::run(host_param, web, config_path.as_deref(), quit_enabled)
+            octo_dl::tui::run(host_param, web, config_path.as_deref())
                 .await
                 .map_err(octo_dl::Error::Io)
         }

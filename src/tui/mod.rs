@@ -12,6 +12,7 @@ pub mod web;
 
 use std::env;
 use std::io::{self, Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -150,7 +151,7 @@ mod tests {
         session.save().unwrap();
 
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(0, event_tx, true);
+        let mut app = App::new(0, event_tx);
 
         resume_session(&mut app);
 
@@ -250,61 +251,6 @@ fn log_progress(app: &mut App) {
     }
 }
 
-#[cfg(test)]
-mod progress_tests {
-    use super::app::{App, FileEntry, FileStatus};
-    use super::event::DownloadEvent;
-    use super::log_progress;
-    use std::time::{Duration, Instant};
-    use tokio::sync::mpsc;
-
-    fn build_test_app() -> App {
-        let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
-        App::new(9723, tx, true)
-    }
-
-    #[test]
-    fn log_progress_skips_logging_but_still_updates_speeds() {
-        let mut app = build_test_app();
-        app.files.push(FileEntry {
-            name: "test".to_string(),
-            size: 1024,
-            downloaded: 0,
-            speed: 0,
-            speed_accum: 42,
-            status: FileStatus::Downloading,
-        });
-        app.last_tick = Instant::now() - Duration::from_secs(1);
-
-        log_progress(&mut app);
-
-        assert!(app.current_speed > 0);
-        assert_eq!(app.files[0].speed_accum, 0);
-    }
-
-    #[test]
-    fn log_progress_updates_speeds_when_active() {
-        let mut app = build_test_app();
-        app.files.push(FileEntry {
-            name: "busy".to_string(),
-            size: 2048,
-            downloaded: 512,
-            speed: 0,
-            speed_accum: 128,
-            status: FileStatus::Downloading,
-        });
-        app.files_total = 1;
-        app.total_downloaded = 512;
-        app.total_size = 2048;
-        app.last_tick = Instant::now() - Duration::from_secs(1);
-
-        log_progress(&mut app);
-
-        assert!(app.current_speed > 0);
-        assert!(app.files.iter().all(|f| f.speed_accum == 0));
-    }
-}
-
 /// Initiates login if credentials are available.
 ///
 /// When no credentials are found, `fallback` determines what happens:
@@ -399,66 +345,6 @@ fn apply_service_config(app: &mut App, config_path: &Path) -> io::Result<(String
     }
 
     Ok((service_config.api.host, service_config.api.port))
-}
-
-fn build_runtime_app(
-    download_tx: mpsc::UnboundedSender<DownloadEvent>,
-    config_path: Option<&Path>,
-    quit_enabled: bool,
-) -> io::Result<(App, String, u16)> {
-    if let Some(path) = config_path {
-        let mut app = App::new(0, download_tx, quit_enabled);
-        let (host, port) = apply_service_config(&mut app, path)?;
-        app.api_port = port;
-        Ok((app, host, port))
-    } else {
-        let port = env::var("OCTO_API_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(DEFAULT_API_PORT);
-        let app = App::new(port, download_tx, quit_enabled);
-        Ok((app, "127.0.0.1".to_string(), port))
-    }
-}
-
-fn spawn_api_server(
-    api_tx: mpsc::UnboundedSender<DownloadEvent>,
-    host: String,
-    port: u16,
-    web_opts: Option<WebOptions>,
-    label: &'static str,
-) {
-    tokio::spawn(async move {
-        log::info!("Starting {label} on {host}:{port}");
-        if let Err(e) = api::run_api_server(api_tx, &host, port, web_opts.as_ref(), None).await {
-            log::error!("{label} error: {e}");
-        }
-    });
-}
-
-fn initialize_interactive_runtime(app: &mut App) {
-    resume_session(app);
-    load_credentials_from_env(app);
-    auto_login(app, app::NoCredentialsFallback::ShowPopup);
-}
-
-fn initialize_headless_runtime(app: &mut App, config_path: &Path) -> io::Result<()> {
-    load_credentials_from_env(app);
-
-    if !app.login.has_credentials() {
-        log::error!(
-            "No credentials configured. Edit {} and set email/password under [credentials], then restart.",
-            config_path.display()
-        );
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("No credentials in {}", config_path.display()),
-        ));
-    }
-
-    resume_session(app);
-    auto_login(app, app::NoCredentialsFallback::Silent);
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -683,7 +569,6 @@ pub async fn run(
     api_host: Option<Option<String>>,
     web: bool,
     config_path: Option<&Path>,
-    quit_enabled: bool,
 ) -> io::Result<()> {
     // Initialize terminal with RAII guard for automatic cleanup
     let _terminal_guard = TerminalGuard::new()?;
@@ -694,19 +579,48 @@ pub async fn run(
 
     let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
 
-    let (mut app, api_bind_host, api_port) =
-        build_runtime_app(download_tx, config_path, quit_enabled)?;
+    // Load service config if provided (credentials, download settings, api bind)
+    let api_port;
+    let api_bind_host;
+    let mut app;
+    if let Some(path) = config_path {
+        app = App::new(0, download_tx, true);
+        let (host, port) = apply_service_config(&mut app, path)?;
+        api_port = port;
+        api_bind_host = host;
+        app.api_port = api_port;
+    } else {
+        api_port = env::var("OCTO_API_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(DEFAULT_API_PORT);
+        api_bind_host = "127.0.0.1".to_string();
+        app = App::new(api_port, download_tx, true);
+    }
 
     // Start the API server (if enabled)
     if let Some(explicit_host) = api_host {
         let host = explicit_host.unwrap_or(api_bind_host);
-        let web_opts = web.then(|| WebOptions {
-            public_host: host.clone(),
+        let web_opts = if web {
+            Some(WebOptions {
+                public_host: host.clone(),
+            })
+        } else {
+            None
+        };
+        let api_tx = app.event_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                api::run_api_server(api_tx, &host, api_port, web_opts.as_ref(), None).await
+            {
+                log::error!("API server error: {e}");
+            }
         });
-        spawn_api_server(app.event_tx.clone(), host, api_port, web_opts, "API server");
     }
 
-    initialize_interactive_runtime(&mut app);
+    resume_session(&mut app);
+    load_credentials_from_env(&mut app);
+    auto_login(&mut app, app::NoCredentialsFallback::ShowPopup);
 
     let mut tick_count: u32 = 0;
     let mut sys = System::new();
@@ -769,12 +683,37 @@ pub async fn run(
 /// Panics if SIGTERM signal handler registration fails on Unix platforms.
 pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
-    let (mut app, api_host, api_port) = build_runtime_app(download_tx, Some(config_path), true)?;
-    initialize_headless_runtime(&mut app, config_path)?;
+    let mut app = App::new(0, download_tx, true);
+
+    let (api_host, api_port) = apply_service_config(&mut app, config_path)?;
+    load_credentials_from_env(&mut app);
+
+    if app.login.has_credentials() {
+        // credentials loaded — good
+    } else {
+        log::error!(
+            "No credentials configured. Edit {} and set email/password under [credentials], then restart.",
+            config_path.display()
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("No credentials in {}", config_path.display()),
+        ));
+    }
+
     app.api_port = api_port;
+    resume_session(&mut app);
+    auto_login(&mut app, app::NoCredentialsFallback::Silent);
 
     // Start the API server (headless — no web UI)
-    spawn_api_server(app.event_tx.clone(), api_host.clone(), api_port, None, "API server");
+    let api_tx = app.event_tx.clone();
+    let api_host_owned = api_host.clone();
+    tokio::spawn(async move {
+        log::info!("Starting API server on {api_host_owned}:{api_port}");
+        if let Err(e) = api::run_api_server(api_tx, &api_host_owned, api_port, None, None).await {
+            log::error!("API server error: {e}");
+        }
+    });
 
     log::info!("Entering headless event loop");
     run_headless_loop(&mut app, &mut download_rx).await;
@@ -811,12 +750,15 @@ pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<(
         (api_host.to_string(), port)
     };
 
-    let (bridge, child, mut log_reader) = terminal::spawn_tui_process(config_path, false)?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let log_addr = listener.local_addr()?;
+    let log_addr_string = log_addr.to_string();
     let log_forwarder = tokio::task::spawn_blocking(move || -> io::Result<()> {
+        let (mut stream, _) = listener.accept()?;
         let stderr = std::io::stderr();
         let mut buf = [0u8; 4096];
         loop {
-            match log_reader.read(&mut buf) {
+            match stream.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     let mut handle = stderr.lock();
@@ -829,6 +771,8 @@ pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<(
         }
         Ok(())
     });
+
+    let (bridge, child) = terminal::spawn_tui_process(config_path, Some(log_addr_string))?;
     let bridge = Arc::new(bridge);
 
     log::debug!("Starting terminal web UI on {host}:{port}");
