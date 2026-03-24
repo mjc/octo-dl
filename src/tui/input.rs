@@ -274,7 +274,7 @@ mod tests {
 
     fn test_app() -> App {
         let (tx, _rx) = mpsc::unbounded_channel();
-        App::new(9723, tx)
+        App::new(9723, tx, true)
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -325,6 +325,15 @@ mod tests {
         handle_input(&mut app, key(KeyCode::Char('h')));
         handle_input(&mut app, key(KeyCode::Char('i')));
         assert_eq!(app.url_input, "hi");
+    }
+
+    #[test]
+    fn handle_main_input_typing_q_does_not_quit_while_editing() {
+        let mut app = test_app();
+        app.url_input = "https://example".to_string();
+        handle_input(&mut app, key(KeyCode::Char('q')));
+        assert!(!app.should_quit);
+        assert_eq!(app.url_input, "https://exampleq");
     }
 
     #[test]

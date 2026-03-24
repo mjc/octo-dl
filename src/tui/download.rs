@@ -567,7 +567,7 @@ mod tests {
 
     fn test_app() -> App {
         let (tx, _rx) = mpsc::unbounded_channel();
-        App::new(9723, tx)
+        App::new(9723, tx, true)
     }
 
     /// Regression test: the mega library reports *cumulative* bytes downloaded,
