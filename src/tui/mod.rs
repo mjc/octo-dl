@@ -16,6 +16,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, RawFd};
+
 use crossterm::event::Event;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -748,6 +751,8 @@ pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<(
     };
 
     let (log_reader, log_writer) = pipe()?;
+    #[cfg(unix)]
+    clear_fd_cloexec(log_writer.as_raw_fd())?;
     let log_fd = pipe_writer_to_usize(&log_writer);
     let log_forwarder = tokio::task::spawn_blocking(move || {
         let mut reader = log_reader;
@@ -815,6 +820,21 @@ pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<(
 fn pipe_writer_to_usize(writer: &os_pipe::PipeWriter) -> usize {
     use std::os::unix::io::AsRawFd;
     writer.as_raw_fd() as usize
+}
+
+#[cfg(unix)]
+fn clear_fd_cloexec(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let cleaned = flags & !libc::FD_CLOEXEC;
+    if cleaned != flags {
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, cleaned) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(windows)]

@@ -322,6 +322,7 @@ impl App {
     ///
     /// Called by the event loop *only* when state has changed and at least
     /// one SSE/API client is connected — never on a blind timer.
+    #[allow(dead_code)]
     pub fn to_json(&self) -> String {
         #[derive(Serialize)]
         struct Snapshot<'a> {
@@ -368,6 +369,7 @@ impl App {
 // ---------------------------------------------------------------------------
 
 /// An action sent from an API handler into the single-owner event loop.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum UiAction {
     AddUrls(Vec<String>),
