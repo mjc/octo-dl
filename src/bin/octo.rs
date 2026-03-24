@@ -1,4 +1,11 @@
+use env_logger::Target;
 use std::env;
+use std::fs::File;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::io::{FromRawFd, RawFd};
+#[cfg(windows)]
+use std::os::windows::io::{FromRawHandle, RawHandle};
 use std::path::PathBuf;
 
 /// Flags that consume the next argument as a value (not a positional arg).
@@ -35,19 +42,69 @@ fn print_usage() {
     eprintln!("  --tui --web         Terminal TUI with web UI alongside");
     eprintln!();
     eprintln!("Global options:");
-    eprintln!("  --host <HOST>       Bind address for API/web (default: 127.0.0.1, or from config)");
+    eprintln!(
+        "  --host <HOST>       Bind address for API/web (default: 127.0.0.1, or from config)"
+    );
     eprintln!("  --config <PATH>     Config file for headless/service mode");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
     eprintln!("Run 'octo --tui --help' or 'octo --help' for mode-specific options.");
 }
 
+fn init_logger() {
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("octo_dl=info"));
+    if let Some(pipe_writer) = log_pipe_writer() {
+        builder.target(Target::Pipe(pipe_writer));
+    }
+    builder.init();
+}
+
+fn log_pipe_writer() -> Option<Box<dyn Write + Send>> {
+    let raw_fd = env::var_os("OCTO_TUI_LOG_FD")?;
+    let fd = raw_fd.to_string_lossy().parse::<usize>().ok()?;
+    log_pipe_writer_from_raw(fd)
+}
+
+#[cfg(unix)]
+fn log_pipe_writer_from_raw(fd: usize) -> Option<Box<dyn Write + Send>> {
+    if fd > i32::MAX as usize {
+        return None;
+    }
+    unsafe {
+        let file = File::from_raw_fd(fd as RawFd);
+        Some(Box::new(file))
+    }
+}
+
+#[cfg(windows)]
+fn log_pipe_writer_from_raw(fd: usize) -> Option<Box<dyn Write + Send>> {
+    unsafe {
+        let file = File::from_raw_handle(fd as RawHandle);
+        Some(Box::new(file))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[test]
+    fn log_pipe_writer_handles_missing_and_invalid_values() {
+        env::remove_var("OCTO_TUI_LOG_FD");
+        assert!(log_pipe_writer().is_none());
+
+        env::set_var("OCTO_TUI_LOG_FD", "invalid");
+        assert!(log_pipe_writer().is_none());
+
+        env::remove_var("OCTO_TUI_LOG_FD");
+    }
+}
+
 #[tokio::main]
 async fn main() -> octo_dl::Result<()> {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("octo_dl=info"),
-    )
-    .init();
+    init_logger();
 
     let mut tui = false;
     let mut api = false;
@@ -115,12 +172,9 @@ async fn main() -> octo_dl::Result<()> {
         // --web without --tui = web UI as the primary interface
         #[cfg(feature = "tui")]
         {
-            octo_dl::tui::run_web(
-                &host,
-                config_path.as_deref(),
-            )
-            .await
-            .map_err(octo_dl::Error::Io)
+            octo_dl::tui::run_web(&host, config_path.as_deref())
+                .await
+                .map_err(octo_dl::Error::Io)
         }
         #[cfg(not(feature = "tui"))]
         {
