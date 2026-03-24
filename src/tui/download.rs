@@ -136,6 +136,9 @@ pub fn handle_file_complete(app: &mut App, name: &str) {
     }
 
     if app.files_completed == app.files_total && app.files_total > 0 {
+        if let Some(ref mut session) = app.session {
+            let _ = session.mark_completed();
+        }
         app.status = "All downloads complete".to_string();
     } else {
         app.status = format!("Downloading ({}/{})", app.files_completed, app.files_total);
