@@ -6,11 +6,14 @@ mod download;
 mod draw;
 mod event;
 mod input;
+mod terminal;
+mod terminal_server;
 pub mod web;
 
 use std::env;
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::Event;
@@ -26,10 +29,11 @@ use app::FileStatus;
 use sysinfo::System;
 
 use self::api::DEFAULT_API_PORT;
-use self::app::{App, SharedAppState, UiAction};
+use self::app::{App, UiAction};
 use self::download::{handle_download_event, start_login};
 use self::draw::draw;
 use self::event::DownloadEvent;
+use os_pipe::pipe;
 
 /// Options for the web UI server.
 ///
@@ -401,6 +405,7 @@ async fn run_headless_loop(
 /// Serialisation happens only when state is dirty **and** at least one API
 /// client holds a receiver (`receiver_count() > 1`, since the
 /// [`SharedAppState`] template receiver always counts as one).
+#[allow(dead_code)]
 async fn run_web_loop(
     app: &mut App,
     download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
@@ -480,6 +485,7 @@ async fn run_web_loop(
 }
 
 /// Translates a [`UiAction`] from an API handler into mutations on `App`.
+#[allow(dead_code)]
 fn handle_ui_action(app: &mut App, action: UiAction) {
     match action {
         UiAction::AddUrls(urls) => {
@@ -730,13 +736,9 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
 /// # Panics
 /// Panics if SIGTERM signal handler registration fails on Unix platforms.
 pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<()> {
-    let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
-    let mut app = App::new(0, download_tx);
-
-    // Load service config if provided (credentials, download settings, api bind)
-    let (api_host, api_port) = if let Some(path) = config_path {
-        let (host, port) = apply_service_config(&mut app, path)?;
-        (host, port)
+    let (host, port) = if let Some(path) = config_path {
+        let config = ServiceConfig::load_or_create(path)?;
+        (config.api.host.clone(), config.api.port)
     } else {
         let port = env::var("OCTO_API_PORT")
             .ok()
@@ -745,47 +747,78 @@ pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<(
         (api_host.to_string(), port)
     };
 
-    app.api_port = api_port;
-
-    // Channel-based shared state — no locks, no Arc<Mutex<App>>.
-    let (action_tx, mut action_rx) = mpsc::unbounded_channel::<UiAction>();
-    let (state_tx, state_rx) = tokio::sync::watch::channel(String::new());
-    let shared = SharedAppState {
-        action_tx,
-        state_rx,
-    };
-    let web_opts = WebOptions {
-        public_host: api_host.clone(),
-    };
-
-    // Start the API + web server
-    let api_tx = app.event_tx.clone();
-    let api_host_owned = api_host.clone();
-    tokio::spawn(async move {
-        log::info!("Starting web TUI on {api_host_owned}:{api_port}");
-        if let Err(e) = api::run_api_server(
-            api_tx,
-            &api_host_owned,
-            api_port,
-            Some(&web_opts),
-            Some(shared),
-        )
-        .await
-        {
-            log::error!("API server error: {e}");
+    let (log_reader, log_writer) = pipe()?;
+    let log_fd = pipe_writer_to_usize(&log_writer);
+    let log_forwarder = tokio::task::spawn_blocking(move || {
+        let mut reader = log_reader;
+        let stderr = std::io::stderr();
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut handle = stderr.lock();
+                    if handle.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                    let _ = handle.flush();
+                }
+                Err(_) => break,
+            }
         }
     });
 
-    resume_session(&mut app);
-    load_credentials_from_env(&mut app);
-    auto_login(&mut app, app::NoCredentialsFallback::ShowPopup);
+    let (bridge, child) = terminal::spawn_tui_process(config_path, Some(log_fd))?;
+    drop(log_writer);
+    let bridge = Arc::new(bridge);
 
-    eprintln!("octo-dl web TUI running at http://{api_host}:{api_port}");
-    log::info!("Entering web TUI event loop");
+    log::debug!("Starting terminal web UI on {host}:{port}");
 
-    run_web_loop(&mut app, &mut download_rx, &mut action_rx, &state_tx).await;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server_handle = {
+        let host = host.clone();
+        let bridge = bridge.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                terminal_server::run_terminal_server(&host, port, bridge, shutdown_rx).await
+            {
+                log::error!("Terminal server error: {e}");
+            }
+        })
+    };
 
-    sync_session_on_shutdown(&mut app);
-    log::info!("Shutdown complete");
+    let child_handle = tokio::task::spawn_blocking(move || {
+        let mut child = child;
+        let status = child.wait();
+        let _ = shutdown_tx.send(());
+        status
+    });
+
+    match child_handle.await {
+        Ok(Ok(status)) => {
+            log::info!("Terminal UI exited with status {status}");
+        }
+        Ok(Err(e)) => {
+            log::error!("Terminal UI wait failed: {e}");
+        }
+        Err(e) => {
+            log::error!("Terminal UI join error: {e}");
+        }
+    }
+
+    let _ = server_handle.await;
+    let _ = log_forwarder.await;
     Ok(())
+}
+
+#[cfg(unix)]
+fn pipe_writer_to_usize(writer: &os_pipe::PipeWriter) -> usize {
+    use std::os::unix::io::AsRawFd;
+    writer.as_raw_fd() as usize
+}
+
+#[cfg(windows)]
+fn pipe_writer_to_usize(writer: &os_pipe::PipeWriter) -> usize {
+    use std::os::windows::io::AsRawHandle;
+    writer.as_raw_handle() as usize
 }
