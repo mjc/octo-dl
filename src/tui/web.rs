@@ -43,25 +43,40 @@ pub fn index_html(host: &str, scheme: &str) -> String {
 
     let socket;
     const notice = document.getElementById("notice");
-    let noticeVisible = true;
+    notice.style.transition = "opacity 0.25s ease";
+    let hideAfterMessage = false;
+    let reconnectAttempt = 0;
+
+    const showNotice = (text) => {
+      notice.textContent = text;
+      notice.style.opacity = "1";
+    };
+
+    const hideNotice = () => {
+      notice.style.opacity = "0";
+    };
 
     const connect = () => {
       socket = new WebSocket("${WS_SCHEME}://${WS_HOST}/ws");
       socket.binaryType = "arraybuffer";
       socket.addEventListener("open", () => {
-        notice.textContent = "Connected";
+        reconnectAttempt = 0;
+        showNotice("Connected");
+        hideAfterMessage = true;
       });
       socket.addEventListener("close", () => {
-        notice.textContent = "Connection closed, reconnecting…";
+        reconnectAttempt += 1;
+        showNotice(
+          `Connection closed, reconnecting… (attempt ${reconnectAttempt})`
+        );
+        hideAfterMessage = false;
         setTimeout(connect, 800);
       });
       socket.addEventListener("message", (event) => {
         term.write(new Uint8Array(event.data));
-        if (noticeVisible) {
-          noticeVisible = false;
-          notice.style.opacity = "0";
-          notice.style.transition = "opacity 0.25s ease";
-          setTimeout(() => notice.remove(), 250);
+        if (hideAfterMessage) {
+          hideAfterMessage = false;
+          setTimeout(hideNotice, 250);
         }
       });
     };

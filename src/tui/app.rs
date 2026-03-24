@@ -1,6 +1,7 @@
 //! Application state model.
 
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::time::Instant;
 
 use ratatui::widgets::ListState;
@@ -181,6 +182,7 @@ pub struct FileEntry {
 pub struct App {
     pub popup: Popup,
     pub should_quit: bool,
+    pub quit_enabled: bool,
     // Auth
     pub login: LoginState,
     pub authenticated: bool,
@@ -288,6 +290,7 @@ impl App {
         Self {
             popup: Popup::None,
             should_quit: false,
+            quit_enabled: env::var("OCTO_TUI_DISABLE_QUIT").is_err(),
             login: LoginState::new(),
             authenticated: false,
             url_input: String::new(),

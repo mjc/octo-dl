@@ -251,6 +251,59 @@ fn log_progress(app: &mut App) {
     }
 }
 
+#[cfg(test)]
+mod progress_tests {
+    use super::app::{App, FileEntry, FileStatus};
+    use super::event::DownloadEvent;
+    use super::log_progress;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
+
+    fn build_test_app() -> App {
+        let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
+        App::new(9723, tx)
+    }
+
+    #[test]
+    fn log_progress_skips_when_no_files() {
+        let mut app = build_test_app();
+        app.files.push(FileEntry {
+            name: "test".to_string(),
+            size: 1024,
+            downloaded: 0,
+            speed: 0,
+            speed_accum: 42,
+            status: FileStatus::Downloading,
+        });
+        let previous_speed = app.current_speed;
+        log_progress(&mut app);
+        assert_eq!(app.current_speed, previous_speed);
+        assert_eq!(app.files[0].speed_accum, 42);
+    }
+
+    #[test]
+    fn log_progress_updates_speeds_when_active() {
+        let mut app = build_test_app();
+        app.files.push(FileEntry {
+            name: "busy".to_string(),
+            size: 2048,
+            downloaded: 512,
+            speed: 0,
+            speed_accum: 128,
+            status: FileStatus::Downloading,
+        });
+        app.files_total = 1;
+        app.total_downloaded = 512;
+        app.total_size = 2048;
+        app.last_tick = Instant::now() - Duration::from_secs(1);
+
+        log_progress(&mut app);
+
+        assert!(app.current_speed > 0);
+        assert!(app.files.iter().all(|f| f.speed_accum == 0));
+    }
+}
+
 /// Initiates login if credentials are available.
 ///
 /// When no credentials are found, `fallback` determines what happens:
@@ -772,7 +825,7 @@ pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<(
         Ok(())
     });
 
-    let (bridge, child) = terminal::spawn_tui_process(config_path, Some(log_addr_string))?;
+    let (bridge, child) = terminal::spawn_tui_process(config_path, Some(log_addr_string), true)?;
     let bridge = Arc::new(bridge);
 
     log::debug!("Starting terminal web UI on {host}:{port}");

@@ -51,6 +51,7 @@ impl TerminalBridge {
 pub fn spawn_tui_process(
     config_path: Option<&Path>,
     log_addr: Option<String>,
+    disable_quit: bool,
 ) -> io::Result<(TerminalBridge, Box<dyn portable_pty::Child + Send + Sync>)> {
     fn map_err<E: std::fmt::Display>(err: E) -> io::Error {
         io::Error::new(io::ErrorKind::Other, err.to_string())
@@ -77,6 +78,9 @@ pub fn spawn_tui_process(
     cmd.env("COLORTERM", "truecolor");
     if let Some(addr) = log_addr {
         cmd.env("OCTO_TUI_LOG_ADDR", addr);
+    }
+    if disable_quit {
+        cmd.env("OCTO_TUI_DISABLE_QUIT", "1");
     }
 
     let child = pair.slave.spawn_command(cmd).map_err(map_err)?;
