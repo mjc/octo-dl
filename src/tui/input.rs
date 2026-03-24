@@ -10,7 +10,7 @@ use super::download::start_login;
 pub fn handle_input(app: &mut App, key: KeyEvent) {
     // Global quit
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        app.should_quit = true;
+        request_quit(app);
         return;
     }
 
@@ -21,11 +21,17 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn request_quit(app: &mut App) {
+    if app.quit_enabled {
+        app.should_quit = true;
+    }
+}
+
 fn handle_login_input(app: &mut App, key: KeyEvent) {
     if app.login.logging_in {
         // Don't accept input while logging in (except Esc to quit)
         if key.code == KeyCode::Esc {
-            app.should_quit = true;
+            request_quit(app);
         }
         return;
     }
@@ -57,7 +63,7 @@ fn handle_login_input(app: &mut App, key: KeyEvent) {
             app.login.active_value_mut().pop();
         }
         KeyCode::Esc => {
-            app.should_quit = true;
+            request_quit(app);
         }
         _ => {}
     }
@@ -206,11 +212,11 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('q') if app.url_input.is_empty() => {
-            app.should_quit = true;
+            request_quit(app);
         }
         KeyCode::Esc => {
             if app.url_input.is_empty() {
-                app.should_quit = true;
+                request_quit(app);
             } else {
                 app.url_input.clear();
             }
@@ -286,6 +292,15 @@ mod tests {
         assert!(!app.should_quit);
         handle_input(&mut app, key(KeyCode::Char('q')));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn handle_main_input_quit_disabled_via_flag() {
+        let mut app = test_app();
+        app.quit_enabled = false;
+        assert!(!app.should_quit);
+        handle_input(&mut app, key(KeyCode::Char('q')));
+        assert!(!app.should_quit);
     }
 
     #[test]
