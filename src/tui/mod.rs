@@ -19,6 +19,9 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
 
+#[cfg(unix)]
+use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+
 use crossterm::event::Event;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -824,15 +827,11 @@ fn pipe_writer_to_usize(writer: &os_pipe::PipeWriter) -> usize {
 
 #[cfg(unix)]
 fn clear_fd_cloexec(fd: RawFd) -> io::Result<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    let cleaned = flags & !libc::FD_CLOEXEC;
-    if cleaned != flags {
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, cleaned) } == -1 {
-            return Err(io::Error::last_os_error());
-        }
+    let flags = fcntl(fd, FcntlArg::F_GETFD).map_err(|err| io::Error::from(err))?;
+    let mut fd_flags = FdFlag::from_bits_truncate(flags);
+    if fd_flags.contains(FdFlag::FD_CLOEXEC) {
+        fd_flags.remove(FdFlag::FD_CLOEXEC);
+        fcntl(fd, FcntlArg::F_SETFD(fd_flags)).map_err(|err| io::Error::from(err))?;
     }
     Ok(())
 }
