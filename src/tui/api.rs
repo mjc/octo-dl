@@ -30,10 +30,10 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::extract_urls;
 
+use super::WebOptions;
 use super::app::{SharedAppState, UiAction};
 use super::event::DownloadEvent;
 use super::web;
-use super::WebOptions;
 
 pub const DEFAULT_API_PORT: u16 = 9723;
 
@@ -224,7 +224,11 @@ async fn api_get_state(State(state): State<ApiState>) -> impl IntoResponse {
         )
             .into_response()
     } else {
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Web UI not enabled").into_response()
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Web UI not enabled",
+        )
+            .into_response()
     }
 }
 
@@ -327,12 +331,14 @@ async fn share_target_post(
 
 /// GET / — serves the main web UI SPA.
 async fn web_ui_index(State(state): State<ApiState>) -> impl IntoResponse {
-    let port = state.port;
     let host = state
         .web_opts
         .as_ref()
         .map_or_else(|| state.host.clone(), |w| w.public_host.clone());
-    Html(web::index_html(&host, port))
+    let scheme = if state.port == 443 { "https" } else { "http" };
+    let ws_scheme = if scheme == "https" { "wss" } else { "ws" };
+    let script_host = web::format_script_host(&host, state.port, scheme);
+    Html(web::index_html(&script_host, ws_scheme))
 }
 
 /// GET /manifest.json — PWA manifest.
@@ -343,7 +349,10 @@ async fn web_ui_manifest(State(state): State<ApiState>) -> impl IntoResponse {
         .as_ref()
         .map_or_else(|| state.host.clone(), |w| w.public_host.clone());
     (
-        [(axum::http::header::CONTENT_TYPE, "application/manifest+json")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/manifest+json",
+        )],
         web::manifest_json(&host, port),
     )
 }

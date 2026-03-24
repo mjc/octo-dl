@@ -364,10 +364,7 @@ fn start_download_task(app: &mut App) {
     let tx = app.event_tx.clone();
     let config = app.config.config.clone();
 
-    let url_rx = app
-        .url_rx
-        .take()
-        .expect("start_download_task called twice");
+    let url_rx = app.url_rx.take().expect("start_download_task called twice");
     let token_tx = app
         .token_tx
         .take()

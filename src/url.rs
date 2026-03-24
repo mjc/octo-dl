@@ -10,8 +10,9 @@ use regex::Regex;
 static URL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"https?://mega\.nz/[^\s"'<>\[\](){}]+"#).expect("valid regex"));
 
-static LEGACY_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"https?://mega\.nz/#[F!][^\s"'<>\[\](){}]+"#).expect("valid regex"));
+static LEGACY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"https?://mega\.nz/#[F!][^\s"'<>\[\](){}]+"#).expect("valid regex")
+});
 
 /// Extracts MEGA URLs and DLC file paths from raw input text.
 ///
