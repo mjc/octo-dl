@@ -136,6 +136,69 @@ fn dispatch_urls(state: &ApiState, urls: Vec<String>) {
     }
 }
 
+fn header_to_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn parse_forwarded_param(value: &str, key: &str) -> Option<String> {
+    for entry in value.split(',') {
+        for part in entry.split(';') {
+            let mut segments = part.trim().splitn(2, '=');
+            if let (Some(param), Some(raw_value)) = (segments.next(), segments.next()) {
+                if param.eq_ignore_ascii_case(key) {
+                    let cleaned = raw_value.trim().trim_matches('"');
+                    if !cleaned.is_empty() {
+                        return Some(cleaned.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn infer_scheme(headers: &HeaderMap, state: &ApiState) -> String {
+    if let Some(proto) = header_to_str(headers, "x-forwarded-proto") {
+        let proto = proto.split(',').next().unwrap_or(proto).trim();
+        if matches!(proto, "http" | "https") {
+            return proto.to_ascii_lowercase();
+        }
+    }
+    if let Some(forwarded) = header_to_str(headers, "forwarded")
+        && let Some(proto) = parse_forwarded_param(forwarded, "proto")
+        && matches!(proto.as_str(), "http" | "https")
+    {
+        return proto.to_ascii_lowercase();
+    }
+    match state.port {
+        443 => "https".to_string(),
+        80 => "http".to_string(),
+        _ => "http".to_string(),
+    }
+}
+
+fn infer_host(headers: &HeaderMap, state: &ApiState) -> String {
+    if let Some(host) = header_to_str(headers, "x-forwarded-host") {
+        return host.split(',').next().unwrap_or(host).trim().to_string();
+    }
+    if let Some(forwarded) = header_to_str(headers, "forwarded")
+        && let Some(host) = parse_forwarded_param(forwarded, "host")
+    {
+        return host;
+    }
+    if let Some(host) = header_to_str(headers, "host") {
+        return host.to_string();
+    }
+    state
+        .web_opts
+        .as_ref()
+        .map(|w| w.public_host.clone())
+        .unwrap_or_else(|| state.host.clone())
+}
+
 // ---------------------------------------------------------------------------
 // Existing endpoints
 // ---------------------------------------------------------------------------
@@ -171,11 +234,7 @@ async fn api_parse_page(
 }
 
 async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
-    let fallback_host = headers
-        .get("host")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or(&format!("{}:{}", state.host, state.port))
-        .to_string();
+    let fallback_host = infer_host(&headers, &state);
 
     Html(format!(
         r#"<!DOCTYPE html>
@@ -330,24 +389,18 @@ async fn share_target_post(
 // ---------------------------------------------------------------------------
 
 /// GET / — serves the main web UI SPA.
-async fn web_ui_index(State(state): State<ApiState>) -> impl IntoResponse {
-    let host = state
-        .web_opts
-        .as_ref()
-        .map_or_else(|| state.host.clone(), |w| w.public_host.clone());
-    let scheme = if state.port == 443 { "https" } else { "http" };
+async fn web_ui_index(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
+    let host = infer_host(&headers, &state);
+    let scheme = infer_scheme(&headers, &state);
     let ws_scheme = if scheme == "https" { "wss" } else { "ws" };
-    let script_host = web::format_script_host(&host, state.port, scheme);
+    let script_host = web::format_script_host(&host, state.port, &scheme);
     Html(web::index_html(&script_host, ws_scheme))
 }
 
 /// GET /manifest.json — PWA manifest.
-async fn web_ui_manifest(State(state): State<ApiState>) -> impl IntoResponse {
+async fn web_ui_manifest(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
     let port = state.port;
-    let host = state
-        .web_opts
-        .as_ref()
-        .map_or_else(|| state.host.clone(), |w| w.public_host.clone());
+    let host = infer_host(&headers, &state);
     (
         [(
             axum::http::header::CONTENT_TYPE,
