@@ -436,6 +436,31 @@ fn spawn_api_server(
     });
 }
 
+fn initialize_interactive_runtime(app: &mut App) {
+    resume_session(app);
+    load_credentials_from_env(app);
+    auto_login(app, app::NoCredentialsFallback::ShowPopup);
+}
+
+fn initialize_headless_runtime(app: &mut App, config_path: &Path) -> io::Result<()> {
+    load_credentials_from_env(app);
+
+    if !app.login.has_credentials() {
+        log::error!(
+            "No credentials configured. Edit {} and set email/password under [credentials], then restart.",
+            config_path.display()
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("No credentials in {}", config_path.display()),
+        ));
+    }
+
+    resume_session(app);
+    auto_login(app, app::NoCredentialsFallback::Silent);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Headless event loop (shared by --api and --web modes)
 // ---------------------------------------------------------------------------
@@ -681,9 +706,7 @@ pub async fn run(
         spawn_api_server(app.event_tx.clone(), host, api_port, web_opts, "API server");
     }
 
-    resume_session(&mut app);
-    load_credentials_from_env(&mut app);
-    auto_login(&mut app, app::NoCredentialsFallback::ShowPopup);
+    initialize_interactive_runtime(&mut app);
 
     let mut tick_count: u32 = 0;
     let mut sys = System::new();
@@ -747,24 +770,8 @@ pub async fn run(
 pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
     let (mut app, api_host, api_port) = build_runtime_app(download_tx, Some(config_path), true)?;
-    load_credentials_from_env(&mut app);
-
-    if app.login.has_credentials() {
-        // credentials loaded — good
-    } else {
-        log::error!(
-            "No credentials configured. Edit {} and set email/password under [credentials], then restart.",
-            config_path.display()
-        );
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("No credentials in {}", config_path.display()),
-        ));
-    }
-
+    initialize_headless_runtime(&mut app, config_path)?;
     app.api_port = api_port;
-    resume_session(&mut app);
-    auto_login(&mut app, app::NoCredentialsFallback::Silent);
 
     // Start the API server (headless — no web UI)
     spawn_api_server(app.event_tx.clone(), api_host.clone(), api_port, None, "API server");
