@@ -401,6 +401,41 @@ fn apply_service_config(app: &mut App, config_path: &Path) -> io::Result<(String
     Ok((service_config.api.host, service_config.api.port))
 }
 
+fn build_runtime_app(
+    download_tx: mpsc::UnboundedSender<DownloadEvent>,
+    config_path: Option<&Path>,
+    quit_enabled: bool,
+) -> io::Result<(App, String, u16)> {
+    if let Some(path) = config_path {
+        let mut app = App::new(0, download_tx, quit_enabled);
+        let (host, port) = apply_service_config(&mut app, path)?;
+        app.api_port = port;
+        Ok((app, host, port))
+    } else {
+        let port = env::var("OCTO_API_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(DEFAULT_API_PORT);
+        let app = App::new(port, download_tx, quit_enabled);
+        Ok((app, "127.0.0.1".to_string(), port))
+    }
+}
+
+fn spawn_api_server(
+    api_tx: mpsc::UnboundedSender<DownloadEvent>,
+    host: String,
+    port: u16,
+    web_opts: Option<WebOptions>,
+    label: &'static str,
+) {
+    tokio::spawn(async move {
+        log::info!("Starting {label} on {host}:{port}");
+        if let Err(e) = api::run_api_server(api_tx, &host, port, web_opts.as_ref(), None).await {
+            log::error!("{label} error: {e}");
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Headless event loop (shared by --api and --web modes)
 // ---------------------------------------------------------------------------
@@ -634,43 +669,16 @@ pub async fn run(
 
     let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
 
-    // Load service config if provided (credentials, download settings, api bind)
-    let api_port;
-    let api_bind_host;
-    let mut app;
-    if let Some(path) = config_path {
-        app = App::new(0, download_tx, quit_enabled);
-        let (host, port) = apply_service_config(&mut app, path)?;
-        api_port = port;
-        api_bind_host = host;
-        app.api_port = api_port;
-    } else {
-        api_port = env::var("OCTO_API_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(DEFAULT_API_PORT);
-        api_bind_host = "127.0.0.1".to_string();
-        app = App::new(api_port, download_tx, quit_enabled);
-    }
+    let (mut app, api_bind_host, api_port) =
+        build_runtime_app(download_tx, config_path, quit_enabled)?;
 
     // Start the API server (if enabled)
     if let Some(explicit_host) = api_host {
         let host = explicit_host.unwrap_or(api_bind_host);
-        let web_opts = if web {
-            Some(WebOptions {
-                public_host: host.clone(),
-            })
-        } else {
-            None
-        };
-        let api_tx = app.event_tx.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                api::run_api_server(api_tx, &host, api_port, web_opts.as_ref(), None).await
-            {
-                log::error!("API server error: {e}");
-            }
+        let web_opts = web.then(|| WebOptions {
+            public_host: host.clone(),
         });
+        spawn_api_server(app.event_tx.clone(), host, api_port, web_opts, "API server");
     }
 
     resume_session(&mut app);
@@ -738,9 +746,7 @@ pub async fn run(
 /// Panics if SIGTERM signal handler registration fails on Unix platforms.
 pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
-    let mut app = App::new(0, download_tx, true);
-
-    let (api_host, api_port) = apply_service_config(&mut app, config_path)?;
+    let (mut app, api_host, api_port) = build_runtime_app(download_tx, Some(config_path), true)?;
     load_credentials_from_env(&mut app);
 
     if app.login.has_credentials() {
@@ -761,14 +767,7 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     auto_login(&mut app, app::NoCredentialsFallback::Silent);
 
     // Start the API server (headless — no web UI)
-    let api_tx = app.event_tx.clone();
-    let api_host_owned = api_host.clone();
-    tokio::spawn(async move {
-        log::info!("Starting API server on {api_host_owned}:{api_port}");
-        if let Err(e) = api::run_api_server(api_tx, &api_host_owned, api_port, None, None).await {
-            log::error!("API server error: {e}");
-        }
-    });
+    spawn_api_server(app.event_tx.clone(), api_host.clone(), api_port, None, "API server");
 
     log::info!("Entering headless event loop");
     run_headless_loop(&mut app, &mut download_rx).await;
