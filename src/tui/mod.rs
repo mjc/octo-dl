@@ -84,16 +84,92 @@ pub(crate) fn resume_session(app: &mut App) {
     log::info!("Resuming session {}", session.id);
 
     if let Some((email, password, mfa)) = session.credentials.decrypt() {
-        app.login.set_credentials(email, password, mfa.unwrap_or_default());
+        app.login
+            .set_credentials(email, password, mfa.unwrap_or_default());
     }
 
-    app.urls = session.urls.iter().map(|u| u.url.clone()).collect();
     for entry in &mut session.urls {
         if entry.status == UrlStatus::Fetched {
             entry.status = UrlStatus::Pending;
         }
     }
+    let resumed_urls: Vec<String> = session.urls.iter().map(|u| u.url.clone()).collect();
+    app.urls = resumed_urls.clone();
+    for url in resumed_urls {
+        let _ = app.url_tx.send(url);
+    }
     app.session = Some(session);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DownloadConfig, SavedCredentials, UrlEntry};
+    use std::env;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    struct StateDirectoryGuard;
+
+    impl StateDirectoryGuard {
+        fn set(path: &Path) -> Self {
+            unsafe { env::set_var("STATE_DIRECTORY", path) };
+            Self
+        }
+    }
+
+    impl Drop for StateDirectoryGuard {
+        fn drop(&mut self) {
+            unsafe { env::remove_var("STATE_DIRECTORY") };
+        }
+    }
+
+    #[test]
+    fn resume_session_requeues_urls() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+
+        let urls = vec![
+            UrlEntry {
+                url: "https://mega.nz/file/first".to_string(),
+                status: UrlStatus::Pending,
+            },
+            UrlEntry {
+                url: "https://mega.nz/file/second".to_string(),
+                status: UrlStatus::Fetched,
+            },
+        ];
+        let session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            urls,
+        );
+        session.save().unwrap();
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(0, event_tx);
+
+        resume_session(&mut app);
+
+        let expected_urls = vec![
+            "https://mega.nz/file/first".to_string(),
+            "https://mega.nz/file/second".to_string(),
+        ];
+        assert_eq!(app.urls, expected_urls);
+
+        let mut url_rx = app.url_rx.take().expect("url_rx should exist");
+        assert_eq!(url_rx.try_recv().unwrap(), expected_urls[0]);
+        assert_eq!(url_rx.try_recv().unwrap(), expected_urls[1]);
+        assert!(url_rx.try_recv().is_err());
+
+        let session_state = app.session.as_ref().expect("session should be present");
+        assert!(
+            session_state
+                .urls
+                .iter()
+                .all(|entry| matches!(entry.status, UrlStatus::Pending))
+        );
+    }
 }
 
 /// Syncs the session file list with visible UI files before shutdown.
@@ -203,7 +279,8 @@ fn load_credentials_from_env(app: &mut App) {
     if !email.is_empty() || !password.is_empty() {
         log::info!("Using MEGA credentials from environment variables");
     }
-    app.login.set_credentials_if_missing(&email, &password, &mfa);
+    app.login
+        .set_credentials_if_missing(&email, &password, &mfa);
 }
 
 /// Loads and validates a `ServiceConfig` from disk, applying download
@@ -212,10 +289,7 @@ fn load_credentials_from_env(app: &mut App) {
 /// Returns the validated `(api_host, api_port)` from the config.  If
 /// credentials are stored in plaintext they are encrypted in-place and
 /// the file is re-saved.
-fn apply_service_config(
-    app: &mut App,
-    config_path: &Path,
-) -> io::Result<(String, u16)> {
+fn apply_service_config(app: &mut App, config_path: &Path) -> io::Result<(String, u16)> {
     let mut service_config = ServiceConfig::load_or_create(config_path)?;
     log::info!("Loaded config from {}", config_path.display());
 
@@ -245,7 +319,9 @@ fn apply_service_config(
                 service_config.save(config_path)?;
             }
         } else {
-            log::warn!("Failed to decrypt credentials from config (machine key mismatch?). Falling back to environment variables.");
+            log::warn!(
+                "Failed to decrypt credentials from config (machine key mismatch?). Falling back to environment variables."
+            );
         }
     }
 
@@ -253,7 +329,8 @@ fn apply_service_config(
     if !credentials_from_config {
         if let (Ok(email), Ok(password)) = (env::var("MEGA_EMAIL"), env::var("MEGA_PASSWORD")) {
             log::info!("Using credentials from MEGA_EMAIL and MEGA_PASSWORD environment variables");
-            app.login.set_credentials(email, password, env::var("MEGA_MFA").unwrap_or_default());
+            app.login
+                .set_credentials(email, password, env::var("MEGA_MFA").unwrap_or_default());
         } else if service_config.credentials.has_credentials() {
             // Config had credentials but decryption failed, and no env vars provided
             return Err(io::Error::new(
@@ -265,8 +342,6 @@ fn apply_service_config(
 
     Ok((service_config.api.host, service_config.api.port))
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Headless event loop (shared by --api and --web modes)
@@ -287,9 +362,8 @@ async fn run_headless_loop(
     progress_interval.tick().await; // consume the immediate first tick
 
     let shutdown = async {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to register SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => log::info!("Received SIGINT"),
             _ = sigterm.recv() => log::info!("Received SIGTERM"),
@@ -348,9 +422,8 @@ async fn run_web_loop(
     let mut dirty = true; // publish initial state
 
     let shutdown = async {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to register SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => log::info!("Received SIGINT"),
             _ = sigterm.recv() => log::info!("Received SIGTERM"),
@@ -628,9 +701,7 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     let api_host_owned = api_host.clone();
     tokio::spawn(async move {
         log::info!("Starting API server on {api_host_owned}:{api_port}");
-        if let Err(e) =
-            api::run_api_server(api_tx, &api_host_owned, api_port, None, None).await
-        {
+        if let Err(e) = api::run_api_server(api_tx, &api_host_owned, api_port, None, None).await {
             log::error!("API server error: {e}");
         }
     });
@@ -658,10 +729,7 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
 ///
 /// # Panics
 /// Panics if SIGTERM signal handler registration fails on Unix platforms.
-pub async fn run_web(
-    api_host: &str,
-    config_path: Option<&Path>,
-) -> io::Result<()> {
+pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<()> {
     let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
     let mut app = App::new(0, download_tx);
 
@@ -695,9 +763,14 @@ pub async fn run_web(
     let api_host_owned = api_host.clone();
     tokio::spawn(async move {
         log::info!("Starting web TUI on {api_host_owned}:{api_port}");
-        if let Err(e) =
-            api::run_api_server(api_tx, &api_host_owned, api_port, Some(&web_opts), Some(shared))
-                .await
+        if let Err(e) = api::run_api_server(
+            api_tx,
+            &api_host_owned,
+            api_port,
+            Some(&web_opts),
+            Some(shared),
+        )
+        .await
         {
             log::error!("API server error: {e}");
         }
@@ -716,5 +789,3 @@ pub async fn run_web(
     log::info!("Shutdown complete");
     Ok(())
 }
-
-
