@@ -50,7 +50,7 @@ impl TerminalBridge {
 /// Spawns the terminal UI inside a pseudo-terminal and returns a bridge to the master plus the child handle.
 pub fn spawn_tui_process(
     config_path: Option<&Path>,
-    log_fd: Option<usize>,
+    log_addr: Option<String>,
 ) -> io::Result<(TerminalBridge, Box<dyn portable_pty::Child + Send + Sync>)> {
     fn map_err<E: std::fmt::Display>(err: E) -> io::Error {
         io::Error::new(io::ErrorKind::Other, err.to_string())
@@ -75,8 +75,8 @@ pub fn spawn_tui_process(
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    if let Some(fd) = log_fd {
-        cmd.env("OCTO_TUI_LOG_FD", fd.to_string());
+    if let Some(addr) = log_addr {
+        cmd.env("OCTO_TUI_LOG_ADDR", addr);
     }
 
     let child = pair.slave.spawn_command(cmd).map_err(map_err)?;
