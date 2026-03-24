@@ -66,18 +66,26 @@ pub async fn parse_dlc_file(
 ) -> Result<Vec<String>> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| Error::Dlc(format!("Failed to read file: {e}")))?;
+    parse_dlc_data(&content, http_client, cache).await
+}
 
+/// Parses DLC data that has already been loaded into memory (e.g. a dropped file).
+pub async fn parse_dlc_data(
+    content: &str,
+    http_client: &reqwest::Client,
+    cache: &DlcKeyCache,
+) -> Result<Vec<String>> {
     // Validate file size
     if content.trim().len() < MIN_DLC_SIZE {
         return Err(Error::Dlc(format!(
-            "DLC file too small (< {MIN_DLC_SIZE} bytes)"
+            "DLC content too small (< {MIN_DLC_SIZE} bytes)"
         )));
     }
 
     // Split into encrypted data and key
     let trimmed = content.trim();
     if trimmed.len() < DLC_KEY_LENGTH {
-        return Err(Error::Dlc("DLC file missing encryption key".to_string()));
+        return Err(Error::Dlc("DLC content missing encryption key".to_string()));
     }
 
     let dlc_key = trimmed[trimmed.len() - DLC_KEY_LENGTH..].to_string();
@@ -116,7 +124,7 @@ pub async fn parse_dlc_file(
     urls.dedup();
 
     if urls.is_empty() {
-        return Err(Error::Dlc("No MEGA links found in DLC file".to_string()));
+        return Err(Error::Dlc("No MEGA links found in DLC content".to_string()));
     }
 
     Ok(urls)
