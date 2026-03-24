@@ -104,13 +104,13 @@ mod tests {
 
     #[test]
     fn log_pipe_writer_handles_missing_and_invalid_values() {
-        env::remove_var("OCTO_TUI_LOG_FD");
+        unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
         assert!(log_pipe_writer().is_none());
 
-        env::set_var("OCTO_TUI_LOG_FD", "invalid");
+        unsafe { env::set_var("OCTO_TUI_LOG_FD", "invalid") };
         assert!(log_pipe_writer().is_none());
 
-        env::remove_var("OCTO_TUI_LOG_FD");
+        unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
     }
 }
 

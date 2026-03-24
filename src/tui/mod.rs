@@ -151,7 +151,7 @@ mod tests {
         session.save().unwrap();
 
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(0, event_tx);
+        let mut app = App::new(0, event_tx, true);
 
         resume_session(&mut app);
 
@@ -570,6 +570,11 @@ pub async fn run(
     web: bool,
     config_path: Option<&Path>,
 ) -> io::Result<()> {
+    if web {
+        let web_host = api_host.and_then(|host| host).unwrap_or_else(|| "127.0.0.1".to_string());
+        return run_web(&web_host, config_path).await;
+    }
+
     // Initialize terminal with RAII guard for automatic cleanup
     let _terminal_guard = TerminalGuard::new()?;
 
