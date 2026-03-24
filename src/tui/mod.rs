@@ -12,15 +12,10 @@ pub mod web;
 
 use std::env;
 use std::io::{self, Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-
-#[cfg(unix)]
-use std::os::unix::io::{AsRawFd, RawFd};
-
-#[cfg(unix)]
-use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 
 use crossterm::event::Event;
 use crossterm::terminal::{
@@ -39,7 +34,6 @@ use self::app::{App, UiAction};
 use self::download::{handle_download_event, start_login};
 use self::draw::draw;
 use self::event::DownloadEvent;
-use os_pipe::pipe;
 
 /// Options for the web UI server.
 ///
@@ -659,6 +653,9 @@ pub async fn run(
 
         drain_download_events(&mut app, &mut download_rx);
         app.update_speeds();
+        if tick_count.is_multiple_of(50) {
+            log_progress(&mut app);
+        }
         drain_token_messages(&mut app);
 
         if app.should_quit {
@@ -753,31 +750,29 @@ pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<(
         (api_host.to_string(), port)
     };
 
-    let (log_reader, log_writer) = pipe()?;
-    #[cfg(unix)]
-    clear_fd_cloexec(log_writer.as_raw_fd())?;
-    let log_fd = pipe_writer_to_usize(&log_writer);
-    let log_forwarder = tokio::task::spawn_blocking(move || {
-        let mut reader = log_reader;
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let log_addr = listener.local_addr()?;
+    let log_addr_string = log_addr.to_string();
+    let log_forwarder = tokio::task::spawn_blocking(move || -> io::Result<()> {
+        let (mut stream, _) = listener.accept()?;
         let stderr = std::io::stderr();
         let mut buf = [0u8; 4096];
         loop {
-            match reader.read(&mut buf) {
+            match stream.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     let mut handle = stderr.lock();
-                    if handle.write_all(&buf[..n]).is_err() {
-                        break;
-                    }
+                    handle.write_all(&buf[..n])?;
                     let _ = handle.flush();
                 }
+                Err(ref err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
             }
         }
+        Ok(())
     });
 
-    let (bridge, child) = terminal::spawn_tui_process(config_path, Some(log_fd))?;
-    drop(log_writer);
+    let (bridge, child) = terminal::spawn_tui_process(config_path, Some(log_addr_string))?;
     let bridge = Arc::new(bridge);
 
     log::debug!("Starting terminal web UI on {host}:{port}");
@@ -817,27 +812,4 @@ pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<(
     let _ = server_handle.await;
     let _ = log_forwarder.await;
     Ok(())
-}
-
-#[cfg(unix)]
-fn pipe_writer_to_usize(writer: &os_pipe::PipeWriter) -> usize {
-    use std::os::unix::io::AsRawFd;
-    writer.as_raw_fd() as usize
-}
-
-#[cfg(unix)]
-fn clear_fd_cloexec(fd: RawFd) -> io::Result<()> {
-    let flags = fcntl(fd, FcntlArg::F_GETFD).map_err(|err| io::Error::from(err))?;
-    let mut fd_flags = FdFlag::from_bits_truncate(flags);
-    if fd_flags.contains(FdFlag::FD_CLOEXEC) {
-        fd_flags.remove(FdFlag::FD_CLOEXEC);
-        fcntl(fd, FcntlArg::F_SETFD(fd_flags)).map_err(|err| io::Error::from(err))?;
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn pipe_writer_to_usize(writer: &os_pipe::PipeWriter) -> usize {
-    use std::os::windows::io::AsRawHandle;
-    writer.as_raw_handle() as usize
 }

@@ -2,6 +2,7 @@ use env_logger::Target;
 use std::env;
 use std::fs::File;
 use std::io::Write;
+use std::net::TcpStream;
 #[cfg(unix)]
 use std::os::unix::io::{FromRawFd, RawFd};
 #[cfg(windows)]
@@ -61,9 +62,20 @@ fn init_logger() {
 }
 
 fn log_pipe_writer() -> Option<Box<dyn Write + Send>> {
+    if let Ok(addr) = env::var("OCTO_TUI_LOG_ADDR") {
+        if let Some(writer) = log_pipe_writer_from_addr(&addr) {
+            return Some(writer);
+        }
+    }
     let raw_fd = env::var_os("OCTO_TUI_LOG_FD")?;
     let fd = raw_fd.to_string_lossy().parse::<usize>().ok()?;
     log_pipe_writer_from_raw(fd)
+}
+
+fn log_pipe_writer_from_addr(addr: &str) -> Option<Box<dyn Write + Send>> {
+    TcpStream::connect(addr)
+        .ok()
+        .map(|stream| Box::new(stream) as Box<dyn Write + Send>)
 }
 
 #[cfg(unix)]
