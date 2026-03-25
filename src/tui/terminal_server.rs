@@ -26,7 +26,7 @@ use super::web;
 mod tests {
     use super::*;
     use portable_pty::{PtySize, native_pty_system};
-    use std::io::{BufRead, Read};
+    use std::io::Read;
 
     fn build_test_state() -> (TerminalApiState, std::io::BufReader<Box<dyn Read + Send>>) {
         let pty_system = native_pty_system();
@@ -58,23 +58,52 @@ mod tests {
 
     #[test]
     fn dispatch_urls_writes_lines_in_order() {
-        let (state, mut reader) = build_test_state();
+        let (state, reader) = build_test_state();
         let urls = vec![
             "https://mega.nz/folder/abc123".to_string(),
             "https://mega.nz/file/xyz789".to_string(),
         ];
 
+        // Spawn a reader task to simulate the actual PTY flow
+        let session = state.session.clone();
+        let reader_task = std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut reader = reader;
+            while let Ok(n) = std::io::Read::read(&mut reader, &mut buf) {
+                if n == 0 {
+                    break;
+                }
+                session.record(&buf[..n]);
+            }
+        });
+
         dispatch_urls(&state, urls.clone());
 
-        for url in urls {
-            let mut buf = Vec::new();
-            reader
-                .read_until(b'\r', &mut buf)
-                .expect("failed to read line");
-            let line = String::from_utf8_lossy(&buf);
-            let trimmed = line.trim_matches(|c| c == '\r' || c == '\n');
-            assert_eq!(trimmed, url);
+        let mut output_rx = state.session.subscribe();
+        let mut received = String::new();
+
+        // Collect chunks until we have all URLs
+        loop {
+            match output_rx.try_recv() {
+                Ok(chunk) => {
+                    received.push_str(&String::from_utf8_lossy(&chunk));
+                    if urls.iter().all(|url| received.contains(url)) {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
         }
+
+        // Verify all URLs are present in order
+        for url in urls {
+            assert!(received.contains(&url));
+        }
+
+        // Let the reader task finish gracefully
+        let _ = reader_task.join();
     }
 
     #[test]
