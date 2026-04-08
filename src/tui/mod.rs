@@ -345,6 +345,15 @@ fn apply_service_config(app: &mut App, config_path: &Path) -> io::Result<(String
         }
     }
 
+    // Auto-generate API key if not set
+    if service_config.api.api_key.is_none() {
+        let key = uuid::Uuid::new_v4().simple().to_string();
+        log::info!("Generated API key: {key}");
+        service_config.api.api_key = Some(key);
+        service_config.save(config_path)?;
+        app.api_key = service_config.api.api_key.clone();
+    }
+
     Ok((service_config.api.host, service_config.api.port))
 }
 
