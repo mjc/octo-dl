@@ -44,6 +44,7 @@ struct ApiState {
     port: u16,
     shared: Option<SharedAppState>,
     web_opts: Option<WebOptions>,
+    api_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -222,15 +223,27 @@ async fn api_post_urls(
 
 async fn api_parse_page(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     axum::Json(payload): axum::Json<ParseRequest>,
 ) -> impl IntoResponse {
+    // Check API key if configured
+    if let Some(ref expected_key) = state.api_key {
+        let provided_key = headers
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if provided_key != expected_key {
+            return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "invalid api key"}))).into_response();
+        }
+    }
+
     let mut urls = extract_urls(&payload.page);
     if urls.is_empty() && !payload.fallback.is_empty() {
         urls = extract_urls(&payload.fallback);
     }
     let count = urls.len();
     dispatch_urls(&state, urls.clone());
-    axum::Json(UrlResponse { added: urls, count })
+    axum::Json(UrlResponse { added: urls, count }).into_response()
 }
 
 async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
@@ -446,6 +459,7 @@ pub async fn run_api_server(
     port: u16,
     web_opts: Option<&WebOptions>,
     shared: Option<SharedAppState>,
+    api_key: Option<String>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = ApiState {
         tx,
@@ -453,6 +467,7 @@ pub async fn run_api_server(
         port,
         shared,
         web_opts: web_opts.cloned(),
+        api_key,
     };
 
     let cors = CorsLayer::new()

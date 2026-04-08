@@ -188,6 +188,9 @@ pub struct ApiConfig {
     pub host: String,
     #[serde(default = "default_api_port")]
     pub port: u16,
+    /// Optional API key for authenticating API requests (e.g., /api/parse).
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 impl Default for ApiConfig {
@@ -195,6 +198,7 @@ impl Default for ApiConfig {
         Self {
             host: default_api_host(),
             port: default_api_port(),
+            api_key: None,
         }
     }
 }
