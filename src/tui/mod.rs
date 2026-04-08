@@ -308,6 +308,7 @@ fn apply_service_config(app: &mut App, config_path: &Path) -> io::Result<(String
     }
 
     app.config.config = service_config.download.clone();
+    app.api_key = service_config.api.api_key.clone();
 
     // Try to load credentials from config file first
     let mut credentials_from_config = false;
@@ -614,9 +615,10 @@ pub async fn run(
             None
         };
         let api_tx = app.event_tx.clone();
+        let api_key = app.api_key.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                api::run_api_server(api_tx, &host, api_port, web_opts.as_ref(), None).await
+                api::run_api_server(api_tx, &host, api_port, web_opts.as_ref(), None, api_key).await
             {
                 log::error!("API server error: {e}");
             }
@@ -713,9 +715,10 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     // Start the API server (headless — no web UI)
     let api_tx = app.event_tx.clone();
     let api_host_owned = api_host.clone();
+    let api_key = app.api_key.clone();
     tokio::spawn(async move {
         log::info!("Starting API server on {api_host_owned}:{api_port}");
-        if let Err(e) = api::run_api_server(api_tx, &api_host_owned, api_port, None, None).await {
+        if let Err(e) = api::run_api_server(api_tx, &api_host_owned, api_port, None, None, api_key).await {
             log::error!("API server error: {e}");
         }
     });

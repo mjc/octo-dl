@@ -223,6 +223,8 @@ pub struct App {
     pub session: Option<SessionState>,
     // API port for display
     pub api_port: u16,
+    // API key for authentication
+    pub api_key: Option<String>,
     // Resource usage
     pub cpu_usage: f32,
     pub memory_rss: u64,
@@ -318,6 +320,7 @@ impl App {
             deleted_files: HashSet::new(),
             session: None,
             api_port,
+            api_key: None,
             cpu_usage: 0.0,
             last_tick: Instant::now(),
             memory_rss: 0,
