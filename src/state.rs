@@ -172,6 +172,13 @@ impl SessionState {
                 continue;
             }
             let Ok(session) = Self::load(&path) else {
+                let corrupt_path = path.with_extension("toml.corrupt");
+                log::warn!(
+                    "Session file failed to parse, renaming to {}: {}",
+                    corrupt_path.display(),
+                    path.display()
+                );
+                let _ = std::fs::rename(&path, &corrupt_path);
                 continue;
             };
             if session.status == SessionStatus::Completed {
