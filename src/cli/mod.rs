@@ -454,7 +454,7 @@ pub async fn run() -> crate::Result<()> {
         println!();
     }
 
-    let mut client = mega::Client::builder().build(http)?;
+    let mut client = mega::Client::builder().build(http.clone())?;
 
     println!("Logging in...");
     client.login(&email, &password, mfa.as_deref()).await?;
@@ -485,7 +485,7 @@ pub async fn run() -> crate::Result<()> {
     let mut all_nodes: Vec<(String, mega::Nodes)> = Vec::new();
     for (idx, url) in config.urls.iter().enumerate() {
         print!("  {url} ... ");
-        match client.fetch_public_nodes(url).await {
+        match crate::fetch_public_nodes(&http, url).await {
             Ok(nodes) => {
                 let collected_tmp = downloader.collect_files(&nodes, &no_progress).await;
                 let file_count = collected_tmp.to_download.len() + collected_tmp.skipped;
@@ -575,7 +575,7 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
 
     let http = build_http_client()?;
 
-    let mut client = mega::Client::builder().build(http)?;
+    let mut client = mega::Client::builder().build(http.clone())?;
 
     println!("Logging in...");
     client.login(&email, &password, mfa.as_deref()).await?;
@@ -599,7 +599,7 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
     let mut all_nodes: Vec<(String, mega::Nodes)> = Vec::new();
     for url in &remaining_urls {
         print!("  {url} ... ");
-        match client.fetch_public_nodes(url).await {
+        match crate::fetch_public_nodes(&http, url).await {
             Ok(nodes) => {
                 let collected_tmp = downloader.collect_files(&nodes, &no_progress).await;
                 let file_count = collected_tmp.to_download.len() + collected_tmp.skipped;
