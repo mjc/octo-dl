@@ -1394,7 +1394,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mega"
 version = "0.8.0"
-source = "git+https://github.com/mjc/mega-rs.git?branch=parallel-download#d01d1b675c7b01c1ea6a21e3ca09d2cd5d834ab2"
+source = "git+https://github.com/mjc/mega-rs.git?branch=parallel-download#dde863acbd5f1fe1421f8483a2f6056b4517b4ac"
 dependencies = [
  "aes",
  "aes-gcm",

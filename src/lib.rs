@@ -51,6 +51,7 @@ pub use dlc::{DlcKeyCache, parse_dlc_data, parse_dlc_file};
 pub use download::{
     CollectedFiles, DownloadItem, DownloadProgress, Downloader, FileStatus, NoProgress,
     OwnedDownloadItem,
+    fetch_public_nodes,
 };
 pub use error::{Error, Result};
 pub use format::{format_bytes, format_duration};

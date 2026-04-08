@@ -13,6 +13,16 @@ use crate::error::{Error, Result};
 use crate::fs::{FileSystem, TokioFileSystem};
 use crate::stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBuilder};
 
+/// Fetches public-link metadata with a fresh anonymous MEGA client.
+///
+/// Public-link browsing should not depend on the caller's authenticated client
+/// state. Using a fresh client avoids cross-talk between account session state
+/// and public-link metadata fetches.
+pub async fn fetch_public_nodes(http: &reqwest::Client, url: &str) -> Result<mega::Nodes> {
+    let client = mega::Client::builder().build(http.clone())?;
+    client.fetch_public_nodes(url).await.map_err(Error::Mega)
+}
+
 /// Classification of a file's current state on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileStatus {

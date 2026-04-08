@@ -278,8 +278,12 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 }
                 return;
             }
-            // Invalid URL errors: mark URL as terminal error so it won't be retried
-            if error.contains("InvalidPublicUrlFormat") {
+            // URL-level fetch/parse errors are terminal for resume purposes.
+            if app
+                .session
+                .as_ref()
+                .is_some_and(|session| session.urls.iter().any(|u| u.url == name))
+            {
                 if let Some(ref mut session) = app.session {
                     if let Some(url_entry) = session.urls.iter_mut().find(|u| u.url == name) {
                         url_entry.status = UrlStatus::Error(error.clone());
@@ -485,11 +489,13 @@ async fn run_download(channels: DownloadChannels, config: DownloadConfig) {
                 // Spawn the download work so we can receive new URLs immediately
                 let dl = Arc::clone(&downloader);
                 let prog = Arc::clone(&progress);
+                let http2 = Arc::clone(&http);
                 let sem = Arc::clone(&semaphore);
                 let tx2 = tx.clone();
                 let token_tx2 = token_tx.clone();
                 join_set.spawn(async move {
-                    download_batch(&resolved, &dl, &prog, &sem, &tx2, &token_tx2, &batch).await;
+                    download_batch(&resolved, &http2, &dl, &prog, &sem, &tx2, &token_tx2, &batch)
+                        .await;
                 });
             }
             Some(result) = join_set.join_next() => {
@@ -671,6 +677,7 @@ mod tests {
 
 async fn download_batch(
     urls: &[String],
+    http: &Arc<reqwest::Client>,
     downloader: &Arc<crate::Downloader>,
     progress: &Arc<dyn DownloadProgress>,
     semaphore: &Arc<tokio::sync::Semaphore>,
@@ -681,7 +688,7 @@ async fn download_batch(
     let mut node_sets: Vec<mega::Nodes> = Vec::new();
     for url in urls {
         let _ = event_tx.send(DownloadEvent::StatusMessage(format!("Fetching: {url}")));
-        let fetch_result = std::panic::AssertUnwindSafe(downloader.client().fetch_public_nodes(url))
+        let fetch_result = std::panic::AssertUnwindSafe(crate::fetch_public_nodes(http, url))
             .catch_unwind()
             .await;
 

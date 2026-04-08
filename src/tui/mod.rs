@@ -97,7 +97,12 @@ pub(crate) fn resume_session(app: &mut App) {
             entry.status = UrlStatus::Pending;
         }
     }
-    let resumed_urls: Vec<String> = session.urls.iter().map(|u| u.url.clone()).collect();
+    let resumed_urls: Vec<String> = session
+        .urls
+        .iter()
+        .filter(|entry| entry.status == UrlStatus::Pending)
+        .map(|entry| entry.url.clone())
+        .collect();
     app.urls = resumed_urls.clone();
     for url in resumed_urls {
         let _ = app.url_tx.send(url);
