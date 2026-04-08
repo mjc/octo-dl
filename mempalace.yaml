@@ -1,0 +1,101 @@
+wing: octo_dl
+rooms:
+  - name: url-dlc-intake
+    description: URL extraction, normalization, and DLC parsing for MEGA sources.
+    keywords:
+      - url
+      - urls
+      - dlc
+      - jdownloader
+      - normalize
+      - extract
+      - mega.nz
+      - bookmarklet
+  - name: download-engine
+    description: Core MEGA download flow, filesystem writes, progress reporting, and transfer stats.
+    keywords:
+      - download
+      - downloader
+      - node
+      - nodes
+      - chunk
+      - chunks
+      - parallel
+      - progress
+      - part
+      - stats
+      - filesystem
+  - name: session-and-config
+    description: Persistent config, credentials, resume state, and service configuration.
+    keywords:
+      - config
+      - session
+      - state
+      - credentials
+      - resume
+      - encrypted
+      - api_key
+      - service
+      - toml
+  - name: cli-runtime
+    description: Command-line entrypoint, CLI parsing, and terminal progress UX.
+    keywords:
+      - cli
+      - octo
+      - command
+      - usage
+      - progressbar
+      - indicatif
+      - args
+      - resume
+  - name: tui-and-web-ui
+    description: Interactive terminal UI, web terminal bridge, and browser-facing surfaces.
+    keywords:
+      - tui
+      - ratatui
+      - crossterm
+      - terminal
+      - websocket
+      - xterm
+      - portable-pty
+      - app
+      - draw
+      - input
+  - name: api-and-browser-integration
+    description: HTTP API, web UI serving, share targets, and remote URL submission flows.
+    keywords:
+      - api
+      - axum
+      - web
+      - browser
+      - share
+      - cors
+      - health
+      - manifest
+      - pwa
+      - parse
+  - name: profiling-and-release
+    description: Profiling scripts, perf analysis, flamegraphs, release builds, and packaging support.
+    keywords:
+      - profile
+      - perf
+      - flamegraph
+      - latency
+      - release
+      - build
+      - zigbuild
+      - nix
+      - benchmark
+  - name: docs-and-positioning
+    description: Project documentation, onboarding text, and high-level product framing.
+    keywords:
+      - readme
+      - documentation
+      - docs
+      - broken
+      - hacked
+      - mega
+      - downloader
+  - name: general
+    description: Files that do not clearly belong to a more specific room.
+    keywords: []
