@@ -16,6 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -48,6 +49,16 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .pool_max_idle_per_host(8)
         .tcp_keepalive(Duration::from_secs(30))
         .build()
+}
+
+fn describe_panic(panic: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(msg) = panic.downcast_ref::<&str>() {
+        (*msg).to_string()
+    } else if let Some(msg) = panic.downcast_ref::<String>() {
+        msg.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
 }
 
 /// Spawns the login task which sends back `LoginResult`.
@@ -670,14 +681,24 @@ async fn download_batch(
     let mut node_sets: Vec<mega::Nodes> = Vec::new();
     for url in urls {
         let _ = event_tx.send(DownloadEvent::StatusMessage(format!("Fetching: {url}")));
-        match downloader.client().fetch_public_nodes(url).await {
-            Ok(nodes) => {
+        let fetch_result = std::panic::AssertUnwindSafe(downloader.client().fetch_public_nodes(url))
+            .catch_unwind()
+            .await;
+
+        match fetch_result {
+            Ok(Ok(nodes)) => {
                 node_sets.push(nodes);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let _ = event_tx.send(DownloadEvent::Error {
                     name: url.clone(),
                     error: format!("Fetch failed: {e}"),
+                });
+            }
+            Err(panic) => {
+                let _ = event_tx.send(DownloadEvent::Error {
+                    name: url.clone(),
+                    error: format!("Fetch panicked: {}", describe_panic(panic)),
                 });
             }
         }

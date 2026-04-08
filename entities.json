@@ -1,0 +1,13 @@
+{
+  "people": [],
+  "projects": [
+    "octo-dl",
+    "MEGA",
+    "mega-rs",
+    "JDownloader",
+    "Tailscale",
+    "ratatui",
+    "axum",
+    "xterm.js"
+  ]
+}

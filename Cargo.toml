@@ -80,7 +80,9 @@ opt-level = 1
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
+# Keep the service alive when a dependency panics inside a worker task so we can
+# surface the failure as a normal error instead of aborting the whole process.
+panic = "unwind"
 strip = true
 overflow-checks = true
 
