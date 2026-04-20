@@ -145,7 +145,11 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('p') if app.url_input.is_empty() => {
-            app.paused = !app.paused;
+            if app.paused {
+                app.resume_downloads();
+            } else {
+                app.pause_downloads();
+            }
         }
         KeyCode::Char('d') | KeyCode::Delete if app.url_input.is_empty() => {
             if let Some(selected) = app.file_list_state.selected()
@@ -157,20 +161,20 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
                     FileStatus::Queued | FileStatus::Error(_) | FileStatus::Downloading
                 );
                 if can_remove {
-                    let file_name = file.name.clone();
+                    let file_id = file.id.clone();
                     // Cancel the download if active
                     if matches!(file.status, FileStatus::Downloading)
-                        && let Some(token) = app.cancellation_tokens.remove(&file_name)
+                        && let Some(token) = app.cancellation_tokens.remove(&file_id)
                     {
                         token.cancel();
                     }
                     // Track so we can ignore stale events
-                    app.deleted_files.insert(file_name.clone());
+                    app.deleted_files.insert(file_id.clone());
                     app.files.remove(selected);
                     app.recompute_totals();
                     // Remove from session state
                     if let Some(ref mut session) = app.session {
-                        let _ = session.remove_file(&file_name);
+                        let _ = session.remove_file(&file_id);
                     }
                     if app.files.is_empty() {
                         app.file_list_state.select(None);
@@ -187,10 +191,18 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
                 && selected < app.files.len()
                 && matches!(app.files[selected].status, FileStatus::Error(_))
             {
+                let source_url = app.files[selected].source_url.clone();
                 app.files[selected].status = FileStatus::Queued;
                 app.files[selected].downloaded = 0;
                 app.files[selected].speed = 0;
-                // TODO: actually re-submit to download task
+                app.files[selected].speed_accum = 0;
+                if let Some(url) = source_url {
+                    let _ = app.url_tx.send(url);
+                } else {
+                    app.files[selected].status =
+                        FileStatus::Error("Retry unavailable for this file".to_string());
+                    app.status = "Retry unavailable for this file".to_string();
+                }
             }
         }
         KeyCode::Char('c') if app.url_input.is_empty() => {
@@ -366,11 +378,13 @@ mod tests {
         let mut app = test_app();
         let token = tokio_util::sync::CancellationToken::new();
         app.files.push(FileEntry {
+            id: "test.zip".to_string(),
             name: "test.zip".to_string(),
             size: 1000,
             downloaded: 500,
             speed: 100,
             speed_accum: 0,
+            source_url: None,
             status: FileStatus::Downloading,
         });
         app.cancellation_tokens

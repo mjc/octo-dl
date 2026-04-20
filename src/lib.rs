@@ -41,6 +41,7 @@ pub mod download;
 pub mod error;
 pub mod format;
 pub mod fs;
+pub(crate) mod progress;
 pub mod state;
 pub mod stats;
 pub mod url;
@@ -50,8 +51,7 @@ pub use config::{ApiConfig, DownloadConfig, ServiceConfig, ServiceCredentials};
 pub use dlc::{DlcKeyCache, parse_dlc_data, parse_dlc_file};
 pub use download::{
     CollectedFiles, DownloadItem, DownloadProgress, Downloader, FileStatus, NoProgress,
-    OwnedDownloadItem,
-    fetch_public_nodes,
+    OwnedDownloadItem, fetch_public_nodes,
 };
 pub use error::{Error, Result};
 pub use format::{format_bytes, format_duration};

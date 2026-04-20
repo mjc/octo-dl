@@ -80,12 +80,18 @@ struct LoginRequest {
 
 #[derive(Deserialize)]
 struct DeleteRequest {
-    name: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct RetryRequest {
-    name: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -134,6 +140,71 @@ fn dispatch_urls(state: &ApiState, urls: Vec<String>) {
         let _ = shared.action_tx.send(UiAction::AddUrls(urls));
     } else {
         let _ = state.tx.send(DownloadEvent::UrlsReceived { urls });
+    }
+}
+
+#[derive(Deserialize)]
+struct SnapshotFile {
+    id: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct SnapshotState {
+    files: Vec<SnapshotFile>,
+}
+
+fn resolve_file_id(
+    state: &ApiState,
+    id: Option<String>,
+    name: Option<String>,
+) -> Result<String, axum::response::Response> {
+    if let Some(id) = id {
+        return Ok(id);
+    }
+
+    let Some(name) = name else {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "missing id or name"})),
+        )
+            .into_response());
+    };
+
+    let Some(shared) = state.shared.as_ref() else {
+        return Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error": "Web UI not enabled"})),
+        )
+            .into_response());
+    };
+
+    let snapshot: SnapshotState =
+        serde_json::from_str(shared.state_rx.borrow().as_str()).map_err(|_| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": "invalid app state"})),
+            )
+                .into_response()
+        })?;
+
+    let matches: Vec<_> = snapshot
+        .files
+        .into_iter()
+        .filter(|file| file.name == name)
+        .collect();
+    match matches.as_slice() {
+        [] => Err((
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"error": "file not found"})),
+        )
+            .into_response()),
+        [file] => Ok(file.id.clone()),
+        _ => Err((
+            axum::http::StatusCode::CONFLICT,
+            axum::Json(serde_json::json!({"error": "ambiguous file name; use id"})),
+        )
+            .into_response()),
     }
 }
 
@@ -233,7 +304,11 @@ async fn api_parse_page(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         if provided_key != expected_key {
-            return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "invalid api key"}))).into_response();
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({"error": "invalid api key"})),
+            )
+                .into_response();
         }
     }
 
@@ -349,7 +424,10 @@ async fn api_delete(
     State(state): State<ApiState>,
     axum::Json(payload): axum::Json<DeleteRequest>,
 ) -> impl IntoResponse {
-    send_ui_action(&state, UiAction::DeleteFile(payload.name))
+    match resolve_file_id(&state, payload.id, payload.name) {
+        Ok(id) => send_ui_action(&state, UiAction::DeleteFile(id)),
+        Err(response) => response,
+    }
 }
 
 /// POST /api/retry — retry a failed file.
@@ -357,7 +435,10 @@ async fn api_retry(
     State(state): State<ApiState>,
     axum::Json(payload): axum::Json<RetryRequest>,
 ) -> impl IntoResponse {
-    send_ui_action(&state, UiAction::RetryFile(payload.name))
+    match resolve_file_id(&state, payload.id, payload.name) {
+        Ok(id) => send_ui_action(&state, UiAction::RetryFile(id)),
+        Err(response) => response,
+    }
 }
 
 /// POST /api/config — update download configuration.
@@ -403,11 +484,9 @@ async fn share_target_post(
 
 /// GET / — serves the main web UI SPA.
 async fn web_ui_index(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
-    let host = infer_host(&headers, &state);
-    let scheme = infer_scheme(&headers, &state);
-    let ws_scheme = if scheme == "https" { "wss" } else { "ws" };
-    let script_host = web::format_script_host(&host, state.port, &scheme);
-    Html(web::index_html(&script_host, ws_scheme))
+    let _host = infer_host(&headers, &state);
+    let _scheme = infer_scheme(&headers, &state);
+    Html(web::dashboard_html())
 }
 
 /// GET /manifest.json — PWA manifest.

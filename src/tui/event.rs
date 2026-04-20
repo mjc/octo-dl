@@ -1,12 +1,15 @@
 //! Download event types and TUI progress adapter.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use crate::{DownloadProgress, FileStats};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct TokenMessage {
-    pub file_path: String,
+    pub file_id: String,
     pub token: CancellationToken,
 }
 
@@ -16,23 +19,31 @@ pub struct DownloadChannels {
     pub event_tx: mpsc::UnboundedSender<DownloadEvent>,
     pub url_rx: mpsc::UnboundedReceiver<String>,
     pub token_tx: mpsc::UnboundedSender<TokenMessage>,
+    pub pause_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 #[derive(Debug)]
 pub enum DownloadEvent {
     FileStart {
+        id: String,
         name: String,
         size: u64,
     },
     Progress {
-        name: String,
+        id: Arc<str>,
         bytes_delta: u64,
         speed: u64,
     },
     FileComplete {
+        id: String,
+        name: String,
+    },
+    FileCancelled {
+        id: String,
         name: String,
     },
     Error {
+        id: Option<String>,
         name: String,
         error: String,
     },
@@ -50,8 +61,11 @@ pub enum DownloadEvent {
         url: String,
     },
     FileQueued {
+        id: String,
         name: String,
         size: u64,
+        source_url: String,
+        session_url: String,
     },
     UrlResolved {
         url: String,
@@ -64,19 +78,42 @@ pub enum DownloadEvent {
 
 pub struct TuiProgress {
     pub tx: mpsc::UnboundedSender<DownloadEvent>,
+    ids: Mutex<HashMap<String, Arc<str>>>,
+}
+
+impl TuiProgress {
+    pub fn new(tx: mpsc::UnboundedSender<DownloadEvent>) -> Self {
+        Self {
+            tx,
+            ids: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn intern_id(&self, name: &str) -> Arc<str> {
+        let mut ids = self.ids.lock().unwrap();
+        if let Some(id) = ids.get(name) {
+            return Arc::clone(id);
+        }
+        let id = Arc::<str>::from(name);
+        ids.insert(name.to_string(), Arc::clone(&id));
+        id
+    }
 }
 
 impl DownloadProgress for TuiProgress {
     fn on_file_start(&self, name: &str, size: u64) {
+        let _ = self.intern_id(name);
         let _ = self.tx.send(DownloadEvent::FileStart {
+            id: name.to_string(),
             name: name.to_string(),
             size,
         });
     }
 
     fn on_progress(&self, name: &str, bytes_delta: u64, speed: u64) {
+        let id = self.intern_id(name);
         let _ = self.tx.send(DownloadEvent::Progress {
-            name: name.to_string(),
+            id,
             bytes_delta,
             speed,
         });
@@ -84,12 +121,14 @@ impl DownloadProgress for TuiProgress {
 
     fn on_file_complete(&self, name: &str, _stats: &FileStats) {
         let _ = self.tx.send(DownloadEvent::FileComplete {
+            id: name.to_string(),
             name: name.to_string(),
         });
     }
 
     fn on_error(&self, name: &str, error: &str) {
         let _ = self.tx.send(DownloadEvent::Error {
+            id: Some(name.to_string()),
             name: name.to_string(),
             error: error.to_string(),
         });
