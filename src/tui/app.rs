@@ -168,6 +168,7 @@ pub enum FileStatus {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FileEntry {
+    pub id: String,
     pub name: String,
     pub size: u64,
     pub downloaded: u64,
@@ -175,6 +176,8 @@ pub struct FileEntry {
     /// Bytes received since the last speed calculation (reset each tick).
     #[serde(skip)]
     pub speed_accum: u64,
+    #[serde(skip)]
+    pub source_url: Option<String>,
     pub status: FileStatus,
 }
 
@@ -209,6 +212,10 @@ pub struct App {
     pub url_tx: mpsc::UnboundedSender<String>,
     /// Taken by `start_download_task` to give the receiver to the download task.
     pub(super) url_rx: Option<mpsc::UnboundedReceiver<String>>,
+    /// Broadcasts pause state changes to the background download task.
+    pub pause_tx: watch::Sender<bool>,
+    /// Taken by `start_download_task` to give the receiver to the download task.
+    pub(super) pause_rx: Option<watch::Receiver<bool>>,
     /// Always valid — tokens arrive once the download task is running.
     pub token_rx: mpsc::UnboundedReceiver<TokenMessage>,
     /// Taken by `start_download_task` to give the sender to the download task.
@@ -291,6 +298,7 @@ impl App {
         quit_enabled: bool,
     ) -> Self {
         let (url_tx, url_rx) = mpsc::unbounded_channel::<String>();
+        let (pause_tx, pause_rx) = watch::channel(false);
         let (token_tx, token_rx) = mpsc::unbounded_channel::<TokenMessage>();
         Self {
             popup: Popup::None,
@@ -313,6 +321,8 @@ impl App {
             event_tx,
             url_tx,
             url_rx: Some(url_rx),
+            pause_tx,
+            pause_rx: Some(pause_rx),
             token_rx,
             token_tx: Some(token_tx),
             client_rx: None,
@@ -325,6 +335,42 @@ impl App {
             last_tick: Instant::now(),
             memory_rss: 0,
         }
+    }
+
+    pub fn find_file_mut(&mut self, id: &str) -> Option<&mut FileEntry> {
+        self.files.iter_mut().find(|f| f.id == id)
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+        let _ = self.pause_tx.send(paused);
+    }
+
+    pub fn pause_downloads(&mut self) {
+        if self.paused {
+            return;
+        }
+        self.set_paused(true);
+        for token in self.cancellation_tokens.values() {
+            token.cancel();
+        }
+        for file in &mut self.files {
+            if matches!(file.status, FileStatus::Downloading) {
+                file.status = FileStatus::Queued;
+                file.speed = 0;
+                file.speed_accum = 0;
+            }
+        }
+        self.current_speed = 0;
+        self.status = "Paused".to_string();
+    }
+
+    pub fn resume_downloads(&mut self) {
+        if !self.paused {
+            return;
+        }
+        self.set_paused(false);
+        self.status = "Resuming downloads...".to_string();
     }
 
     /// Serialises UI-visible state to a JSON string.

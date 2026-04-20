@@ -1,16 +1,17 @@
 //! octo-dl CLI - Command-line interface for downloading MEGA files.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use dirs;
 use futures::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 use crate::{
-    DlcKeyCache, DownloadConfig, DownloadItem, DownloadStatsTracker, FileEntry, FileEntryStatus,
+    DlcKeyCache, DownloadConfig, DownloadItem, DownloadProgress, FileEntry, FileEntryStatus,
     FileStats, NoProgress, SavedCredentials, SessionState, SessionStats, SessionStatsBuilder,
     SessionStatus, UrlEntry, UrlStatus, format_bytes, format_duration, is_dlc_path,
 };
@@ -25,12 +26,6 @@ fn build_http_client() -> reqwest::Result<reqwest::Client> {
         .pool_max_idle_per_host(8)
         .tcp_keepalive(Duration::from_secs(30))
         .build()
-}
-
-fn dummy_downloader(config: &DownloadConfig) -> crate::Downloader {
-    let http = reqwest::Client::new();
-    let client = mega::Client::builder().build(http).expect("client builder");
-    crate::Downloader::new(client, config.clone())
 }
 
 // ============================================================================
@@ -77,84 +72,79 @@ fn make_total_progress_bar(size: u64) -> ProgressBar {
 // Download Functions
 // ============================================================================
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-async fn download_file(
-    client: &mega::Client,
-    progress: &MultiProgress,
-    total_bar: &ProgressBar,
-    item: &DownloadItem<'_>,
-    chunks: usize,
-) -> crate::Result<FileStats> {
-    let DownloadItem { path, node } = item;
+struct CliDownloadProgress {
+    progress: MultiProgress,
+    total_bar: ProgressBar,
+    bars: Mutex<HashMap<String, ProgressBar>>,
+    session_peak: AtomicU64,
+}
 
-    // Ensure parent directory exists
-    if let Some(parent) = std::path::Path::new(path)
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-    {
-        let _ = std::fs::create_dir_all(parent);
+impl CliDownloadProgress {
+    fn new(progress: MultiProgress, total_bar: ProgressBar) -> Self {
+        Self {
+            progress,
+            total_bar,
+            bars: Mutex::new(HashMap::new()),
+            session_peak: AtomicU64::new(0),
+        }
     }
 
-    let part_file = format!("{path}.part");
-    let stats = Arc::new(DownloadStatsTracker::new(node.size()));
-    let bar = progress.insert_before(total_bar, make_progress_bar(node.size(), node.name()));
-    bar.enable_steady_tick(std::time::Duration::from_millis(250));
+    fn peak_speed(&self) -> u64 {
+        self.session_peak.load(Ordering::Relaxed)
+    }
+}
 
-    let bar_clone = bar.clone();
-    let total_bar_clone = total_bar.clone();
-    let stats_clone = Arc::clone(&stats);
+impl DownloadProgress for CliDownloadProgress {
+    fn on_file_start(&self, name: &str, size: u64) {
+        let bar = self
+            .progress
+            .insert_before(&self.total_bar, make_progress_bar(size, name));
+        bar.enable_steady_tick(Duration::from_millis(250));
+        self.bars.lock().unwrap().insert(name.to_string(), bar);
+    }
 
-    // Open .part file for parallel chunk download with MAC verification
-    let file = tokio::fs::File::create(&part_file).await?;
-    file.set_len(node.size()).await?;
-    let file = file.compat_write();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn on_progress(&self, name: &str, bytes_delta: u64, _speed: u64) {
+        self.total_bar.inc(bytes_delta);
+        let current_speed = self.total_bar.per_sec() as u64;
+        self.session_peak
+            .fetch_max(current_speed, Ordering::Relaxed);
+        if let Some(bar) = self.bars.lock().unwrap().get(name) {
+            bar.inc(bytes_delta);
+        }
+    }
 
-    let name_for_progress = node.name().to_string();
-    let result = client
-        .download_node_parallel_with_progress(
-            node,
-            file,
-            chunks,
-            Some(move |delta| {
-                bar_clone.inc(delta);
-                total_bar_clone.inc(delta);
-                // per_sec() returns f64; as u64 saturates (Rust 1.45+)
-                stats_clone.update_speed(bar_clone.per_sec() as u64);
-                bar_clone.set_message(name_for_progress.clone());
-            }),
-        )
-        .await;
-
-    if result.is_ok() {
-        // Rename .part → final
-        tokio::fs::rename(&part_file, path).await?;
-        bar.finish_and_clear();
-        let file_stats = FileStats {
-            size: node.size(),
-            elapsed: stats.elapsed(),
-            average_speed: stats.average_speed(),
-            peak_speed: stats.peak_speed(),
-            ramp_up_time: stats.time_to_80pct(),
-        };
-        let ramp_up = file_stats.ramp_up_time.map_or_else(
+    fn on_file_complete(&self, name: &str, stats: &FileStats) {
+        if let Some(bar) = self.bars.lock().unwrap().remove(name) {
+            bar.finish_and_clear();
+        }
+        let ramp_up = stats.ramp_up_time.map_or_else(
             || "ramp <1s".to_string(),
             |d| format!("ramp {}", format_duration(d)),
         );
-        let _ = progress.println(format!(
+        let _ = self.progress.println(format!(
             "  {} - {} in {} ({}/s avg, {}/s peak, {})",
-            node.name(),
-            format_bytes(file_stats.size),
-            format_duration(file_stats.elapsed),
-            format_bytes(file_stats.average_speed),
-            format_bytes(file_stats.peak_speed),
+            name,
+            format_bytes(stats.size),
+            format_duration(stats.elapsed),
+            format_bytes(stats.average_speed),
+            format_bytes(stats.peak_speed),
             ramp_up,
         ));
-        Ok(file_stats)
-    } else {
-        // Clean up .part file on error
-        let _ = tokio::fs::remove_file(&part_file).await;
-        bar.abandon();
-        result.map(|()| unreachable!()).map_err(crate::Error::from)
+    }
+
+    fn on_error(&self, name: &str, _error: &str) {
+        if let Some(bar) = self.bars.lock().unwrap().remove(name) {
+            bar.abandon();
+        }
+    }
+
+    fn on_partial_detected(&self, name: &str, existing_size: u64, expected_size: u64) {
+        let _ = self.progress.println(format!(
+            "  partial: {name} ({}/{})",
+            format_bytes(existing_size),
+            format_bytes(expected_size),
+        ));
     }
 }
 
@@ -184,7 +174,7 @@ fn print_file_list(files: &[DownloadItem], skipped: usize, partial: usize) {
         println!("  {skipped} file(s) skipped (already exist)");
     }
     if partial > 0 {
-        println!("  {partial} file(s) with partial downloads (will re-download)");
+        println!("  {partial} file(s) with partial downloads (verified chunks will be reused)");
     }
     println!("{SEPARATOR}\n");
 }
@@ -224,11 +214,9 @@ fn print_summary(stats: &SessionStats) {
 
 #[allow(clippy::similar_names)]
 async fn download_all(
-    client: &mega::Client,
-    progress: &MultiProgress,
-    total_bar: &ProgressBar,
+    downloader: &crate::Downloader,
     files: &[DownloadItem<'_>],
-    config: &DownloadConfig,
+    progress: &Arc<CliDownloadProgress>,
     builder: &mut SessionStatsBuilder,
     mut session_state: Option<&mut SessionState>,
 ) -> crate::Result<()> {
@@ -236,29 +224,24 @@ async fn download_all(
         return Ok(());
     }
 
-    // Track aggregate peak speed from total_bar
-    let session_peak = Arc::new(AtomicU64::new(0));
-    let session_peak_clone = Arc::clone(&session_peak);
+    let progress_trait: Arc<dyn DownloadProgress> = progress.clone();
 
     let results: Vec<_> = stream::iter(files)
         .map(|item| {
-            let peak_tracker = Arc::clone(&session_peak_clone);
+            let progress = Arc::clone(&progress_trait);
             async move {
-                let result =
-                    download_file(client, progress, total_bar, item, config.chunks_per_file).await;
-                // Update session peak from total_bar's aggregate speed
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let current_speed = total_bar.per_sec() as u64;
-                peak_tracker.fetch_max(current_speed, Ordering::Relaxed);
+                let result = downloader
+                    .download_file(item.node, &item.path, &progress, None)
+                    .await;
                 (item.path.clone(), result)
             }
         })
-        .buffer_unordered(config.concurrent_files)
+        .buffer_unordered(downloader.config().concurrent_files)
         .collect()
         .await;
 
     // Use aggregate peak, not per-file peak
-    builder.set_peak_speed(session_peak.load(Ordering::Relaxed));
+    builder.set_peak_speed(progress.peak_speed());
 
     for (path, result) in results {
         match result {
@@ -269,7 +252,7 @@ async fn download_all(
                 }
             }
             Err(e) => {
-                let _ = progress.println(format!("Download error: {e:?}"));
+                let _ = progress.progress.println(format!("Download error: {e:?}"));
                 if let Some(ref mut state) = session_state.as_deref_mut() {
                     let _ = state.mark_file_error(&path, &e.to_string());
                 }
@@ -319,7 +302,7 @@ fn parse_args() -> CliConfig {
             }
             // Skip global flags handled by the unified binary
             "--tui" | "--api" => {}
-            "--api-host" => {
+            "--host" | "--config" => {
                 let _ = args.next(); // consume the value
             }
             _ if !arg.starts_with('-') => {
@@ -460,8 +443,8 @@ pub async fn run() -> crate::Result<()> {
     client.login(&email, &password, mfa.as_deref()).await?;
     println!("Logged in successfully.");
 
-    // Create downloader for file collection
-    let downloader = dummy_downloader(&config.download_config);
+    // Shared downloader owns collection and all payload writes.
+    let downloader = crate::Downloader::new(client, config.download_config.clone());
     let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
     // Create session state for persistence
@@ -539,16 +522,18 @@ pub async fn run() -> crate::Result<()> {
     let total_size: u64 = all_files.iter().map(|i| i.node.size()).sum();
     let total_bar = progress.add(make_total_progress_bar(total_size));
     total_bar.enable_steady_tick(Duration::from_millis(250));
+    let cli_progress = Arc::new(CliDownloadProgress::new(
+        progress.clone(),
+        total_bar.clone(),
+    ));
 
     let mut builder = SessionStatsBuilder::new();
     builder.set_skipped(total_skipped);
 
     download_all(
-        &client,
-        &progress,
-        &total_bar,
+        &downloader,
         &all_files,
-        &config.download_config,
+        &cli_progress,
         &mut builder,
         Some(&mut session_state),
     )
@@ -581,7 +566,7 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
     client.login(&email, &password, mfa.as_deref()).await?;
     println!("Logged in successfully.");
 
-    let downloader = dummy_downloader(&config.download_config);
+    let downloader = crate::Downloader::new(client, config.download_config.clone());
     let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
     // Re-fetch URLs and collect remaining files
@@ -650,16 +635,18 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
     let total_size: u64 = all_files.iter().map(|i| i.node.size()).sum();
     let total_bar = progress.add(make_total_progress_bar(total_size));
     total_bar.enable_steady_tick(Duration::from_millis(250));
+    let cli_progress = Arc::new(CliDownloadProgress::new(
+        progress.clone(),
+        total_bar.clone(),
+    ));
 
     let mut builder = SessionStatsBuilder::new();
     builder.set_skipped(total_skipped);
 
     download_all(
-        &client,
-        &progress,
-        &total_bar,
+        &downloader,
         &all_files,
-        &config.download_config,
+        &cli_progress,
         &mut builder,
         Some(&mut session),
     )

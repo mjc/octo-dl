@@ -10,7 +10,7 @@ use std::os::windows::io::{FromRawHandle, RawHandle};
 use std::path::PathBuf;
 
 /// Flags that consume the next argument as a value (not a positional arg).
-const FLAGS_WITH_VALUES: &[&str] = &["--host", "--config"];
+const FLAGS_WITH_VALUES: &[&str] = &["--host", "--config", "-j", "--chunks", "-p", "--parallel"];
 
 /// Returns true if `args` contains positional arguments (URLs, DLC paths, etc.)
 /// as opposed to just flags and their values.
@@ -111,6 +111,22 @@ mod tests {
         assert!(log_pipe_writer().is_none());
 
         unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
+    }
+
+    #[test]
+    fn positional_args_ignore_cli_flag_values() {
+        let args = vec!["--web".to_string(), "--chunks".to_string(), "4".to_string()];
+        assert!(!has_positional_args(&args));
+    }
+
+    #[test]
+    fn positional_args_detect_url_after_global_flag_value() {
+        let args = vec![
+            "--host".to_string(),
+            "0.0.0.0".to_string(),
+            "https://mega.nz/file/test".to_string(),
+        ];
+        assert!(has_positional_args(&args));
     }
 }
 

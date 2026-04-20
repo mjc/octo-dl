@@ -23,7 +23,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::{ServiceConfig, SessionState, SessionStatus, UrlStatus, format_bytes};
 use app::FileStatus;
@@ -202,7 +202,7 @@ pub(crate) fn sync_session_on_shutdown(app: &mut App) {
                 FileStatus::Queued | FileStatus::Downloading | FileStatus::Error(_)
             )
         })
-        .map(|f| f.name.as_str())
+        .map(|f| f.id.as_str())
         .collect();
 
     session.files.retain(|f| visible.contains(f.path.as_str()));
@@ -228,7 +228,7 @@ pub(crate) fn drain_download_events(
 /// Drains all pending token messages (non-blocking).
 pub(crate) fn drain_token_messages(app: &mut App) {
     while let Ok(msg) = app.token_rx.try_recv() {
-        app.cancellation_tokens.insert(msg.file_path, msg.token);
+        app.cancellation_tokens.insert(msg.file_id, msg.token);
     }
 }
 
@@ -520,26 +520,39 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
             }
         }
         UiAction::TogglePause => {
-            app.paused = !app.paused;
+            if app.paused {
+                app.resume_downloads();
+            } else {
+                app.pause_downloads();
+            }
         }
-        UiAction::DeleteFile(name) => {
-            if let Some(token) = app.cancellation_tokens.remove(&name) {
+        UiAction::DeleteFile(id) => {
+            if let Some(token) = app.cancellation_tokens.remove(&id) {
                 token.cancel();
             }
-            app.deleted_files.insert(name.clone());
-            app.files.retain(|f| f.name != name);
+            app.deleted_files.insert(id.clone());
+            app.files.retain(|f| f.id != id);
+            if let Some(ref mut session) = app.session {
+                let _ = session.remove_file(&id);
+            }
             app.recompute_totals();
         }
-        UiAction::RetryFile(name) => {
-            if let Some(f) = app.files.iter_mut().find(|f| f.name == name) {
+        UiAction::RetryFile(id) => {
+            let mut source_url = None;
+            if let Some(f) = app.find_file_mut(&id) {
                 f.status = FileStatus::Queued;
                 f.downloaded = 0;
                 f.speed = 0;
                 f.speed_accum = 0;
+                source_url = f.source_url.clone();
             }
-            // Re-send URL so the download pipeline picks it up
-            if let Some(url) = app.urls.iter().find(|u| u.contains(&name)).cloned() {
+            if let Some(url) = source_url {
                 let _ = app.url_tx.send(url);
+            } else {
+                app.status = format!("Retry unavailable for {id}");
+                if let Some(f) = app.find_file_mut(&id) {
+                    f.status = FileStatus::Error("Retry unavailable for this file".to_string());
+                }
             }
         }
         UiAction::UpdateConfig {
@@ -585,11 +598,6 @@ pub async fn run(
     web: bool,
     config_path: Option<&Path>,
 ) -> io::Result<()> {
-    if web {
-        let web_host = api_host.and_then(|host| host).unwrap_or_else(|| "127.0.0.1".to_string());
-        return run_web(&web_host, config_path).await;
-    }
-
     // Initialize terminal with RAII guard for automatic cleanup
     let _terminal_guard = TerminalGuard::new()?;
 
@@ -618,6 +626,13 @@ pub async fn run(
         app = App::new(api_port, download_tx, true);
     }
 
+    let (action_tx, mut action_rx) = mpsc::unbounded_channel::<UiAction>();
+    let (state_tx, state_rx) = watch::channel(app.to_json());
+    let shared_state = web.then_some(app::SharedAppState {
+        action_tx,
+        state_rx,
+    });
+
     // Start the API server (if enabled)
     if let Some(explicit_host) = api_host {
         let host = explicit_host.unwrap_or(api_bind_host);
@@ -630,9 +645,11 @@ pub async fn run(
         };
         let api_tx = app.event_tx.clone();
         let api_key = app.api_key.clone();
+        let shared = shared_state.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                api::run_api_server(api_tx, &host, api_port, web_opts.as_ref(), None, api_key).await
+                api::run_api_server(api_tx, &host, api_port, web_opts.as_ref(), shared, api_key)
+                    .await
             {
                 log::error!("API server error: {e}");
             }
@@ -678,6 +695,12 @@ pub async fn run(
             log_progress(&mut app);
         }
         drain_token_messages(&mut app);
+        while let Ok(action) = action_rx.try_recv() {
+            handle_ui_action(&mut app, action);
+        }
+        if web && state_tx.receiver_count() > 1 {
+            state_tx.send_replace(app.to_json());
+        }
 
         if app.should_quit {
             sync_session_on_shutdown(&mut app);
@@ -732,7 +755,9 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     let api_key = app.api_key.clone();
     tokio::spawn(async move {
         log::info!("Starting API server on {api_host_owned}:{api_port}");
-        if let Err(e) = api::run_api_server(api_tx, &api_host_owned, api_port, None, None, api_key).await {
+        if let Err(e) =
+            api::run_api_server(api_tx, &api_host_owned, api_port, None, None, api_key).await
+        {
             log::error!("API server error: {e}");
         }
     });

@@ -1,16 +1,22 @@
 //! Core download logic and abstractions.
 
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use futures::{StreamExt, stream};
+use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::DownloadConfig;
 use crate::error::{Error, Result};
 use crate::fs::{FileSystem, TokioFileSystem};
+use crate::progress::CumulativeProgress;
 use crate::stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBuilder};
 
 /// Fetches public-link metadata with a fresh anonymous MEGA client.
@@ -124,6 +130,119 @@ fn part_path(path: &str) -> PathBuf {
     PathBuf::from(format!("{path}.part"))
 }
 
+fn sidecar_path(path: &str) -> PathBuf {
+    PathBuf::from(format!("{path}.part.meta.json"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VerifiedChunkRecord {
+    index: u32,
+    mac_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResumeSidecar {
+    version: u32,
+    file_size: u64,
+    expected_condensed_mac_b64: String,
+    verified_chunks: Vec<VerifiedChunkRecord>,
+}
+
+#[derive(Debug)]
+struct ResumeTracker {
+    file_size: u64,
+    expected_condensed_mac_b64: String,
+    chunk_macs: Vec<Option<[u8; 16]>>,
+    dirty_chunks: usize,
+}
+
+impl ResumeTracker {
+    const FLUSH_THRESHOLD: usize = 32;
+
+    fn new(
+        file_size: u64,
+        expected_condensed_mac_b64: String,
+        chunk_macs: Vec<Option<[u8; 16]>>,
+    ) -> Self {
+        Self {
+            file_size,
+            expected_condensed_mac_b64,
+            chunk_macs,
+            dirty_chunks: 0,
+        }
+    }
+
+    fn mark_verified(&mut self, index: u32, mac: [u8; 16]) {
+        let Some(slot) = self.chunk_macs.get_mut(index as usize) else {
+            return;
+        };
+        let was_unverified = slot.is_none();
+        *slot = Some(mac);
+        if was_unverified {
+            self.dirty_chunks = self.dirty_chunks.saturating_add(1);
+        }
+    }
+
+    fn needs_flush(&self) -> bool {
+        self.dirty_chunks >= Self::FLUSH_THRESHOLD
+    }
+
+    fn snapshot(&mut self) -> ResumeSidecar {
+        self.dirty_chunks = 0;
+        ResumeSidecar {
+            version: 1,
+            file_size: self.file_size,
+            expected_condensed_mac_b64: self.expected_condensed_mac_b64.clone(),
+            verified_chunks: self
+                .chunk_macs
+                .iter()
+                .enumerate()
+                .filter_map(|(index, mac)| {
+                    mac.map(|mac| VerifiedChunkRecord {
+                        index: index as u32,
+                        mac_b64: STANDARD.encode(mac),
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    fn trusted_chunks(&self) -> Vec<Option<[u8; 16]>> {
+        self.chunk_macs.clone()
+    }
+}
+
+async fn load_sidecar(path: &Path) -> Option<ResumeSidecar> {
+    let data = tokio::fs::read(path).await.ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+async fn save_sidecar_atomic(path: &Path, sidecar: &ResumeSidecar) -> io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    let data = serde_json::to_vec(sidecar)?;
+    tokio::fs::write(&tmp, data).await?;
+    tokio::fs::rename(&tmp, path).await
+}
+
+async fn delete_sidecar(path: &Path) -> io::Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn encode_expected_mac(node: &mega::Node) -> Result<String> {
+    let mac = node
+        .condensed_mac()
+        .ok_or(mega::Error::MissingCondensedMac)?;
+    Ok(STANDARD.encode(mac))
+}
+
+fn is_condensed_mac_mismatch(error: &Error) -> bool {
+    matches!(error, Error::Mega(mega::Error::CondensedMacMismatch))
+}
+
 /// Core downloader that handles MEGA file downloads.
 pub struct Downloader<F: FileSystem = TokioFileSystem> {
     client: mega::Client,
@@ -219,7 +338,7 @@ impl<F: FileSystem> Downloader<F> {
                 FileStatus::Partial => {
                     let pp = part_path(&item.path);
                     let existing_size = self.fs.file_size(&pp).await.unwrap_or(0);
-                    progress.on_partial_detected(item.node.name(), existing_size, item.node.size());
+                    progress.on_partial_detected(&item.path, existing_size, item.node.size());
                     partial += 1;
                     to_download.push(item);
                 }
@@ -247,6 +366,74 @@ impl<F: FileSystem> Downloader<F> {
         Ok(())
     }
 
+    async fn revalidate_resume_chunks(
+        &self,
+        node: &mega::Node,
+        boundaries: &[mega::MegaChunk],
+        part_path: &Path,
+        sidecar_path: &Path,
+        expected_condensed_mac_b64: &str,
+    ) -> Result<Vec<Option<[u8; 16]>>> {
+        let mut trusted = vec![None; boundaries.len()];
+
+        let Some(sidecar) = load_sidecar(sidecar_path).await else {
+            return Ok(trusted);
+        };
+
+        if sidecar.version != 1
+            || sidecar.file_size != node.size()
+            || sidecar.expected_condensed_mac_b64 != expected_condensed_mac_b64
+        {
+            return Ok(trusted);
+        }
+
+        let Some(aes_iv) = node.aes_iv() else {
+            return Ok(trusted);
+        };
+        let part_size = self.fs.file_size(part_path).await.unwrap_or(0);
+        let max_chunk_len = boundaries
+            .iter()
+            .map(|chunk| chunk.length as usize)
+            .max()
+            .unwrap_or(0);
+        let mut scratch = vec![0u8; max_chunk_len];
+
+        for record in sidecar.verified_chunks {
+            let Some(boundary) = boundaries.get(record.index as usize) else {
+                continue;
+            };
+            if trusted[record.index as usize].is_some() {
+                continue;
+            }
+            if boundary.offset.saturating_add(boundary.length) > part_size {
+                continue;
+            }
+            let Ok(decoded) = STANDARD.decode(record.mac_b64.as_bytes()) else {
+                continue;
+            };
+            let Ok(expected_mac) = <[u8; 16]>::try_from(decoded.as_slice()) else {
+                continue;
+            };
+
+            let chunk_len = boundary.length as usize;
+            let buf = &mut scratch[..chunk_len];
+            if self
+                .fs
+                .read_exact_at(part_path, boundary.offset, buf)
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let actual_mac = mega::compute_mega_chunk_mac(buf, node.aes_key(), aes_iv);
+            if actual_mac == expected_mac {
+                trusted[record.index as usize] = Some(actual_mac);
+            }
+        }
+
+        Ok(trusted)
+    }
+
     /// Downloads a single file using atomic `.part` file semantics.
     ///
     /// Writes to `{path}.part` during download, then renames to `{path}` on success.
@@ -263,18 +450,83 @@ impl<F: FileSystem> Downloader<F> {
         progress: &Arc<dyn DownloadProgress>,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<FileStats> {
+        if !self.config.force_overwrite
+            && self
+                .fs
+                .file_size(Path::new(path))
+                .await
+                .is_some_and(|size| size == node.size())
+        {
+            let stats = FileStats {
+                size: node.size(),
+                elapsed: std::time::Duration::ZERO,
+                average_speed: 0,
+                peak_speed: 0,
+                ramp_up_time: None,
+            };
+            progress.on_file_complete(path, &stats);
+            return Ok(stats);
+        }
+
         self.ensure_parent_dir(path).await?;
 
         let pp = part_path(path);
+        let sp = sidecar_path(path);
+        let expected_condensed_mac_b64 = encode_expected_mac(node)?;
+        let boundaries = mega::mega_chunk_boundaries(node.size());
+        let trusted_chunks = if self.config.force_overwrite {
+            vec![None; boundaries.len()]
+        } else {
+            self.revalidate_resume_chunks(node, &boundaries, &pp, &sp, &expected_condensed_mac_b64)
+                .await?
+        };
+        let preserve_existing = trusted_chunks.iter().any(Option::is_some);
+        if !preserve_existing {
+            let _ = delete_sidecar(&sp).await;
+        }
+
         let stats = Arc::new(DownloadStatsTracker::new(node.size()));
-        let name = node.name().to_string();
+        let name = path.to_string();
 
         progress.on_file_start(&name, node.size());
 
-        // Create .part file with pre-allocated size
-        let file = self.fs.create_file(&pp, node.size()).await?;
+        // Open the plaintext .part file, preserving only locally revalidated chunks.
+        let file = self
+            .fs
+            .open_part_file(&pp, node.size(), preserve_existing)
+            .await?;
 
         let name_clone = name.clone();
+        let tracker = Arc::new(Mutex::new(ResumeTracker::new(
+            node.size(),
+            expected_condensed_mac_b64,
+            trusted_chunks,
+        )));
+        let trusted_for_download = tracker.lock().unwrap().trusted_chunks();
+        let (flush_stop_tx, mut flush_stop_rx) = oneshot::channel::<()>();
+        let flush_tracker = Arc::clone(&tracker);
+        let flush_sidecar_path = sp.clone();
+        let flush_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let snapshot = {
+                            let mut guard = flush_tracker.lock().unwrap();
+                            if !guard.needs_flush() {
+                                None
+                            } else {
+                                Some(guard.snapshot())
+                            }
+                        };
+                        if let Some(snapshot) = snapshot {
+                            let _ = save_sidecar_atomic(&flush_sidecar_path, &snapshot).await;
+                        }
+                    }
+                    _ = &mut flush_stop_rx => break,
+                }
+            }
+        });
 
         // Wrap tokio file for futures::AsyncWrite/AsyncSeek compatibility
         let file = file.compat_write();
@@ -283,26 +535,32 @@ impl<F: FileSystem> Downloader<F> {
         // total bytes downloaded so far, NOT a delta.  We use fetch_max (not
         // swap) so that out-of-order callbacks from parallel workers never
         // regress the high-water mark.
-        let prev_bytes = Arc::new(AtomicU64::new(0));
+        let cumulative = Arc::new(CumulativeProgress::new());
         let stats_clone = Arc::clone(&stats);
         let progress_clone = Arc::clone(progress);
         let name_for_cb = name.clone();
-        let progress_cb = move |cumulative: u64| {
-            let previous = prev_bytes.fetch_max(cumulative, Ordering::Relaxed);
-            let delta = cumulative.saturating_sub(previous);
+        let progress_cb = move |cumulative_bytes: u64| {
+            let delta = cumulative.delta(cumulative_bytes);
             if delta > 0 {
                 let speed = stats_clone.record_bytes(delta);
                 progress_clone.on_progress(&name_for_cb, delta, speed);
             }
         };
+        let verify_tracker = Arc::clone(&tracker);
+        let chunk_verified_cb = move |index: u32, mac: [u8; 16]| {
+            let mut guard = verify_tracker.lock().unwrap();
+            guard.mark_verified(index, mac);
+        };
 
         // Download with progress callback, optionally with cancellation support
         let download_result = if let Some(token) = cancellation_token {
-            let download_fut = self.client.download_node_parallel_with_progress(
+            let download_fut = self.client.download_node_parallel_resumable_with_progress(
                 node,
                 file,
                 self.config.chunks_per_file,
+                &trusted_for_download,
                 Some(progress_cb),
+                Some(chunk_verified_cb),
             );
             tokio::select! {
                 res = download_fut => res.map_err(Error::Mega),
@@ -312,20 +570,25 @@ impl<F: FileSystem> Downloader<F> {
             }
         } else {
             self.client
-                .download_node_parallel_with_progress(
+                .download_node_parallel_resumable_with_progress(
                     node,
                     file,
                     self.config.chunks_per_file,
+                    &trusted_for_download,
                     Some(progress_cb),
+                    Some(chunk_verified_cb),
                 )
                 .await
                 .map_err(Error::Mega)
         };
+        let _ = flush_stop_tx.send(());
+        let _ = flush_handle.await;
 
         match download_result {
             Ok(()) => {
                 // Rename .part → final
                 self.fs.rename_file(&pp, Path::new(path)).await?;
+                delete_sidecar(&sp).await?;
 
                 let file_stats = FileStats {
                     size: node.size(),
@@ -338,9 +601,16 @@ impl<F: FileSystem> Downloader<F> {
                 Ok(file_stats)
             }
             Err(e) => {
+                let final_mac_mismatch = is_condensed_mac_mismatch(&e);
                 // Keep .part files for future resume support; only clean up if configured
-                if self.config.cleanup_on_error && !matches!(e, Error::Cancelled) {
+                if final_mac_mismatch
+                    || (self.config.cleanup_on_error && !matches!(e, Error::Cancelled))
+                {
                     let _ = self.fs.remove_file(&pp).await;
+                    let _ = delete_sidecar(&sp).await;
+                } else {
+                    let snapshot = tracker.lock().unwrap().snapshot();
+                    let _ = save_sidecar_atomic(&sp, &snapshot).await;
                 }
                 if !matches!(e, Error::Cancelled) {
                     progress.on_error(&name_clone, &e.to_string());
@@ -475,7 +745,7 @@ fn collect_files_recursive<'a>(
         .partition(|n| n.kind().is_folder());
 
     let current_files = files.into_iter().map(|file| DownloadItem {
-        path: build_path(nodes, node, file),
+        path: build_path(nodes, file),
         node: file,
     });
 
@@ -487,15 +757,33 @@ fn collect_files_recursive<'a>(
 }
 
 /// Builds the full path for a file within a folder structure.
-fn build_path(nodes: &mega::Nodes, parent: &mega::Node, file: &mega::Node) -> String {
-    // Try to build full path with grandparent, fallback to parent/file if no grandparent
-    if let Some(gp_handle) = parent.parent()
-        && let Some(grandparent) = nodes.get_node_by_handle(gp_handle)
-    {
-        return format!("{}/{}/{}", grandparent.name(), parent.name(), file.name());
+fn build_path(nodes: &mega::Nodes, file: &mega::Node) -> String {
+    build_relative_path(file.name(), file.parent(), |handle| {
+        let node = nodes.get_node_by_handle(handle)?;
+        Some((node.name().to_string(), node.parent().map(str::to_string)))
+    })
+}
+
+fn build_relative_path<F>(file_name: &str, parent: Option<&str>, mut lookup: F) -> String
+where
+    F: FnMut(&str) -> Option<(String, Option<String>)>,
+{
+    let mut components = vec![file_name.to_string()];
+    let mut parent = parent.map(str::to_string);
+
+    while let Some(handle) = parent.as_deref() {
+        let Some((name, next_parent)) = lookup(handle) else {
+            break;
+        };
+        if next_parent.is_none() {
+            break;
+        }
+        components.push(name);
+        parent = next_parent;
     }
-    // Parent is at root level, just use parent/file
-    format!("{}/{}", parent.name(), file.name())
+
+    components.reverse();
+    components.join("/")
 }
 
 #[cfg(test)]
@@ -573,6 +861,24 @@ mod tests {
 
         async fn create_file(&self, _path: &Path, _size: u64) -> std::io::Result<tokio::fs::File> {
             // Not needed for classify_file tests
+            Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "mock"))
+        }
+
+        async fn open_part_file(
+            &self,
+            _path: &Path,
+            _size: u64,
+            _preserve_existing: bool,
+        ) -> std::io::Result<tokio::fs::File> {
+            Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "mock"))
+        }
+
+        async fn read_exact_at(
+            &self,
+            _path: &Path,
+            _offset: u64,
+            _buf: &mut [u8],
+        ) -> std::io::Result<()> {
             Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "mock"))
         }
 
@@ -656,5 +962,37 @@ mod tests {
             dl.classify_file("movie.mkv", 1_000_000).await,
             FileStatus::Missing
         );
+    }
+
+    #[test]
+    fn build_relative_path_handles_deep_nesting() {
+        let mut parents = std::collections::HashMap::new();
+        parents.insert(
+            "folder-b".to_string(),
+            ("b".to_string(), Some("folder-a".to_string())),
+        );
+        parents.insert(
+            "folder-a".to_string(),
+            ("a".to_string(), Some("root".to_string())),
+        );
+        parents.insert("root".to_string(), ("ignored-root".to_string(), None));
+
+        let path = build_relative_path("file.bin", Some("folder-b"), |handle| {
+            parents.get(handle).cloned()
+        });
+
+        assert_eq!(path, "a/b/file.bin");
+    }
+
+    #[test]
+    fn build_relative_path_keeps_root_level_files_flat() {
+        let mut parents = std::collections::HashMap::new();
+        parents.insert("root".to_string(), ("ignored-root".to_string(), None));
+
+        let path = build_relative_path("file.bin", Some("root"), |handle| {
+            parents.get(handle).cloned()
+        });
+
+        assert_eq!(path, "file.bin");
     }
 }

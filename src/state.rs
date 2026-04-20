@@ -395,6 +395,35 @@ impl SavedCredentials {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+
+    struct StateDirectoryGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl StateDirectoryGuard {
+        fn unset() -> Self {
+            let previous = env::var_os("STATE_DIRECTORY");
+            unsafe { env::remove_var("STATE_DIRECTORY") };
+            Self { previous }
+        }
+
+        fn set(path: &str) -> Self {
+            let previous = env::var_os("STATE_DIRECTORY");
+            unsafe { env::set_var("STATE_DIRECTORY", path) };
+            Self { previous }
+        }
+    }
+
+    impl Drop for StateDirectoryGuard {
+        fn drop(&mut self) {
+            if let Some(ref value) = self.previous {
+                unsafe { env::set_var("STATE_DIRECTORY", value) };
+            } else {
+                unsafe { env::remove_var("STATE_DIRECTORY") };
+            }
+        }
+    }
 
     #[test]
     fn credential_encryption_round_trip() {
@@ -521,9 +550,20 @@ mod tests {
     }
 
     #[test]
-    fn state_dir_is_under_data_dir() {
+    fn state_dir_default_ends_in_sessions() {
+        let _guard = StateDirectoryGuard::unset();
         let dir = SessionState::state_dir();
-        assert!(dir.to_string_lossy().contains("octo-dl"));
-        assert!(dir.to_string_lossy().contains("sessions"));
+        assert!(dir.ends_with("sessions"));
+
+        if dirs::data_dir().is_some() {
+            assert!(dir.ends_with("octo-dl/sessions"));
+        }
+    }
+
+    #[test]
+    fn state_dir_uses_override() {
+        let _guard = StateDirectoryGuard::set("/tmp/octo-state");
+        let dir = SessionState::state_dir();
+        assert_eq!(dir, PathBuf::from("/tmp/octo-state/sessions"));
     }
 }
