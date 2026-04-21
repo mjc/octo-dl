@@ -115,7 +115,8 @@ impl DownloadProgress for CliDownloadProgress {
     }
 
     fn on_file_complete(&self, name: &str, stats: &FileStats) {
-        if let Some(bar) = self.bars.lock().unwrap().remove(name) {
+        let bar = self.bars.lock().unwrap().remove(name);
+        if let Some(bar) = bar {
             bar.finish_and_clear();
         }
         let ramp_up = stats.ramp_up_time.map_or_else(
@@ -134,7 +135,8 @@ impl DownloadProgress for CliDownloadProgress {
     }
 
     fn on_error(&self, name: &str, _error: &str) {
-        if let Some(bar) = self.bars.lock().unwrap().remove(name) {
+        let bar = self.bars.lock().unwrap().remove(name);
+        if let Some(bar) = bar {
             bar.abandon();
         }
     }

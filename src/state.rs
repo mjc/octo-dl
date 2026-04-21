@@ -22,6 +22,9 @@ type Aes128CbcEnc = cbc::Encryptor<Aes128>;
 
 const CREDENTIAL_VERSION_PREFIX: &str = "v2:";
 
+#[cfg(test)]
+pub(crate) static STATE_DIRECTORY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Overall session status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionStatus {
@@ -442,20 +445,29 @@ mod tests {
     use std::env;
 
     struct StateDirectoryGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
         previous: Option<std::ffi::OsString>,
     }
 
     impl StateDirectoryGuard {
         fn unset() -> Self {
+            let lock = STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
             let previous = env::var_os("STATE_DIRECTORY");
             unsafe { env::remove_var("STATE_DIRECTORY") };
-            Self { previous }
+            Self {
+                _lock: lock,
+                previous,
+            }
         }
 
         fn set(path: &str) -> Self {
+            let lock = STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
             let previous = env::var_os("STATE_DIRECTORY");
             unsafe { env::set_var("STATE_DIRECTORY", path) };
-            Self { previous }
+            Self {
+                _lock: lock,
+                previous,
+            }
         }
     }
 

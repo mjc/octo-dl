@@ -118,16 +118,19 @@ struct ShareTargetQuery {
 
 /// Sends a `UiAction` to the event loop, returning 503 if shared state is absent.
 fn send_ui_action(state: &ApiState, action: UiAction) -> axum::response::Response {
-    if let Some(ref shared) = state.shared {
-        let _ = shared.action_tx.send(action);
-        axum::Json(serde_json::json!({"ok": true})).into_response()
-    } else {
-        (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "Web UI not enabled",
-        )
-            .into_response()
-    }
+    state.shared.as_ref().map_or_else(
+        || {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Web UI not enabled",
+            )
+                .into_response()
+        },
+        |shared| {
+            let _ = shared.action_tx.send(action);
+            axum::Json(serde_json::json!({"ok": true})).into_response()
+        },
+    )
 }
 
 /// Dispatches extracted URLs — via `UiAction` if shared state is available,
@@ -158,34 +161,40 @@ fn resolve_file_id(
     state: &ApiState,
     id: Option<String>,
     name: Option<String>,
-) -> Result<String, axum::response::Response> {
+) -> Result<String, Box<axum::response::Response>> {
     if let Some(id) = id {
         return Ok(id);
     }
 
     let Some(name) = name else {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            axum::Json(serde_json::json!({"error": "missing id or name"})),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({"error": "missing id or name"})),
+            )
+                .into_response(),
+        ));
     };
 
     let Some(shared) = state.shared.as_ref() else {
-        return Err((
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(serde_json::json!({"error": "Web UI not enabled"})),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({"error": "Web UI not enabled"})),
+            )
+                .into_response(),
+        ));
     };
 
     let snapshot: SnapshotState =
         serde_json::from_str(shared.state_rx.borrow().as_str()).map_err(|_| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({"error": "invalid app state"})),
+            Box::new(
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({"error": "invalid app state"})),
+                )
+                    .into_response(),
             )
-                .into_response()
         })?;
 
     let matches: Vec<_> = snapshot
@@ -194,17 +203,21 @@ fn resolve_file_id(
         .filter(|file| file.name == name)
         .collect();
     match matches.as_slice() {
-        [] => Err((
-            axum::http::StatusCode::NOT_FOUND,
-            axum::Json(serde_json::json!({"error": "file not found"})),
-        )
-            .into_response()),
+        [] => Err(Box::new(
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({"error": "file not found"})),
+            )
+                .into_response(),
+        )),
         [file] => Ok(file.id.clone()),
-        _ => Err((
-            axum::http::StatusCode::CONFLICT,
-            axum::Json(serde_json::json!({"error": "ambiguous file name; use id"})),
-        )
-            .into_response()),
+        _ => Err(Box::new(
+            (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({"error": "ambiguous file name; use id"})),
+            )
+                .into_response(),
+        )),
     }
 }
 
@@ -219,12 +232,12 @@ fn parse_forwarded_param(value: &str, key: &str) -> Option<String> {
     for entry in value.split(',') {
         for part in entry.split(';') {
             let mut segments = part.trim().splitn(2, '=');
-            if let (Some(param), Some(raw_value)) = (segments.next(), segments.next()) {
-                if param.eq_ignore_ascii_case(key) {
-                    let cleaned = raw_value.trim().trim_matches('"');
-                    if !cleaned.is_empty() {
-                        return Some(cleaned.to_string());
-                    }
+            if let (Some(param), Some(raw_value)) = (segments.next(), segments.next())
+                && param.eq_ignore_ascii_case(key)
+            {
+                let cleaned = raw_value.trim().trim_matches('"');
+                if !cleaned.is_empty() {
+                    return Some(cleaned.to_string());
                 }
             }
         }
@@ -247,7 +260,6 @@ fn infer_scheme(headers: &HeaderMap, state: &ApiState) -> String {
     }
     match state.port {
         443 => "https".to_string(),
-        80 => "http".to_string(),
         _ => "http".to_string(),
     }
 }
@@ -267,8 +279,7 @@ fn infer_host(headers: &HeaderMap, state: &ApiState) -> String {
     state
         .web_opts
         .as_ref()
-        .map(|w| w.public_host.clone())
-        .unwrap_or_else(|| state.host.clone())
+        .map_or_else(|| state.host.clone(), |w| w.public_host.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -363,20 +374,23 @@ async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> 
 
 /// GET /api/state — returns the latest application snapshot as JSON.
 async fn api_get_state(State(state): State<ApiState>) -> impl IntoResponse {
-    if let Some(ref shared) = state.shared {
-        let json = shared.state_rx.borrow().clone();
-        (
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
-            json,
-        )
-            .into_response()
-    } else {
-        (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "Web UI not enabled",
-        )
-            .into_response()
-    }
+    state.shared.as_ref().map_or_else(
+        || {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Web UI not enabled",
+            )
+                .into_response()
+        },
+        |shared| {
+            let json = shared.state_rx.borrow().clone();
+            (
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                json,
+            )
+                .into_response()
+        },
+    )
 }
 
 /// GET /api/events — SSE stream of application state updates.
@@ -426,7 +440,7 @@ async fn api_delete(
 ) -> impl IntoResponse {
     match resolve_file_id(&state, payload.id, payload.name) {
         Ok(id) => send_ui_action(&state, UiAction::DeleteFile(id)),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -437,7 +451,7 @@ async fn api_retry(
 ) -> impl IntoResponse {
     match resolve_file_id(&state, payload.id, payload.name) {
         Ok(id) => send_ui_action(&state, UiAction::RetryFile(id)),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -588,4 +602,148 @@ pub async fn run_api_server(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderValue, StatusCode};
+    use tokio::sync::watch;
+
+    fn state_without_shared() -> (ApiState, mpsc::UnboundedReceiver<DownloadEvent>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            ApiState {
+                tx,
+                host: "127.0.0.1".to_string(),
+                port: DEFAULT_API_PORT,
+                shared: None,
+                web_opts: None,
+                api_key: None,
+            },
+            rx,
+        )
+    }
+
+    fn state_with_snapshot(snapshot: &str) -> (ApiState, mpsc::UnboundedReceiver<UiAction>) {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (action_tx, action_rx) = mpsc::unbounded_channel();
+        let (_state_tx, state_rx) = watch::channel(snapshot.to_string());
+        (
+            ApiState {
+                tx: event_tx,
+                host: "127.0.0.1".to_string(),
+                port: DEFAULT_API_PORT,
+                shared: Some(SharedAppState {
+                    action_tx,
+                    state_rx,
+                }),
+                web_opts: None,
+                api_key: None,
+            },
+            action_rx,
+        )
+    }
+
+    #[test]
+    fn dispatch_urls_without_shared_state_sends_download_event() {
+        let (state, mut rx) = state_without_shared();
+        let urls = vec!["https://mega.nz/file/abc#key".to_string()];
+
+        dispatch_urls(&state, urls.clone());
+
+        match rx.try_recv().expect("download event should be sent") {
+            DownloadEvent::UrlsReceived { urls: received } => assert_eq!(received, urls),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_urls_with_shared_state_sends_ui_action() {
+        let (state, mut rx) = state_with_snapshot(r#"{"files":[]}"#);
+        let urls = vec!["https://mega.nz/folder/abc#key".to_string()];
+
+        dispatch_urls(&state, urls.clone());
+
+        match rx.try_recv().expect("UI action should be sent") {
+            UiAction::AddUrls(received) => assert_eq!(received, urls),
+            other => panic!("unexpected UI action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_file_id_by_id_does_not_require_shared_state() {
+        let (state, _rx) = state_without_shared();
+
+        let id = resolve_file_id(&state, Some("file-id".to_string()), None)
+            .expect("explicit id should resolve");
+
+        assert_eq!(id, "file-id");
+    }
+
+    #[test]
+    fn resolve_file_id_by_name_reports_all_lookup_cases() {
+        let (state, _rx) = state_with_snapshot(
+            r#"{"files":[{"id":"one","name":"unique.mkv"},{"id":"two","name":"dup.mkv"},{"id":"three","name":"dup.mkv"}]}"#,
+        );
+
+        let id = resolve_file_id(&state, None, Some("unique.mkv".to_string()))
+            .expect("unique name should resolve");
+        assert_eq!(id, "one");
+
+        let missing = resolve_file_id(&state, None, None).expect_err("missing selector");
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+
+        let not_found =
+            resolve_file_id(&state, None, Some("missing.mkv".to_string())).expect_err("not found");
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+
+        let duplicate =
+            resolve_file_id(&state, None, Some("dup.mkv".to_string())).expect_err("duplicate");
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn resolve_file_id_by_name_requires_valid_shared_state() {
+        let (state, _rx) = state_without_shared();
+        let unavailable =
+            resolve_file_id(&state, None, Some("file.mkv".to_string())).expect_err("no web UI");
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let (state, _rx) = state_with_snapshot("{not-json");
+        let invalid =
+            resolve_file_id(&state, None, Some("file.mkv".to_string())).expect_err("bad state");
+        assert_eq!(invalid.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn forwarded_headers_drive_public_scheme_and_host() {
+        let (state, _rx) = state_without_shared();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "forwarded",
+            HeaderValue::from_static(r#"for=192.0.2.10;proto=https;host="octo.example""#),
+        );
+
+        assert_eq!(infer_scheme(&headers, &state), "https");
+        assert_eq!(infer_host(&headers, &state), "octo.example");
+    }
+
+    #[test]
+    fn forwarded_header_precedence_matches_proxy_conventions() {
+        let (state, _rx) = state_without_shared();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https, http"));
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("public.example, internal.example"),
+        );
+        headers.insert(
+            "forwarded",
+            HeaderValue::from_static("proto=http;host=ignored.example"),
+        );
+
+        assert_eq!(infer_scheme(&headers, &state), "https");
+        assert_eq!(infer_host(&headers, &state), "public.example");
+    }
 }

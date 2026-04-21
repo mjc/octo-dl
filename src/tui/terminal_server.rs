@@ -25,6 +25,7 @@ use super::web;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
     use portable_pty::{PtySize, native_pty_system};
     use std::io::Read;
 
@@ -100,6 +101,49 @@ mod tests {
         let chunk = rx.try_recv().expect("broadcast should receive bytes");
         assert_eq!(chunk, b"abc");
     }
+
+    #[test]
+    fn parse_forwarded_param_handles_quotes_and_multiple_entries() {
+        let header = r#"for=192.0.2.1;proto=http, for=192.0.2.2;proto=https;host="octo.example""#;
+
+        assert_eq!(
+            parse_forwarded_param(header, "host"),
+            Some("octo.example".to_string())
+        );
+        assert_eq!(
+            parse_forwarded_param(header, "proto"),
+            Some("http".to_string())
+        );
+        assert_eq!(parse_forwarded_param(header, "missing"), None);
+    }
+
+    #[test]
+    fn infer_scheme_prefers_forwarded_proto_then_port() {
+        let (mut state, _reader) = build_test_state();
+        let mut headers = HeaderMap::new();
+        headers.insert("forwarded", HeaderValue::from_static("proto=https"));
+
+        assert_eq!(infer_scheme(&headers, &state), "https");
+
+        headers.clear();
+        state.port = 443;
+        assert_eq!(infer_scheme(&headers, &state), "https");
+    }
+
+    #[test]
+    fn infer_host_formats_ipv6_fallback_and_prefers_proxy_header() {
+        let (mut state, _reader) = build_test_state();
+        state.host = "::1".to_string();
+        let mut headers = HeaderMap::new();
+
+        assert_eq!(infer_host(&headers, &state, "http"), "[::1]:9723");
+
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("public.example, internal.example"),
+        );
+        assert_eq!(infer_host(&headers, &state, "http"), "public.example");
+    }
 }
 
 #[derive(Clone)]
@@ -158,12 +202,12 @@ fn parse_forwarded_param(value: &str, key: &str) -> Option<String> {
     for entry in value.split(',') {
         for part in entry.split(';') {
             let mut segments = part.trim().splitn(2, '=');
-            if let (Some(param), Some(raw_value)) = (segments.next(), segments.next()) {
-                if param.eq_ignore_ascii_case(key) {
-                    let cleaned = raw_value.trim().trim_matches('"');
-                    if !cleaned.is_empty() {
-                        return Some(cleaned.to_string());
-                    }
+            if let (Some(param), Some(raw_value)) = (segments.next(), segments.next())
+                && param.eq_ignore_ascii_case(key)
+            {
+                let cleaned = raw_value.trim().trim_matches('"');
+                if !cleaned.is_empty() {
+                    return Some(cleaned.to_string());
                 }
             }
         }
@@ -178,16 +222,14 @@ fn infer_scheme(headers: &HeaderMap, state: &TerminalApiState) -> String {
             return proto.to_ascii_lowercase();
         }
     }
-    if let Some(forwarded) = header_to_str(headers, "forwarded") {
-        if let Some(proto) = parse_forwarded_param(forwarded, "proto") {
-            if matches!(proto.as_str(), "http" | "https") {
-                return proto.to_ascii_lowercase();
-            }
-        }
+    if let Some(forwarded) = header_to_str(headers, "forwarded")
+        && let Some(proto) = parse_forwarded_param(forwarded, "proto")
+        && matches!(proto.as_str(), "http" | "https")
+    {
+        return proto.to_ascii_lowercase();
     }
     match state.port {
         443 => "https".to_string(),
-        80 => "http".to_string(),
         _ => "http".to_string(),
     }
 }
@@ -196,10 +238,10 @@ fn infer_host(headers: &HeaderMap, state: &TerminalApiState, scheme: &str) -> St
     if let Some(host) = header_to_str(headers, "x-forwarded-host") {
         return host.split(',').next().unwrap_or(host).trim().to_string();
     }
-    if let Some(forwarded) = header_to_str(headers, "forwarded") {
-        if let Some(host) = parse_forwarded_param(forwarded, "host") {
-            return host;
-        }
+    if let Some(forwarded) = header_to_str(headers, "forwarded")
+        && let Some(host) = parse_forwarded_param(forwarded, "host")
+    {
+        return host;
     }
     if let Some(host) = header_to_str(headers, "host") {
         return host.to_string();
@@ -458,7 +500,7 @@ async fn ws_handler(
     State(state): State<TerminalApiState>,
     upgrade: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    upgrade.on_upgrade(move |socket| handle_ws(state.clone(), socket))
+    upgrade.on_upgrade(move |socket| handle_ws(state, socket))
 }
 
 async fn handle_ws(state: TerminalApiState, ws: WebSocket) {
@@ -485,7 +527,7 @@ async fn handle_ws(state: TerminalApiState, ws: WebSocket) {
                         break;
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }

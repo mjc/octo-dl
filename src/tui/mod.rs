@@ -103,82 +103,11 @@ pub(crate) fn resume_session(app: &mut App) {
         .filter(|entry| entry.status == UrlStatus::Pending)
         .map(|entry| entry.url.clone())
         .collect();
-    app.urls = resumed_urls.clone();
+    app.urls.clone_from(&resumed_urls);
     for url in resumed_urls {
         let _ = app.url_tx.send(url);
     }
     app.session = Some(session);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{DownloadConfig, SavedCredentials, UrlEntry};
-    use std::env;
-    use std::path::Path;
-    use tempfile::tempdir;
-
-    struct StateDirectoryGuard;
-
-    impl StateDirectoryGuard {
-        fn set(path: &Path) -> Self {
-            unsafe { env::set_var("STATE_DIRECTORY", path) };
-            Self
-        }
-    }
-
-    impl Drop for StateDirectoryGuard {
-        fn drop(&mut self) {
-            unsafe { env::remove_var("STATE_DIRECTORY") };
-        }
-    }
-
-    #[test]
-    fn resume_session_requeues_urls() {
-        let dir = tempdir().unwrap();
-        let _guard = StateDirectoryGuard::set(dir.path());
-
-        let urls = vec![
-            UrlEntry {
-                url: "https://mega.nz/file/first".to_string(),
-                status: UrlStatus::Pending,
-            },
-            UrlEntry {
-                url: "https://mega.nz/file/second".to_string(),
-                status: UrlStatus::Fetched,
-            },
-        ];
-        let session = SessionState::new(
-            SavedCredentials::encrypt("test@example.com", "hunter2", None),
-            DownloadConfig::default(),
-            urls,
-        );
-        session.save().unwrap();
-
-        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(0, event_tx, true);
-
-        resume_session(&mut app);
-
-        let expected_urls = vec![
-            "https://mega.nz/file/first".to_string(),
-            "https://mega.nz/file/second".to_string(),
-        ];
-        assert_eq!(app.urls, expected_urls);
-
-        let mut url_rx = app.url_rx.take().expect("url_rx should exist");
-        assert_eq!(url_rx.try_recv().unwrap(), expected_urls[0]);
-        assert_eq!(url_rx.try_recv().unwrap(), expected_urls[1]);
-        assert!(url_rx.try_recv().is_err());
-
-        let session_state = app.session.as_ref().expect("session should be present");
-        assert!(
-            session_state
-                .urls
-                .iter()
-                .all(|entry| matches!(entry.status, UrlStatus::Pending))
-        );
-    }
 }
 
 /// Syncs the session file list with visible UI files before shutdown.
@@ -313,7 +242,7 @@ fn apply_service_config(app: &mut App, config_path: &Path) -> io::Result<(String
     }
 
     app.config.config = service_config.download.clone();
-    app.api_key = service_config.api.api_key.clone();
+    app.api_key.clone_from(&service_config.api.api_key);
 
     // Try to load credentials from config file first
     let mut credentials_from_config = false;
@@ -356,7 +285,7 @@ fn apply_service_config(app: &mut App, config_path: &Path) -> io::Result<(String
         log::info!("Generated API key: {key}");
         service_config.api.api_key = Some(key);
         service_config.save(config_path)?;
-        app.api_key = service_config.api.api_key.clone();
+        app.api_key.clone_from(&service_config.api.api_key);
     }
 
     Ok((service_config.api.host, service_config.api.port))
@@ -546,14 +475,15 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
             app.recompute_totals();
         }
         UiAction::RetryFile(id) => {
-            let mut source_url = None;
-            if let Some(f) = app.find_file_mut(&id) {
+            let source_url = if let Some(f) = app.find_file_mut(&id) {
                 f.status = FileStatus::Queued;
                 f.downloaded = 0;
                 f.speed = 0;
                 f.speed_accum = 0;
-                source_url = f.source_url.clone();
-            }
+                f.source_url.clone()
+            } else {
+                None
+            };
             if let Some(url) = source_url {
                 let _ = app.url_tx.send(url);
             } else {
@@ -653,11 +583,16 @@ pub async fn run(
         };
         let api_tx = app.event_tx.clone();
         let api_key = app.api_key.clone();
-        let shared = shared_state.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                api::run_api_server(api_tx, &host, api_port, web_opts.as_ref(), shared, api_key)
-                    .await
+            if let Err(e) = api::run_api_server(
+                api_tx,
+                &host,
+                api_port,
+                web_opts.as_ref(),
+                shared_state,
+                api_key,
+            )
+            .await
             {
                 log::error!("API server error: {e}");
             }
@@ -816,7 +751,7 @@ pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<(
                     handle.write_all(&buf[..n])?;
                     let _ = handle.flush();
                 }
-                Err(ref err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(ref err) if err.kind() == io::ErrorKind::Interrupted => {}
                 Err(_) => break,
             }
         }
@@ -863,4 +798,87 @@ pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<(
     let _ = server_handle.await;
     let _ = log_forwarder.await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DownloadConfig, SavedCredentials, UrlEntry};
+    use std::env;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    struct StateDirectoryGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl StateDirectoryGuard {
+        fn set(path: &Path) -> Self {
+            let lock = crate::state::STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
+            let previous = env::var_os("STATE_DIRECTORY");
+            unsafe { env::set_var("STATE_DIRECTORY", path) };
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for StateDirectoryGuard {
+        fn drop(&mut self) {
+            if let Some(ref value) = self.previous {
+                unsafe { env::set_var("STATE_DIRECTORY", value) };
+            } else {
+                unsafe { env::remove_var("STATE_DIRECTORY") };
+            }
+        }
+    }
+
+    #[test]
+    fn resume_session_requeues_urls() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+
+        let urls = vec![
+            UrlEntry {
+                url: "https://mega.nz/file/first".to_string(),
+                status: UrlStatus::Pending,
+            },
+            UrlEntry {
+                url: "https://mega.nz/file/second".to_string(),
+                status: UrlStatus::Fetched,
+            },
+        ];
+        let session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            urls,
+        );
+        session.save().unwrap();
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(0, event_tx, true);
+
+        resume_session(&mut app);
+
+        let expected_urls = vec![
+            "https://mega.nz/file/first".to_string(),
+            "https://mega.nz/file/second".to_string(),
+        ];
+        assert_eq!(app.urls, expected_urls);
+
+        let mut url_rx = app.url_rx.take().expect("url_rx should exist");
+        assert_eq!(url_rx.try_recv().unwrap(), expected_urls[0]);
+        assert_eq!(url_rx.try_recv().unwrap(), expected_urls[1]);
+        assert!(url_rx.try_recv().is_err());
+
+        let session_state = app.session.as_ref().expect("session should be present");
+        assert!(
+            session_state
+                .urls
+                .iter()
+                .all(|entry| matches!(entry.status, UrlStatus::Pending))
+        );
+    }
 }

@@ -39,7 +39,7 @@ pub struct LoginState {
 }
 
 impl LoginState {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             email: String::new(),
             password: String::new(),
@@ -69,17 +69,17 @@ impl LoginState {
     /// explicit sources (config file, session).
     pub fn set_credentials_if_missing(&mut self, email: &str, password: &str, mfa: &str) {
         if self.email.is_empty() && !email.is_empty() {
-            self.email = email.to_owned();
+            email.clone_into(&mut self.email);
         }
         if self.password.is_empty() && !password.is_empty() {
-            self.password = password.to_owned();
+            password.clone_into(&mut self.password);
         }
         if self.mfa.is_empty() && !mfa.is_empty() {
-            self.mfa = mfa.to_owned();
+            mfa.clone_into(&mut self.mfa);
         }
     }
 
-    pub fn has_credentials(&self) -> bool {
+    pub const fn has_credentials(&self) -> bool {
         !self.email.is_empty() && !self.password.is_empty()
     }
 
@@ -181,10 +181,30 @@ pub struct FileEntry {
     pub status: FileStatus,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitPolicy {
+    Enabled,
+    Disabled,
+}
+
+impl QuitPolicy {
+    pub const fn from_bool(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+
+    pub const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
 pub struct App {
     pub popup: Popup,
     pub should_quit: bool,
-    pub quit_enabled: bool,
+    pub quit_policy: QuitPolicy,
     // Auth
     pub login: LoginState,
     pub authenticated: bool,
@@ -303,7 +323,7 @@ impl App {
         Self {
             popup: Popup::None,
             should_quit: false,
-            quit_enabled,
+            quit_policy: QuitPolicy::from_bool(quit_enabled),
             login: LoginState::new(),
             authenticated: false,
             url_input: String::new(),
@@ -570,5 +590,44 @@ mod tests {
         assert_eq!(ConfigField::ConcurrentFiles.label(), "Concurrent files");
         assert_eq!(ConfigField::ForceOverwrite.label(), "Force overwrite");
         assert_eq!(ConfigField::CleanupOnError.label(), "Cleanup on error");
+    }
+
+    #[test]
+    fn quit_policy_converts_from_bool() {
+        assert_eq!(QuitPolicy::from_bool(true), QuitPolicy::Enabled);
+        assert_eq!(QuitPolicy::from_bool(false), QuitPolicy::Disabled);
+        assert!(QuitPolicy::Enabled.is_enabled());
+        assert!(!QuitPolicy::Disabled.is_enabled());
+    }
+
+    #[test]
+    fn to_json_contains_visible_file_state_without_internal_fields() {
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "stable/file.bin".to_string(),
+            name: "file.bin".to_string(),
+            size: 128,
+            downloaded: 64,
+            speed: 32,
+            speed_accum: 16,
+            source_url: Some("https://mega.nz/file/abc".to_string()),
+            status: FileStatus::Downloading,
+        });
+        app.cpu_usage = 12.5;
+        app.memory_rss = 4096;
+        app.recompute_totals();
+
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&app.to_json()).expect("snapshot should be valid JSON");
+        let file = &snapshot["files"][0];
+
+        assert_eq!(file["id"], "stable/file.bin");
+        assert_eq!(file["status"], "downloading");
+        assert_eq!(snapshot["total_downloaded"], 64);
+        assert_eq!(snapshot["total_size"], 128);
+        assert!(file.get("speed_accum").is_none());
+        assert!(file.get("source_url").is_none());
+        assert_eq!(snapshot["cpu_usage"], 12.5);
+        assert_eq!(snapshot["memory_rss"], 4096);
     }
 }

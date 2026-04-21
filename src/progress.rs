@@ -2,20 +2,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Tracks a cumulative byte counter and yields monotonic deltas.
 #[derive(Debug, Default)]
-pub(crate) struct CumulativeProgress {
+pub struct CumulativeProgress {
     high_water: AtomicU64,
 }
 
 impl CumulativeProgress {
     #[must_use]
-    pub(crate) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             high_water: AtomicU64::new(0),
         }
     }
 
     #[must_use]
-    pub(crate) fn delta(&self, cumulative: u64) -> u64 {
+    pub fn delta(&self, cumulative: u64) -> u64 {
         let previous = self.high_water.fetch_max(cumulative, Ordering::Relaxed);
         cumulative.saturating_sub(previous)
     }
