@@ -586,6 +586,9 @@ impl<F: FileSystem> Downloader<F> {
 
         match download_result {
             Ok(()) => {
+                if self.config.force_overwrite {
+                    let _ = self.fs.remove_file(Path::new(path)).await;
+                }
                 // Rename .part → final
                 self.fs.rename_file(&pp, Path::new(path)).await?;
                 delete_sidecar(&sp).await?;
