@@ -1551,6 +1551,7 @@ name = "octo-dl"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "aes-gcm",
  "async-trait",
  "axum",
  "base64",

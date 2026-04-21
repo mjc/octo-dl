@@ -3,17 +3,24 @@
 use std::path::{Path, PathBuf};
 
 use aes::Aes128;
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes128Gcm, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+#[cfg(test)]
+use cbc::cipher::BlockEncryptMut;
+use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::DownloadConfig;
 
-type Aes128CbcEnc = cbc::Encryptor<Aes128>;
 type Aes128CbcDec = cbc::Decryptor<Aes128>;
+#[cfg(test)]
+type Aes128CbcEnc = cbc::Encryptor<Aes128>;
+
+const CREDENTIAL_VERSION_PREFIX: &str = "v2:";
 
 /// Overall session status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,47 +306,49 @@ fn derive_machine_key() -> [u8; 16] {
     key
 }
 
-/// Encrypts a plaintext string using AES-128-CBC with the machine key.
+/// Encrypts a plaintext string using AES-128-GCM with the machine key.
 /// Returns the encrypted data as a base64-encoded string.
 ///
-/// This provides basic obfuscation for credentials stored in session files (0o600).
-/// Not cryptographically secure (uses key as IV), but acceptable for the threat model.
+/// The encoded value is versioned as `v2:<base64(nonce || ciphertext_and_tag)>`.
+/// Session/config files are also saved with 0o600 permissions as defense in depth.
 ///
 /// # Panics
 ///
-/// Panics if the encryption buffer size is incorrect (should never happen).
+/// Panics if authenticated encryption fails (should never happen for AES-GCM).
 #[must_use]
-#[allow(clippy::cast_possible_truncation)]
 pub fn encrypt_credential(plaintext: &str) -> String {
     let key = derive_machine_key();
-    // Use key as IV for simplicity (not high-security, just prevents casual reading)
-    let iv = key;
+    let cipher = Aes128Gcm::new(&key.into());
+    let nonce_uuid = uuid::Uuid::new_v4();
+    let nonce_bytes = &nonce_uuid.as_bytes()[..12];
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .expect("AES-GCM encryption should succeed");
 
-    let plaintext_bytes = plaintext.as_bytes();
-    // PKCS7 padding: pad to 16-byte block boundary
-    let padded_len = ((plaintext_bytes.len() / 16) + 1) * 16;
-    let mut buf = vec![0u8; padded_len];
-    buf[..plaintext_bytes.len()].copy_from_slice(plaintext_bytes);
-
-    // PKCS7 padding
-    let pad_byte = (padded_len - plaintext_bytes.len()) as u8;
-    buf[plaintext_bytes.len()..].fill(pad_byte);
-
-    let cipher = Aes128CbcEnc::new(&key.into(), &iv.into());
-    let encrypted = cipher
-        .encrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut buf, padded_len)
-        .expect("buffer size is correct");
-
-    BASE64.encode(encrypted)
+    let mut encoded = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
+    encoded.extend_from_slice(nonce_bytes);
+    encoded.extend_from_slice(&ciphertext);
+    format!("{CREDENTIAL_VERSION_PREFIX}{}", BASE64.encode(encoded))
 }
 
-/// Decrypts a base64-encoded AES-128-CBC encrypted credential.
-///
-/// # Errors
-///
-/// Returns `None` if decryption or decoding fails.
-#[must_use]
-pub fn decrypt_credential(encrypted: &str) -> Option<String> {
+fn decrypt_credential_v2(encrypted: &str) -> Option<String> {
+    let encoded = encrypted.strip_prefix(CREDENTIAL_VERSION_PREFIX)?;
+    let data = BASE64.decode(encoded).ok()?;
+    if data.len() < 13 {
+        return None;
+    }
+    let (nonce_bytes, ciphertext) = data.split_at(12);
+    let key = derive_machine_key();
+    let cipher = Aes128Gcm::new(&key.into());
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
+        .ok()?;
+    String::from_utf8(plaintext).ok()
+}
+
+/// Decrypts legacy AES-128-CBC credentials written by older octo-dl versions.
+fn decrypt_credential_legacy(encrypted: &str) -> Option<String> {
     let key = derive_machine_key();
     let iv = key;
 
@@ -349,25 +358,60 @@ pub fn decrypt_credential(encrypted: &str) -> Option<String> {
     }
 
     let cipher = Aes128CbcDec::new(&key.into(), &iv.into());
-    let decrypted = cipher
+    let encrypted = cipher
         .decrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut data)
         .ok()?;
 
     // Remove PKCS7 padding
-    let pad_byte = *decrypted.last()? as usize;
+    let pad_byte = *encrypted.last()? as usize;
     if pad_byte == 0 || pad_byte > 16 {
         return None;
     }
-    let unpadded_len = decrypted.len().checked_sub(pad_byte)?;
+    let unpadded_len = encrypted.len().checked_sub(pad_byte)?;
     // Verify padding bytes
-    if !decrypted[unpadded_len..]
+    if !encrypted[unpadded_len..]
         .iter()
         .all(|&b| b as usize == pad_byte)
     {
         return None;
     }
 
-    String::from_utf8(decrypted[..unpadded_len].to_vec()).ok()
+    String::from_utf8(encrypted[..unpadded_len].to_vec()).ok()
+}
+
+/// Decrypts a versioned AES-128-GCM credential, falling back to legacy CBC.
+///
+/// # Errors
+///
+/// Returns `None` if decryption or decoding fails.
+#[must_use]
+pub fn decrypt_credential(encrypted: &str) -> Option<String> {
+    if encrypted.starts_with(CREDENTIAL_VERSION_PREFIX) {
+        return decrypt_credential_v2(encrypted);
+    }
+    decrypt_credential_legacy(encrypted)
+}
+
+#[cfg(test)]
+#[allow(clippy::cast_possible_truncation)]
+fn encrypt_credential_legacy_for_test(plaintext: &str) -> String {
+    let key = derive_machine_key();
+    let iv = key;
+
+    let plaintext_bytes = plaintext.as_bytes();
+    let padded_len = ((plaintext_bytes.len() / 16) + 1) * 16;
+    let mut buf = vec![0u8; padded_len];
+    buf[..plaintext_bytes.len()].copy_from_slice(plaintext_bytes);
+
+    let pad_byte = (padded_len - plaintext_bytes.len()) as u8;
+    buf[plaintext_bytes.len()..].fill(pad_byte);
+
+    let cipher = Aes128CbcEnc::new(&key.into(), &iv.into());
+    let encrypted = cipher
+        .encrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut buf, padded_len)
+        .expect("buffer size is correct");
+
+    BASE64.encode(encrypted)
 }
 
 impl SavedCredentials {
@@ -432,6 +476,8 @@ mod tests {
         let mfa = Some("123456");
 
         let saved = SavedCredentials::encrypt(email, password, mfa);
+        assert!(saved.email.starts_with(CREDENTIAL_VERSION_PREFIX));
+        assert!(saved.password.starts_with(CREDENTIAL_VERSION_PREFIX));
         // Encrypted values should not be plaintext
         assert_ne!(saved.email, email);
         assert_ne!(saved.password, password);
@@ -456,6 +502,20 @@ mod tests {
         let encrypted = encrypt_credential("");
         let decrypted = decrypt_credential(&encrypted).unwrap();
         assert_eq!(decrypted, "");
+    }
+
+    #[test]
+    fn credential_decryption_rejects_tampering() {
+        let mut encrypted = encrypt_credential("secret");
+        encrypted.push('A');
+        assert!(decrypt_credential(&encrypted).is_none());
+    }
+
+    #[test]
+    fn legacy_credential_decryption_still_works() {
+        let encrypted = encrypt_credential_legacy_for_test("old-secret");
+        assert!(!encrypted.starts_with(CREDENTIAL_VERSION_PREFIX));
+        assert_eq!(decrypt_credential(&encrypted).unwrap(), "old-secret");
     }
 
     #[test]
