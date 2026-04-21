@@ -46,7 +46,7 @@
           then [''-I${pkgs.glibc.dev}/include'']
           else [];
 
-        cargoTargetEnvPrefix = pkgs.lib.toUpper (builtins.replaceStrings ["-"] ["_"] pkgs.rust.toRustTargetSpec pkgs.stdenv.hostPlatform);
+        cargoTargetEnvPrefix = pkgs.lib.toUpper (builtins.replaceStrings ["-"] ["_"] (pkgs.rust.toRustTargetSpec pkgs.stdenv.hostPlatform));
 
         # Crane setup with nightly rust
         rustNightly = pkgs.rust-bin.nightly.latest.default.override {

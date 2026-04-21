@@ -21,7 +21,7 @@ in {
         Path to config.toml. Auto-created with defaults on first start; edit to add credentials.
 
         The API server binds to 127.0.0.1 by default. To expose externally, set
-        `api_host = "0.0.0.0"` in the config file and place behind an
+        `[api]` and `host = "0.0.0.0"` in the config file and place behind an
         auth-protecting reverse proxy or VPN (e.g., Tailscale).
       '';
     };
@@ -53,7 +53,7 @@ in {
 
       host = lib.mkOption {
         type = lib.types.str;
-        default = "0.0.0.0";
+        default = "127.0.0.1";
         description = "Bind address for the web/API server.";
       };
 
