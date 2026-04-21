@@ -366,13 +366,35 @@ fn apply_service_config(app: &mut App, config_path: &Path) -> io::Result<(String
 // Headless event loop (shared by --api and --web modes)
 // ---------------------------------------------------------------------------
 
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+        match sigterm {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => log::info!("Received SIGINT"),
+                    _ = sigterm.recv() => log::info!("Received SIGTERM"),
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to register SIGTERM handler: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                log::info!("Received SIGINT");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        log::info!("Received Ctrl-C");
+    }
+}
+
 /// Async event loop for headless modes (`--api` and `--web`).
 ///
 /// Processes download events and logs periodic progress summaries.
-/// Runs until SIGINT or SIGTERM.
-///
-/// # Panics
-/// Panics if SIGTERM signal handler registration fails on Unix platforms.
+/// Runs until SIGINT or SIGTERM on Unix, or Ctrl-C on non-Unix targets.
 async fn run_headless_loop(
     app: &mut App,
     download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
@@ -380,14 +402,7 @@ async fn run_headless_loop(
     let mut progress_interval = tokio::time::interval(Duration::from_secs(30));
     progress_interval.tick().await; // consume the immediate first tick
 
-    let shutdown = async {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => log::info!("Received SIGINT"),
-            _ = sigterm.recv() => log::info!("Received SIGTERM"),
-        }
-    };
+    let shutdown = wait_for_shutdown_signal();
     tokio::pin!(shutdown);
 
     loop {
@@ -441,14 +456,7 @@ async fn run_web_loop(
 
     let mut dirty = true; // publish initial state
 
-    let shutdown = async {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => log::info!("Received SIGINT"),
-            _ = sigterm.recv() => log::info!("Received SIGTERM"),
-        }
-    };
+    let shutdown = wait_for_shutdown_signal();
     tokio::pin!(shutdown);
 
     loop {
@@ -723,8 +731,6 @@ pub async fn run(
 /// # Errors
 /// Returns an error if configuration loading fails, server startup fails, or I/O operations fail.
 ///
-/// # Panics
-/// Panics if SIGTERM signal handler registration fails on Unix platforms.
 pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
     let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
     let mut app = App::new(0, download_tx, true);
@@ -783,8 +789,6 @@ pub async fn run_api_only(config_path: &Path) -> io::Result<()> {
 /// # Errors
 /// Returns an error if server startup fails or I/O operations fail.
 ///
-/// # Panics
-/// Panics if SIGTERM signal handler registration fails on Unix platforms.
 pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<()> {
     let (host, port) = if let Some(path) = config_path {
         let config = ServiceConfig::load_or_create(path)?;
