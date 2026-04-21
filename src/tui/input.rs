@@ -21,8 +21,8 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn request_quit(app: &mut App) {
-    if app.quit_enabled {
+const fn request_quit(app: &mut App) {
+    if app.quit_policy.is_enabled() {
         app.should_quit = true;
     }
 }
@@ -48,12 +48,12 @@ fn handle_login_input(app: &mut App, key: KeyEvent) {
             };
         }
         KeyCode::Enter => {
-            if !app.login.has_credentials() {
-                app.login.error = Some("Email and password are required".to_string());
-            } else {
+            if app.login.has_credentials() {
                 app.login.error = None;
                 app.login.logging_in = true;
                 start_login(app);
+            } else {
+                app.login.error = Some("Email and password are required".to_string());
             }
         }
         KeyCode::Char(c) => {
@@ -151,40 +151,7 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
                 app.pause_downloads();
             }
         }
-        KeyCode::Char('d') | KeyCode::Delete if app.url_input.is_empty() => {
-            if let Some(selected) = app.file_list_state.selected()
-                && selected < app.files.len()
-            {
-                let file = &app.files[selected];
-                let can_remove = matches!(
-                    file.status,
-                    FileStatus::Queued | FileStatus::Error(_) | FileStatus::Downloading
-                );
-                if can_remove {
-                    let file_id = file.id.clone();
-                    // Cancel the download if active
-                    if matches!(file.status, FileStatus::Downloading)
-                        && let Some(token) = app.cancellation_tokens.remove(&file_id)
-                    {
-                        token.cancel();
-                    }
-                    // Track so we can ignore stale events
-                    app.deleted_files.insert(file_id.clone());
-                    app.files.remove(selected);
-                    app.recompute_totals();
-                    // Remove from session state
-                    if let Some(ref mut session) = app.session {
-                        let _ = session.remove_file(&file_id);
-                    }
-                    if app.files.is_empty() {
-                        app.file_list_state.select(None);
-                    } else {
-                        app.file_list_state
-                            .select(Some(selected.min(app.files.len() - 1)));
-                    }
-                }
-            }
-        }
+        KeyCode::Char('d') | KeyCode::Delete if app.url_input.is_empty() => delete_selected(app),
         KeyCode::Char('r') if app.url_input.is_empty() => {
             // Retry selected errored file — re-queue it
             if let Some(selected) = app.file_list_state.selected()
@@ -243,6 +210,42 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn delete_selected(app: &mut App) {
+    let Some(selected) = app.file_list_state.selected() else {
+        return;
+    };
+    if selected >= app.files.len() {
+        return;
+    }
+    let file = &app.files[selected];
+    let can_remove = matches!(
+        file.status,
+        FileStatus::Queued | FileStatus::Error(_) | FileStatus::Downloading
+    );
+    if !can_remove {
+        return;
+    }
+
+    let file_id = file.id.clone();
+    if matches!(file.status, FileStatus::Downloading)
+        && let Some(token) = app.cancellation_tokens.remove(&file_id)
+    {
+        token.cancel();
+    }
+    app.deleted_files.insert(file_id.clone());
+    app.files.remove(selected);
+    app.recompute_totals();
+    if let Some(ref mut session) = app.session {
+        let _ = session.remove_file(&file_id);
+    }
+    if app.files.is_empty() {
+        app.file_list_state.select(None);
+    } else {
+        app.file_list_state
+            .select(Some(selected.min(app.files.len() - 1)));
+    }
+}
+
 pub fn handle_paste(app: &mut App, text: &str) {
     match app.popup {
         Popup::Login => {
@@ -279,10 +282,44 @@ pub fn add_url(app: &mut App, url: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::app::{App, FileEntry, FileStatus, Popup};
+    use super::super::app::{App, FileEntry, FileStatus, Popup, QuitPolicy};
     use super::*;
+    use crate::{
+        DownloadConfig, FileEntry as SessionFileEntry, FileEntryStatus, SavedCredentials,
+        SessionState, UrlEntry, UrlStatus,
+    };
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use std::env;
+    use std::path::Path;
+    use tempfile::tempdir;
     use tokio::sync::mpsc;
+
+    struct StateDirectoryGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl StateDirectoryGuard {
+        fn set(path: &Path) -> Self {
+            let lock = crate::state::STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
+            let previous = env::var_os("STATE_DIRECTORY");
+            unsafe { env::set_var("STATE_DIRECTORY", path) };
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for StateDirectoryGuard {
+        fn drop(&mut self) {
+            if let Some(ref value) = self.previous {
+                unsafe { env::set_var("STATE_DIRECTORY", value) };
+            } else {
+                unsafe { env::remove_var("STATE_DIRECTORY") };
+            }
+        }
+    }
 
     fn test_app() -> App {
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -309,7 +346,7 @@ mod tests {
     #[test]
     fn handle_main_input_quit_disabled_via_flag() {
         let mut app = test_app();
-        app.quit_enabled = false;
+        app.quit_policy = QuitPolicy::Disabled;
         assert!(!app.should_quit);
         handle_input(&mut app, key(KeyCode::Char('q')));
         assert!(!app.should_quit);
@@ -394,6 +431,79 @@ mod tests {
         handle_input(&mut app, key(KeyCode::Char('d')));
         assert!(token.is_cancelled());
         assert!(app.files.is_empty());
+    }
+
+    #[test]
+    fn handle_main_input_delete_removes_session_entry_and_keeps_selection() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let mut app = test_app();
+        app.files = vec![
+            FileEntry {
+                id: "first.bin".to_string(),
+                name: "first.bin".to_string(),
+                size: 10,
+                downloaded: 0,
+                speed: 0,
+                speed_accum: 0,
+                source_url: Some("https://mega.nz/file/first".to_string()),
+                status: FileStatus::Queued,
+            },
+            FileEntry {
+                id: "second.bin".to_string(),
+                name: "second.bin".to_string(),
+                size: 20,
+                downloaded: 0,
+                speed: 0,
+                speed_accum: 0,
+                source_url: Some("https://mega.nz/file/second".to_string()),
+                status: FileStatus::Queued,
+            },
+        ];
+        app.recompute_totals();
+        app.file_list_state.select(Some(0));
+
+        let mut session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![UrlEntry {
+                url: "https://mega.nz/folder/root".to_string(),
+                status: UrlStatus::Fetched,
+            }],
+        );
+        session.files = vec![
+            SessionFileEntry {
+                url_index: 0,
+                path: "first.bin".to_string(),
+                size: 10,
+                status: FileEntryStatus::Pending,
+            },
+            SessionFileEntry {
+                url_index: 0,
+                path: "second.bin".to_string(),
+                size: 20,
+                status: FileEntryStatus::Pending,
+            },
+        ];
+        let session_path = session.state_path();
+        app.session = Some(session);
+
+        handle_input(&mut app, key(KeyCode::Delete));
+
+        assert_eq!(app.files.len(), 1);
+        assert_eq!(app.files[0].id, "second.bin");
+        assert_eq!(app.file_list_state.selected(), Some(0));
+        assert_eq!(app.total_size, 20);
+        assert!(app.deleted_files.contains("first.bin"));
+        assert!(session_path.exists());
+
+        let session = app.session.as_ref().expect("session should remain");
+        let paths: Vec<_> = session
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["second.bin"]);
     }
 
     #[test]

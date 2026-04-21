@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>octo-dl</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icon-192.svg">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1220;
+      --panel: #101b2f;
+      --panel-alt: #14233d;
+      --accent: #4dd0e1;
+      --danger: #ff6b6b;
+      --ok: #61d095;
+      --text: #e9eef7;
+      --muted: #92a2bd;
+      --border: #223456;
+      font-family: "IBM Plex Sans", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(circle at top, #172946, var(--bg) 60%); color: var(--text); }
+    main { max-width: 980px; margin: 0 auto; padding: 24px; display: grid; gap: 16px; }
+    section { background: rgba(16, 27, 47, 0.92); border: 1px solid var(--border); border-radius: 16px; padding: 16px; }
+    h1, h2 { margin: 0 0 12px; }
+    .muted { color: var(--muted); }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .row > * { min-width: 0; }
+    input { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel-alt); color: var(--text); }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel-alt); color: var(--text); cursor: pointer; }
+    button.primary { background: var(--accent); color: #09111f; border-color: transparent; }
+    button.danger { background: rgba(255, 107, 107, 0.16); color: #ffd7d7; }
+    button:disabled { opacity: 0.55; cursor: default; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+    .stat { padding: 12px; border-radius: 12px; background: var(--panel-alt); }
+    .files { display: grid; gap: 10px; }
+    .file { padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(20, 35, 61, 0.9); }
+    .file-header { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    .file-name { overflow-wrap: anywhere; font-weight: 600; }
+    .badge { padding: 4px 8px; border-radius: 999px; font-size: 0.8rem; border: 1px solid var(--border); }
+    .queued { color: var(--muted); }
+    .downloading { color: var(--accent); }
+    .complete { color: var(--ok); }
+    .error { color: #ffc4c4; background: rgba(255, 107, 107, 0.12); }
+    .hidden { display: none; }
+    code { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <div class="row" style="justify-content: space-between;">
+        <div>
+          <h1>octo-dl</h1>
+          <div id="status" class="muted">Connecting…</div>
+        </div>
+        <div class="row">
+          <button id="pauseBtn">Pause</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="loginSection">
+      <h2>Login</h2>
+      <div class="row">
+        <input id="email" type="email" placeholder="MEGA email">
+        <input id="password" type="password" placeholder="Password">
+        <input id="mfa" type="text" placeholder="MFA (optional)">
+      </div>
+      <div class="row" style="margin-top: 12px;">
+        <button id="loginBtn" class="primary">Login</button>
+        <span id="loginError" class="muted"></span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Overview</h2>
+      <div class="stats">
+        <div class="stat"><div class="muted">Files</div><div id="filesStat">0 / 0</div></div>
+        <div class="stat"><div class="muted">Downloaded</div><div id="bytesStat">0 / 0</div></div>
+        <div class="stat"><div class="muted">Speed</div><div id="speedStat">0/s</div></div>
+        <div class="stat"><div class="muted">API Port</div><div id="portStat">-</div></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Files</h2>
+      <div id="files" class="files"></div>
+    </section>
+  </main>
+
+  <script>
+    const fmt = (n) => {
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let value = Number(n || 0);
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+      }
+      const digits = unit === 0 ? 0 : value >= 10 ? 1 : 2;
+      return `${value.toFixed(digits)} ${units[unit]}`;
+    };
+
+    const state = { files: [] };
+    const filesEl = document.getElementById("files");
+    const statusEl = document.getElementById("status");
+    const loginSection = document.getElementById("loginSection");
+    const loginError = document.getElementById("loginError");
+    const pauseBtn = document.getElementById("pauseBtn");
+
+    const postJson = async (url, body) => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const payload = await response.text();
+        throw new Error(payload || `Request failed: ${response.status}`);
+      }
+      return response;
+    };
+
+    const renderFiles = () => {
+      filesEl.innerHTML = "";
+      for (const file of state.files) {
+        const item = document.createElement("div");
+        item.className = "file";
+        const retryDisabled = !(file.status && file.status.error);
+        const badgeClass = file.status?.downloading ? "downloading" :
+          file.status?.complete ? "complete" :
+          file.status?.error ? "error" : "queued";
+        const badgeText = file.status?.error ?? (file.status?.downloading ? "downloading" :
+          file.status?.complete ? "complete" : "queued");
+        item.innerHTML = `
+          <div class="file-header">
+            <div class="file-name">${file.name}</div>
+            <span class="badge ${badgeClass}">${badgeText}</span>
+          </div>
+          <div class="muted">${fmt(file.downloaded)} / ${fmt(file.size)} at ${fmt(file.speed)}/s</div>
+          <div class="row" style="margin-top: 10px;">
+            <button data-id="${file.id}" data-action="retry" ${retryDisabled ? "disabled" : ""}>Retry</button>
+            <button data-id="${file.id}" data-action="delete" class="danger">Delete</button>
+          </div>`;
+        filesEl.appendChild(item);
+      }
+    };
+
+    const normalizeStatus = (status) => {
+      if (typeof status === "string") return { [status]: true };
+      if (status && typeof status === "object") {
+        const [key, value] = Object.entries(status)[0] || [];
+        return key ? { [key]: value ?? true } : {};
+      }
+      return {};
+    };
+
+    const render = (snapshot) => {
+      state.files = (snapshot.files || []).map((file) => ({
+        ...file,
+        status: normalizeStatus(file.status),
+      }));
+      statusEl.textContent = snapshot.login_error || (snapshot.paused ? "Paused" : "Ready");
+      document.getElementById("filesStat").textContent = `${snapshot.files_completed} / ${snapshot.files_total}`;
+      document.getElementById("bytesStat").textContent = `${fmt(snapshot.total_downloaded)} / ${fmt(snapshot.total_size)}`;
+      document.getElementById("speedStat").textContent = `${fmt(snapshot.current_speed)}/s`;
+      document.getElementById("portStat").textContent = snapshot.api_port;
+      pauseBtn.textContent = snapshot.paused ? "Resume" : "Pause";
+      loginSection.classList.toggle("hidden", snapshot.authenticated || snapshot.logging_in);
+      loginError.textContent = snapshot.login_error || "";
+      renderFiles();
+    };
+
+    document.getElementById("loginBtn").addEventListener("click", async () => {
+      try {
+        loginError.textContent = "";
+        await postJson("/api/login", {
+          email: document.getElementById("email").value,
+          password: document.getElementById("password").value,
+          mfa: document.getElementById("mfa").value,
+        });
+      } catch (error) {
+        loginError.textContent = error.message;
+      }
+    });
+
+    pauseBtn.addEventListener("click", async () => {
+      try {
+        await postJson("/api/pause", {});
+      } catch (error) {
+        statusEl.textContent = error.message;
+      }
+    });
+
+    filesEl.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-action]");
+      if (!button) return;
+      const id = button.dataset.id;
+      const action = button.dataset.action;
+      try {
+        await postJson(`/api/${action}`, { id });
+      } catch (error) {
+        statusEl.textContent = error.message;
+      }
+    });
+
+    fetch("/api/state")
+      .then((response) => response.json())
+      .then(render)
+      .catch((error) => {
+        statusEl.textContent = `State load failed: ${error}`;
+      });
+
+    const events = new EventSource("/api/events");
+    events.onmessage = (event) => {
+      render(JSON.parse(event.data));
+    };
+    events.onerror = () => {
+      statusEl.textContent = "Connection lost; retrying…";
+    };
+  </script>
+</body>
+</html>

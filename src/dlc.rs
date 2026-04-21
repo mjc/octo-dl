@@ -70,6 +70,11 @@ pub async fn parse_dlc_file(
 }
 
 /// Parses DLC data that has already been loaded into memory (e.g. a dropped file).
+///
+/// # Errors
+///
+/// Returns an error if the content is malformed, too small, uses invalid
+/// base64, cannot be decrypted, or contains no MEGA links.
 pub async fn parse_dlc_data(
     content: &str,
     http_client: &reqwest::Client,
@@ -680,7 +685,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires local DLC file
+    #[ignore = "requires local DLC file"]
     async fn parse_dlc_converts_legacy_urls() {
         let http = reqwest::Client::builder()
             .user_agent("JDownloader/2.0 (octo-dl/test)")

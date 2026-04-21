@@ -62,10 +62,10 @@ fn init_logger() {
 }
 
 fn log_pipe_writer() -> Option<Box<dyn Write + Send>> {
-    if let Ok(addr) = env::var("OCTO_TUI_LOG_ADDR") {
-        if let Some(writer) = log_pipe_writer_from_addr(&addr) {
-            return Some(writer);
-        }
+    if let Ok(addr) = env::var("OCTO_TUI_LOG_ADDR")
+        && let Some(writer) = log_pipe_writer_from_addr(&addr)
+    {
+        return Some(writer);
     }
     let raw_fd = env::var_os("OCTO_TUI_LOG_FD")?;
     let fd = raw_fd.to_string_lossy().parse::<usize>().ok()?;
@@ -94,39 +94,6 @@ fn log_pipe_writer_from_raw(fd: usize) -> Option<Box<dyn Write + Send>> {
     unsafe {
         let file = File::from_raw_handle(fd as RawHandle);
         Some(Box::new(file))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::env;
-
-    #[test]
-    fn log_pipe_writer_handles_missing_and_invalid_values() {
-        unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
-        assert!(log_pipe_writer().is_none());
-
-        unsafe { env::set_var("OCTO_TUI_LOG_FD", "invalid") };
-        assert!(log_pipe_writer().is_none());
-
-        unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
-    }
-
-    #[test]
-    fn positional_args_ignore_cli_flag_values() {
-        let args = vec!["--web".to_string(), "--chunks".to_string(), "4".to_string()];
-        assert!(!has_positional_args(&args));
-    }
-
-    #[test]
-    fn positional_args_detect_url_after_global_flag_value() {
-        let args = vec![
-            "--host".to_string(),
-            "0.0.0.0".to_string(),
-            "https://mega.nz/file/test".to_string(),
-        ];
-        assert!(has_positional_args(&args));
     }
 }
 
@@ -247,5 +214,38 @@ async fn main() -> octo_dl::Result<()> {
             eprintln!("CLI support not compiled in");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[test]
+    fn log_pipe_writer_handles_missing_and_invalid_values() {
+        unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
+        assert!(log_pipe_writer().is_none());
+
+        unsafe { env::set_var("OCTO_TUI_LOG_FD", "invalid") };
+        assert!(log_pipe_writer().is_none());
+
+        unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
+    }
+
+    #[test]
+    fn positional_args_ignore_cli_flag_values() {
+        let args = vec!["--web".to_string(), "--chunks".to_string(), "4".to_string()];
+        assert!(!has_positional_args(&args));
+    }
+
+    #[test]
+    fn positional_args_detect_url_after_global_flag_value() {
+        let args = vec![
+            "--host".to_string(),
+            "0.0.0.0".to_string(),
+            "https://mega.nz/file/test".to_string(),
+        ];
+        assert!(has_positional_args(&args));
     }
 }

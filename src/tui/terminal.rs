@@ -9,26 +9,23 @@ use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 /// Connection to the pseudo-terminal master that allows writing keystrokes.
 #[derive(Clone)]
 pub struct TerminalBridge {
-    master: Arc<Box<dyn MasterPty + Send>>,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
 }
-
-// MasterPty is not Sync upstream, but we only use its safe handles.
-unsafe impl Send for TerminalBridge {}
-unsafe impl Sync for TerminalBridge {}
 
 impl TerminalBridge {
     pub(crate) fn new(master: Box<dyn MasterPty + Send>, writer: Box<dyn Write + Send>) -> Self {
         Self {
-            master: Arc::new(master),
+            master: Arc::new(Mutex::new(master)),
             writer: Arc::new(Mutex::new(writer)),
         }
     }
 
     pub(crate) fn try_clone_reader(&self) -> io::Result<Box<dyn Read + Send>> {
         self.master
+            .lock()
             .try_clone_reader()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            .map_err(io::Error::other)
     }
 
     /// Writes raw bytes to the terminal master.
@@ -36,6 +33,7 @@ impl TerminalBridge {
         let mut guard = self.writer.lock();
         guard.write_all(data)?;
         guard.flush()?;
+        drop(guard);
         Ok(())
     }
 
@@ -53,7 +51,7 @@ pub fn spawn_tui_process(
     log_addr: Option<String>,
 ) -> io::Result<(TerminalBridge, Box<dyn portable_pty::Child + Send + Sync>)> {
     fn map_err<E: std::fmt::Display>(err: E) -> io::Error {
-        io::Error::new(io::ErrorKind::Other, err.to_string())
+        io::Error::other(err.to_string())
     }
 
     let pty_system = native_pty_system();

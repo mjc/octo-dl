@@ -24,6 +24,11 @@ use crate::stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBu
 /// Public-link browsing should not depend on the caller's authenticated client
 /// state. Using a fresh client avoids cross-talk between account session state
 /// and public-link metadata fetches.
+///
+/// # Errors
+///
+/// Returns an error if the MEGA client cannot be created or the public link
+/// metadata fetch fails.
 pub async fn fetch_public_nodes(http: &reqwest::Client, url: &str) -> Result<mega::Nodes> {
     let client = mega::Client::builder().build(http.clone())?;
     client.fetch_public_nodes(url).await.map_err(Error::Mega)
@@ -159,7 +164,7 @@ struct ResumeTracker {
 impl ResumeTracker {
     const FLUSH_THRESHOLD: usize = 32;
 
-    fn new(
+    const fn new(
         file_size: u64,
         expected_condensed_mac_b64: String,
         chunk_macs: Vec<Option<[u8; 16]>>,
@@ -183,7 +188,7 @@ impl ResumeTracker {
         }
     }
 
-    fn needs_flush(&self) -> bool {
+    const fn needs_flush(&self) -> bool {
         self.dirty_chunks >= Self::FLUSH_THRESHOLD
     }
 
@@ -198,9 +203,11 @@ impl ResumeTracker {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, mac)| {
-                    mac.map(|mac| VerifiedChunkRecord {
-                        index: index as u32,
-                        mac_b64: STANDARD.encode(mac),
+                    mac.and_then(|mac| {
+                        Some(VerifiedChunkRecord {
+                            index: u32::try_from(index).ok()?,
+                            mac_b64: STANDARD.encode(mac),
+                        })
                     })
                 })
                 .collect(),
@@ -239,8 +246,49 @@ fn encode_expected_mac(node: &mega::Node) -> Result<String> {
     Ok(STANDARD.encode(mac))
 }
 
-fn is_condensed_mac_mismatch(error: &Error) -> bool {
+const fn is_condensed_mac_mismatch(error: &Error) -> bool {
     matches!(error, Error::Mega(mega::Error::CondensedMacMismatch))
+}
+
+fn spawn_sidecar_flusher(
+    tracker: Arc<Mutex<ResumeTracker>>,
+    sidecar_path: PathBuf,
+) -> (oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+    let (flush_stop_tx, mut flush_stop_rx) = oneshot::channel::<()>();
+    let flush_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let snapshot = {
+                        let mut guard = tracker.lock().unwrap();
+                        if guard.needs_flush() {
+                            Some(guard.snapshot())
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(snapshot) = snapshot {
+                        let _ = save_sidecar_atomic(&sidecar_path, &snapshot).await;
+                    }
+                }
+                _ = &mut flush_stop_rx => break,
+            }
+        }
+    });
+
+    (flush_stop_tx, flush_handle)
+}
+
+struct DownloadFinishContext<'a> {
+    node: &'a mega::Node,
+    path: &'a str,
+    part_path: &'a Path,
+    sidecar_path: &'a Path,
+    stats: &'a DownloadStatsTracker,
+    tracker: &'a Mutex<ResumeTracker>,
+    progress: &'a Arc<dyn DownloadProgress>,
+    name: &'a str,
 }
 
 /// Core downloader that handles MEGA file downloads.
@@ -366,6 +414,32 @@ impl<F: FileSystem> Downloader<F> {
         Ok(())
     }
 
+    async fn complete_existing_file(
+        &self,
+        node: &mega::Node,
+        path: &str,
+        progress: &Arc<dyn DownloadProgress>,
+    ) -> Option<FileStats> {
+        if self.config.force_overwrite
+            || self
+                .fs
+                .file_size(Path::new(path))
+                .await
+                .is_none_or(|size| size != node.size())
+        {
+            return None;
+        }
+        let stats = FileStats {
+            size: node.size(),
+            elapsed: std::time::Duration::ZERO,
+            average_speed: 0,
+            peak_speed: 0,
+            ramp_up_time: None,
+        };
+        progress.on_file_complete(path, &stats);
+        Some(stats)
+    }
+
     async fn revalidate_resume_chunks(
         &self,
         node: &mega::Node,
@@ -393,7 +467,7 @@ impl<F: FileSystem> Downloader<F> {
         let part_size = self.fs.file_size(part_path).await.unwrap_or(0);
         let max_chunk_len = boundaries
             .iter()
-            .map(|chunk| chunk.length as usize)
+            .filter_map(|chunk| usize::try_from(chunk.length).ok())
             .max()
             .unwrap_or(0);
         let mut scratch = vec![0u8; max_chunk_len];
@@ -415,7 +489,9 @@ impl<F: FileSystem> Downloader<F> {
                 continue;
             };
 
-            let chunk_len = boundary.length as usize;
+            let Ok(chunk_len) = usize::try_from(boundary.length) else {
+                continue;
+            };
             let buf = &mut scratch[..chunk_len];
             if self
                 .fs
@@ -443,6 +519,10 @@ impl<F: FileSystem> Downloader<F> {
     /// # Errors
     ///
     /// Returns an error if the file cannot be created or the download fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal resume tracker mutex is poisoned.
     pub async fn download_file(
         &self,
         node: &mega::Node,
@@ -450,21 +530,7 @@ impl<F: FileSystem> Downloader<F> {
         progress: &Arc<dyn DownloadProgress>,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<FileStats> {
-        if !self.config.force_overwrite
-            && self
-                .fs
-                .file_size(Path::new(path))
-                .await
-                .is_some_and(|size| size == node.size())
-        {
-            let stats = FileStats {
-                size: node.size(),
-                elapsed: std::time::Duration::ZERO,
-                average_speed: 0,
-                peak_speed: 0,
-                ramp_up_time: None,
-            };
-            progress.on_file_complete(path, &stats);
+        if let Some(stats) = self.complete_existing_file(node, path, progress).await {
             return Ok(stats);
         }
 
@@ -503,30 +569,7 @@ impl<F: FileSystem> Downloader<F> {
             trusted_chunks,
         )));
         let trusted_for_download = tracker.lock().unwrap().trusted_chunks();
-        let (flush_stop_tx, mut flush_stop_rx) = oneshot::channel::<()>();
-        let flush_tracker = Arc::clone(&tracker);
-        let flush_sidecar_path = sp.clone();
-        let flush_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let snapshot = {
-                            let mut guard = flush_tracker.lock().unwrap();
-                            if !guard.needs_flush() {
-                                None
-                            } else {
-                                Some(guard.snapshot())
-                            }
-                        };
-                        if let Some(snapshot) = snapshot {
-                            let _ = save_sidecar_atomic(&flush_sidecar_path, &snapshot).await;
-                        }
-                    }
-                    _ = &mut flush_stop_rx => break,
-                }
-            }
-        });
+        let (flush_stop_tx, flush_handle) = spawn_sidecar_flusher(Arc::clone(&tracker), sp.clone());
 
         // Wrap tokio file for futures::AsyncWrite/AsyncSeek compatibility
         let file = file.compat_write();
@@ -584,23 +627,46 @@ impl<F: FileSystem> Downloader<F> {
         let _ = flush_stop_tx.send(());
         let _ = flush_handle.await;
 
+        self.finish_download_result(
+            DownloadFinishContext {
+                node,
+                path,
+                part_path: &pp,
+                sidecar_path: &sp,
+                stats: &stats,
+                tracker: &tracker,
+                progress,
+                name: &name_clone,
+            },
+            download_result,
+        )
+        .await
+    }
+
+    async fn finish_download_result(
+        &self,
+        ctx: DownloadFinishContext<'_>,
+        download_result: Result<()>,
+    ) -> Result<FileStats> {
         match download_result {
             Ok(()) => {
                 if self.config.force_overwrite {
-                    let _ = self.fs.remove_file(Path::new(path)).await;
+                    let _ = self.fs.remove_file(Path::new(ctx.path)).await;
                 }
                 // Rename .part → final
-                self.fs.rename_file(&pp, Path::new(path)).await?;
-                delete_sidecar(&sp).await?;
+                self.fs
+                    .rename_file(ctx.part_path, Path::new(ctx.path))
+                    .await?;
+                delete_sidecar(ctx.sidecar_path).await?;
 
                 let file_stats = FileStats {
-                    size: node.size(),
-                    elapsed: stats.elapsed(),
-                    average_speed: stats.average_speed(),
-                    peak_speed: stats.peak_speed(),
-                    ramp_up_time: stats.time_to_80pct(),
+                    size: ctx.node.size(),
+                    elapsed: ctx.stats.elapsed(),
+                    average_speed: ctx.stats.average_speed(),
+                    peak_speed: ctx.stats.peak_speed(),
+                    ramp_up_time: ctx.stats.time_to_80pct(),
                 };
-                progress.on_file_complete(&name_clone, &file_stats);
+                ctx.progress.on_file_complete(ctx.name, &file_stats);
                 Ok(file_stats)
             }
             Err(e) => {
@@ -609,14 +675,14 @@ impl<F: FileSystem> Downloader<F> {
                 if final_mac_mismatch
                     || (self.config.cleanup_on_error && !matches!(e, Error::Cancelled))
                 {
-                    let _ = self.fs.remove_file(&pp).await;
-                    let _ = delete_sidecar(&sp).await;
+                    let _ = self.fs.remove_file(ctx.part_path).await;
+                    let _ = delete_sidecar(ctx.sidecar_path).await;
                 } else {
-                    let snapshot = tracker.lock().unwrap().snapshot();
-                    let _ = save_sidecar_atomic(&sp, &snapshot).await;
+                    let snapshot = ctx.tracker.lock().unwrap().snapshot();
+                    let _ = save_sidecar_atomic(ctx.sidecar_path, &snapshot).await;
                 }
                 if !matches!(e, Error::Cancelled) {
-                    progress.on_error(&name_clone, &e.to_string());
+                    ctx.progress.on_error(ctx.name, &e.to_string());
                 }
                 Err(e)
             }
