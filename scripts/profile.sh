@@ -88,8 +88,8 @@ RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" cargo build --profi
 # Select binary and build args
 BINARY="$PROJECT_DIR/target/profiling/octo"
 if [ "$TUI" = true ]; then
-    # TUI takes --api-host flag for API server binding
-    BIN_ARGS=(--tui --api-host 0.0.0.0)
+    # TUI enables the API server and binds it to all interfaces for profiling.
+    BIN_ARGS=(--tui --api --host 0.0.0.0)
 else
     BIN_ARGS=(-j "$CHUNKS" -p "$PARALLEL")
     if [ "$FORCE" = true ]; then
