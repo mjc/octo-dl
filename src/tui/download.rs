@@ -13,6 +13,7 @@
 //! - Enable collapsible package groups in the TUI file list
 //! - Make session persistence more robust (key by package+path, not filename)
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -390,7 +391,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 app.cancellation_tokens.remove(&id);
                 schedule_resume_artifact_delete(name);
                 if let Some(ref mut session) = app.session {
-                    let _ = session.remove_file(&id);
+                    let _ = session.mark_file_skipped(&id);
                 }
                 return;
             }
@@ -403,7 +404,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 app.cancellation_tokens.remove(&id);
                 schedule_resume_artifact_delete(name);
                 if let Some(ref mut session) = app.session {
-                    let _ = session.remove_file(&id);
+                    let _ = session.mark_file_skipped(&id);
                 }
                 return;
             }
@@ -426,7 +427,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 app.cancellation_tokens.remove(id);
                 schedule_resume_artifact_delete(name);
                 if let Some(ref mut session) = app.session {
-                    let _ = session.remove_file(id);
+                    let _ = session.mark_file_skipped(id);
                 }
                 return;
             }
@@ -480,6 +481,21 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             session_url,
         } => {
             if app.deleted_files.contains(&id) {
+                return;
+            }
+            if app.session.as_ref().is_some_and(|session| {
+                session
+                    .urls
+                    .iter()
+                    .position(|u| u.url == session_url)
+                    .is_some_and(|url_index| {
+                        session.files.iter().any(|file| {
+                            file.url_index == url_index
+                                && file.path == name
+                                && matches!(file.status, crate::FileEntryStatus::Skipped)
+                        })
+                    })
+            }) {
                 return;
             }
             // Add a real file entry with stable identity and size.
@@ -945,6 +961,45 @@ mod tests {
     }
 
     #[test]
+    fn file_queued_does_not_restore_session_skipped_file() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let mut app = test_app();
+        let mut session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![UrlEntry {
+                url: "https://mega.nz/file/root".to_string(),
+                status: UrlStatus::Fetched,
+            }],
+        );
+        session.files.push(SessionFileEntry {
+            key: Some("0:episode.mkv".to_string()),
+            url_index: 0,
+            path: "episode.mkv".to_string(),
+            size: 128,
+            status: FileEntryStatus::Skipped,
+        });
+        app.session = Some(session);
+
+        handle_download_event(
+            &mut app,
+            DownloadEvent::FileQueued {
+                id: "episode.mkv".to_string(),
+                name: "episode.mkv".to_string(),
+                size: 128,
+                source_url: "https://mega.nz/file/root".to_string(),
+                session_url: "https://mega.nz/file/root".to_string(),
+            },
+        );
+
+        assert!(app.files.is_empty());
+        let session = app.session.as_ref().expect("session should remain");
+        assert_eq!(session.files.len(), 1);
+        assert_eq!(session.files[0].status, FileEntryStatus::Skipped);
+    }
+
+    #[test]
     fn handle_file_complete_is_idempotent_for_visible_complete_rows() {
         let mut app = test_app();
         app.files.push(FileEntry {
@@ -1200,34 +1255,69 @@ async fn fetch_node_sets(
     node_sets
 }
 
+fn load_skipped_session_paths() -> HashMap<String, HashSet<String>> {
+    let Some(session) = SessionState::latest() else {
+        return HashMap::new();
+    };
+    let mut skipped = HashMap::<String, HashSet<String>>::new();
+    for file in session.files {
+        if !matches!(file.status, crate::FileEntryStatus::Skipped) {
+            continue;
+        }
+        let Some(url) = session
+            .urls
+            .get(file.url_index)
+            .map(|entry| entry.url.clone())
+        else {
+            continue;
+        };
+        skipped.entry(url).or_default().insert(file.path);
+    }
+    skipped
+}
+
 async fn collect_queued_items(
     node_sets: &[(ResolvedUrl, mega::Nodes)],
     downloader: &Arc<crate::Downloader>,
     progress: &Arc<dyn DownloadProgress>,
 ) -> (Vec<QueuedDownload>, Vec<QueuedDownload>, usize, usize) {
+    let skipped_paths = load_skipped_session_paths();
     let mut all_queued_items = Vec::new();
     let mut all_completed_items = Vec::new();
     let mut actual_skipped = 0;
     let mut actual_partial = 0;
 
     for (resolved, nodes) in node_sets {
+        let skipped_for_url = skipped_paths.get(&resolved.session_url);
         let collected = downloader.collect_files(nodes, progress).await;
         actual_skipped += collected.skipped;
         actual_partial += collected.partial;
         let (to_download, completed) = collected.into_owned_parts();
-        all_queued_items.extend(to_download.into_iter().map(|item| QueuedDownload {
-            id: item.path.clone(),
-            name: item.path.clone(),
-            source_url: resolved.url.clone(),
-            session_url: resolved.session_url.clone(),
-            item,
+        all_queued_items.extend(to_download.into_iter().filter_map(|item| {
+            if skipped_for_url.is_some_and(|paths| paths.contains(&item.path)) {
+                actual_skipped += 1;
+                return None;
+            }
+            Some(QueuedDownload {
+                id: item.path.clone(),
+                name: item.path.clone(),
+                source_url: resolved.url.clone(),
+                session_url: resolved.session_url.clone(),
+                item,
+            })
         }));
-        all_completed_items.extend(completed.into_iter().map(|item| QueuedDownload {
-            id: item.path.clone(),
-            name: item.path.clone(),
-            source_url: resolved.url.clone(),
-            session_url: resolved.session_url.clone(),
-            item,
+        all_completed_items.extend(completed.into_iter().filter_map(|item| {
+            if skipped_for_url.is_some_and(|paths| paths.contains(&item.path)) {
+                actual_skipped += 1;
+                return None;
+            }
+            Some(QueuedDownload {
+                id: item.path.clone(),
+                name: item.path.clone(),
+                source_url: resolved.url.clone(),
+                session_url: resolved.session_url.clone(),
+                item,
+            })
         }));
     }
     (

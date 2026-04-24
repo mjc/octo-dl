@@ -303,7 +303,7 @@ fn delete_selected(app: &mut App) {
     app.files.remove(selected_file);
     app.recompute_totals();
     if let Some(ref mut session) = app.session {
-        let _ = session.remove_file(&file_id);
+        let _ = session.mark_file_skipped(&file_id);
     }
     if app.files.is_empty() {
         app.file_list_state.select(None);
@@ -567,12 +567,18 @@ mod tests {
         assert!(session_path.exists());
 
         let session = app.session.as_ref().expect("session should remain");
-        let paths: Vec<_> = session
+        let statuses: Vec<_> = session
             .files
             .iter()
-            .map(|file| file.path.as_str())
+            .map(|file| (file.path.as_str(), &file.status))
             .collect();
-        assert_eq!(paths, vec!["second.bin"]);
+        assert_eq!(
+            statuses,
+            vec![
+                ("first.bin", &FileEntryStatus::Skipped),
+                ("second.bin", &FileEntryStatus::Pending),
+            ]
+        );
     }
 
     #[test]

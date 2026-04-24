@@ -47,6 +47,7 @@ pub enum FileEntryStatus {
     Pending,
     Downloading,
     Completed,
+    Skipped,
     Error(String),
 }
 
@@ -253,6 +254,18 @@ impl SessionState {
         self.save()
     }
 
+    /// Marks a file as skipped by the user and saves the state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state file cannot be written.
+    pub fn mark_file_skipped(&mut self, path: &str) -> std::io::Result<()> {
+        if let Some(entry) = self.files.iter_mut().find(|f| f.matches_identity(path)) {
+            entry.status = FileEntryStatus::Skipped;
+        }
+        self.save()
+    }
+
     /// Removes a file entry by path and saves the state.
     ///
     /// # Errors
@@ -297,7 +310,12 @@ impl SessionState {
     pub fn remaining_count(&self) -> usize {
         self.files
             .iter()
-            .filter(|f| !matches!(f.status, FileEntryStatus::Completed))
+            .filter(|f| {
+                !matches!(
+                    f.status,
+                    FileEntryStatus::Completed | FileEntryStatus::Skipped
+                )
+            })
             .count()
     }
 }
@@ -637,6 +655,13 @@ mod tests {
                 path: "file3.txt".to_string(),
                 size: 300,
                 status: FileEntryStatus::Error("timeout".to_string()),
+            },
+            FileEntry {
+                key: None,
+                url_index: 0,
+                path: "file4.txt".to_string(),
+                size: 400,
+                status: FileEntryStatus::Skipped,
             },
         ];
 

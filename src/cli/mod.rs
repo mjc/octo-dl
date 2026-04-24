@@ -229,7 +229,28 @@ fn resumable_urls(session: &SessionState) -> Vec<(usize, String)> {
         .urls
         .iter()
         .enumerate()
-        .filter(|(_, u)| matches!(u.status, UrlStatus::Pending | UrlStatus::Fetched))
+        .filter(|(idx, u)| match u.status {
+            UrlStatus::Pending => true,
+            UrlStatus::Fetched => {
+                let mut saw_file = false;
+                let mut has_remaining = false;
+                for file in &session.files {
+                    if file.url_index != *idx {
+                        continue;
+                    }
+                    saw_file = true;
+                    if !matches!(
+                        file.status,
+                        FileEntryStatus::Completed | FileEntryStatus::Skipped
+                    ) {
+                        has_remaining = true;
+                        break;
+                    }
+                }
+                has_remaining || !saw_file
+            }
+            UrlStatus::Error(_) => false,
+        })
         .map(|(idx, u)| (idx, u.url.clone()))
         .collect()
 }
@@ -623,10 +644,15 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
     }
 
     // Completed file paths from session state
-    let completed_paths: std::collections::HashSet<String> = session
+    let ignored_paths: std::collections::HashSet<String> = session
         .files
         .iter()
-        .filter(|f| f.status == FileEntryStatus::Completed)
+        .filter(|f| {
+            matches!(
+                f.status,
+                FileEntryStatus::Completed | FileEntryStatus::Skipped
+            )
+        })
         .map(|f| f.key_or_path().to_string())
         .collect();
 
@@ -638,7 +664,7 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
         let collected = downloader.collect_files(nodes, &no_progress).await;
         for mut item in collected.to_download {
             let key = file_key(*url_idx, &item.path);
-            if completed_paths.contains(&key) || completed_paths.contains(&item.path) {
+            if ignored_paths.contains(&key) || ignored_paths.contains(&item.path) {
                 total_skipped += 1;
             } else {
                 item.key = Some(key);
@@ -734,5 +760,27 @@ mod tests {
                 (1, "https://mega.nz/file/fetched".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn resume_url_selection_excludes_fetched_urls_with_only_terminal_files() {
+        let mut session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "password", None),
+            DownloadConfig::default(),
+            vec![UrlEntry {
+                url: "https://mega.nz/file/skipped".to_string(),
+                status: UrlStatus::Fetched,
+            }],
+        );
+        session.files = vec![FileEntry {
+            key: Some("0:skip.bin".to_string()),
+            url_index: 0,
+            path: "skip.bin".to_string(),
+            size: 123,
+            status: FileEntryStatus::Skipped,
+        }];
+
+        let urls = resumable_urls(&session);
+        assert!(urls.is_empty());
     }
 }
