@@ -13,7 +13,7 @@ use crate::{DownloadConfig, SessionState};
 use super::event::{DownloadEvent, TokenMessage};
 
 const MIN_RATE_SAMPLE_SPAN: Duration = Duration::from_secs(1);
-const THROUGHPUT_DECAY: Duration = Duration::from_secs(15);
+const THROUGHPUT_DECAY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub(crate) struct TransferRate {
@@ -346,6 +346,7 @@ pub struct App {
     pub files_completed: usize,
     pub files_total: usize,
     pub current_speed: u64,
+    aggregate_rate: TransferRate,
     // Status
     pub status: String,
     pub paused: bool,
@@ -414,12 +415,15 @@ impl App {
             }
         }
 
-        self.current_speed = self
+        self.current_speed = if self
             .files
             .iter()
-            .filter(|f| matches!(f.status, FileStatus::Downloading))
-            .map(|f| f.speed)
-            .sum();
+            .any(|f| matches!(f.status, FileStatus::Downloading))
+        {
+            self.aggregate_rate.bytes_per_sec(now)
+        } else {
+            0
+        };
     }
 
     /// Recomputes aggregate totals from the current files list.
@@ -438,12 +442,9 @@ impl App {
             .iter()
             .filter(|f| !matches!(f.status, FileStatus::Error(_)))
             .count();
-        self.current_speed = self
-            .files
-            .iter()
-            .filter(|f| matches!(f.status, FileStatus::Downloading))
-            .map(|f| f.speed)
-            .sum();
+        self.current_speed = 0;
+        self.aggregate_rate
+            .reset(self.total_downloaded, Instant::now());
     }
 
     pub fn new(
@@ -469,6 +470,7 @@ impl App {
             files_completed: 0,
             files_total: 0,
             current_speed: 0,
+            aggregate_rate: Default::default(),
             status: String::new(),
             paused: false,
             config: ConfigState::new(),
@@ -495,6 +497,18 @@ impl App {
         self.files.iter_mut().find(|f| f.id == id)
     }
 
+    pub(crate) fn reset_aggregate_rate(&mut self) {
+        self.current_speed = 0;
+        self.aggregate_rate
+            .reset(self.total_downloaded, Instant::now());
+    }
+
+    pub(crate) fn record_total_progress(&mut self, bytes_delta: u64, now: Instant) {
+        self.total_downloaded = self.total_downloaded.saturating_add(bytes_delta);
+        self.aggregate_rate.record(self.total_downloaded, now);
+        self.current_speed = self.aggregate_rate.bytes_per_sec(now);
+    }
+
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
         let _ = self.pause_tx.send(paused);
@@ -514,7 +528,7 @@ impl App {
                 file.reset_rate();
             }
         }
-        self.current_speed = 0;
+        self.reset_aggregate_rate();
         self.status = "Paused".to_string();
     }
 
@@ -783,6 +797,28 @@ mod tests {
 
         let decayed = rate.bytes_per_sec(start + Duration::from_secs(11));
         assert!(decayed < current);
+    }
+
+    #[test]
+    fn aggregate_rate_uses_progress_since_current_baseline() {
+        let start = Instant::now();
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "file.bin".to_string(),
+            name: "file.bin".to_string(),
+            size: 2_000,
+            downloaded: 1_000,
+            speed: 0,
+            rate: Default::default(),
+            source_url: None,
+            status: FileStatus::Downloading,
+        });
+        app.total_downloaded = 1_000;
+        app.aggregate_rate.reset(1_000, start);
+
+        app.record_total_progress(100, start + Duration::from_secs(1));
+
+        assert!((95..=105).contains(&app.current_speed));
     }
 
     #[test]
