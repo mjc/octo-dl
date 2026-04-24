@@ -133,9 +133,9 @@ fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
 
     // --- Controls bar ---
     let controls = if app.paused {
-        "p:resume  d:delete  r:retry  c:config  q:quit"
+        "p:resume  d:delete  r:retry  R:reset  c:config  q:quit"
     } else {
-        "p:pause  d:delete  r:retry  c:config  q:quit"
+        "p:pause  d:delete  r:retry  R:reset  c:config  q:quit"
     };
     let controls_bar = Paragraph::new(controls)
         .style(Style::default().fg(Color::DarkGray))
@@ -188,19 +188,14 @@ fn build_status_line(app: &App) -> Vec<Span<'_>> {
 }
 
 fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    // Sort files: downloading first, then queued, then complete, then error
-    let mut indexed: Vec<_> = app.files.iter().enumerate().collect();
-    indexed.sort_by_key(|(_, f)| match &f.status {
-        FileStatus::Downloading => 0,
-        FileStatus::Queued => 1,
-        FileStatus::Complete => 2,
-        FileStatus::Error(_) => 3,
-    });
+    let sorted_indices = app.sorted_file_indices();
 
-    let items: Vec<ListItem> = indexed
+    let items: Vec<ListItem> = sorted_indices
         .iter()
-        .map(|(i, f)| {
-            let selected = app.file_list_state.selected() == Some(*i);
+        .enumerate()
+        .map(|(display_index, file_index)| {
+            let f = &app.files[*file_index];
+            let selected = app.file_list_state.selected() == Some(display_index);
 
             let (icon, color) = match &f.status {
                 FileStatus::Downloading => ("\u{25cf}", Color::Yellow),

@@ -152,10 +152,15 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('d') | KeyCode::Delete if app.url_input.is_empty() => delete_selected(app),
+        KeyCode::Char('R') if app.url_input.is_empty() => reset_selected(app),
+        KeyCode::Char('r')
+            if app.url_input.is_empty() && key.modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            reset_selected(app);
+        }
         KeyCode::Char('r') if app.url_input.is_empty() => {
             // Retry selected errored file — re-queue it
-            if let Some(selected) = app.file_list_state.selected()
-                && selected < app.files.len()
+            if let Some(selected) = app.selected_file_index()
                 && matches!(app.files[selected].status, FileStatus::Error(_))
             {
                 let source_url = app.files[selected].source_url.clone();
@@ -210,14 +215,76 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn delete_selected(app: &mut App) {
-    let Some(selected) = app.file_list_state.selected() else {
+fn reset_selected(app: &mut App) {
+    let Some(selected) = app.selected_file_index() else {
         return;
     };
-    if selected >= app.files.len() {
+
+    let file_id = app.files[selected].id.clone();
+    let artifact_path = app.files[selected].name.clone();
+    let Some(source_url) = app.files[selected].source_url.clone() else {
+        app.files[selected].status =
+            FileStatus::Error("Reset unavailable for this file".to_string());
+        app.status = "Reset unavailable for selected file".to_string();
+        app.recompute_totals();
         return;
+    };
+
+    if let Some(token) = app.cancellation_tokens.remove(&file_id) {
+        token.cancel();
     }
-    let file = &app.files[selected];
+
+    let file = &mut app.files[selected];
+    file.status = FileStatus::Queued;
+    file.downloaded = 0;
+    file.speed = 0;
+    file.speed_accum = 0;
+    app.recompute_totals();
+
+    schedule_download_artifact_delete(artifact_path);
+
+    let _ = app.url_tx.send(source_url);
+}
+
+fn schedule_download_artifact_delete(path: String) {
+    let part = std::path::PathBuf::from(format!("{path}.part"));
+    let sidecar = std::path::PathBuf::from(format!("{path}.part.meta.json"));
+
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            remove_file_if_exists(&path).await;
+            remove_file_if_exists(part).await;
+            remove_file_if_exists(sidecar).await;
+        });
+    } else {
+        remove_file_if_exists_sync(&path);
+        remove_file_if_exists_sync(part);
+        remove_file_if_exists_sync(sidecar);
+    }
+}
+
+async fn remove_file_if_exists(path: impl AsRef<std::path::Path>) {
+    if let Err(e) = tokio::fs::remove_file(path.as_ref()).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("Failed to delete artifact {}: {e}", path.as_ref().display());
+    }
+}
+
+fn remove_file_if_exists_sync(path: impl AsRef<std::path::Path>) {
+    if let Err(e) = std::fs::remove_file(path.as_ref())
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("Failed to delete artifact {}: {e}", path.as_ref().display());
+    }
+}
+
+fn delete_selected(app: &mut App) {
+    let Some(selected_file) = app.selected_file_index() else {
+        return;
+    };
+    let selected_row = app.file_list_state.selected().unwrap_or(0);
+    let file = &app.files[selected_file];
     let can_remove = matches!(
         file.status,
         FileStatus::Queued | FileStatus::Error(_) | FileStatus::Downloading
@@ -233,7 +300,7 @@ fn delete_selected(app: &mut App) {
         token.cancel();
     }
     app.deleted_files.insert(file_id.clone());
-    app.files.remove(selected);
+    app.files.remove(selected_file);
     app.recompute_totals();
     if let Some(ref mut session) = app.session {
         let _ = session.remove_file(&file_id);
@@ -242,7 +309,7 @@ fn delete_selected(app: &mut App) {
         app.file_list_state.select(None);
     } else {
         app.file_list_state
-            .select(Some(selected.min(app.files.len() - 1)));
+            .select(Some(selected_row.min(app.files.len() - 1)));
     }
 }
 
@@ -504,6 +571,85 @@ mod tests {
             .map(|file| file.path.as_str())
             .collect();
         assert_eq!(paths, vec!["second.bin"]);
+    }
+
+    #[test]
+    fn handle_main_input_delete_uses_visible_sorted_row() {
+        let mut app = test_app();
+        app.files = vec![
+            FileEntry {
+                id: "complete.bin".to_string(),
+                name: "complete.bin".to_string(),
+                size: 10,
+                downloaded: 10,
+                speed: 0,
+                speed_accum: 0,
+                source_url: None,
+                status: FileStatus::Complete,
+            },
+            FileEntry {
+                id: "active.bin".to_string(),
+                name: "active.bin".to_string(),
+                size: 20,
+                downloaded: 5,
+                speed: 1,
+                speed_accum: 0,
+                source_url: None,
+                status: FileStatus::Downloading,
+            },
+        ];
+        app.file_list_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Delete));
+
+        assert_eq!(app.files.len(), 1);
+        assert_eq!(app.files[0].id, "complete.bin");
+        assert_eq!(app.file_list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn handle_main_input_shift_r_resets_selected_file_from_scratch() {
+        let dir = tempdir().unwrap();
+        let final_path = dir.path().join("active.bin");
+        let final_path_string = final_path.to_string_lossy();
+        let part_path = std::path::PathBuf::from(format!("{final_path_string}.part"));
+        let sidecar_path = std::path::PathBuf::from(format!("{final_path_string}.part.meta.json"));
+        std::fs::write(&final_path, b"complete").unwrap();
+        std::fs::write(&part_path, b"partial").unwrap();
+        std::fs::write(&sidecar_path, b"metadata").unwrap();
+
+        let mut app = test_app();
+        let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+        app.url_tx = url_tx;
+        let token = tokio_util::sync::CancellationToken::new();
+        app.files.push(FileEntry {
+            id: "active.bin".to_string(),
+            name: final_path.to_string_lossy().into_owned(),
+            size: 100,
+            downloaded: 80,
+            speed: 25,
+            speed_accum: 10,
+            source_url: Some("https://mega.nz/file/reset".to_string()),
+            status: FileStatus::Downloading,
+        });
+        app.cancellation_tokens
+            .insert("active.bin".to_string(), token.clone());
+        app.file_list_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('R')));
+
+        assert!(token.is_cancelled());
+        assert_eq!(app.files[0].status, FileStatus::Queued);
+        assert_eq!(app.files[0].downloaded, 0);
+        assert_eq!(app.files[0].speed, 0);
+        assert_eq!(app.files[0].speed_accum, 0);
+        assert_eq!(
+            url_rx.try_recv().unwrap(),
+            "https://mega.nz/file/reset".to_string()
+        );
+        assert!(!final_path.exists());
+        assert!(!part_path.exists());
+        assert!(!sidecar_path.exists());
     }
 
     #[test]

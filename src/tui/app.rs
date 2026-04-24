@@ -260,6 +260,22 @@ pub struct App {
 }
 
 impl App {
+    pub fn sorted_file_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<_> = (0..self.files.len()).collect();
+        indices.sort_by_key(|&i| match &self.files[i].status {
+            FileStatus::Downloading => 0,
+            FileStatus::Queued => 1,
+            FileStatus::Complete => 2,
+            FileStatus::Error(_) => 3,
+        });
+        indices
+    }
+
+    pub fn selected_file_index(&self) -> Option<usize> {
+        let selected = self.file_list_state.selected()?;
+        self.sorted_file_indices().get(selected).copied()
+    }
+
     /// Computes per-file instantaneous speeds from accumulated bytes since last tick.
     #[allow(
         clippy::cast_precision_loss,
