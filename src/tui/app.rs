@@ -348,6 +348,7 @@ pub struct App {
     pub files_completed: usize,
     pub files_total: usize,
     pub current_speed: u64,
+    total_network_downloaded: u64,
     aggregate_rate: TransferRate,
     // Status
     pub status: String,
@@ -420,7 +421,8 @@ impl App {
             .iter()
             .any(|f| matches!(f.status, FileStatus::Downloading))
         {
-            self.aggregate_rate.record(self.total_downloaded, now);
+            self.aggregate_rate
+                .record(self.total_network_downloaded, now);
             self.aggregate_rate.bytes_per_sec(now)
         } else {
             0
@@ -486,6 +488,7 @@ impl App {
             files_completed: 0,
             files_total: 0,
             current_speed: 0,
+            total_network_downloaded: 0,
             aggregate_rate: Default::default(),
             status: String::new(),
             paused: false,
@@ -516,11 +519,19 @@ impl App {
     pub(crate) fn reset_aggregate_rate(&mut self) {
         self.current_speed = 0;
         self.aggregate_rate
-            .reset(self.total_downloaded, Instant::now());
+            .reset(self.total_network_downloaded, Instant::now());
     }
 
-    pub(crate) fn record_total_progress(&mut self, bytes_delta: u64, now: Instant) {
+    pub(crate) fn record_total_progress(
+        &mut self,
+        bytes_delta: u64,
+        network_bytes_delta: u64,
+        now: Instant,
+    ) {
         self.total_downloaded = self.total_downloaded.saturating_add(bytes_delta);
+        self.total_network_downloaded = self
+            .total_network_downloaded
+            .saturating_add(network_bytes_delta);
         let _ = now;
     }
 
@@ -831,12 +842,38 @@ mod tests {
             status: FileStatus::Downloading,
         });
         app.total_downloaded = 1_000;
+        app.total_network_downloaded = 1_000;
         app.aggregate_rate.reset(1_000, start);
 
-        app.record_total_progress(100, start + Duration::from_secs(1));
+        app.record_total_progress(100, 100, start + Duration::from_secs(1));
         app.update_speeds_at(start + Duration::from_secs(1));
 
         assert!((95..=105).contains(&app.current_speed));
+    }
+
+    #[test]
+    fn aggregate_rate_ignores_reused_bytes() {
+        let start = Instant::now();
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "file.bin".to_string(),
+            name: "file.bin".to_string(),
+            size: 2_000,
+            downloaded: 1_000,
+            speed: 0,
+            rate: Default::default(),
+            source_url: None,
+            counts_toward_progress: true,
+            status: FileStatus::Downloading,
+        });
+        app.total_downloaded = 1_000;
+        app.aggregate_rate.reset(0, start);
+
+        app.record_total_progress(1_000, 0, start + Duration::from_secs(1));
+        app.update_speeds_at(start + Duration::from_secs(1));
+
+        assert_eq!(app.current_speed, 0);
+        assert_eq!(app.total_downloaded, 2_000);
     }
 
     #[test]
