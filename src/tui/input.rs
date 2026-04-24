@@ -166,8 +166,7 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
                 let source_url = app.files[selected].source_url.clone();
                 app.files[selected].status = FileStatus::Queued;
                 app.files[selected].downloaded = 0;
-                app.files[selected].speed = 0;
-                app.files[selected].speed_accum = 0;
+                app.files[selected].reset_rate();
                 if let Some(url) = source_url {
                     let _ = app.url_tx.send(url);
                 } else {
@@ -237,8 +236,7 @@ fn reset_selected(app: &mut App) {
     let file = &mut app.files[selected];
     file.status = FileStatus::Queued;
     file.downloaded = 0;
-    file.speed = 0;
-    file.speed_accum = 0;
+    file.reset_rate();
     app.recompute_totals();
 
     schedule_download_artifact_delete(artifact_path);
@@ -487,7 +485,7 @@ mod tests {
             size: 1000,
             downloaded: 500,
             speed: 100,
-            speed_accum: 0,
+            rate: Default::default(),
             source_url: None,
             status: FileStatus::Downloading,
         });
@@ -512,7 +510,7 @@ mod tests {
                 size: 10,
                 downloaded: 0,
                 speed: 0,
-                speed_accum: 0,
+                rate: Default::default(),
                 source_url: Some("https://mega.nz/file/first".to_string()),
                 status: FileStatus::Queued,
             },
@@ -522,7 +520,7 @@ mod tests {
                 size: 20,
                 downloaded: 0,
                 speed: 0,
-                speed_accum: 0,
+                rate: Default::default(),
                 source_url: Some("https://mega.nz/file/second".to_string()),
                 status: FileStatus::Queued,
             },
@@ -591,7 +589,7 @@ mod tests {
                 size: 10,
                 downloaded: 10,
                 speed: 0,
-                speed_accum: 0,
+                rate: Default::default(),
                 source_url: None,
                 status: FileStatus::Complete,
             },
@@ -601,7 +599,7 @@ mod tests {
                 size: 20,
                 downloaded: 5,
                 speed: 1,
-                speed_accum: 0,
+                rate: Default::default(),
                 source_url: None,
                 status: FileStatus::Downloading,
             },
@@ -636,7 +634,7 @@ mod tests {
             size: 100,
             downloaded: 80,
             speed: 25,
-            speed_accum: 10,
+            rate: Default::default(),
             source_url: Some("https://mega.nz/file/reset".to_string()),
             status: FileStatus::Downloading,
         });
@@ -650,7 +648,6 @@ mod tests {
         assert_eq!(app.files[0].status, FileStatus::Queued);
         assert_eq!(app.files[0].downloaded, 0);
         assert_eq!(app.files[0].speed, 0);
-        assert_eq!(app.files[0].speed_accum, 0);
         assert_eq!(
             url_rx.try_recv().unwrap(),
             "https://mega.nz/file/reset".to_string()

@@ -1,7 +1,7 @@
 //! Application state model.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ratatui::widgets::ListState;
 use serde::Serialize;
@@ -11,6 +11,111 @@ use tokio_util::sync::CancellationToken;
 use crate::{DownloadConfig, SessionState};
 
 use super::event::{DownloadEvent, TokenMessage};
+
+const MIN_RATE_SAMPLE_SPAN: Duration = Duration::from_secs(1);
+const THROUGHPUT_DECAY: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone)]
+pub(crate) struct TransferRate {
+    start_time: Instant,
+    last_time: Instant,
+    last_total: u64,
+    smoothed_bytes_per_sec: f64,
+    double_smoothed_bytes_per_sec: f64,
+}
+
+impl Default for TransferRate {
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            start_time: now,
+            last_time: now,
+            last_total: 0,
+            smoothed_bytes_per_sec: 0.0,
+            double_smoothed_bytes_per_sec: 0.0,
+        }
+    }
+}
+
+impl TransferRate {
+    pub(crate) fn reset(&mut self, total: u64, now: Instant) {
+        self.start_time = now;
+        self.last_time = now;
+        self.last_total = total;
+        self.smoothed_bytes_per_sec = 0.0;
+        self.double_smoothed_bytes_per_sec = 0.0;
+    }
+
+    pub(crate) fn record(&mut self, total: u64, now: Instant) {
+        if total < self.last_total {
+            self.reset(total, now);
+            return;
+        }
+        if total == self.last_total || now <= self.last_time {
+            return;
+        }
+
+        let delta_bytes = total - self.last_total;
+        let delta_secs = now.duration_since(self.last_time).as_secs_f64();
+        let instant_bytes_per_sec = delta_bytes as f64 / delta_secs;
+        let weight = throughput_weight(now.duration_since(self.last_time));
+
+        self.smoothed_bytes_per_sec = self
+            .smoothed_bytes_per_sec
+            .mul_add(weight, instant_bytes_per_sec * (1.0 - weight));
+
+        let total_weight = 1.0 - throughput_weight(now.duration_since(self.start_time));
+        if total_weight > f64::EPSILON {
+            let normalized = self.smoothed_bytes_per_sec / total_weight;
+            self.double_smoothed_bytes_per_sec = self
+                .double_smoothed_bytes_per_sec
+                .mul_add(weight, normalized * (1.0 - weight));
+        }
+
+        self.last_total = total;
+        self.last_time = now;
+    }
+
+    #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    pub(crate) fn bytes_per_sec(&self, now: Instant) -> u64 {
+        let sample_span = now.duration_since(self.start_time);
+        if sample_span < MIN_RATE_SAMPLE_SPAN {
+            return 0;
+        }
+
+        let total_weight = 1.0 - throughput_weight(sample_span);
+        if total_weight <= f64::EPSILON {
+            return 0;
+        }
+
+        let age = now.duration_since(self.last_time);
+        let reweight = throughput_weight(age);
+        let single_smoothed = self.smoothed_bytes_per_sec * reweight / total_weight;
+        let double_smoothed = self
+            .double_smoothed_bytes_per_sec
+            .mul_add(reweight, single_smoothed * (1.0 - reweight));
+        let bytes_per_sec = double_smoothed / total_weight;
+        if bytes_per_sec < 1.0 || !bytes_per_sec.is_finite() {
+            return 0;
+        }
+
+        if bytes_per_sec >= u64::MAX as f64 {
+            u64::MAX
+        } else {
+            bytes_per_sec as u64
+        }
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn throughput_weight(elapsed: Duration) -> f64 {
+    0.1_f64.powf(elapsed.as_secs_f64() / THROUGHPUT_DECAY.as_secs_f64())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -173,12 +278,32 @@ pub struct FileEntry {
     pub size: u64,
     pub downloaded: u64,
     pub speed: u64,
-    /// Bytes received since the last speed calculation (reset each tick).
     #[serde(skip)]
-    pub speed_accum: u64,
+    pub(crate) rate: TransferRate,
     #[serde(skip)]
     pub source_url: Option<String>,
     pub status: FileStatus,
+}
+
+impl FileEntry {
+    pub(crate) fn reset_rate(&mut self) {
+        self.speed = 0;
+        self.rate.reset(self.downloaded, Instant::now());
+    }
+
+    pub(crate) fn record_progress(&mut self, bytes_delta: u64, now: Instant) -> u64 {
+        let next = self.downloaded.saturating_add(bytes_delta);
+        let next = if self.size > 0 {
+            next.min(self.size)
+        } else {
+            next
+        };
+        let accepted = next.saturating_sub(self.downloaded);
+        self.downloaded = next;
+        self.rate.record(self.downloaded, now);
+        self.speed = self.rate.bytes_per_sec(now);
+        accepted
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,23 +401,16 @@ impl App {
         self.sorted_file_indices().get(selected).copied()
     }
 
-    /// Computes per-file instantaneous speeds from accumulated bytes since last tick.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
+    /// Computes per-file transfer rates from timestamped cumulative samples.
     pub fn update_speeds(&mut self) {
         let now = Instant::now();
-        let dt = now.duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
 
-        if dt > 0.0 {
-            for f in &mut self.files {
-                if matches!(f.status, FileStatus::Downloading) {
-                    f.speed = (f.speed_accum as f64 / dt) as u64;
-                }
-                f.speed_accum = 0;
+        for f in &mut self.files {
+            if matches!(f.status, FileStatus::Downloading) {
+                f.speed = f.rate.bytes_per_sec(now);
+            } else {
+                f.speed = 0;
             }
         }
 
@@ -393,8 +511,7 @@ impl App {
         for file in &mut self.files {
             if matches!(file.status, FileStatus::Downloading) {
                 file.status = FileStatus::Queued;
-                file.speed = 0;
-                file.speed_accum = 0;
+                file.reset_rate();
             }
         }
         self.current_speed = 0;
@@ -625,7 +742,7 @@ mod tests {
             size: 128,
             downloaded: 64,
             speed: 32,
-            speed_accum: 16,
+            rate: Default::default(),
             source_url: Some("https://mega.nz/file/abc".to_string()),
             status: FileStatus::Downloading,
         });
@@ -641,9 +758,49 @@ mod tests {
         assert_eq!(file["status"], "downloading");
         assert_eq!(snapshot["total_downloaded"], 64);
         assert_eq!(snapshot["total_size"], 128);
-        assert!(file.get("speed_accum").is_none());
+        assert!(file.get("rate").is_none());
         assert!(file.get("source_url").is_none());
         assert_eq!(snapshot["cpu_usage"], 12.5);
         assert_eq!(snapshot["memory_rss"], 4096);
+    }
+
+    #[test]
+    fn transfer_rate_smooths_cumulative_samples() {
+        let start = Instant::now();
+        let mut rate = TransferRate::default();
+
+        rate.reset(0, start);
+        rate.record(100_000, start + Duration::from_millis(100));
+
+        assert_eq!(rate.bytes_per_sec(start + Duration::from_millis(100)), 0);
+
+        rate.reset(0, start);
+        rate.record(1_000, start + Duration::from_secs(1));
+        rate.record(2_000, start + Duration::from_secs(2));
+
+        let current = rate.bytes_per_sec(start + Duration::from_secs(2));
+        assert!((950..=1_050).contains(&current));
+
+        let decayed = rate.bytes_per_sec(start + Duration::from_secs(11));
+        assert!(decayed < current);
+    }
+
+    #[test]
+    fn record_progress_caps_downloaded_at_file_size() {
+        let mut file = FileEntry {
+            id: "file.bin".to_string(),
+            name: "file.bin".to_string(),
+            size: 100,
+            downloaded: 90,
+            speed: 0,
+            rate: Default::default(),
+            source_url: None,
+            status: FileStatus::Downloading,
+        };
+
+        let accepted = file.record_progress(25, Instant::now());
+
+        assert_eq!(accepted, 10);
+        assert_eq!(file.downloaded, 100);
     }
 }
