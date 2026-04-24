@@ -51,6 +51,13 @@ pub enum FileEntryStatus {
     Error(String),
 }
 
+impl FileEntryStatus {
+    #[must_use]
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Skipped)
+    }
+}
+
 /// Encrypted credentials stored in the session file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedCredentials {
@@ -296,6 +303,35 @@ impl SessionState {
         self.save()
     }
 
+    /// Returns true when a URL should be resumed on startup.
+    ///
+    /// Pending URLs always resume. Fetched URLs resume only when they either
+    /// have no file-level bookkeeping yet or still have non-terminal files.
+    #[must_use]
+    pub fn url_should_resume(&self, url_index: usize) -> bool {
+        let Some(entry) = self.urls.get(url_index) else {
+            return false;
+        };
+
+        match entry.status {
+            UrlStatus::Pending => true,
+            UrlStatus::Fetched => {
+                let mut saw_file = false;
+                for file in &self.files {
+                    if file.url_index != url_index {
+                        continue;
+                    }
+                    saw_file = true;
+                    if !file.status.is_terminal() {
+                        return true;
+                    }
+                }
+                !saw_file
+            }
+            UrlStatus::Error(_) => false,
+        }
+    }
+
     /// Returns the number of completed files.
     #[must_use]
     pub fn completed_count(&self) -> usize {
@@ -310,12 +346,7 @@ impl SessionState {
     pub fn remaining_count(&self) -> usize {
         self.files
             .iter()
-            .filter(|f| {
-                !matches!(
-                    f.status,
-                    FileEntryStatus::Completed | FileEntryStatus::Skipped
-                )
-            })
+            .filter(|f| !f.status.is_terminal())
             .count()
     }
 }
@@ -667,6 +698,114 @@ mod tests {
 
         assert_eq!(state.completed_count(), 1);
         assert_eq!(state.remaining_count(), 2);
+    }
+
+    #[test]
+    fn url_should_resume_matrix() {
+        struct Case {
+            name: &'static str,
+            url_status: UrlStatus,
+            files: Vec<FileEntry>,
+            expected: bool,
+        }
+
+        let cases = vec![
+            Case {
+                name: "pending url resumes without file bookkeeping",
+                url_status: UrlStatus::Pending,
+                files: vec![],
+                expected: true,
+            },
+            Case {
+                name: "fetched url resumes without file bookkeeping",
+                url_status: UrlStatus::Fetched,
+                files: vec![],
+                expected: true,
+            },
+            Case {
+                name: "fetched url with completed file does not resume",
+                url_status: UrlStatus::Fetched,
+                files: vec![FileEntry {
+                    key: Some("0:done.bin".to_string()),
+                    url_index: 0,
+                    path: "done.bin".to_string(),
+                    size: 10,
+                    status: FileEntryStatus::Completed,
+                }],
+                expected: false,
+            },
+            Case {
+                name: "fetched url with skipped file does not resume",
+                url_status: UrlStatus::Fetched,
+                files: vec![FileEntry {
+                    key: Some("0:skip.bin".to_string()),
+                    url_index: 0,
+                    path: "skip.bin".to_string(),
+                    size: 20,
+                    status: FileEntryStatus::Skipped,
+                }],
+                expected: false,
+            },
+            Case {
+                name: "fetched url with errored file resumes",
+                url_status: UrlStatus::Fetched,
+                files: vec![FileEntry {
+                    key: Some("0:error.bin".to_string()),
+                    url_index: 0,
+                    path: "error.bin".to_string(),
+                    size: 30,
+                    status: FileEntryStatus::Error("boom".to_string()),
+                }],
+                expected: true,
+            },
+            Case {
+                name: "fetched url with mixed terminal and pending files resumes",
+                url_status: UrlStatus::Fetched,
+                files: vec![
+                    FileEntry {
+                        key: Some("0:done.bin".to_string()),
+                        url_index: 0,
+                        path: "done.bin".to_string(),
+                        size: 10,
+                        status: FileEntryStatus::Completed,
+                    },
+                    FileEntry {
+                        key: Some("0:skip.bin".to_string()),
+                        url_index: 0,
+                        path: "skip.bin".to_string(),
+                        size: 20,
+                        status: FileEntryStatus::Skipped,
+                    },
+                    FileEntry {
+                        key: Some("0:todo.bin".to_string()),
+                        url_index: 0,
+                        path: "todo.bin".to_string(),
+                        size: 30,
+                        status: FileEntryStatus::Pending,
+                    },
+                ],
+                expected: true,
+            },
+            Case {
+                name: "errored url does not resume",
+                url_status: UrlStatus::Error("fetch failed".to_string()),
+                files: vec![],
+                expected: false,
+            },
+        ];
+
+        for case in cases {
+            let mut state = SessionState::new(
+                SavedCredentials::encrypt("t@t.com", "p", None),
+                DownloadConfig::default(),
+                vec![UrlEntry {
+                    url: "https://mega.nz/file/test".to_string(),
+                    status: case.url_status,
+                }],
+            );
+            state.files = case.files;
+            assert_eq!(state.url_should_resume(0), case.expected, "{}", case.name);
+        }
     }
 
     #[test]
