@@ -59,9 +59,12 @@
           # Include standard Rust files plus any extra assets
           filteredSrc = pkgs.lib.cleanSourceWith {
             src = ./.;
-            filter = path: type:
+            filter = path: type: let
+              pathString = toString path;
+            in
               (craneLib.filterCargoSources path type)
-              || builtins.match ".*\\.toml$" path != null;
+              || builtins.match ".*\\.toml$" pathString != null
+              || builtins.match ".*/src/tui/assets/.*" pathString != null;
           };
         in
           filteredSrc;
