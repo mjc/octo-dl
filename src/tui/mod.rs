@@ -77,32 +77,79 @@ use self::input::{handle_input, handle_paste};
 // Helpers — small, focused functions extracted from the three run variants
 // ---------------------------------------------------------------------------
 
+fn merge_session_file(existing: &mut crate::FileEntry, incoming: crate::FileEntry) {
+    if existing.key.is_none() {
+        existing.key = incoming.key;
+    }
+    if incoming.size > existing.size {
+        existing.size = incoming.size;
+    }
+    if matches!(incoming.status, FileEntryStatus::Completed) {
+        existing.status = FileEntryStatus::Completed;
+    }
+}
+
+fn normalize_session_files(session: &mut SessionState) -> bool {
+    let mut changed = false;
+    let mut merged = Vec::with_capacity(session.files.len());
+    let mut seen = std::collections::HashMap::<(usize, String), usize>::new();
+
+    for file in std::mem::take(&mut session.files) {
+        let identity = (file.url_index, file.path.clone());
+        if let Some(&idx) = seen.get(&identity) {
+            merge_session_file(&mut merged[idx], file);
+            changed = true;
+        } else {
+            seen.insert(identity, merged.len());
+            merged.push(file);
+        }
+    }
+
+    session.files = merged;
+    changed
+}
+
 fn restore_session_files(app: &mut App, session: &SessionState) {
-    app.files = session
-        .files
-        .iter()
-        .map(|file| {
-            let (status, downloaded) = match &file.status {
-                FileEntryStatus::Pending
-                | FileEntryStatus::Downloading
-                | FileEntryStatus::Error(_) => (FileStatus::Queued, 0),
-                FileEntryStatus::Completed => (FileStatus::Complete, file.size),
-            };
-            app::FileEntry {
-                id: file.key_or_path().to_string(),
-                name: file.path.clone(),
-                size: file.size,
-                downloaded,
-                speed: 0,
-                speed_accum: 0,
-                source_url: session
-                    .urls
-                    .get(file.url_index)
-                    .map(|entry| entry.url.clone()),
-                status,
+    app.files.clear();
+    for file in &session.files {
+        let source_url = session
+            .urls
+            .get(file.url_index)
+            .map(|entry| entry.url.clone());
+        let (status, downloaded) = match &file.status {
+            FileEntryStatus::Pending | FileEntryStatus::Downloading | FileEntryStatus::Error(_) => {
+                (FileStatus::Queued, 0)
             }
-        })
-        .collect();
+            FileEntryStatus::Completed => (FileStatus::Complete, file.size),
+        };
+
+        if let Some(existing) = app.files.iter_mut().find(|entry| entry.id == file.path) {
+            if existing.size < file.size {
+                existing.size = file.size;
+            }
+            if existing.source_url.is_none() {
+                existing.source_url = source_url;
+            }
+            if matches!(status, FileStatus::Complete) {
+                existing.status = FileStatus::Complete;
+                existing.downloaded = existing.size;
+                existing.speed = 0;
+                existing.speed_accum = 0;
+            }
+            continue;
+        }
+
+        app.files.push(app::FileEntry {
+            id: file.path.clone(),
+            name: file.path.clone(),
+            size: file.size,
+            downloaded,
+            speed: 0,
+            speed_accum: 0,
+            source_url,
+            status,
+        });
+    }
     app.recompute_totals();
 }
 
@@ -119,6 +166,10 @@ pub(crate) fn resume_session(app: &mut App) {
     if let Some((email, password, mfa)) = session.credentials.decrypt() {
         app.login
             .set_credentials(email, password, mfa.unwrap_or_default());
+    }
+
+    if normalize_session_files(&mut session) {
+        let _ = session.save();
     }
 
     restore_session_files(app, &session);
@@ -171,7 +222,9 @@ pub(crate) fn sync_session_on_shutdown(app: &mut App) {
     let visible: std::collections::HashSet<&str> =
         app.files.iter().map(|f| f.id.as_str()).collect();
 
-    session.files.retain(|f| visible.contains(f.key_or_path()));
+    session
+        .files
+        .retain(|f| visible.contains(f.path.as_str()) || visible.contains(f.key_or_path()));
 
     if session.files.is_empty() {
         let _ = session.mark_completed();
@@ -974,7 +1027,7 @@ mod tests {
         let completed = app
             .files
             .iter()
-            .find(|file| file.id == "completed-id")
+            .find(|file| file.id == "completed.mkv")
             .expect("completed file should be restored");
         assert_eq!(completed.status, FileStatus::Complete);
         assert_eq!(completed.downloaded, completed.size);
@@ -982,7 +1035,7 @@ mod tests {
         let pending = app
             .files
             .iter()
-            .find(|file| file.id == "pending-id")
+            .find(|file| file.id == "pending.mkv")
             .expect("pending file should be restored");
         assert_eq!(pending.status, FileStatus::Queued);
         assert_eq!(pending.downloaded, 0);
@@ -1029,7 +1082,7 @@ mod tests {
         let restored = app
             .files
             .iter()
-            .find(|file| file.id == "retry-id")
+            .find(|file| file.id == "retry.mkv")
             .expect("retryable error should be restored");
         assert_eq!(restored.status, FileStatus::Queued);
         assert_eq!(restored.downloaded, 0);
@@ -1071,7 +1124,7 @@ mod tests {
         let mut app = App::new(0, event_tx, true);
         app.files = vec![
             app::FileEntry {
-                id: "completed-id".to_string(),
+                id: "completed.mkv".to_string(),
                 name: "completed.mkv".to_string(),
                 size: 128,
                 downloaded: 128,
@@ -1081,7 +1134,7 @@ mod tests {
                 status: FileStatus::Complete,
             },
             app::FileEntry {
-                id: "pending-id".to_string(),
+                id: "pending.mkv".to_string(),
                 name: "pending.mkv".to_string(),
                 size: 256,
                 downloaded: 0,
@@ -1102,13 +1155,59 @@ mod tests {
             session
                 .files
                 .iter()
-                .any(|file| file.key_or_path() == "completed-id")
+                .any(|file| file.path == "completed.mkv")
         );
-        assert!(
-            session
-                .files
-                .iter()
-                .any(|file| file.key_or_path() == "pending-id")
+        assert!(session.files.iter().any(|file| file.path == "pending.mkv"));
+    }
+
+    #[test]
+    fn resume_session_deduplicates_duplicate_file_entries_by_path() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+
+        let mut session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![UrlEntry {
+                url: "https://mega.nz/file/root".to_string(),
+                status: UrlStatus::Fetched,
+            }],
         );
+        session.files = vec![
+            FileEntry {
+                key: Some("legacy-key".to_string()),
+                url_index: 0,
+                path: "duplicate.mkv".to_string(),
+                size: 128,
+                status: FileEntryStatus::Pending,
+            },
+            FileEntry {
+                key: Some("new-key".to_string()),
+                url_index: 0,
+                path: "duplicate.mkv".to_string(),
+                size: 128,
+                status: FileEntryStatus::Completed,
+            },
+        ];
+        session.save().unwrap();
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(0, event_tx, true);
+
+        resume_session(&mut app);
+
+        assert_eq!(app.files.len(), 1);
+        let file = app
+            .files
+            .iter()
+            .find(|entry| entry.id == "duplicate.mkv")
+            .expect("duplicate file should be collapsed into one row");
+        assert_eq!(file.status, FileStatus::Complete);
+        assert_eq!(app.urls, Vec::<String>::new());
+
+        let session = app.session.as_ref().expect("session should be present");
+        assert_eq!(session.files.len(), 1);
+        assert_eq!(session.files[0].path, "duplicate.mkv");
+        assert_eq!(session.files[0].status, FileEntryStatus::Completed);
     }
 }

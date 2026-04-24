@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     DlcKeyCache, DownloadConfig, DownloadProgress, SavedCredentials, SessionState, UrlEntry,
-    UrlStatus, format_bytes, is_dlc_path,
+    UrlStatus, file_key, format_bytes, is_dlc_path,
 };
 use dirs;
 
@@ -513,10 +513,20 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                     .iter()
                     .position(|u| u.url == session_url)
                     .unwrap_or(0);
+                let stable_key = file_key(url_index, &name);
 
-                if !session.files.iter().any(|f| f.key_or_path() == id) {
+                if let Some(file) = session
+                    .files
+                    .iter_mut()
+                    .find(|f| f.url_index == url_index && f.path == name)
+                {
+                    if file.key.is_none() {
+                        file.key = Some(stable_key);
+                        let _ = session.save();
+                    }
+                } else {
                     session.files.push(crate::FileEntry {
-                        key: Some(id.clone()),
+                        key: Some(stable_key),
                         url_index,
                         path: name,
                         size,
@@ -958,6 +968,50 @@ mod tests {
         assert_eq!(file.downloaded, 128);
     }
 
+    #[test]
+    fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "episode.mkv".to_string(),
+            name: "episode.mkv".to_string(),
+            size: 128,
+            downloaded: 128,
+            speed: 0,
+            speed_accum: 0,
+            source_url: Some("https://mega.nz/file/root".to_string()),
+            status: FileStatus::Complete,
+        });
+        app.recompute_totals();
+
+        handle_download_event(
+            &mut app,
+            DownloadEvent::FileQueued {
+                id: "episode.mkv".to_string(),
+                name: "episode.mkv".to_string(),
+                size: 128,
+                source_url: "https://mega.nz/file/root".to_string(),
+                session_url: "https://mega.nz/file/root".to_string(),
+            },
+        );
+        handle_download_event(
+            &mut app,
+            DownloadEvent::FileComplete {
+                id: "episode.mkv".to_string(),
+                name: "episode.mkv".to_string(),
+            },
+        );
+
+        assert_eq!(app.files.len(), 1);
+        let file = app
+            .files
+            .iter()
+            .find(|file| file.id == "episode.mkv")
+            .unwrap();
+        assert_eq!(file.status, FileStatus::Complete);
+        assert_eq!(file.downloaded, 128);
+        assert_eq!(app.files_completed, 1);
+    }
+
     /// Regression test: the mega library reports *cumulative* bytes downloaded,
     /// but `on_progress` must send true deltas.  If cumulative values leak
     /// through as deltas, `downloaded` will vastly exceed `size`.
@@ -1162,14 +1216,14 @@ async fn collect_queued_items(
         actual_partial += collected.partial;
         let (to_download, completed) = collected.into_owned_parts();
         all_queued_items.extend(to_download.into_iter().map(|item| QueuedDownload {
-            id: format!("{}:{}", resolved.session_url, item.path),
+            id: item.path.clone(),
             name: item.path.clone(),
             source_url: resolved.url.clone(),
             session_url: resolved.session_url.clone(),
             item,
         }));
         all_completed_items.extend(completed.into_iter().map(|item| QueuedDownload {
-            id: format!("{}:{}", resolved.session_url, item.path),
+            id: item.path.clone(),
             name: item.path.clone(),
             source_url: resolved.url.clone(),
             session_url: resolved.session_url.clone(),
