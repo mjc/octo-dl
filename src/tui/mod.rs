@@ -78,14 +78,19 @@ use self::input::{handle_input, handle_paste};
 // ---------------------------------------------------------------------------
 
 fn merge_session_file(existing: &mut crate::FileEntry, incoming: crate::FileEntry) {
+    let incoming_status = incoming.status.clone();
     if existing.key.is_none() {
         existing.key = incoming.key;
     }
     if incoming.size > existing.size {
         existing.size = incoming.size;
     }
-    if matches!(incoming.status, FileEntryStatus::Completed) {
+    if matches!(incoming_status, FileEntryStatus::Completed) {
         existing.status = FileEntryStatus::Completed;
+    } else if matches!(incoming_status, FileEntryStatus::Skipped)
+        && !matches!(existing.status, FileEntryStatus::Completed)
+    {
+        existing.status = FileEntryStatus::Skipped;
     }
 }
 
@@ -112,11 +117,15 @@ fn normalize_session_files(session: &mut SessionState) -> bool {
 fn restore_session_files(app: &mut App, session: &SessionState) {
     app.files.clear();
     for file in &session.files {
+        if matches!(file.status, FileEntryStatus::Skipped) {
+            continue;
+        }
         let source_url = session
             .urls
             .get(file.url_index)
             .map(|entry| entry.url.clone());
         let (status, downloaded) = match &file.status {
+            FileEntryStatus::Skipped => continue,
             FileEntryStatus::Pending | FileEntryStatus::Downloading | FileEntryStatus::Error(_) => {
                 (FileStatus::Queued, 0)
             }
@@ -185,7 +194,10 @@ pub(crate) fn resume_session(app: &mut App) {
                 continue;
             }
             saw_file = true;
-            if file.status != FileEntryStatus::Completed {
+            if !matches!(
+                file.status,
+                FileEntryStatus::Completed | FileEntryStatus::Skipped
+            ) {
                 has_remaining = true;
                 break;
             }
@@ -222,9 +234,11 @@ pub(crate) fn sync_session_on_shutdown(app: &mut App) {
     let visible: std::collections::HashSet<&str> =
         app.files.iter().map(|f| f.id.as_str()).collect();
 
-    session
-        .files
-        .retain(|f| visible.contains(f.path.as_str()) || visible.contains(f.key_or_path()));
+    session.files.retain(|f| {
+        matches!(f.status, FileEntryStatus::Skipped)
+            || visible.contains(f.path.as_str())
+            || visible.contains(f.key_or_path())
+    });
 
     if session.files.is_empty() {
         let _ = session.mark_completed();
@@ -567,7 +581,7 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
             app.files.retain(|f| f.id != id);
             download::schedule_resume_artifact_delete(artifact_path);
             if let Some(ref mut session) = app.session {
-                let _ = session.remove_file(&id);
+                let _ = session.mark_file_skipped(&id);
             }
             app.recompute_totals();
         }
@@ -1088,6 +1102,44 @@ mod tests {
         assert_eq!(restored.downloaded, 0);
 
         assert_eq!(app.urls, vec!["https://mega.nz/file/retry".to_string()]);
+    }
+
+    #[test]
+    fn resume_session_does_not_restore_or_requeue_skipped_files() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+
+        let mut session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![UrlEntry {
+                url: "https://mega.nz/file/skipped".to_string(),
+                status: UrlStatus::Fetched,
+            }],
+        );
+        session.files = vec![FileEntry {
+            key: Some("skipped-id".to_string()),
+            url_index: 0,
+            path: "skipped.mkv".to_string(),
+            size: 256,
+            status: FileEntryStatus::Skipped,
+        }];
+        session.save().unwrap();
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(0, event_tx, true);
+
+        resume_session(&mut app);
+
+        assert!(app.files.is_empty());
+        assert!(app.urls.is_empty());
+
+        let mut url_rx = app.url_rx.take().expect("url_rx should exist");
+        assert!(url_rx.try_recv().is_err());
+
+        let session_state = app.session.as_ref().expect("session should be present");
+        assert_eq!(session_state.urls[0].status, UrlStatus::Fetched);
+        assert_eq!(session_state.files[0].status, FileEntryStatus::Skipped);
     }
 
     #[test]
