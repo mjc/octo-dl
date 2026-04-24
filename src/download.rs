@@ -84,6 +84,8 @@ pub struct DownloadItem<'a> {
 pub struct CollectedFiles<'a> {
     /// Files that need to be downloaded.
     pub to_download: Vec<DownloadItem<'a>>,
+    /// Files already complete on disk.
+    pub completed: Vec<DownloadItem<'a>>,
     /// Number of files skipped (already exist with correct size).
     pub skipped: usize,
     /// Number of files with partial `.part` downloads detected.
@@ -116,6 +118,28 @@ impl CollectedFiles<'_> {
                 node: item.node.clone(),
             })
             .collect()
+    }
+
+    /// Converts both download and already-complete items into owned items.
+    #[must_use]
+    pub fn into_owned_parts(self) -> (Vec<OwnedDownloadItem>, Vec<OwnedDownloadItem>) {
+        let to_download = self
+            .to_download
+            .into_iter()
+            .map(|item| OwnedDownloadItem {
+                path: item.path,
+                node: item.node.clone(),
+            })
+            .collect();
+        let completed = self
+            .completed
+            .into_iter()
+            .map(|item| OwnedDownloadItem {
+                path: item.path,
+                node: item.node.clone(),
+            })
+            .collect();
+        (to_download, completed)
     }
 }
 
@@ -377,12 +401,16 @@ impl<F: FileSystem> Downloader<F> {
             .collect();
 
         let mut to_download = Vec::new();
+        let mut completed = Vec::new();
         let mut skipped = 0;
         let mut partial = 0;
 
         for item in all_items {
             match self.classify_file(&item.path, item.node.size()).await {
-                FileStatus::Complete => skipped += 1,
+                FileStatus::Complete => {
+                    skipped += 1;
+                    completed.push(item);
+                }
                 FileStatus::Partial => {
                     let pp = part_path(&item.path);
                     let existing_size = self.fs.file_size(&pp).await.unwrap_or(0);
@@ -398,6 +426,7 @@ impl<F: FileSystem> Downloader<F> {
 
         CollectedFiles {
             to_download,
+            completed,
             skipped,
             partial,
         }
@@ -869,6 +898,7 @@ mod tests {
     fn collected_files_total_size() {
         let collected = CollectedFiles {
             to_download: vec![],
+            completed: vec![],
             skipped: 5,
             partial: 0,
         };
