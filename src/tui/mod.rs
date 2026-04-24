@@ -183,27 +183,11 @@ pub(crate) fn resume_session(app: &mut App) {
 
     restore_session_files(app, &session);
 
-    for (url_index, entry) in session.urls.iter_mut().enumerate() {
-        if entry.status != UrlStatus::Fetched {
-            continue;
-        }
-        let mut saw_file = false;
-        let mut has_remaining = false;
-        for file in &session.files {
-            if file.url_index != url_index {
-                continue;
-            }
-            saw_file = true;
-            if !matches!(
-                file.status,
-                FileEntryStatus::Completed | FileEntryStatus::Skipped
-            ) {
-                has_remaining = true;
-                break;
-            }
-        }
-        if has_remaining || !saw_file {
-            entry.status = UrlStatus::Pending;
+    for url_index in 0..session.urls.len() {
+        if session.urls[url_index].status == UrlStatus::Fetched
+            && session.url_should_resume(url_index)
+        {
+            session.urls[url_index].status = UrlStatus::Pending;
         }
     }
     let resumed_urls: Vec<String> = session

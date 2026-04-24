@@ -229,28 +229,7 @@ fn resumable_urls(session: &SessionState) -> Vec<(usize, String)> {
         .urls
         .iter()
         .enumerate()
-        .filter(|(idx, u)| match u.status {
-            UrlStatus::Pending => true,
-            UrlStatus::Fetched => {
-                let mut saw_file = false;
-                let mut has_remaining = false;
-                for file in &session.files {
-                    if file.url_index != *idx {
-                        continue;
-                    }
-                    saw_file = true;
-                    if !matches!(
-                        file.status,
-                        FileEntryStatus::Completed | FileEntryStatus::Skipped
-                    ) {
-                        has_remaining = true;
-                        break;
-                    }
-                }
-                has_remaining || !saw_file
-            }
-            UrlStatus::Error(_) => false,
-        })
+        .filter(|(idx, _)| session.url_should_resume(*idx))
         .map(|(idx, u)| (idx, u.url.clone()))
         .collect()
 }
