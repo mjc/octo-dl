@@ -25,7 +25,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::{mpsc, watch};
 
-use crate::{ServiceConfig, SessionState, SessionStatus, UrlStatus, format_bytes};
+use crate::{FileEntryStatus, ServiceConfig, SessionState, SessionStatus, UrlStatus, format_bytes};
 use app::FileStatus;
 use sysinfo::System;
 
@@ -77,10 +77,38 @@ use self::input::{handle_input, handle_paste};
 // Helpers — small, focused functions extracted from the three run variants
 // ---------------------------------------------------------------------------
 
+fn restore_session_files(app: &mut App, session: &SessionState) {
+    app.files = session
+        .files
+        .iter()
+        .map(|file| {
+            let (status, downloaded) = match &file.status {
+                FileEntryStatus::Pending | FileEntryStatus::Downloading => (FileStatus::Queued, 0),
+                FileEntryStatus::Completed => (FileStatus::Complete, file.size),
+                FileEntryStatus::Error(error) => (FileStatus::Error(error.clone()), 0),
+            };
+            app::FileEntry {
+                id: file.path.clone(),
+                name: file.path.clone(),
+                size: file.size,
+                downloaded,
+                speed: 0,
+                speed_accum: 0,
+                source_url: session
+                    .urls
+                    .get(file.url_index)
+                    .map(|entry| entry.url.clone()),
+                status,
+            }
+        })
+        .collect();
+    app.recompute_totals();
+}
+
 /// Loads the latest session (if any), pre-filling credentials and URLs.
 ///
-/// Previously-fetched URLs are reset to pending so the download pipeline
-/// re-evaluates them (files already on disk are skipped automatically).
+/// Previously-fetched URLs are only reset to pending when they still have
+/// unresolved files or when the session predates file-level tracking.
 pub(crate) fn resume_session(app: &mut App) {
     let Some(mut session) = SessionState::latest() else {
         return;
@@ -92,8 +120,25 @@ pub(crate) fn resume_session(app: &mut App) {
             .set_credentials(email, password, mfa.unwrap_or_default());
     }
 
-    for entry in &mut session.urls {
-        if entry.status == UrlStatus::Fetched {
+    restore_session_files(app, &session);
+
+    for (url_index, entry) in session.urls.iter_mut().enumerate() {
+        if entry.status != UrlStatus::Fetched {
+            continue;
+        }
+        let mut saw_file = false;
+        let mut has_remaining = false;
+        for file in &session.files {
+            if file.url_index != url_index {
+                continue;
+            }
+            saw_file = true;
+            if file.status != FileEntryStatus::Completed {
+                has_remaining = true;
+                break;
+            }
+        }
+        if has_remaining || !saw_file {
             entry.status = UrlStatus::Pending;
         }
     }
@@ -122,17 +167,8 @@ pub(crate) fn sync_session_on_shutdown(app: &mut App) {
         return;
     }
 
-    let visible: std::collections::HashSet<&str> = app
-        .files
-        .iter()
-        .filter(|f| {
-            matches!(
-                f.status,
-                FileStatus::Queued | FileStatus::Downloading | FileStatus::Error(_)
-            )
-        })
-        .map(|f| f.id.as_str())
-        .collect();
+    let visible: std::collections::HashSet<&str> =
+        app.files.iter().map(|f| f.id.as_str()).collect();
 
     session.files.retain(|f| visible.contains(f.path.as_str()));
 
@@ -803,7 +839,7 @@ pub async fn run_web(api_host: &str, config_path: Option<&Path>) -> io::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DownloadConfig, SavedCredentials, UrlEntry};
+    use crate::{DownloadConfig, FileEntry, SavedCredentials, UrlEntry};
     use std::env;
     use std::path::Path;
     use tempfile::tempdir;
@@ -880,5 +916,144 @@ mod tests {
                 .iter()
                 .all(|entry| matches!(entry.status, UrlStatus::Pending))
         );
+    }
+
+    #[test]
+    fn resume_session_restores_files_and_only_requeues_remaining_urls() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+
+        let mut session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![
+                UrlEntry {
+                    url: "https://mega.nz/file/completed".to_string(),
+                    status: UrlStatus::Fetched,
+                },
+                UrlEntry {
+                    url: "https://mega.nz/file/pending".to_string(),
+                    status: UrlStatus::Fetched,
+                },
+            ],
+        );
+        session.files = vec![
+            FileEntry {
+                url_index: 0,
+                path: "completed.mkv".to_string(),
+                size: 128,
+                status: FileEntryStatus::Completed,
+            },
+            FileEntry {
+                url_index: 1,
+                path: "pending.mkv".to_string(),
+                size: 256,
+                status: FileEntryStatus::Pending,
+            },
+        ];
+        session.save().unwrap();
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(0, event_tx, true);
+
+        resume_session(&mut app);
+
+        assert_eq!(app.urls, vec!["https://mega.nz/file/pending".to_string()]);
+        assert_eq!(app.files.len(), 2);
+
+        let completed = app
+            .files
+            .iter()
+            .find(|file| file.id == "completed.mkv")
+            .expect("completed file should be restored");
+        assert_eq!(completed.status, FileStatus::Complete);
+        assert_eq!(completed.downloaded, completed.size);
+
+        let pending = app
+            .files
+            .iter()
+            .find(|file| file.id == "pending.mkv")
+            .expect("pending file should be restored");
+        assert_eq!(pending.status, FileStatus::Queued);
+        assert_eq!(pending.downloaded, 0);
+
+        let mut url_rx = app.url_rx.take().expect("url_rx should exist");
+        assert_eq!(
+            url_rx.try_recv().unwrap(),
+            "https://mega.nz/file/pending".to_string()
+        );
+        assert!(url_rx.try_recv().is_err());
+
+        let session_state = app.session.as_ref().expect("session should be present");
+        assert_eq!(session_state.urls[0].status, UrlStatus::Fetched);
+        assert_eq!(session_state.urls[1].status, UrlStatus::Pending);
+    }
+
+    #[test]
+    fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+
+        let mut session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![UrlEntry {
+                url: "https://mega.nz/file/root".to_string(),
+                status: UrlStatus::Fetched,
+            }],
+        );
+        session.files = vec![
+            FileEntry {
+                url_index: 0,
+                path: "completed.mkv".to_string(),
+                size: 128,
+                status: FileEntryStatus::Completed,
+            },
+            FileEntry {
+                url_index: 0,
+                path: "pending.mkv".to_string(),
+                size: 256,
+                status: FileEntryStatus::Pending,
+            },
+        ];
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(0, event_tx, true);
+        app.files = vec![
+            app::FileEntry {
+                id: "completed.mkv".to_string(),
+                name: "completed.mkv".to_string(),
+                size: 128,
+                downloaded: 128,
+                speed: 0,
+                speed_accum: 0,
+                source_url: Some("https://mega.nz/file/root".to_string()),
+                status: FileStatus::Complete,
+            },
+            app::FileEntry {
+                id: "pending.mkv".to_string(),
+                name: "pending.mkv".to_string(),
+                size: 256,
+                downloaded: 0,
+                speed: 0,
+                speed_accum: 0,
+                source_url: Some("https://mega.nz/file/root".to_string()),
+                status: FileStatus::Queued,
+            },
+        ];
+        app.session = Some(session);
+
+        sync_session_on_shutdown(&mut app);
+
+        let session = app.session.as_ref().expect("session should remain");
+        assert_eq!(session.status, SessionStatus::Paused);
+        assert_eq!(session.files.len(), 2);
+        assert!(
+            session
+                .files
+                .iter()
+                .any(|file| file.path == "completed.mkv")
+        );
+        assert!(session.files.iter().any(|file| file.path == "pending.mkv"));
     }
 }
