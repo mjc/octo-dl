@@ -235,6 +235,7 @@ fn reset_selected(app: &mut App) {
 
     let file = &mut app.files[selected];
     file.status = FileStatus::Queued;
+    file.counts_toward_progress = true;
     file.downloaded = 0;
     file.reset_rate();
     app.recompute_totals();
@@ -487,6 +488,7 @@ mod tests {
             speed: 100,
             rate: Default::default(),
             source_url: None,
+            counts_toward_progress: true,
             status: FileStatus::Downloading,
         });
         app.cancellation_tokens
@@ -512,6 +514,7 @@ mod tests {
                 speed: 0,
                 rate: Default::default(),
                 source_url: Some("https://mega.nz/file/first".to_string()),
+                counts_toward_progress: true,
                 status: FileStatus::Queued,
             },
             FileEntry {
@@ -522,6 +525,7 @@ mod tests {
                 speed: 0,
                 rate: Default::default(),
                 source_url: Some("https://mega.nz/file/second".to_string()),
+                counts_toward_progress: true,
                 status: FileStatus::Queued,
             },
         ];
@@ -591,6 +595,7 @@ mod tests {
                 speed: 0,
                 rate: Default::default(),
                 source_url: None,
+                counts_toward_progress: true,
                 status: FileStatus::Complete,
             },
             FileEntry {
@@ -601,6 +606,7 @@ mod tests {
                 speed: 1,
                 rate: Default::default(),
                 source_url: None,
+                counts_toward_progress: true,
                 status: FileStatus::Downloading,
             },
         ];
@@ -636,6 +642,7 @@ mod tests {
             speed: 25,
             rate: Default::default(),
             source_url: Some("https://mega.nz/file/reset".to_string()),
+            counts_toward_progress: true,
             status: FileStatus::Downloading,
         });
         app.cancellation_tokens
