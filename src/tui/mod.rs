@@ -83,9 +83,10 @@ fn restore_session_files(app: &mut App, session: &SessionState) {
         .iter()
         .map(|file| {
             let (status, downloaded) = match &file.status {
-                FileEntryStatus::Pending | FileEntryStatus::Downloading => (FileStatus::Queued, 0),
+                FileEntryStatus::Pending
+                | FileEntryStatus::Downloading
+                | FileEntryStatus::Error(_) => (FileStatus::Queued, 0),
                 FileEntryStatus::Completed => (FileStatus::Complete, file.size),
-                FileEntryStatus::Error(error) => (FileStatus::Error(error.clone()), 0),
             };
             app::FileEntry {
                 id: file.path.clone(),
@@ -987,6 +988,43 @@ mod tests {
         let session_state = app.session.as_ref().expect("session should be present");
         assert_eq!(session_state.urls[0].status, UrlStatus::Fetched);
         assert_eq!(session_state.urls[1].status, UrlStatus::Pending);
+    }
+
+    #[test]
+    fn resume_session_restores_retryable_errors_as_queued() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+
+        let mut session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![UrlEntry {
+                url: "https://mega.nz/file/retry".to_string(),
+                status: UrlStatus::Fetched,
+            }],
+        );
+        session.files = vec![FileEntry {
+            url_index: 0,
+            path: "retry.mkv".to_string(),
+            size: 256,
+            status: FileEntryStatus::Error("network failure".to_string()),
+        }];
+        session.save().unwrap();
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(0, event_tx, true);
+
+        resume_session(&mut app);
+
+        let restored = app
+            .files
+            .iter()
+            .find(|file| file.id == "retry.mkv")
+            .expect("retryable error should be restored");
+        assert_eq!(restored.status, FileStatus::Queued);
+        assert_eq!(restored.downloaded, 0);
+
+        assert_eq!(app.urls, vec!["https://mega.nz/file/retry".to_string()]);
     }
 
     #[test]

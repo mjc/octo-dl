@@ -374,9 +374,15 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             }
             // Add a real file entry with stable identity and size.
             if let Some(fp) = app.find_file_mut(&id) {
-                fp.name = name;
+                fp.name = name.clone();
                 fp.size = size;
                 fp.source_url = Some(source_url);
+                if !matches!(fp.status, FileStatus::Complete) {
+                    fp.status = FileStatus::Queued;
+                    fp.downloaded = 0;
+                    fp.speed = 0;
+                    fp.speed_accum = 0;
+                }
             } else {
                 app.files.push(FileEntry {
                     id: id.clone(),
@@ -779,6 +785,41 @@ mod tests {
         assert_eq!(session.files.len(), 1);
         assert_eq!(session.files[0].status, FileEntryStatus::Completed);
         assert_eq!(session.status, SessionStatus::Completed);
+    }
+
+    #[test]
+    fn file_queued_clears_stale_error_state() {
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "file-id".to_string(),
+            name: "old-name.mkv".to_string(),
+            size: 64,
+            downloaded: 17,
+            speed: 12,
+            speed_accum: 5,
+            source_url: Some("https://mega.nz/file/old".to_string()),
+            status: FileStatus::Error("stale error".to_string()),
+        });
+
+        handle_download_event(
+            &mut app,
+            DownloadEvent::FileQueued {
+                id: "file-id".to_string(),
+                name: "new-name.mkv".to_string(),
+                size: 128,
+                source_url: "https://mega.nz/file/new".to_string(),
+                session_url: "https://mega.nz/folder/root".to_string(),
+            },
+        );
+
+        let file = app.files.iter().find(|file| file.id == "file-id").unwrap();
+        assert_eq!(file.name, "new-name.mkv");
+        assert_eq!(file.size, 128);
+        assert_eq!(file.source_url.as_deref(), Some("https://mega.nz/file/new"));
+        assert_eq!(file.status, FileStatus::Queued);
+        assert_eq!(file.downloaded, 0);
+        assert_eq!(file.speed, 0);
+        assert_eq!(file.speed_accum, 0);
     }
 
     /// Regression test: the mega library reports *cumulative* bytes downloaded,
