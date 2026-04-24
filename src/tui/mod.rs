@@ -89,7 +89,7 @@ fn restore_session_files(app: &mut App, session: &SessionState) {
                 FileEntryStatus::Completed => (FileStatus::Complete, file.size),
             };
             app::FileEntry {
-                id: file.path.clone(),
+                id: file.key_or_path().to_string(),
                 name: file.path.clone(),
                 size: file.size,
                 downloaded,
@@ -171,7 +171,7 @@ pub(crate) fn sync_session_on_shutdown(app: &mut App) {
     let visible: std::collections::HashSet<&str> =
         app.files.iter().map(|f| f.id.as_str()).collect();
 
-    session.files.retain(|f| visible.contains(f.path.as_str()));
+    session.files.retain(|f| visible.contains(f.key_or_path()));
 
     if session.files.is_empty() {
         let _ = session.mark_completed();
@@ -501,11 +501,18 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
             }
         }
         UiAction::DeleteFile(id) => {
+            let artifact_path = app
+                .files
+                .iter()
+                .find(|f| f.id == id)
+                .map(|f| f.name.clone())
+                .unwrap_or_else(|| id.clone());
             if let Some(token) = app.cancellation_tokens.remove(&id) {
                 token.cancel();
             }
             app.deleted_files.insert(id.clone());
             app.files.retain(|f| f.id != id);
+            download::schedule_resume_artifact_delete(artifact_path);
             if let Some(ref mut session) = app.session {
                 let _ = session.remove_file(&id);
             }
@@ -940,12 +947,14 @@ mod tests {
         );
         session.files = vec![
             FileEntry {
+                key: Some("completed-id".to_string()),
                 url_index: 0,
                 path: "completed.mkv".to_string(),
                 size: 128,
                 status: FileEntryStatus::Completed,
             },
             FileEntry {
+                key: Some("pending-id".to_string()),
                 url_index: 1,
                 path: "pending.mkv".to_string(),
                 size: 256,
@@ -965,7 +974,7 @@ mod tests {
         let completed = app
             .files
             .iter()
-            .find(|file| file.id == "completed.mkv")
+            .find(|file| file.id == "completed-id")
             .expect("completed file should be restored");
         assert_eq!(completed.status, FileStatus::Complete);
         assert_eq!(completed.downloaded, completed.size);
@@ -973,7 +982,7 @@ mod tests {
         let pending = app
             .files
             .iter()
-            .find(|file| file.id == "pending.mkv")
+            .find(|file| file.id == "pending-id")
             .expect("pending file should be restored");
         assert_eq!(pending.status, FileStatus::Queued);
         assert_eq!(pending.downloaded, 0);
@@ -1004,6 +1013,7 @@ mod tests {
             }],
         );
         session.files = vec![FileEntry {
+            key: Some("retry-id".to_string()),
             url_index: 0,
             path: "retry.mkv".to_string(),
             size: 256,
@@ -1019,7 +1029,7 @@ mod tests {
         let restored = app
             .files
             .iter()
-            .find(|file| file.id == "retry.mkv")
+            .find(|file| file.id == "retry-id")
             .expect("retryable error should be restored");
         assert_eq!(restored.status, FileStatus::Queued);
         assert_eq!(restored.downloaded, 0);
@@ -1042,12 +1052,14 @@ mod tests {
         );
         session.files = vec![
             FileEntry {
+                key: Some("completed-id".to_string()),
                 url_index: 0,
                 path: "completed.mkv".to_string(),
                 size: 128,
                 status: FileEntryStatus::Completed,
             },
             FileEntry {
+                key: Some("pending-id".to_string()),
                 url_index: 0,
                 path: "pending.mkv".to_string(),
                 size: 256,
@@ -1059,7 +1071,7 @@ mod tests {
         let mut app = App::new(0, event_tx, true);
         app.files = vec![
             app::FileEntry {
-                id: "completed.mkv".to_string(),
+                id: "completed-id".to_string(),
                 name: "completed.mkv".to_string(),
                 size: 128,
                 downloaded: 128,
@@ -1069,7 +1081,7 @@ mod tests {
                 status: FileStatus::Complete,
             },
             app::FileEntry {
-                id: "pending.mkv".to_string(),
+                id: "pending-id".to_string(),
                 name: "pending.mkv".to_string(),
                 size: 256,
                 downloaded: 0,
@@ -1090,8 +1102,13 @@ mod tests {
             session
                 .files
                 .iter()
-                .any(|file| file.path == "completed.mkv")
+                .any(|file| file.key_or_path() == "completed-id")
         );
-        assert!(session.files.iter().any(|file| file.path == "pending.mkv"));
+        assert!(
+            session
+                .files
+                .iter()
+                .any(|file| file.key_or_path() == "pending-id")
+        );
     }
 }

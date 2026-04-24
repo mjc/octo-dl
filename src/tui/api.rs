@@ -146,6 +146,37 @@ fn dispatch_urls(state: &ApiState, urls: Vec<String>) {
     }
 }
 
+fn provided_api_key(headers: &HeaderMap) -> Option<&str> {
+    if let Some(key) = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some(key);
+    }
+
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn require_api_key(state: &ApiState, headers: &HeaderMap) -> Option<axum::response::Response> {
+    let expected_key = state.api_key.as_ref()?;
+    if provided_api_key(headers).is_some_and(|provided| provided == expected_key) {
+        return None;
+    }
+
+    Some(
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "invalid api key"})),
+        )
+            .into_response(),
+    )
+}
+
 #[derive(Deserialize)]
 struct SnapshotFile {
     id: String,
@@ -295,12 +326,17 @@ async fn api_health(State(state): State<ApiState>) -> impl IntoResponse {
 
 async fn api_post_urls(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     axum::Json(payload): axum::Json<UrlRequest>,
 ) -> impl IntoResponse {
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
+
     let urls = extract_urls(&payload.text);
     let count = urls.len();
     dispatch_urls(&state, urls.clone());
-    axum::Json(UrlResponse { added: urls, count })
+    axum::Json(UrlResponse { added: urls, count }).into_response()
 }
 
 async fn api_parse_page(
@@ -308,19 +344,8 @@ async fn api_parse_page(
     headers: HeaderMap,
     axum::Json(payload): axum::Json<ParseRequest>,
 ) -> impl IntoResponse {
-    // Check API key if configured
-    if let Some(ref expected_key) = state.api_key {
-        let provided_key = headers
-            .get("x-api-key")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if provided_key != expected_key {
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                axum::Json(serde_json::json!({"error": "invalid api key"})),
-            )
-                .into_response();
-        }
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
     }
 
     let mut urls = extract_urls(&payload.page);
@@ -334,6 +359,15 @@ async fn api_parse_page(
 
 async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
     let fallback_host = infer_host(&headers, &state);
+    let api_key_header = state.api_key.as_ref().map_or_else(
+        || "{}".to_string(),
+        |key| {
+            serde_json::to_string(&serde_json::json!({
+                "x-api-key": key,
+            }))
+            .expect("serializing API key header should not fail")
+        },
+    );
 
     Html(format!(
         r#"<!DOCTYPE html>
@@ -358,7 +392,7 @@ async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> 
 <body>
 <h1>octo-dl bookmarklet</h1>
 <p>Drag this link to your bookmarks bar:</p>
-<a class="bookmarklet" href="javascript:void(function(){{var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var proto=window.location.protocol;var h=proto+'//{fallback_host}';fetch(h+'/api/parse',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{page:page,fallback:selected}})}}).then(function(r){{return r.json()}}).then(function(d){{if(d.count>0){{alert('Sent '+d.count+' URL(s) to octo-dl')}}else{{alert('No URLs found on this page')}}}}).catch(function(e){{alert('Error: '+e)}})}})()">
+<a class="bookmarklet" href="javascript:void(function(){{var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var proto=window.location.protocol;var h=proto+'//{fallback_host}';var headers=Object.assign({{'Content-Type':'application/json'}},{api_key_header});fetch(h+'/api/parse',{{method:'POST',headers:headers,body:JSON.stringify({{page:page,fallback:selected}})}}).then(function(r){{return r.json()}}).then(function(d){{if(d.count>0){{alert('Sent '+d.count+' URL(s) to octo-dl')}}else{{alert('No URLs found on this page')}}}}).catch(function(e){{alert('Error: '+e)}})}})()">
   Send to octo-dl
 </a>
 <p>Click it on any page to send the page HTML (with selected text as fallback) to octo-dl for download.</p>
@@ -714,6 +748,38 @@ mod tests {
         let invalid =
             resolve_file_id(&state, None, Some("file.mkv".to_string())).expect_err("bad state");
         assert_eq!(invalid.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn require_api_key_accepts_header_and_bearer_token() {
+        let (mut state, _rx) = state_without_shared();
+        state.api_key = Some("secret".to_string());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+        assert!(require_api_key(&state, &headers).is_none());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer secret"),
+        );
+        assert!(require_api_key(&state, &headers).is_none());
+    }
+
+    #[test]
+    fn require_api_key_rejects_missing_or_wrong_key() {
+        let (mut state, _rx) = state_without_shared();
+        state.api_key = Some("secret".to_string());
+
+        let headers = HeaderMap::new();
+        let missing = require_api_key(&state, &headers).expect("missing key should reject");
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("wrong"));
+        let wrong = require_api_key(&state, &headers).expect("wrong key should reject");
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

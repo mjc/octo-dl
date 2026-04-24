@@ -51,13 +51,15 @@ pub use config::{ApiConfig, DownloadConfig, ServiceConfig, ServiceCredentials};
 pub use dlc::{DlcKeyCache, parse_dlc_data, parse_dlc_file};
 pub use download::{
     CollectedFiles, DownloadItem, DownloadProgress, Downloader, FileStatus, NoProgress,
-    OwnedDownloadItem, fetch_public_nodes,
+    OwnedDownloadItem, ResumeReuse, ResumeReuseSource, delete_download_artifacts,
+    delete_resume_artifacts, fetch_public_nodes,
 };
 pub use error::{Error, Result};
 pub use format::{format_bytes, format_duration};
 pub use fs::{FileSystem, TokioFileSystem};
 pub use state::{
     FileEntry, FileEntryStatus, SavedCredentials, SessionState, SessionStatus, UrlEntry, UrlStatus,
+    file_key,
 };
 pub use stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBuilder};
 pub use url::{extract_urls, is_dlc_path, normalize_mega_url};
