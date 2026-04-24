@@ -145,15 +145,19 @@ pub fn handle_login_result(app: &mut App, success: bool, error: Option<String>) 
 }
 
 pub fn handle_file_complete(app: &mut App, id: &str, name: &str) {
+    let mut was_complete = false;
     app.cancellation_tokens.remove(id);
     if let Some(fp) = app.find_file_mut(id) {
+        was_complete = matches!(fp.status, FileStatus::Complete);
         fp.status = FileStatus::Complete;
         fp.downloaded = fp.size;
         fp.speed = 0;
         fp.speed_accum = 0;
         fp.name = name.to_string();
     }
-    app.files_completed += 1;
+    if !was_complete {
+        app.files_completed += 1;
+    }
 
     if let Some(ref mut session) = app.session {
         let _ = session.mark_file_complete(id);
@@ -822,6 +826,30 @@ mod tests {
         assert_eq!(file.speed_accum, 0);
     }
 
+    #[test]
+    fn handle_file_complete_is_idempotent_for_visible_complete_rows() {
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "file-id".to_string(),
+            name: "file.mkv".to_string(),
+            size: 128,
+            downloaded: 128,
+            speed: 0,
+            speed_accum: 0,
+            source_url: Some("https://mega.nz/file/root".to_string()),
+            status: FileStatus::Complete,
+        });
+        app.recompute_totals();
+        assert_eq!(app.files_completed, 1);
+
+        handle_file_complete(&mut app, "file-id", "file.mkv");
+
+        assert_eq!(app.files_completed, 1);
+        let file = app.files.iter().find(|file| file.id == "file-id").unwrap();
+        assert_eq!(file.status, FileStatus::Complete);
+        assert_eq!(file.downloaded, 128);
+    }
+
     /// Regression test: the mega library reports *cumulative* bytes downloaded,
     /// but `on_progress` must send true deltas.  If cumulative values leak
     /// through as deltas, `downloaded` will vastly exceed `size`.
@@ -916,11 +944,12 @@ async fn download_batch(
     ctx: BatchContext<'_>,
 ) {
     let node_sets = fetch_node_sets(urls, ctx.http, ctx.event_tx).await;
-    let (all_queued_items, actual_skipped, actual_partial) =
+    let (all_queued_items, all_completed_items, actual_skipped, actual_partial) =
         collect_queued_items(&node_sets, ctx.downloader, ctx.progress).await;
 
     send_collection_events(
         &all_queued_items,
+        &all_completed_items,
         actual_skipped,
         actual_partial,
         source_urls,
@@ -1009,8 +1038,9 @@ async fn collect_queued_items(
     node_sets: &[(ResolvedUrl, mega::Nodes)],
     downloader: &Arc<crate::Downloader>,
     progress: &Arc<dyn DownloadProgress>,
-) -> (Vec<QueuedDownload>, usize, usize) {
+) -> (Vec<QueuedDownload>, Vec<QueuedDownload>, usize, usize) {
     let mut all_queued_items = Vec::new();
+    let mut all_completed_items = Vec::new();
     let mut actual_skipped = 0;
     let mut actual_partial = 0;
 
@@ -1018,31 +1048,44 @@ async fn collect_queued_items(
         let collected = downloader.collect_files(nodes, progress).await;
         actual_skipped += collected.skipped;
         actual_partial += collected.partial;
-        all_queued_items.extend(
-            collected
-                .into_owned()
-                .into_iter()
-                .map(|item| QueuedDownload {
-                    id: item.path.clone(),
-                    name: item.path.clone(),
-                    source_url: resolved.url.clone(),
-                    session_url: resolved.session_url.clone(),
-                    item,
-                }),
-        );
+        let (to_download, completed) = collected.into_owned_parts();
+        all_queued_items.extend(to_download.into_iter().map(|item| QueuedDownload {
+            id: item.path.clone(),
+            name: item.path.clone(),
+            source_url: resolved.url.clone(),
+            session_url: resolved.session_url.clone(),
+            item,
+        }));
+        all_completed_items.extend(completed.into_iter().map(|item| QueuedDownload {
+            id: item.path.clone(),
+            name: item.path.clone(),
+            source_url: resolved.url.clone(),
+            session_url: resolved.session_url.clone(),
+            item,
+        }));
     }
-    (all_queued_items, actual_skipped, actual_partial)
+    (
+        all_queued_items,
+        all_completed_items,
+        actual_skipped,
+        actual_partial,
+    )
 }
 
 fn send_collection_events(
     all_queued_items: &[QueuedDownload],
+    all_completed_items: &[QueuedDownload],
     actual_skipped: usize,
     actual_partial: usize,
     source_urls: &[String],
     event_tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) {
-    let total_bytes: u64 = all_queued_items.iter().map(|i| i.item.node.size()).sum();
-    let total_files = all_queued_items.len();
+    let total_bytes: u64 = all_queued_items
+        .iter()
+        .chain(all_completed_items.iter())
+        .map(|i| i.item.node.size())
+        .sum();
+    let total_files = all_queued_items.len() + all_completed_items.len();
 
     let _ = event_tx.send(DownloadEvent::FilesCollected {
         total: total_files,
@@ -1059,6 +1102,20 @@ fn send_collection_events(
             size: item.item.node.size(),
             source_url: item.source_url.clone(),
             session_url: item.session_url.clone(),
+        });
+    }
+
+    for item in all_completed_items {
+        let _ = event_tx.send(DownloadEvent::FileQueued {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            size: item.item.node.size(),
+            source_url: item.source_url.clone(),
+            session_url: item.session_url.clone(),
+        });
+        let _ = event_tx.send(DownloadEvent::FileComplete {
+            id: item.id.clone(),
+            name: item.name.clone(),
         });
     }
 
