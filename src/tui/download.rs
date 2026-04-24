@@ -156,7 +156,7 @@ pub fn handle_file_complete(app: &mut App, id: &str, name: &str) {
     app.files_completed += 1;
 
     if let Some(ref mut session) = app.session {
-        let _ = session.remove_file(id);
+        let _ = session.mark_file_complete(id);
     }
 
     if app.files_completed == app.files_total && app.files_total > 0 {
@@ -743,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_file_complete_removes_session_file_and_marks_complete() {
+    fn handle_file_complete_marks_session_file_complete() {
         let dir = tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
         let mut app = test_app();
@@ -776,7 +776,8 @@ mod tests {
         assert!(session_path.exists());
 
         let session = app.session.as_ref().expect("session should remain");
-        assert!(session.files.is_empty());
+        assert_eq!(session.files.len(), 1);
+        assert_eq!(session.files[0].status, FileEntryStatus::Completed);
         assert_eq!(session.status, SessionStatus::Completed);
     }
 
