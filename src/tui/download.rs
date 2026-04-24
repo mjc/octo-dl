@@ -278,6 +278,7 @@ pub fn handle_file_error(app: &mut App, id: &str, name: &str, error: &str) {
             speed: 0,
             rate: Default::default(),
             source_url: None,
+            counts_toward_progress: true,
             status: FileStatus::Error(error.to_string()),
         });
     }
@@ -303,6 +304,7 @@ pub fn show_error_ui_only(app: &mut App, name: &str, error: &str) {
             speed: 0,
             rate: Default::default(),
             source_url: None,
+            counts_toward_progress: false,
             status: FileStatus::Error(error.to_string()),
         });
     }
@@ -340,6 +342,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 fp.status = FileStatus::Downloading;
                 fp.name = name;
                 fp.size = size;
+                fp.counts_toward_progress = true;
                 fp.rate.reset(fp.downloaded, std::time::Instant::now());
             } else {
                 app.files.push(FileEntry {
@@ -350,6 +353,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                     speed: 0,
                     rate: Default::default(),
                     source_url: None,
+                    counts_toward_progress: true,
                     status: FileStatus::Downloading,
                 });
             }
@@ -465,6 +469,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                     speed: 0,
                     rate: Default::default(),
                     source_url: None,
+                    counts_toward_progress: false,
                     status: FileStatus::Queued,
                 });
             }
@@ -474,6 +479,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             id,
             name,
             size,
+            count_toward_progress,
             source_url,
             session_url,
         } => {
@@ -500,6 +506,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 fp.name = name.clone();
                 fp.size = size;
                 fp.source_url = Some(source_url);
+                fp.counts_toward_progress |= count_toward_progress;
                 if !matches!(fp.status, FileStatus::Complete) {
                     fp.status = FileStatus::Queued;
                     fp.downloaded = 0;
@@ -514,6 +521,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                     speed: 0,
                     rate: Default::default(),
                     source_url: Some(source_url),
+                    counts_toward_progress: count_toward_progress,
                     status: FileStatus::Queued,
                 });
             }
@@ -895,6 +903,7 @@ mod tests {
             speed: 12,
             rate: Default::default(),
             source_url: Some("https://mega.nz/file/first".to_string()),
+            counts_toward_progress: true,
             status: FileStatus::Downloading,
         });
         app.recompute_totals();
@@ -932,6 +941,7 @@ mod tests {
             speed: 12,
             rate: Default::default(),
             source_url: Some("https://mega.nz/file/old".to_string()),
+            counts_toward_progress: true,
             status: FileStatus::Error("stale error".to_string()),
         });
 
@@ -941,6 +951,7 @@ mod tests {
                 id: "file-id".to_string(),
                 name: "new-name.mkv".to_string(),
                 size: 128,
+                count_toward_progress: true,
                 source_url: "https://mega.nz/file/new".to_string(),
                 session_url: "https://mega.nz/folder/root".to_string(),
             },
@@ -983,6 +994,7 @@ mod tests {
                 id: "episode.mkv".to_string(),
                 name: "episode.mkv".to_string(),
                 size: 128,
+                count_toward_progress: true,
                 source_url: "https://mega.nz/file/root".to_string(),
                 session_url: "https://mega.nz/file/root".to_string(),
             },
@@ -1005,6 +1017,7 @@ mod tests {
             speed: 0,
             rate: Default::default(),
             source_url: Some("https://mega.nz/file/root".to_string()),
+            counts_toward_progress: true,
             status: FileStatus::Complete,
         });
         app.recompute_totals();
@@ -1029,6 +1042,7 @@ mod tests {
             speed: 0,
             rate: Default::default(),
             source_url: Some("https://mega.nz/file/root".to_string()),
+            counts_toward_progress: false,
             status: FileStatus::Complete,
         });
         app.recompute_totals();
@@ -1039,6 +1053,7 @@ mod tests {
                 id: "episode.mkv".to_string(),
                 name: "episode.mkv".to_string(),
                 size: 128,
+                count_toward_progress: false,
                 source_url: "https://mega.nz/file/root".to_string(),
                 session_url: "https://mega.nz/file/root".to_string(),
             },
@@ -1059,7 +1074,8 @@ mod tests {
             .unwrap();
         assert_eq!(file.status, FileStatus::Complete);
         assert_eq!(file.downloaded, 128);
-        assert_eq!(app.files_completed, 1);
+        assert_eq!(app.files_completed, 0);
+        assert_eq!(app.files_total, 0);
     }
 
     /// Regression test: the mega library reports *cumulative* bytes downloaded,
@@ -1345,6 +1361,7 @@ fn send_collection_events(
             id: item.id.clone(),
             name: item.name.clone(),
             size: item.item.node.size(),
+            count_toward_progress: true,
             source_url: item.source_url.clone(),
             session_url: item.session_url.clone(),
         });
@@ -1355,6 +1372,7 @@ fn send_collection_events(
             id: item.id.clone(),
             name: item.name.clone(),
             size: item.item.node.size(),
+            count_toward_progress: false,
             source_url: item.source_url.clone(),
             session_url: item.session_url.clone(),
         });

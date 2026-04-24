@@ -155,6 +155,7 @@ fn restore_session_files(app: &mut App, session: &SessionState) {
             speed: 0,
             rate: Default::default(),
             source_url,
+            counts_toward_progress: !matches!(file.status, FileEntryStatus::Completed),
             status,
         });
     }
@@ -1165,6 +1166,7 @@ mod tests {
                 speed: 0,
                 rate: Default::default(),
                 source_url: Some("https://mega.nz/file/root".to_string()),
+                counts_toward_progress: true,
                 status: FileStatus::Complete,
             },
             app::FileEntry {
@@ -1175,6 +1177,7 @@ mod tests {
                 speed: 0,
                 rate: Default::default(),
                 source_url: Some("https://mega.nz/file/root".to_string()),
+                counts_toward_progress: true,
                 status: FileStatus::Queued,
             },
         ];

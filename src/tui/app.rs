@@ -282,6 +282,8 @@ pub struct FileEntry {
     pub(crate) rate: TransferRate,
     #[serde(skip)]
     pub source_url: Option<String>,
+    #[serde(skip)]
+    pub(crate) counts_toward_progress: bool,
     pub status: FileStatus,
 }
 
@@ -402,9 +404,7 @@ impl App {
         self.sorted_file_indices().get(selected).copied()
     }
 
-    /// Computes per-file transfer rates from timestamped cumulative samples.
-    pub fn update_speeds(&mut self) {
-        let now = Instant::now();
+    fn update_speeds_at(&mut self, now: Instant) {
         self.last_tick = now;
 
         for f in &mut self.files {
@@ -420,27 +420,43 @@ impl App {
             .iter()
             .any(|f| matches!(f.status, FileStatus::Downloading))
         {
+            self.aggregate_rate.record(self.total_downloaded, now);
             self.aggregate_rate.bytes_per_sec(now)
         } else {
             0
         };
     }
 
+    /// Computes per-file transfer rates from timestamped cumulative samples.
+    pub fn update_speeds(&mut self) {
+        self.update_speeds_at(Instant::now());
+    }
+
     /// Recomputes aggregate totals from the current files list.
     ///
     /// Call after deleting files to keep counters consistent.
     pub fn recompute_totals(&mut self) {
-        self.total_size = self.files.iter().map(|f| f.size).sum();
-        self.total_downloaded = self.files.iter().map(|f| f.downloaded).sum();
+        self.total_size = self
+            .files
+            .iter()
+            .filter(|f| f.counts_toward_progress)
+            .map(|f| f.size)
+            .sum();
+        self.total_downloaded = self
+            .files
+            .iter()
+            .filter(|f| f.counts_toward_progress)
+            .map(|f| f.downloaded)
+            .sum();
         self.files_completed = self
             .files
             .iter()
-            .filter(|f| matches!(f.status, FileStatus::Complete))
+            .filter(|f| f.counts_toward_progress && matches!(f.status, FileStatus::Complete))
             .count();
         self.files_total = self
             .files
             .iter()
-            .filter(|f| !matches!(f.status, FileStatus::Error(_)))
+            .filter(|f| f.counts_toward_progress && !matches!(f.status, FileStatus::Error(_)))
             .count();
         self.current_speed = 0;
         self.aggregate_rate
@@ -505,8 +521,7 @@ impl App {
 
     pub(crate) fn record_total_progress(&mut self, bytes_delta: u64, now: Instant) {
         self.total_downloaded = self.total_downloaded.saturating_add(bytes_delta);
-        self.aggregate_rate.record(self.total_downloaded, now);
-        self.current_speed = self.aggregate_rate.bytes_per_sec(now);
+        let _ = now;
     }
 
     pub fn set_paused(&mut self, paused: bool) {
@@ -758,6 +773,7 @@ mod tests {
             speed: 32,
             rate: Default::default(),
             source_url: Some("https://mega.nz/file/abc".to_string()),
+            counts_toward_progress: true,
             status: FileStatus::Downloading,
         });
         app.cpu_usage = 12.5;
@@ -811,12 +827,14 @@ mod tests {
             speed: 0,
             rate: Default::default(),
             source_url: None,
+            counts_toward_progress: true,
             status: FileStatus::Downloading,
         });
         app.total_downloaded = 1_000;
         app.aggregate_rate.reset(1_000, start);
 
         app.record_total_progress(100, start + Duration::from_secs(1));
+        app.update_speeds_at(start + Duration::from_secs(1));
 
         assert!((95..=105).contains(&app.current_speed));
     }
@@ -831,6 +849,7 @@ mod tests {
             speed: 0,
             rate: Default::default(),
             source_url: None,
+            counts_toward_progress: true,
             status: FileStatus::Downloading,
         };
 

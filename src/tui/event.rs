@@ -69,6 +69,7 @@ pub enum DownloadEvent {
         id: String,
         name: String,
         size: u64,
+        count_toward_progress: bool,
         source_url: String,
         session_url: String,
     },
