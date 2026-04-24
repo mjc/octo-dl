@@ -242,8 +242,7 @@ pub fn handle_file_complete(app: &mut App, id: &str, name: &str) {
         was_complete = matches!(fp.status, FileStatus::Complete);
         fp.status = FileStatus::Complete;
         fp.downloaded = fp.size;
-        fp.speed = 0;
-        fp.speed_accum = 0;
+        fp.reset_rate();
         fp.name = name.to_string();
     }
     if !was_complete {
@@ -268,8 +267,7 @@ pub fn handle_file_error(app: &mut App, id: &str, name: &str, error: &str) {
     app.cancellation_tokens.remove(id);
     if let Some(fp) = app.find_file_mut(id) {
         fp.status = FileStatus::Error(error.to_string());
-        fp.speed = 0;
-        fp.speed_accum = 0;
+        fp.reset_rate();
         fp.name = name.to_string();
     } else {
         app.files.push(FileEntry {
@@ -278,7 +276,7 @@ pub fn handle_file_error(app: &mut App, id: &str, name: &str, error: &str) {
             size: 0,
             downloaded: 0,
             speed: 0,
-            speed_accum: 0,
+            rate: Default::default(),
             source_url: None,
             status: FileStatus::Error(error.to_string()),
         });
@@ -295,8 +293,7 @@ pub fn show_error_ui_only(app: &mut App, name: &str, error: &str) {
     app.cancellation_tokens.remove(name);
     if let Some(fp) = app.find_file_mut(name) {
         fp.status = FileStatus::Error(error.to_string());
-        fp.speed = 0;
-        fp.speed_accum = 0;
+        fp.reset_rate();
     } else {
         app.files.push(FileEntry {
             id: name.to_string(),
@@ -304,7 +301,7 @@ pub fn show_error_ui_only(app: &mut App, name: &str, error: &str) {
             size: 0,
             downloaded: 0,
             speed: 0,
-            speed_accum: 0,
+            rate: Default::default(),
             source_url: None,
             status: FileStatus::Error(error.to_string()),
         });
@@ -343,6 +340,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 fp.status = FileStatus::Downloading;
                 fp.name = name;
                 fp.size = size;
+                fp.rate.reset(fp.downloaded, std::time::Instant::now());
             } else {
                 app.files.push(FileEntry {
                     id,
@@ -350,7 +348,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                     size,
                     downloaded: 0,
                     speed: 0,
-                    speed_accum: 0,
+                    rate: Default::default(),
                     source_url: None,
                     status: FileStatus::Downloading,
                 });
@@ -365,12 +363,12 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             if app.deleted_files.contains(id.as_ref()) {
                 return;
             }
-            let _ = speed; // lifetime average from library — ignored, we compute our own
+            let _ = speed; // lifetime average from downloader; UI uses smoothed throughput.
+            let now = std::time::Instant::now();
             if let Some(fp) = app.find_file_mut(id.as_ref()) {
-                fp.downloaded = fp.downloaded.saturating_add(bytes_delta);
-                fp.speed_accum = fp.speed_accum.saturating_add(bytes_delta);
+                let accepted_delta = fp.record_progress(bytes_delta, now);
+                app.total_downloaded = app.total_downloaded.saturating_add(accepted_delta);
             }
-            app.total_downloaded = app.total_downloaded.saturating_add(bytes_delta);
         }
         DownloadEvent::ResumeReused { id, chunks, bytes } => {
             if app.deleted_files.contains(&id) {
@@ -411,8 +409,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             app.cancellation_tokens.remove(&id);
             if let Some(fp) = app.find_file_mut(&id) {
                 fp.status = FileStatus::Queued;
-                fp.speed = 0;
-                fp.speed_accum = 0;
+                fp.reset_rate();
             }
             if app.paused {
                 app.status = "Paused".to_string();
@@ -466,7 +463,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                     size: 0,
                     downloaded: 0,
                     speed: 0,
-                    speed_accum: 0,
+                    rate: Default::default(),
                     source_url: None,
                     status: FileStatus::Queued,
                 });
@@ -506,8 +503,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 if !matches!(fp.status, FileStatus::Complete) {
                     fp.status = FileStatus::Queued;
                     fp.downloaded = 0;
-                    fp.speed = 0;
-                    fp.speed_accum = 0;
+                    fp.reset_rate();
                 }
             } else {
                 app.files.push(FileEntry {
@@ -516,7 +512,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                     size,
                     downloaded: 0,
                     speed: 0,
-                    speed_accum: 0,
+                    rate: Default::default(),
                     source_url: Some(source_url),
                     status: FileStatus::Queued,
                 });
@@ -897,7 +893,7 @@ mod tests {
             size: 64,
             downloaded: 16,
             speed: 12,
-            speed_accum: 4,
+            rate: Default::default(),
             source_url: Some("https://mega.nz/file/first".to_string()),
             status: FileStatus::Downloading,
         });
@@ -934,7 +930,7 @@ mod tests {
             size: 64,
             downloaded: 17,
             speed: 12,
-            speed_accum: 5,
+            rate: Default::default(),
             source_url: Some("https://mega.nz/file/old".to_string()),
             status: FileStatus::Error("stale error".to_string()),
         });
@@ -957,7 +953,6 @@ mod tests {
         assert_eq!(file.status, FileStatus::Queued);
         assert_eq!(file.downloaded, 0);
         assert_eq!(file.speed, 0);
-        assert_eq!(file.speed_accum, 0);
     }
 
     #[test]
@@ -1008,7 +1003,7 @@ mod tests {
             size: 128,
             downloaded: 128,
             speed: 0,
-            speed_accum: 0,
+            rate: Default::default(),
             source_url: Some("https://mega.nz/file/root".to_string()),
             status: FileStatus::Complete,
         });
@@ -1032,7 +1027,7 @@ mod tests {
             size: 128,
             downloaded: 128,
             speed: 0,
-            speed_accum: 0,
+            rate: Default::default(),
             source_url: Some("https://mega.nz/file/root".to_string()),
             status: FileStatus::Complete,
         });
@@ -1113,10 +1108,10 @@ mod tests {
         assert_eq!(app.total_downloaded, file_size);
     }
 
-    /// Verify that if buggy cumulative values were sent as deltas,
-    /// downloaded would blow past the file size (the pre-fix behaviour).
+    /// Verify that even if buggy cumulative values were sent as deltas,
+    /// visible progress is capped at the known file size.
     #[test]
-    fn cumulative_values_as_deltas_would_overshoot() {
+    fn cumulative_values_as_deltas_are_capped_at_file_size() {
         let mut app = test_app();
         let file_size: u64 = 1_000_000;
 
@@ -1143,14 +1138,8 @@ mod tests {
         }
 
         let file = app.files.iter().find(|f| f.id == "test.bin").unwrap();
-        // Sum of cumulatives = 3_050_000, which is 3x the file size
-        assert_eq!(file.downloaded, 3_050_000);
-        assert!(
-            file.downloaded > file.size,
-            "this demonstrates the bug: {} > {}",
-            file.downloaded,
-            file.size,
-        );
+        assert_eq!(file.downloaded, file_size);
+        assert_eq!(app.total_downloaded, file_size);
     }
 }
 

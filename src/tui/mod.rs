@@ -142,8 +142,7 @@ fn restore_session_files(app: &mut App, session: &SessionState) {
             if matches!(status, FileStatus::Complete) {
                 existing.status = FileStatus::Complete;
                 existing.downloaded = existing.size;
-                existing.speed = 0;
-                existing.speed_accum = 0;
+                existing.reset_rate();
             }
             continue;
         }
@@ -154,7 +153,7 @@ fn restore_session_files(app: &mut App, session: &SessionState) {
             size: file.size,
             downloaded,
             speed: 0,
-            speed_accum: 0,
+            rate: Default::default(),
             source_url,
             status,
         });
@@ -573,8 +572,7 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
             let source_url = if let Some(f) = app.find_file_mut(&id) {
                 f.status = FileStatus::Queued;
                 f.downloaded = 0;
-                f.speed = 0;
-                f.speed_accum = 0;
+                f.reset_rate();
                 f.source_url.clone()
             } else {
                 None
@@ -1165,7 +1163,7 @@ mod tests {
                 size: 128,
                 downloaded: 128,
                 speed: 0,
-                speed_accum: 0,
+                rate: Default::default(),
                 source_url: Some("https://mega.nz/file/root".to_string()),
                 status: FileStatus::Complete,
             },
@@ -1175,7 +1173,7 @@ mod tests {
                 size: 256,
                 downloaded: 0,
                 speed: 0,
-                speed_accum: 0,
+                rate: Default::default(),
                 source_url: Some("https://mega.nz/file/root".to_string()),
                 status: FileStatus::Queued,
             },
