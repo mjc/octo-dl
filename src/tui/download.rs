@@ -30,6 +30,49 @@ use super::app::{App, FileEntry, FileStatus, Popup};
 use super::event::{DownloadChannels, DownloadEvent, TokenMessage, TuiProgress};
 use super::input::add_url;
 
+pub(crate) fn schedule_resume_artifact_delete(path: String) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            if let Err(e) = crate::delete_resume_artifacts(&path).await {
+                log::warn!("Failed to delete resume artifacts for {path}: {e}");
+            }
+        });
+    } else {
+        let part = crate::download::part_path(&path);
+        let sidecar = crate::download::sidecar_path(&path);
+        if let Err(e) = std::fs::remove_file(&part)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("Failed to delete resume artifact {}: {e}", part.display());
+        }
+        if let Err(e) = std::fs::remove_file(&sidecar)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!(
+                "Failed to delete resume artifact {}: {e}",
+                sidecar.display()
+            );
+        }
+    }
+}
+
+pub(crate) fn schedule_download_artifact_delete(path: String) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            if let Err(e) = crate::delete_download_artifacts(&path).await {
+                log::warn!("Failed to delete download artifacts for {path}: {e}");
+            }
+        });
+    } else {
+        if let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("Failed to delete output artifact {path}: {e}");
+        }
+        schedule_resume_artifact_delete(path);
+    }
+}
+
 fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .pool_idle_timeout(Duration::from_secs(60))
@@ -71,6 +114,53 @@ struct BatchContext<'a> {
     semaphore: &'a Arc<tokio::sync::Semaphore>,
     event_tx: &'a mpsc::UnboundedSender<DownloadEvent>,
     token_tx: &'a mpsc::UnboundedSender<TokenMessage>,
+}
+
+struct FileProgress {
+    tx: mpsc::UnboundedSender<DownloadEvent>,
+    id: String,
+    name: String,
+}
+
+impl DownloadProgress for FileProgress {
+    fn on_file_start(&self, _name: &str, size: u64) {
+        let _ = self.tx.send(DownloadEvent::FileStart {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            size,
+        });
+    }
+
+    fn on_progress(&self, _name: &str, bytes_delta: u64, speed: u64) {
+        let _ = self.tx.send(DownloadEvent::Progress {
+            id: Arc::<str>::from(self.id.as_str()),
+            bytes_delta,
+            speed,
+        });
+    }
+
+    fn on_resume_reused(&self, _name: &str, chunks: usize, bytes: u64) {
+        let _ = self.tx.send(DownloadEvent::ResumeReused {
+            id: self.id.clone(),
+            chunks,
+            bytes,
+        });
+    }
+
+    fn on_file_complete(&self, _name: &str, _stats: &crate::FileStats) {
+        let _ = self.tx.send(DownloadEvent::FileComplete {
+            id: self.id.clone(),
+            name: self.name.clone(),
+        });
+    }
+
+    fn on_error(&self, _name: &str, error: &str) {
+        let _ = self.tx.send(DownloadEvent::Error {
+            id: Some(self.id.clone()),
+            name: self.name.clone(),
+            error: error.to_string(),
+        });
+    }
 }
 
 /// Spawns the login task which sends back `LoginResult`.
@@ -281,10 +371,24 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             }
             app.total_downloaded = app.total_downloaded.saturating_add(bytes_delta);
         }
+        DownloadEvent::ResumeReused { id, chunks, bytes } => {
+            if app.deleted_files.contains(&id) {
+                return;
+            }
+            log::info!(
+                "Reusing {chunks} verified chunk(s) for {id} ({})",
+                format_bytes(bytes)
+            );
+            app.status = format!(
+                "Reusing {chunks} verified chunk(s) for {id} ({})",
+                format_bytes(bytes)
+            );
+        }
         DownloadEvent::FileComplete { id, name } => {
             log::info!("Download complete: {name}");
             if app.deleted_files.remove(&id) {
                 app.cancellation_tokens.remove(&id);
+                schedule_resume_artifact_delete(name);
                 if let Some(ref mut session) = app.session {
                     let _ = session.remove_file(&id);
                 }
@@ -297,6 +401,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             log::info!("Download cancelled: {name}");
             if app.deleted_files.remove(&id) {
                 app.cancellation_tokens.remove(&id);
+                schedule_resume_artifact_delete(name);
                 if let Some(ref mut session) = app.session {
                     let _ = session.remove_file(&id);
                 }
@@ -319,6 +424,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 && app.deleted_files.remove(id)
             {
                 app.cancellation_tokens.remove(id);
+                schedule_resume_artifact_delete(name);
                 if let Some(ref mut session) = app.session {
                     let _ = session.remove_file(id);
                 }
@@ -390,7 +496,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             } else {
                 app.files.push(FileEntry {
                     id: id.clone(),
-                    name,
+                    name: name.clone(),
                     size,
                     downloaded: 0,
                     speed: 0,
@@ -408,10 +514,11 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                     .position(|u| u.url == session_url)
                     .unwrap_or(0);
 
-                if !session.files.iter().any(|f| f.path == id) {
+                if !session.files.iter().any(|f| f.key_or_path() == id) {
                     session.files.push(crate::FileEntry {
+                        key: Some(id.clone()),
                         url_index,
-                        path: id,
+                        path: name,
                         size,
                         status: crate::FileEntryStatus::Pending,
                     });
@@ -733,6 +840,7 @@ mod tests {
             }],
         );
         session.files.push(SessionFileEntry {
+            key: None,
             url_index: 0,
             path: path.to_string(),
             size,
@@ -974,11 +1082,15 @@ async fn download_batch(
             .await
             .expect("semaphore not closed");
         let dl = Arc::clone(ctx.downloader);
-        let prog = Arc::clone(ctx.progress);
         let event_tx = ctx.event_tx.clone();
         let pause_rx_for_task = pause_rx.clone();
         join_set.spawn(async move {
             let _permit = permit;
+            let prog: Arc<dyn DownloadProgress> = Arc::new(FileProgress {
+                tx: event_tx.clone(),
+                id: item.id.clone(),
+                name: item.name.clone(),
+            });
             let result = dl
                 .download_file(&item.item.node, &item.item.path, &prog, Some(cancel_token))
                 .await;
@@ -1050,14 +1162,14 @@ async fn collect_queued_items(
         actual_partial += collected.partial;
         let (to_download, completed) = collected.into_owned_parts();
         all_queued_items.extend(to_download.into_iter().map(|item| QueuedDownload {
-            id: item.path.clone(),
+            id: format!("{}:{}", resolved.session_url, item.path),
             name: item.path.clone(),
             source_url: resolved.url.clone(),
             session_url: resolved.session_url.clone(),
             item,
         }));
         all_completed_items.extend(completed.into_iter().map(|item| QueuedDownload {
-            id: item.path.clone(),
+            id: format!("{}:{}", resolved.session_url, item.path),
             name: item.path.clone(),
             source_url: resolved.url.clone(),
             session_url: resolved.session_url.clone(),

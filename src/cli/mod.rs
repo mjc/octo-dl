@@ -13,7 +13,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use crate::{
     DlcKeyCache, DownloadConfig, DownloadItem, DownloadProgress, FileEntry, FileEntryStatus,
     FileStats, NoProgress, SavedCredentials, SessionState, SessionStats, SessionStatsBuilder,
-    SessionStatus, UrlEntry, UrlStatus, format_bytes, format_duration, is_dlc_path,
+    SessionStatus, UrlEntry, UrlStatus, file_key, format_bytes, format_duration, is_dlc_path,
 };
 
 const DEFAULT_CONCURRENT_FILES: usize = 4;
@@ -124,13 +124,14 @@ impl DownloadProgress for CliDownloadProgress {
             |d| format!("ramp {}", format_duration(d)),
         );
         let _ = self.progress.println(format!(
-            "  {} - {} in {} ({}/s avg, {}/s peak, {})",
+            "  {} - {} in {} ({}/s avg, {}/s peak, {}, {} reused)",
             name,
             format_bytes(stats.size),
             format_duration(stats.elapsed),
             format_bytes(stats.average_speed),
             format_bytes(stats.peak_speed),
             ramp_up,
+            format_bytes(stats.reused_bytes),
         ));
     }
 
@@ -146,6 +147,13 @@ impl DownloadProgress for CliDownloadProgress {
             "  partial: {name} ({}/{})",
             format_bytes(existing_size),
             format_bytes(expected_size),
+        ));
+    }
+
+    fn on_resume_reused(&self, name: &str, chunks: usize, bytes: u64) {
+        let _ = self.progress.println(format!(
+            "  resuming: {name} reusing {chunks} verified chunk(s), {}",
+            format_bytes(bytes),
         ));
     }
 }
@@ -193,6 +201,8 @@ fn print_summary(stats: &SessionStats) {
     if stats.files_downloaded > 0 {
         println!("  Files downloaded:  {}", stats.files_downloaded);
         println!("  Total size:        {}", format_bytes(stats.total_bytes));
+        println!("  Network this run:  {}", format_bytes(stats.network_bytes));
+        println!("  Reused partials:   {}", format_bytes(stats.reused_bytes));
         println!("  Total time:        {}", format_duration(stats.elapsed));
         println!(
             "  Average speed:     {}/s",
@@ -212,6 +222,16 @@ fn print_summary(stats: &SessionStats) {
     }
 
     println!("{SEPARATOR}");
+}
+
+fn resumable_urls(session: &SessionState) -> Vec<(usize, String)> {
+    session
+        .urls
+        .iter()
+        .enumerate()
+        .filter(|(_, u)| matches!(u.status, UrlStatus::Pending | UrlStatus::Fetched))
+        .map(|(idx, u)| (idx, u.url.clone()))
+        .collect()
 }
 
 #[allow(clippy::similar_names)]
@@ -235,7 +255,10 @@ async fn download_all(
                 let result = downloader
                     .download_file(item.node, &item.path, &progress, None)
                     .await;
-                (item.path.clone(), result)
+                (
+                    item.key.clone().unwrap_or_else(|| item.path.clone()),
+                    result,
+                )
             }
         })
         .buffer_unordered(downloader.config().concurrent_files)
@@ -494,13 +517,17 @@ pub async fn run() -> crate::Result<()> {
         // Record files in session state
         for item in &collected.to_download {
             session_state.files.push(FileEntry {
+                key: Some(file_key(url_idx, &item.path)),
                 url_index: url_idx,
                 path: item.path.clone(),
                 size: item.node.size(),
                 status: FileEntryStatus::Pending,
             });
         }
-        all_files.extend(collected.to_download);
+        all_files.extend(collected.to_download.into_iter().map(|mut item| {
+            item.key = Some(file_key(url_idx, &item.path));
+            item
+        }));
         total_skipped += collected.skipped;
         total_partial += collected.partial;
     }
@@ -572,26 +599,24 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
     let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
     // Re-fetch URLs and collect remaining files
-    let remaining_urls: Vec<_> = session
-        .urls
-        .iter()
-        .filter(|u| u.status == UrlStatus::Fetched)
-        .map(|u| u.url.clone())
-        .collect();
+    let remaining_urls = resumable_urls(&session);
 
     println!(
         "Fetching file lists from {} URL(s)...\n",
         remaining_urls.len()
     );
-    let mut all_nodes: Vec<(String, mega::Nodes)> = Vec::new();
-    for url in &remaining_urls {
+    let mut all_nodes: Vec<(usize, String, mega::Nodes)> = Vec::new();
+    for (url_idx, url) in &remaining_urls {
         print!("  {url} ... ");
         match crate::fetch_public_nodes(&http, url).await {
             Ok(nodes) => {
                 let collected_tmp = downloader.collect_files(&nodes, &no_progress).await;
                 let file_count = collected_tmp.to_download.len() + collected_tmp.skipped;
                 println!("{file_count} file(s)");
-                all_nodes.push((url.clone(), nodes));
+                if let Some(entry) = session.urls.get_mut(*url_idx) {
+                    entry.status = UrlStatus::Fetched;
+                }
+                all_nodes.push((*url_idx, url.clone(), nodes));
             }
             Err(e) => println!("ERROR: {e:?}"),
         }
@@ -602,19 +627,21 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
         .files
         .iter()
         .filter(|f| f.status == FileEntryStatus::Completed)
-        .map(|f| f.path.clone())
+        .map(|f| f.key_or_path().to_string())
         .collect();
 
     // Collect files, skipping already-completed ones
     let mut all_files: Vec<DownloadItem> = Vec::new();
     let mut total_skipped = 0;
     let mut total_partial = 0;
-    for (_url, nodes) in &all_nodes {
+    for (url_idx, _url, nodes) in &all_nodes {
         let collected = downloader.collect_files(nodes, &no_progress).await;
-        for item in collected.to_download {
-            if completed_paths.contains(&item.path) {
+        for mut item in collected.to_download {
+            let key = file_key(*url_idx, &item.path);
+            if completed_paths.contains(&key) || completed_paths.contains(&item.path) {
                 total_skipped += 1;
             } else {
+                item.key = Some(key);
                 all_files.push(item);
             }
         }
@@ -676,5 +703,36 @@ mod tests {
     fn progress_bar_creation() {
         let bar = make_progress_bar(1000, "test.txt");
         assert_eq!(bar.length(), Some(1000));
+    }
+
+    #[test]
+    fn resume_url_selection_includes_pending_and_fetched() {
+        let session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "password", None),
+            DownloadConfig::default(),
+            vec![
+                UrlEntry {
+                    url: "https://mega.nz/file/pending".to_string(),
+                    status: UrlStatus::Pending,
+                },
+                UrlEntry {
+                    url: "https://mega.nz/file/fetched".to_string(),
+                    status: UrlStatus::Fetched,
+                },
+                UrlEntry {
+                    url: "https://mega.nz/file/error".to_string(),
+                    status: UrlStatus::Error("nope".to_string()),
+                },
+            ],
+        );
+
+        let urls = resumable_urls(&session);
+        assert_eq!(
+            urls,
+            vec![
+                (0, "https://mega.nz/file/pending".to_string()),
+                (1, "https://mega.nz/file/fetched".to_string()),
+            ]
+        );
     }
 }

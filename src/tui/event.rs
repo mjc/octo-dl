@@ -34,6 +34,11 @@ pub enum DownloadEvent {
         bytes_delta: u64,
         speed: u64,
     },
+    ResumeReused {
+        id: String,
+        chunks: usize,
+        bytes: u64,
+    },
     FileComplete {
         id: String,
         name: String,
@@ -116,6 +121,15 @@ impl DownloadProgress for TuiProgress {
             id,
             bytes_delta,
             speed,
+        });
+    }
+
+    fn on_resume_reused(&self, name: &str, chunks: usize, bytes: u64) {
+        let _ = self.intern_id(name);
+        let _ = self.tx.send(DownloadEvent::ResumeReused {
+            id: name.to_string(),
+            chunks,
+            bytes,
         });
     }
 

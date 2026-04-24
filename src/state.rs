@@ -68,10 +68,30 @@ pub struct UrlEntry {
 /// A file entry in the session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     pub url_index: usize,
     pub path: String,
     pub size: u64,
     pub status: FileEntryStatus,
+}
+
+/// Builds a stable session/UI key for a file path from a specific source URL.
+#[must_use]
+pub fn file_key(url_index: usize, path: &str) -> String {
+    format!("{url_index}:{path}")
+}
+
+impl FileEntry {
+    /// Returns the stable key for this file, falling back to legacy path-only identity.
+    #[must_use]
+    pub fn key_or_path(&self) -> &str {
+        self.key.as_deref().unwrap_or(&self.path)
+    }
+
+    fn matches_identity(&self, id_or_path: &str) -> bool {
+        self.key.as_deref() == Some(id_or_path) || self.path == id_or_path
+    }
 }
 
 /// Persistent session state for resume support.
@@ -215,7 +235,7 @@ impl SessionState {
     ///
     /// Returns an error if the state file cannot be written.
     pub fn mark_file_complete(&mut self, path: &str) -> std::io::Result<()> {
-        if let Some(entry) = self.files.iter_mut().find(|f| f.path == path) {
+        if let Some(entry) = self.files.iter_mut().find(|f| f.matches_identity(path)) {
             entry.status = FileEntryStatus::Completed;
         }
         self.save()
@@ -227,7 +247,7 @@ impl SessionState {
     ///
     /// Returns an error if the state file cannot be written.
     pub fn mark_file_error(&mut self, path: &str, error: &str) -> std::io::Result<()> {
-        if let Some(entry) = self.files.iter_mut().find(|f| f.path == path) {
+        if let Some(entry) = self.files.iter_mut().find(|f| f.matches_identity(path)) {
             entry.status = FileEntryStatus::Error(error.to_string());
         }
         self.save()
@@ -239,7 +259,7 @@ impl SessionState {
     ///
     /// Returns an error if the state file cannot be written.
     pub fn remove_file(&mut self, path: &str) -> std::io::Result<()> {
-        self.files.retain(|f| f.path != path);
+        self.files.retain(|f| !f.matches_identity(path));
         self.save()
     }
 
@@ -598,18 +618,21 @@ mod tests {
 
         state.files = vec![
             FileEntry {
+                key: None,
                 url_index: 0,
                 path: "file1.txt".to_string(),
                 size: 100,
                 status: FileEntryStatus::Completed,
             },
             FileEntry {
+                key: None,
                 url_index: 0,
                 path: "file2.txt".to_string(),
                 size: 200,
                 status: FileEntryStatus::Pending,
             },
             FileEntry {
+                key: None,
                 url_index: 0,
                 path: "file3.txt".to_string(),
                 size: 300,

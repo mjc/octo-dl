@@ -22,7 +22,7 @@ pub struct DownloadConfig {
     pub concurrent_files: usize,
     /// Whether to overwrite existing files.
     pub force_overwrite: bool,
-    /// Whether to clean up `.part` files on download error.
+    /// Whether to clean up `.part` files on recoverable download errors.
     pub cleanup_on_error: bool,
 }
 
@@ -33,7 +33,7 @@ impl Default for DownloadConfig {
             chunks_per_file: 2,
             concurrent_files: 4,
             force_overwrite: false,
-            cleanup_on_error: true,
+            cleanup_on_error: false,
         }
     }
 }
@@ -84,7 +84,7 @@ mod tests {
         assert_eq!(config.chunks_per_file, 2);
         assert_eq!(config.concurrent_files, 4);
         assert!(!config.force_overwrite);
-        assert!(config.cleanup_on_error);
+        assert!(!config.cleanup_on_error);
     }
 
     #[test]
@@ -93,12 +93,12 @@ mod tests {
             .with_chunks_per_file(8)
             .with_concurrent_files(2)
             .with_force_overwrite(true)
-            .with_cleanup_on_error(false);
+            .with_cleanup_on_error(true);
 
         assert_eq!(config.chunks_per_file, 8);
         assert_eq!(config.concurrent_files, 2);
         assert!(config.force_overwrite);
-        assert!(!config.cleanup_on_error);
+        assert!(config.cleanup_on_error);
     }
 
     #[test]

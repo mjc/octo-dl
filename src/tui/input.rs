@@ -540,12 +540,14 @@ mod tests {
         );
         session.files = vec![
             SessionFileEntry {
+                key: None,
                 url_index: 0,
                 path: "first.bin".to_string(),
                 size: 10,
                 status: FileEntryStatus::Pending,
             },
             SessionFileEntry {
+                key: None,
                 url_index: 0,
                 path: "second.bin".to_string(),
                 size: 20,

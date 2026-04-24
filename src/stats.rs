@@ -21,8 +21,12 @@ fn compute_average_speed(total_bytes: u64, elapsed: Duration) -> u64 {
 /// Statistics for a single file download.
 #[derive(Debug, Clone)]
 pub struct FileStats {
-    /// Total size of the file in bytes.
+    /// Completed file size in bytes.
     pub size: u64,
+    /// Bytes fetched from the network during this run.
+    pub network_bytes: u64,
+    /// Bytes reused from verified partial chunks.
+    pub reused_bytes: u64,
     /// Time taken to download the file.
     pub elapsed: Duration,
     /// Average download speed in bytes per second.
@@ -40,8 +44,12 @@ pub struct SessionStats {
     pub files_downloaded: usize,
     /// Number of files skipped (already existed).
     pub files_skipped: usize,
-    /// Total bytes downloaded.
+    /// Total completed file size.
     pub total_bytes: u64,
+    /// Bytes fetched from the network during this run.
+    pub network_bytes: u64,
+    /// Bytes reused from verified partial chunks.
+    pub reused_bytes: u64,
     /// Total elapsed time for the session.
     pub elapsed: Duration,
     /// Peak aggregate download speed in bytes per second.
@@ -64,6 +72,8 @@ impl SessionStats {
             files_downloaded: 0,
             files_skipped: 0,
             total_bytes: 0,
+            network_bytes: 0,
+            reused_bytes: 0,
             elapsed: Duration::ZERO,
             peak_speed: 0,
             average_ramp_up: None,
@@ -73,7 +83,7 @@ impl SessionStats {
     /// Returns the average download speed in bytes per second.
     #[must_use]
     pub fn average_speed(&self) -> u64 {
-        compute_average_speed(self.total_bytes, self.elapsed)
+        compute_average_speed(self.network_bytes, self.elapsed)
     }
 }
 
@@ -151,6 +161,12 @@ impl DownloadStatsTracker {
         compute_average_speed(self.total_bytes, self.elapsed())
     }
 
+    /// Returns bytes recorded as fetched from the network.
+    #[must_use]
+    pub fn downloaded_bytes(&self) -> u64 {
+        self.downloaded.load(Ordering::Relaxed)
+    }
+
     /// Returns the peak speed recorded.
     #[must_use]
     pub fn peak_speed(&self) -> u64 {
@@ -169,6 +185,8 @@ impl DownloadStatsTracker {
     pub fn into_file_stats(self) -> FileStats {
         FileStats {
             size: self.total_bytes,
+            network_bytes: self.downloaded.load(Ordering::Relaxed),
+            reused_bytes: 0,
             elapsed: self.elapsed(),
             average_speed: self.average_speed(),
             peak_speed: self.peak_speed(),
@@ -182,6 +200,8 @@ pub struct SessionStatsBuilder {
     files_downloaded: usize,
     files_skipped: usize,
     total_bytes: u64,
+    network_bytes: u64,
+    reused_bytes: u64,
     start_time: Instant,
     peak_speed: u64,
     total_ramp_up_ms: u64,
@@ -202,6 +222,8 @@ impl SessionStatsBuilder {
             files_downloaded: 0,
             files_skipped: 0,
             total_bytes: 0,
+            network_bytes: 0,
+            reused_bytes: 0,
             start_time: Instant::now(),
             peak_speed: 0,
             total_ramp_up_ms: 0,
@@ -223,6 +245,8 @@ impl SessionStatsBuilder {
     pub fn add_download(&mut self, file_stats: &FileStats) {
         self.files_downloaded += 1;
         self.total_bytes += file_stats.size;
+        self.network_bytes += file_stats.network_bytes;
+        self.reused_bytes += file_stats.reused_bytes;
         if let Some(ramp) = file_stats.ramp_up_time {
             self.total_ramp_up_ms += ramp.as_millis().try_into().unwrap_or(u64::MAX);
             self.ramp_up_count += 1;
@@ -244,6 +268,8 @@ impl SessionStatsBuilder {
             files_downloaded: self.files_downloaded,
             files_skipped: self.files_skipped,
             total_bytes: self.total_bytes,
+            network_bytes: self.network_bytes,
+            reused_bytes: self.reused_bytes,
             elapsed: self.start_time.elapsed(),
             peak_speed: self.peak_speed,
             average_ramp_up,
@@ -269,6 +295,8 @@ mod tests {
             files_downloaded: 1,
             files_skipped: 0,
             total_bytes: 1000,
+            network_bytes: 0,
+            reused_bytes: 0,
             elapsed: Duration::ZERO,
             peak_speed: 0,
             average_ramp_up: None,
@@ -282,6 +310,8 @@ mod tests {
             files_downloaded: 1,
             files_skipped: 0,
             total_bytes: 1000,
+            network_bytes: 1000,
+            reused_bytes: 0,
             elapsed: Duration::from_secs(2),
             peak_speed: 600,
             average_ramp_up: None,
@@ -319,6 +349,8 @@ mod tests {
 
         let file_stats = FileStats {
             size: 500,
+            network_bytes: 300,
+            reused_bytes: 200,
             elapsed: Duration::from_secs(1),
             average_speed: 500,
             peak_speed: 600,
@@ -330,6 +362,8 @@ mod tests {
         assert_eq!(stats.files_downloaded, 1);
         assert_eq!(stats.files_skipped, 2);
         assert_eq!(stats.total_bytes, 500);
+        assert_eq!(stats.network_bytes, 300);
+        assert_eq!(stats.reused_bytes, 200);
         assert_eq!(stats.peak_speed, 1000);
         assert!(stats.average_ramp_up.is_some());
     }
