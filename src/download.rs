@@ -54,8 +54,12 @@ pub trait DownloadProgress: Send + Sync {
     /// Called when a file download starts.
     fn on_file_start(&self, _name: &str, _size: u64) {}
 
-    /// Called periodically with the number of bytes downloaded since the last call.
-    fn on_progress(&self, _name: &str, _bytes_delta: u64, _speed: u64) {}
+    /// Called periodically with the number of bytes advanced since the last call.
+    ///
+    /// `bytes_delta` includes any locally reused bytes revealed by resume
+    /// revalidation, while `network_bytes_delta` counts only fresh bytes
+    /// received from the network during this callback interval.
+    fn on_progress(&self, _name: &str, _bytes_delta: u64, _network_bytes_delta: u64, _speed: u64) {}
 
     /// Called when a file download completes successfully.
     fn on_file_complete(&self, _name: &str, _stats: &FileStats) {}
@@ -874,7 +878,7 @@ impl<F: FileSystem> Downloader<F> {
                 } else {
                     0
                 };
-                progress_clone.on_progress(&name_for_cb, delta, speed);
+                progress_clone.on_progress(&name_for_cb, delta, fresh_delta, speed);
             }
         };
         let verify_tracker = Arc::clone(&tracker);

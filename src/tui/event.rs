@@ -32,6 +32,7 @@ pub enum DownloadEvent {
     Progress {
         id: Arc<str>,
         bytes_delta: u64,
+        network_bytes_delta: u64,
         speed: u64,
     },
     ResumeReused {
@@ -116,11 +117,12 @@ impl DownloadProgress for TuiProgress {
         });
     }
 
-    fn on_progress(&self, name: &str, bytes_delta: u64, speed: u64) {
+    fn on_progress(&self, name: &str, bytes_delta: u64, network_bytes_delta: u64, speed: u64) {
         let id = self.intern_id(name);
         let _ = self.tx.send(DownloadEvent::Progress {
             id,
             bytes_delta,
+            network_bytes_delta,
             speed,
         });
     }

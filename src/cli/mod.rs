@@ -104,7 +104,7 @@ impl DownloadProgress for CliDownloadProgress {
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn on_progress(&self, name: &str, bytes_delta: u64, _speed: u64) {
+    fn on_progress(&self, name: &str, bytes_delta: u64, _network_bytes_delta: u64, _speed: u64) {
         self.total_bar.inc(bytes_delta);
         let current_speed = self.total_bar.per_sec() as u64;
         self.session_peak
