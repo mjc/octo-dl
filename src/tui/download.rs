@@ -367,7 +367,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             let now = std::time::Instant::now();
             if let Some(fp) = app.find_file_mut(id.as_ref()) {
                 let accepted_delta = fp.record_progress(bytes_delta, now);
-                app.total_downloaded = app.total_downloaded.saturating_add(accepted_delta);
+                app.record_total_progress(accepted_delta, now);
             }
         }
         DownloadEvent::ResumeReused { id, chunks, bytes } => {
