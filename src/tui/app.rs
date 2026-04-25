@@ -940,13 +940,27 @@ impl App {
         if self.paused {
             return;
         }
+        let downloading_ids: Vec<_> = self
+            .files
+            .iter()
+            .filter(|file| matches!(file.status, FileStatus::Downloading))
+            .map(|file| file.id.clone())
+            .collect();
         self.set_paused(true);
         for token in self.cancellation_tokens.values() {
             token.cancel();
         }
-        for file in &mut self.files {
-            if matches!(file.status, FileStatus::Downloading) {
+        for file_id in downloading_ids {
+            if self.core_state.files.contains_key(&file_id) {
+                self.apply_core_event(CoreEvent::FileCancelled {
+                    file_id: file_id.clone(),
+                });
+            } else if let Some(file) = self.overlay_file_mut(&file_id) {
                 file.status = FileStatus::Queued;
+                file.reset_rate();
+                self.sync_visible_files();
+            }
+            if let Some(file) = self.find_file_mut(&file_id) {
                 file.reset_rate();
             }
         }
@@ -1388,6 +1402,48 @@ mod tests {
                 "a-complete.bin".to_string(),
                 "b-downloading.bin".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn pause_downloads_queues_core_backed_active_files() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "pkg".to_string(),
+                source_url: "https://mega.nz/folder/root".to_string(),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "episode.bin".to_string(),
+                    path: "episode.bin".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: "episode.bin".to_string(),
+            size: 128,
+        });
+        let token = CancellationToken::new();
+        app.cancellation_tokens
+            .insert("episode.bin".to_string(), token.clone());
+
+        app.pause_downloads();
+
+        assert!(app.paused);
+        assert!(token.is_cancelled());
+        assert_eq!(
+            app.core_state.files["episode.bin"].lifecycle,
+            FileLifecycle::Queued
+        );
+        assert_eq!(
+            app.files
+                .iter()
+                .find(|file| file.id == "episode.bin")
+                .expect("visible row should remain")
+                .status,
+            FileStatus::Queued
         );
     }
 }
