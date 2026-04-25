@@ -165,14 +165,17 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
             {
                 let source_url = app.files[selected].source_url.clone();
                 app.files[selected].status = FileStatus::Queued;
+                app.files[selected].counts_toward_progress = true;
                 app.files[selected].downloaded = 0;
                 app.files[selected].reset_rate();
                 if let Some(url) = source_url {
+                    app.recompute_totals();
                     let _ = app.url_tx.send(url);
                 } else {
                     app.files[selected].status =
                         FileStatus::Error("Retry unavailable for this file".to_string());
                     app.status = "Retry unavailable for this file".to_string();
+                    app.recompute_totals();
                 }
             }
         }
@@ -329,9 +332,10 @@ pub fn handle_paste(app: &mut App, text: &str) {
 
 /// Adds a URL and sends it to the download task if authenticated.
 pub fn add_url(app: &mut App, url: String) {
-    if !app.urls.contains(&url) {
-        app.urls.push(url.clone());
+    if app.urls.contains(&url) {
+        return;
     }
+    app.urls.push(url.clone());
     // Persist the URL in the session so it survives restarts
     if let Some(ref mut session) = app.session
         && !session.urls.iter().any(|u| u.url == url)
@@ -715,9 +719,46 @@ mod tests {
     #[test]
     fn add_url_deduplicates() {
         let mut app = test_app();
+        let mut url_rx = app.url_rx.take().expect("url_rx should exist");
         add_url(&mut app, "https://mega.nz/file/abc".to_string());
         add_url(&mut app, "https://mega.nz/file/abc".to_string());
         assert_eq!(app.urls.len(), 1);
+        assert_eq!(url_rx.try_recv().unwrap(), "https://mega.nz/file/abc");
+        assert!(url_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn retry_recomputes_totals_for_errored_file() {
+        let mut app = test_app();
+        let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+        app.url_tx = url_tx;
+        app.files.push(FileEntry {
+            id: "error.bin".to_string(),
+            name: "error.bin".to_string(),
+            size: 100,
+            downloaded: 42,
+            speed: 0,
+            rate: Default::default(),
+            source_url: Some("https://mega.nz/file/error".to_string()),
+            counts_toward_progress: true,
+            status: FileStatus::Error("boom".to_string()),
+        });
+        app.recompute_totals();
+        app.file_list_state.select(Some(0));
+
+        assert_eq!(app.files_total, 0);
+        assert_eq!(app.total_downloaded, 42);
+
+        handle_input(&mut app, key(KeyCode::Char('r')));
+
+        assert_eq!(app.files[0].status, FileStatus::Queued);
+        assert_eq!(app.files[0].downloaded, 0);
+        assert_eq!(app.files_total, 1);
+        assert_eq!(app.total_downloaded, 0);
+        assert_eq!(
+            url_rx.try_recv().unwrap(),
+            "https://mega.nz/file/error".to_string()
+        );
     }
 
     #[test]
