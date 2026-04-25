@@ -33,3 +33,27 @@ failed integrity verification.
 Session summaries distinguish completed file size, bytes fetched from the
 network during the current run, and bytes reused from partial files. Speed
 metrics are based on network bytes only.
+
+## NixOS module
+
+The flake exports `nixosModules.default`.
+
+The module now manages the `config.toml` it points at by default, so these
+NixOS options actually control the running service instead of drifting behind
+whatever the binary auto-created on first boot:
+
+- `services.octo-dl.web.host`
+- `services.octo-dl.web.port`
+- `services.octo-dl.downloadDir`
+- `services.octo-dl.chunksPerFile`
+- `services.octo-dl.concurrentFiles`
+- `services.octo-dl.forceOverwrite`
+- `services.octo-dl.cleanupOnError`
+
+Recommended secret setup is:
+
+- `services.octo-dl.environmentFile` with `MEGA_EMAIL`, `MEGA_PASSWORD`, and optional `MEGA_MFA`
+- `services.octo-dl.apiKeyFile` if you want a fixed API key instead of the auto-generated one
+
+Set `services.octo-dl.manageConfig = false` if you want to own the TOML file
+yourself.

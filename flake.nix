@@ -202,6 +202,13 @@
     )
     // {
       # NixOS module (system-independent, outside eachDefaultSystem)
-      nixosModules.default = import ./nixos-module.nix;
+      nixosModules.default = {
+        pkgs,
+        lib,
+        ...
+      }: {
+        imports = [./nixos-module.nix];
+        services.octo-dl.package = lib.mkDefault self.packages.${pkgs.system}.octo-dl;
+      };
     };
 }
