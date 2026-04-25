@@ -82,40 +82,8 @@ use self::input::{add_url, handle_input, handle_paste};
 // ---------------------------------------------------------------------------
 
 fn restore_restart_snapshot(app: &mut App, snapshot: &RestartSnapshot) {
-    app.files.clear();
-    for file in snapshot.state.files.values() {
-        if matches!(file.lifecycle, FileLifecycle::Skipped | FileLifecycle::Deleted) {
-            continue;
-        }
-        let source_url = snapshot
-            .state
-            .packages
-            .get(&file.package_id)
-            .map(|package| package.source_url.clone());
-        let (status, downloaded) = match file.lifecycle {
-            FileLifecycle::Planned | FileLifecycle::Queued | FileLifecycle::Downloading => {
-                (FileStatus::Queued, file.progress.visible_completed_bytes)
-            }
-            FileLifecycle::Failed => (
-                FileStatus::Error(file.message.clone().unwrap_or_else(|| "failed".to_string())),
-                file.progress.visible_completed_bytes,
-            ),
-            FileLifecycle::Complete => (FileStatus::Complete, file.size),
-            FileLifecycle::Skipped | FileLifecycle::Deleted => continue,
-        };
-
-        app.files.push(app::FileEntry {
-            id: file.id.clone(),
-            name: file.path.clone(),
-            size: file.size,
-            downloaded,
-            speed: 0,
-            rate: Default::default(),
-            source_url,
-            counts_toward_progress: file.runtime.counts_in_run_totals,
-            status,
-        });
-    }
+    app.core_state = snapshot.state.clone();
+    app.sync_visible_files_from_core();
     app.recompute_totals();
 }
 
@@ -188,7 +156,6 @@ pub(crate) fn resume_session(app: &mut App) {
         })
         .collect();
     let _ = session.save();
-    app.core_state = restart.state.clone();
     app.urls.clone_from(&resumed_urls);
     for url in resumed_urls {
         let _ = app.url_tx.send(url);
@@ -558,6 +525,11 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
                         f.counts_toward_progress,
                     )
                 });
+            let is_core_backed = app.core_state.files.contains_key(&id)
+                || core_row
+                    .as_ref()
+                    .and_then(|(source_url, ..)| source_url.as_ref())
+                    .is_some();
             let artifact_path = app
                 .files
                 .iter()
@@ -574,12 +546,16 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
             app.apply_core_event(CoreEvent::FileDeleted {
                 file_id: id.clone(),
             });
-            app.files.retain(|f| f.id != id);
+            if !is_core_backed {
+                app.files.retain(|f| f.id != id);
+            }
             download::schedule_download_artifact_delete(artifact_path);
             if let Some(ref mut session) = app.session {
                 let _ = session.mark_file_skipped(&id);
             }
-            app.recompute_totals();
+            if !is_core_backed {
+                app.recompute_totals();
+            }
         }
         UiAction::RetryFile(id) => {
             let core_row = app
@@ -594,15 +570,7 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
                         f.counts_toward_progress,
                     )
                 });
-            let source_url = if let Some(f) = app.find_file_mut(&id) {
-                f.status = FileStatus::Queued;
-                f.counts_toward_progress = true;
-                f.downloaded = 0;
-                f.reset_rate();
-                f.source_url.clone()
-            } else {
-                None
-            };
+            let source_url = app.find_file_mut(&id).and_then(|f| f.source_url.clone());
             if let Some((Some(source_url), name, size, counts_toward_progress)) = core_row {
                 app.ensure_core_file(&id, &source_url, &name, size, counts_toward_progress);
             }
@@ -610,14 +578,15 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
                 file_id: id.clone(),
             });
             if let Some(url) = source_url {
-                app.recompute_totals();
+                if let Some(file) = app.find_file_mut(&id) {
+                    file.reset_rate();
+                }
                 let _ = app.url_tx.send(url);
             } else {
                 app.status = format!("Retry unavailable for {id}");
                 if let Some(f) = app.find_file_mut(&id) {
                     f.status = FileStatus::Error("Retry unavailable for this file".to_string());
                 }
-                app.recompute_totals();
             }
         }
         UiAction::UpdateConfig {

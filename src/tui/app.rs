@@ -12,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     DownloadConfig, SessionState,
     core::{
-        CoreEffect, CoreEvent, DownloadState, ResolvedFile, ResolvedPackage, SessionMeta, reduce,
+        CoreEffect, CoreEvent, DownloadState, FileLifecycle, FileState, PackageState,
+        ResolvedFile, ResolvedPackage, SessionMeta, reduce,
     },
 };
 
@@ -396,6 +397,67 @@ pub struct App {
 }
 
 impl App {
+    fn project_core_file(
+        file: &FileState,
+        package: Option<&PackageState>,
+        existing: Option<FileEntry>,
+    ) -> Option<FileEntry> {
+        let status = match file.lifecycle {
+            FileLifecycle::Planned | FileLifecycle::Queued => FileStatus::Queued,
+            FileLifecycle::Downloading => FileStatus::Downloading,
+            FileLifecycle::Complete => FileStatus::Complete,
+            FileLifecycle::Failed => {
+                FileStatus::Error(file.message.clone().unwrap_or_else(|| "failed".to_string()))
+            }
+            FileLifecycle::Skipped | FileLifecycle::Deleted => return None,
+        };
+
+        let downloaded = match file.lifecycle {
+            FileLifecycle::Complete => file.size,
+            _ => file.progress.visible_completed_bytes.min(file.size),
+        };
+        let source_url = package.map(|package| package.source_url.clone());
+        let counts_toward_progress =
+            file.runtime.counts_in_run_totals && !file.runtime.preexisting_complete;
+        let now = Instant::now();
+
+        if let Some(mut existing) = existing {
+            existing.name = file.path.clone();
+            existing.size = file.size;
+            existing.downloaded = downloaded;
+            existing.source_url = source_url;
+            existing.counts_toward_progress = counts_toward_progress;
+            if matches!(status, FileStatus::Downloading) {
+                if !matches!(existing.status, FileStatus::Downloading)
+                    || existing.downloaded > downloaded
+                {
+                    existing.rate.reset(downloaded, now);
+                    existing.speed = 0;
+                }
+            } else {
+                existing.speed = 0;
+            }
+            existing.status = status;
+            return Some(existing);
+        }
+
+        let mut rate = TransferRate::default();
+        if matches!(status, FileStatus::Downloading) {
+            rate.reset(downloaded, now);
+        }
+        Some(FileEntry {
+            id: file.id.clone(),
+            name: file.path.clone(),
+            size: file.size,
+            downloaded,
+            speed: 0,
+            rate,
+            source_url,
+            counts_toward_progress,
+            status,
+        })
+    }
+
     fn snapshot_packages(&self) -> Vec<serde_json::Value> {
         if !self.core_state.packages.is_empty() {
             return self
@@ -469,6 +531,51 @@ impl App {
         self.sorted_file_indices().get(selected).copied()
     }
 
+    pub(crate) fn sync_visible_files_from_core(&mut self) {
+        let selected_id = self.selected_file_index().map(|index| self.files[index].id.clone());
+        let selected_row = self.file_list_state.selected().unwrap_or(0);
+        let core_file_ids: HashSet<_> = self.core_state.files.keys().cloned().collect();
+        let existing: IndexMap<_, _> = std::mem::take(&mut self.files)
+            .into_iter()
+            .map(|file| (file.id.clone(), file))
+            .collect();
+
+        let mut existing = existing;
+        let mut files = Vec::new();
+        for file in self.core_state.files.values() {
+            let package = self.core_state.packages.get(&file.package_id);
+            let existing = existing.shift_remove(&file.id);
+            if let Some(entry) = Self::project_core_file(file, package, existing) {
+                files.push(entry);
+            }
+        }
+
+        for (id, entry) in existing {
+            if !core_file_ids.contains(&id) {
+                files.push(entry);
+            }
+        }
+
+        self.files = files;
+        if let Some(selected_id) = selected_id {
+            if let Some(display_row) = self
+                .sorted_file_indices()
+                .into_iter()
+                .position(|index| self.files[index].id == selected_id)
+            {
+                self.file_list_state.select(Some(display_row));
+                return;
+            }
+        }
+
+        if self.files.is_empty() {
+            self.file_list_state.select(None);
+        } else {
+            self.file_list_state
+                .select(Some(selected_row.min(self.files.len() - 1)));
+        }
+    }
+
     fn update_speeds_at(&mut self, now: Instant) {
         self.last_tick = now;
 
@@ -502,31 +609,31 @@ impl App {
     ///
     /// Call after deleting files to keep counters consistent.
     pub fn recompute_totals(&mut self) {
-        self.total_size = self
-            .files
-            .iter()
-            .filter(|f| f.counts_toward_progress)
-            .map(|f| f.size)
-            .sum();
-        self.total_downloaded = self
-            .files
-            .iter()
-            .filter(|f| f.counts_toward_progress)
-            .map(|f| f.downloaded)
-            .sum();
-        self.files_completed = self
-            .files
-            .iter()
-            .filter(|f| f.counts_toward_progress && matches!(f.status, FileStatus::Complete))
-            .count();
-        self.files_total = self
-            .files
-            .iter()
-            .filter(|f| f.counts_toward_progress && !matches!(f.status, FileStatus::Error(_)))
-            .count();
+        self.total_size = self.core_state.totals.run_total_bytes;
+        self.total_downloaded = self.core_state.totals.run_completed_bytes;
+        self.files_completed = self.core_state.totals.run_file_completed;
+        self.files_total = self.core_state.totals.run_file_total;
+        self.total_network_downloaded = self.core_state.totals.displayed_network_bytes;
+
+        for file in &self.files {
+            if self.core_state.files.contains_key(&file.id) || !file.counts_toward_progress {
+                continue;
+            }
+            self.total_size = self.total_size.saturating_add(file.size);
+            self.total_downloaded = self.total_downloaded.saturating_add(file.downloaded);
+            self.total_network_downloaded =
+                self.total_network_downloaded.saturating_add(file.downloaded);
+            if matches!(file.status, FileStatus::Complete) {
+                self.files_completed = self.files_completed.saturating_add(1);
+            }
+            if !matches!(file.status, FileStatus::Error(_)) {
+                self.files_total = self.files_total.saturating_add(1);
+            }
+        }
+
         self.current_speed = 0;
         self.aggregate_rate
-            .reset(self.total_downloaded, Instant::now());
+            .reset(self.total_network_downloaded, Instant::now());
     }
 
     pub fn new(
@@ -610,6 +717,8 @@ impl App {
         self.seed_core_session_from_session();
         let effects = reduce(&mut self.core_state, event);
         self.apply_core_effects(effects);
+        self.sync_visible_files_from_core();
+        self.recompute_totals();
     }
 
     fn apply_core_effects(&mut self, effects: Vec<CoreEffect>) {
