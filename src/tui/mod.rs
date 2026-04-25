@@ -83,7 +83,7 @@ use self::input::{add_url, handle_input, handle_paste};
 
 fn restore_restart_snapshot(app: &mut App, snapshot: &RestartSnapshot) {
     app.core_state = snapshot.state.clone();
-    app.sync_visible_files_from_core();
+    app.sync_visible_files();
     app.recompute_totals();
 }
 
@@ -543,11 +543,12 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
                 token.cancel();
             }
             app.deleted_files.insert(id.clone());
-            app.apply_core_event(CoreEvent::FileDeleted {
-                file_id: id.clone(),
-            });
-            if !is_core_backed {
-                app.files.retain(|f| f.id != id);
+            if is_core_backed {
+                app.apply_core_event(CoreEvent::FileDeleted {
+                    file_id: id.clone(),
+                });
+            } else {
+                let _ = app.remove_overlay_file(&id);
             }
             download::schedule_download_artifact_delete(artifact_path);
             if let Some(ref mut session) = app.session {
@@ -584,8 +585,13 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
                 let _ = app.url_tx.send(url);
             } else {
                 app.status = format!("Retry unavailable for {id}");
-                if let Some(f) = app.find_file_mut(&id) {
+                if app.core_state.files.contains_key(&id) {
+                    if let Some(f) = app.find_file_mut(&id) {
+                        f.status = FileStatus::Error("Retry unavailable for this file".to_string());
+                    }
+                } else if let Some(f) = app.overlay_file_mut(&id) {
                     f.status = FileStatus::Error("Retry unavailable for this file".to_string());
+                    app.sync_visible_files();
                 }
             }
         }

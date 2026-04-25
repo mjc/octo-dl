@@ -265,12 +265,13 @@ pub fn handle_file_error(app: &mut App, id: &str, name: &str, error: &str) {
     app.cancellation_tokens.remove(id);
     if app.core_state.files.contains_key(id) {
         // Core-backed rows are projected back into the TUI view.
-    } else if let Some(fp) = app.find_file_mut(id) {
+    } else if let Some(fp) = app.overlay_file_mut(id) {
         fp.status = FileStatus::Error(error.to_string());
         fp.reset_rate();
         fp.name = name.to_string();
+        app.sync_visible_files();
     } else {
-        app.files.push(FileEntry {
+        app.upsert_overlay_file(FileEntry {
             id: id.to_string(),
             name: name.to_string(),
             size: 0,
@@ -292,11 +293,12 @@ pub fn handle_file_error(app: &mut App, id: &str, name: &str, error: &str) {
 /// Used for URL-level errors that should never be retried.
 pub fn show_error_ui_only(app: &mut App, name: &str, error: &str) {
     app.cancellation_tokens.remove(name);
-    if let Some(fp) = app.find_file_mut(name) {
+    if let Some(fp) = app.overlay_file_mut(name) {
         fp.status = FileStatus::Error(error.to_string());
         fp.reset_rate();
+        app.sync_visible_files();
     } else {
-        app.files.push(FileEntry {
+        app.upsert_overlay_file(FileEntry {
             id: name.to_string(),
             name: name.to_string(),
             size: 0,
@@ -451,7 +453,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                     let _ = session.save();
                 }
                 // Remove URL placeholder from UI and show error without persisting as file
-                app.files.retain(|f| f.id != name);
+                let _ = app.remove_overlay_file(&name);
                 show_error_ui_only(app, &name, &error);
             } else if let Some(id) = id {
                 // For actual file download errors, mark as error and keep in session for retry
@@ -470,8 +472,8 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 return;
             }
             // Add a placeholder entry showing the URL while we fetch file info
-            if !app.files.iter().any(|f| f.id == url) {
-                app.files.push(FileEntry {
+            if !app.overlay_files.contains_key(&url) {
+                app.upsert_overlay_file(FileEntry {
                     id: url.clone(),
                     name: url,
                     size: 0,
@@ -544,7 +546,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
         }
         DownloadEvent::UrlResolved { url } => {
             // Remove the URL placeholder now that real file entries exist
-            app.files.retain(|f| f.id != url);
+            let _ = app.drop_overlay_file(&url);
             // Mark URL as fetched in session so it's not re-sent on resume
             if let Some(ref mut session) = app.session {
                 if let Some(entry) = session.urls.iter_mut().find(|u| u.url == url) {
@@ -990,6 +992,58 @@ mod tests {
         let session = app.session.as_ref().expect("session should remain");
         assert_eq!(session.files.len(), 1);
         assert_eq!(session.files[0].status, FileEntryStatus::Skipped);
+    }
+
+    #[test]
+    fn url_placeholder_lives_in_overlay_until_resolved() {
+        let mut app = test_app();
+        let url = "https://mega.nz/folder/root".to_string();
+
+        handle_download_event(&mut app, DownloadEvent::UrlQueued { url: url.clone() });
+        assert!(app.overlay_files.contains_key(&url));
+        assert!(app.files.iter().any(|file| file.id == url));
+
+        handle_download_event(&mut app, DownloadEvent::UrlResolved { url: url.clone() });
+        assert!(!app.overlay_files.contains_key(&url));
+        assert!(!app.files.iter().any(|file| file.id == url));
+    }
+
+    #[test]
+    fn url_level_error_replaces_placeholder_in_overlay() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let mut app = test_app();
+        let url = "https://mega.nz/folder/root".to_string();
+        let session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![UrlEntry {
+                url: url.clone(),
+                status: UrlStatus::Pending,
+            }],
+        );
+        app.session = Some(session);
+
+        handle_download_event(&mut app, DownloadEvent::UrlQueued { url: url.clone() });
+        handle_download_event(
+            &mut app,
+            DownloadEvent::Error {
+                id: None,
+                name: url.clone(),
+                error: "bad folder".to_string(),
+            },
+        );
+
+        let overlay = app
+            .overlay_files
+            .get(&url)
+            .expect("url-level errors should remain in overlay");
+        assert!(matches!(overlay.status, FileStatus::Error(ref msg) if msg == "bad folder"));
+        let session = app.session.as_ref().expect("session should remain");
+        assert!(matches!(
+            session.urls[0].status,
+            UrlStatus::Error(ref msg) if msg == "bad folder"
+        ));
     }
 
     #[test]

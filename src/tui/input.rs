@@ -187,8 +187,13 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
                     }
                     let _ = app.url_tx.send(url);
                 } else {
-                    app.files[selected].status =
-                        FileStatus::Error("Retry unavailable for this file".to_string());
+                    if app.core_state.files.contains_key(&file_id) {
+                        app.files[selected].status =
+                            FileStatus::Error("Retry unavailable for this file".to_string());
+                    } else if let Some(file) = app.overlay_file_mut(&file_id) {
+                        file.status = FileStatus::Error("Retry unavailable for this file".to_string());
+                        app.sync_visible_files();
+                    }
                     app.status = "Retry unavailable for this file".to_string();
                 }
             }
@@ -239,8 +244,12 @@ fn reset_selected(app: &mut App) {
     let file_id = app.files[selected].id.clone();
     let artifact_path = app.files[selected].name.clone();
     let Some(source_url) = app.files[selected].source_url.clone() else {
-        app.files[selected].status =
-            FileStatus::Error("Reset unavailable for this file".to_string());
+        if app.core_state.files.contains_key(&file_id) {
+            app.files[selected].status = FileStatus::Error("Reset unavailable for this file".to_string());
+        } else if let Some(file) = app.overlay_file_mut(&file_id) {
+            file.status = FileStatus::Error("Reset unavailable for this file".to_string());
+            app.sync_visible_files();
+        }
         app.status = "Reset unavailable for selected file".to_string();
         app.recompute_totals();
         return;
@@ -342,11 +351,12 @@ fn delete_selected(app: &mut App) {
     }
     let is_core_backed = app.core_state.files.contains_key(&file_id) || source_url.is_some();
     app.deleted_files.insert(file_id.clone());
-    app.apply_core_event(CoreEvent::FileDeleted {
-        file_id: file_id.clone(),
-    });
-    if !is_core_backed {
-        app.files.remove(selected_file);
+    if is_core_backed {
+        app.apply_core_event(CoreEvent::FileDeleted {
+            file_id: file_id.clone(),
+        });
+    } else {
+        let _ = app.remove_overlay_file(&file_id);
     }
     schedule_download_artifact_delete(artifact_path);
     if let Some(ref mut session) = app.session {
