@@ -23,7 +23,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     DlcKeyCache, DownloadConfig, DownloadProgress, SavedCredentials, SessionState, UrlEntry,
-    UrlStatus, file_key, format_bytes, is_dlc_path,
+    UrlStatus,
+    core::ProgressDelta,
+    file_key, format_bytes, is_dlc_path,
 };
 use dirs;
 
@@ -132,12 +134,10 @@ impl DownloadProgress for FileProgress {
         });
     }
 
-    fn on_progress(&self, _name: &str, bytes_delta: u64, network_bytes_delta: u64, speed: u64) {
+    fn on_progress(&self, _name: &str, delta: ProgressDelta) {
         let _ = self.tx.send(DownloadEvent::Progress {
             id: Arc::<str>::from(self.id.as_str()),
-            bytes_delta,
-            network_bytes_delta,
-            speed,
+            delta,
         });
     }
 
@@ -360,20 +360,14 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             }
             app.recompute_totals();
         }
-        DownloadEvent::Progress {
-            id,
-            bytes_delta,
-            network_bytes_delta,
-            speed,
-        } => {
+        DownloadEvent::Progress { id, delta } => {
             if app.deleted_files.contains(id.as_ref()) {
                 return;
             }
-            let _ = speed; // lifetime average from downloader; UI uses smoothed throughput.
             let now = std::time::Instant::now();
             if let Some(fp) = app.find_file_mut(id.as_ref()) {
-                let accepted_delta = fp.record_progress(bytes_delta, now);
-                let accepted_network_delta = network_bytes_delta.min(accepted_delta);
+                let accepted_delta = fp.record_progress(delta.total_bytes_delta, now);
+                let accepted_network_delta = delta.network_bytes_delta.min(accepted_delta);
                 app.record_total_progress(accepted_delta, accepted_network_delta, now);
             }
         }
@@ -1107,9 +1101,10 @@ mod tests {
                 &mut app,
                 DownloadEvent::Progress {
                     id: std::sync::Arc::<str>::from("test.bin"),
-                    bytes_delta: d,
-                    network_bytes_delta: d,
-                    speed: 0,
+                    delta: ProgressDelta {
+                        total_bytes_delta: d,
+                        network_bytes_delta: d,
+                    },
                 },
             );
         }
@@ -1151,9 +1146,10 @@ mod tests {
                 &mut app,
                 DownloadEvent::Progress {
                     id: std::sync::Arc::<str>::from("test.bin"),
-                    bytes_delta: c, // wrong! these are cumulative
-                    network_bytes_delta: c,
-                    speed: 0,
+                    delta: ProgressDelta {
+                        total_bytes_delta: c, // wrong! these are cumulative
+                        network_bytes_delta: c,
+                    },
                 },
             );
         }

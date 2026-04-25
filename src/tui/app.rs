@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 use serde::Serialize;
 use tokio::sync::{mpsc, watch};
@@ -389,6 +390,47 @@ pub struct App {
 }
 
 impl App {
+    fn snapshot_packages(&self) -> Vec<serde_json::Value> {
+        let mut packages = IndexMap::<String, Vec<&FileEntry>>::new();
+        for file in &self.files {
+            let package_id = file
+                .source_url
+                .clone()
+                .unwrap_or_else(|| file.id.clone());
+            packages.entry(package_id).or_default().push(file);
+        }
+
+        packages
+            .into_iter()
+            .map(|(package_id, files)| {
+                let status = if files
+                    .iter()
+                    .any(|file| matches!(file.status, FileStatus::Error(_)))
+                {
+                    "failed"
+                } else if files
+                    .iter()
+                    .any(|file| matches!(file.status, FileStatus::Downloading))
+                {
+                    "downloading"
+                } else if files.iter().all(|file| matches!(file.status, FileStatus::Complete)) {
+                    "complete"
+                } else if files.iter().any(|file| matches!(file.status, FileStatus::Complete)) {
+                    "partial"
+                } else {
+                    "queued"
+                };
+                serde_json::json!({
+                    "id": package_id,
+                    "source_url": files[0].source_url.clone().unwrap_or_else(|| files[0].id.clone()),
+                    "display_name": files[0].source_url.clone().unwrap_or_else(|| files[0].name.clone()),
+                    "status": status,
+                    "file_ids": files.iter().map(|file| file.id.clone()).collect::<Vec<_>>(),
+                })
+            })
+            .collect()
+    }
+
     pub fn sorted_file_indices(&self) -> Vec<usize> {
         let mut indices: Vec<_> = (0..self.files.len()).collect();
         indices.sort_by_key(|&i| match &self.files[i].status {
@@ -573,18 +615,30 @@ impl App {
     #[allow(dead_code)]
     pub fn to_json(&self) -> String {
         #[derive(Serialize)]
+        struct RunTotals {
+            run_total_bytes: u64,
+            run_completed_bytes: u64,
+            run_file_total: usize,
+            run_file_completed: usize,
+            displayed_network_rate_bps: u64,
+        }
+
+        #[derive(Serialize)]
         struct Snapshot<'a> {
             authenticated: bool,
             paused: bool,
             logging_in: bool,
             login_error: Option<&'a str>,
             popup: Popup,
+            packages: Vec<serde_json::Value>,
             files: &'a [FileEntry],
             total_downloaded: u64,
             total_size: u64,
             files_completed: usize,
             files_total: usize,
             current_speed: u64,
+            displayed_network_rate_bps: u64,
+            run_totals: RunTotals,
             cpu_usage: f32,
             memory_rss: u64,
             api_port: u16,
@@ -597,12 +651,21 @@ impl App {
             logging_in: self.login.logging_in,
             login_error: self.login.error.as_deref(),
             popup: self.popup,
+            packages: self.snapshot_packages(),
             files: &self.files,
             total_downloaded: self.total_downloaded,
             total_size: self.total_size,
             files_completed: self.files_completed,
             files_total: self.files_total,
             current_speed: self.current_speed,
+            displayed_network_rate_bps: self.current_speed,
+            run_totals: RunTotals {
+                run_total_bytes: self.total_size,
+                run_completed_bytes: self.total_downloaded,
+                run_file_total: self.files_total,
+                run_file_completed: self.files_completed,
+                displayed_network_rate_bps: self.current_speed,
+            },
             cpu_usage: self.cpu_usage,
             memory_rss: self.memory_rss,
             api_port: self.api_port,
@@ -797,8 +860,11 @@ mod tests {
 
         assert_eq!(file["id"], "stable/file.bin");
         assert_eq!(file["status"], "downloading");
+        assert_eq!(snapshot["packages"][0]["source_url"], "https://mega.nz/file/abc");
         assert_eq!(snapshot["total_downloaded"], 64);
         assert_eq!(snapshot["total_size"], 128);
+        assert_eq!(snapshot["run_totals"]["run_total_bytes"], 128);
+        assert_eq!(snapshot["displayed_network_rate_bps"], 0);
         assert!(file.get("rate").is_none());
         assert!(file.get("source_url").is_none());
         assert_eq!(snapshot["cpu_usage"], 12.5);

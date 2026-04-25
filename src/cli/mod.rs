@@ -14,7 +14,7 @@ use crate::{
     DlcKeyCache, DownloadConfig, DownloadItem, DownloadProgress, FileEntry, FileEntryStatus,
     FileStats, NoProgress, SavedCredentials, SessionState, SessionStats, SessionStatsBuilder,
     SessionStatus, UrlEntry, UrlStatus,
-    core::{RestartSnapshot, reconcile_restart, scan_filesystem},
+    core::{ProgressDelta, RestartSnapshot, reconcile_restart, scan_filesystem},
     file_key, format_bytes, format_duration, is_dlc_path,
 };
 
@@ -106,13 +106,13 @@ impl DownloadProgress for CliDownloadProgress {
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn on_progress(&self, name: &str, bytes_delta: u64, _network_bytes_delta: u64, _speed: u64) {
-        self.total_bar.inc(bytes_delta);
+    fn on_progress(&self, name: &str, delta: ProgressDelta) {
+        self.total_bar.inc(delta.total_bytes_delta);
         let current_speed = self.total_bar.per_sec() as u64;
         self.session_peak
             .fetch_max(current_speed, Ordering::Relaxed);
         if let Some(bar) = self.bars.lock().unwrap().get(name) {
-            bar.inc(bytes_delta);
+            bar.inc(delta.total_bytes_delta);
         }
     }
 
