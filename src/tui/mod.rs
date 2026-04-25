@@ -71,7 +71,7 @@ impl Drop for TerminalGuard {
         );
     }
 }
-use self::input::{handle_input, handle_paste};
+use self::input::{add_url, handle_input, handle_paste};
 
 // ---------------------------------------------------------------------------
 // Helpers — small, focused functions extracted from the three run variants
@@ -529,11 +529,11 @@ async fn run_web_loop(
 fn handle_ui_action(app: &mut App, action: UiAction) {
     match action {
         UiAction::AddUrls(urls) => {
-            for url in &urls {
-                let _ = app.url_tx.send(url.clone());
+            let count = urls.len();
+            for url in urls {
+                add_url(app, url);
             }
-            app.urls.extend(urls.iter().cloned());
-            let _ = app.event_tx.send(DownloadEvent::UrlsReceived { urls });
+            app.status = format!("Received {count} URL(s) from bookmarklet");
         }
         UiAction::Login {
             email,
@@ -563,7 +563,7 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
             }
             app.deleted_files.insert(id.clone());
             app.files.retain(|f| f.id != id);
-            download::schedule_resume_artifact_delete(artifact_path);
+            download::schedule_download_artifact_delete(artifact_path);
             if let Some(ref mut session) = app.session {
                 let _ = session.mark_file_skipped(&id);
             }
@@ -572,6 +572,7 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
         UiAction::RetryFile(id) => {
             let source_url = if let Some(f) = app.find_file_mut(&id) {
                 f.status = FileStatus::Queued;
+                f.counts_toward_progress = true;
                 f.downloaded = 0;
                 f.reset_rate();
                 f.source_url.clone()
@@ -579,12 +580,14 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
                 None
             };
             if let Some(url) = source_url {
+                app.recompute_totals();
                 let _ = app.url_tx.send(url);
             } else {
                 app.status = format!("Retry unavailable for {id}");
                 if let Some(f) = app.find_file_mut(&id) {
                     f.status = FileStatus::Error("Retry unavailable for this file".to_string());
                 }
+                app.recompute_totals();
             }
         }
         UiAction::UpdateConfig {
@@ -1195,6 +1198,96 @@ mod tests {
                 .any(|file| file.path == "completed.mkv")
         );
         assert!(session.files.iter().any(|file| file.path == "pending.mkv"));
+    }
+
+    #[test]
+    fn ui_add_urls_enqueues_each_unique_url_once() {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(0, event_tx, true);
+        let mut url_rx = app.url_rx.take().expect("url_rx should exist");
+
+        handle_ui_action(
+            &mut app,
+            UiAction::AddUrls(vec![
+                "https://mega.nz/file/one".to_string(),
+                "https://mega.nz/file/one".to_string(),
+                "https://mega.nz/file/two".to_string(),
+            ]),
+        );
+
+        assert_eq!(
+            app.urls,
+            vec![
+                "https://mega.nz/file/one".to_string(),
+                "https://mega.nz/file/two".to_string()
+            ]
+        );
+        assert_eq!(url_rx.try_recv().unwrap(), "https://mega.nz/file/one");
+        assert_eq!(url_rx.try_recv().unwrap(), "https://mega.nz/file/two");
+        assert!(url_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ui_retry_file_recomputes_totals() {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(0, event_tx, true);
+        let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.url_tx = url_tx;
+        app.files.push(app::FileEntry {
+            id: "error.bin".to_string(),
+            name: "error.bin".to_string(),
+            size: 100,
+            downloaded: 20,
+            speed: 0,
+            rate: Default::default(),
+            source_url: Some("https://mega.nz/file/error".to_string()),
+            counts_toward_progress: true,
+            status: FileStatus::Error("boom".to_string()),
+        });
+        app.recompute_totals();
+
+        assert_eq!(app.files_total, 0);
+        assert_eq!(app.total_downloaded, 20);
+
+        handle_ui_action(&mut app, UiAction::RetryFile("error.bin".to_string()));
+
+        assert_eq!(app.files[0].status, FileStatus::Queued);
+        assert_eq!(app.files[0].downloaded, 0);
+        assert_eq!(app.files_total, 1);
+        assert_eq!(app.total_downloaded, 0);
+        assert_eq!(
+            url_rx.try_recv().unwrap(),
+            "https://mega.nz/file/error".to_string()
+        );
+    }
+
+    #[test]
+    fn ui_delete_file_removes_completed_artifact_from_disk() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("completed.bin");
+        std::fs::write(&file_path, b"done").unwrap();
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(0, event_tx, true);
+        app.files.push(app::FileEntry {
+            id: file_path.to_string_lossy().into_owned(),
+            name: file_path.to_string_lossy().into_owned(),
+            size: 4,
+            downloaded: 4,
+            speed: 0,
+            rate: Default::default(),
+            source_url: Some("https://mega.nz/file/completed".to_string()),
+            counts_toward_progress: false,
+            status: FileStatus::Complete,
+        });
+
+        handle_ui_action(
+            &mut app,
+            UiAction::DeleteFile(file_path.to_string_lossy().into_owned()),
+        );
+
+        assert!(app.files.is_empty());
+        assert!(!file_path.exists());
     }
 
     #[test]
