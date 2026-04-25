@@ -158,89 +158,79 @@ in {
       webHostFlag = lib.optionalString (cfg.web.enable && cfg.web.publicHost != null) " --web-host ${cfg.web.publicHost}";
       apiHostFlag = " --host ${cfg.web.host}";
       manageConfigScript = ''
+        toml_quote() {
+          local value="$1"
+          value=''${value//\\/\\\\}
+          value=''${value//\"/\\\"}
+          printf '"%s"' "$value"
+        }
+
+        read_toml_value() {
+          local section="$1"
+          local key="$2"
+          local file="$3"
+
+          [ -f "$file" ] || return 1
+
+          awk -v section="$section" -v key="$key" '
+            /^\[/ {
+              in_section = ($0 == "[" section "]")
+              next
+            }
+            in_section && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+              sub(/^[[:space:]]*[^=]+=[[:space:]]*/, "", $0)
+              print
+              exit
+            }
+          ' "$file"
+        }
+
         umask 077
         mkdir -p "$(dirname "$OCTO_CONFIG_PATH")"
-        ${pkgs.python3}/bin/python3 <<'PY'
-import json
-import os
-from pathlib import Path
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover
-    import tomli as tomllib
+        encrypted="$(read_toml_value credentials encrypted "$OCTO_CONFIG_PATH" || true)"
+        email="$(read_toml_value credentials email "$OCTO_CONFIG_PATH" || true)"
+        password="$(read_toml_value credentials password "$OCTO_CONFIG_PATH" || true)"
+        mfa="$(read_toml_value credentials mfa "$OCTO_CONFIG_PATH" || true)"
+        api_key="$(read_toml_value api api_key "$OCTO_CONFIG_PATH" || true)"
 
-config_path = Path(os.environ["OCTO_CONFIG_PATH"])
-api_key_file = os.environ.get("OCTO_API_KEY_FILE", "")
+        encrypted=''${encrypted:-false}
+        email=''${email:-\"\"}
+        password=''${password:-\"\"}
+        mfa=''${mfa:-\"\"}
 
-existing = {}
-if config_path.exists():
-    try:
-        raw = config_path.read_text(encoding="utf-8")
-        try:
-            existing = tomllib.loads(raw)
-        except Exception:
-            if "\\n" in raw:
-                existing = tomllib.loads(raw.replace("\\n", "\n"))
-            else:
-                raise
-    except Exception:
-        existing = {}
+        if [ -n "$OCTO_API_KEY_FILE" ] && [ -f "$OCTO_API_KEY_FILE" ]; then
+          api_key="$(toml_quote "$(tr -d '\n' < "$OCTO_API_KEY_FILE")")"
+        fi
 
-credentials = existing.get("credentials") or {}
-api = existing.get("api") or {}
+        force_overwrite=false
+        cleanup_on_error=false
+        [ "$OCTO_FORCE_OVERWRITE" = "true" ] && force_overwrite=true
+        [ "$OCTO_CLEANUP_ON_ERROR" = "true" ] && cleanup_on_error=true
 
-if api_key_file:
-    api_key = Path(api_key_file).read_text(encoding="utf-8").strip()
-else:
-    api_key = str(api.get("api_key", "")).strip()
+        {
+          printf '%s\n' '[credentials]'
+          printf 'encrypted = %s\n' "$encrypted"
+          printf 'email = %s\n' "$email"
+          printf 'password = %s\n' "$password"
+          printf 'mfa = %s\n' "$mfa"
+          printf '\n'
+          printf '%s\n' '[api]'
+          printf 'host = %s\n' "$(toml_quote "$OCTO_API_HOST")"
+          printf 'port = %s\n' "$OCTO_API_PORT"
+          if [ -n "$api_key" ]; then
+            printf 'api_key = %s\n' "$api_key"
+          fi
+          printf '\n'
+          printf '%s\n' '[download]'
+          printf 'path = %s\n' "$(toml_quote "$OCTO_DOWNLOAD_DIR")"
+          printf 'chunks_per_file = %s\n' "$OCTO_CHUNKS_PER_FILE"
+          printf 'concurrent_files = %s\n' "$OCTO_CONCURRENT_FILES"
+          printf 'force_overwrite = %s\n' "$force_overwrite"
+          printf 'cleanup_on_error = %s\n' "$cleanup_on_error"
+          printf '\n'
+        } > "$OCTO_CONFIG_PATH"
 
-def toml_string(value: str) -> str:
-    return json.dumps(value)
-
-def toml_bool(value: bool) -> str:
-    return "true" if value else "false"
-
-encrypted_value = toml_bool(bool(credentials.get("encrypted", False)))
-email_value = toml_string(str(credentials.get("email", "")))
-password_value = toml_string(str(credentials.get("password", "")))
-mfa_value = toml_string(str(credentials.get("mfa", "")))
-api_host_value = toml_string(os.environ["OCTO_API_HOST"])
-api_port_value = os.environ["OCTO_API_PORT"]
-download_dir_value = toml_string(os.environ["OCTO_DOWNLOAD_DIR"])
-chunks_per_file_value = os.environ["OCTO_CHUNKS_PER_FILE"]
-concurrent_files_value = os.environ["OCTO_CONCURRENT_FILES"]
-force_overwrite_value = toml_bool(os.environ["OCTO_FORCE_OVERWRITE"] == "true")
-cleanup_on_error_value = toml_bool(os.environ["OCTO_CLEANUP_ON_ERROR"] == "true")
-
-lines = [
-    "[credentials]",
-    f"encrypted = {encrypted_value}",
-    f"email = {email_value}",
-    f"password = {password_value}",
-    f"mfa = {mfa_value}",
-    "",
-    "[api]",
-    f"host = {api_host_value}",
-    f"port = {api_port_value}",
-]
-
-if api_key:
-    lines.append(f"api_key = {toml_string(api_key)}")
-
-lines += [
-    "",
-    "[download]",
-    f"path = {download_dir_value}",
-    f"chunks_per_file = {chunks_per_file_value}",
-    f"concurrent_files = {concurrent_files_value}",
-    f"force_overwrite = {force_overwrite_value}",
-    f"cleanup_on_error = {cleanup_on_error_value}",
-    "",
-]
-
-config_path.write_text("\n".join(lines), encoding="utf-8")
-PY
         chown ${cfg.user}:${cfg.group} "$OCTO_CONFIG_PATH"
         chmod 600 "$OCTO_CONFIG_PATH"
       '';
