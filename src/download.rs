@@ -15,6 +15,7 @@ use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::DownloadConfig;
+use crate::core::ProgressDelta;
 use crate::error::{Error, Result};
 use crate::fs::{FileSystem, TokioFileSystem};
 use crate::progress::CumulativeProgress;
@@ -56,10 +57,10 @@ pub trait DownloadProgress: Send + Sync {
 
     /// Called periodically with the number of bytes advanced since the last call.
     ///
-    /// `bytes_delta` includes any locally reused bytes revealed by resume
-    /// revalidation, while `network_bytes_delta` counts only fresh bytes
-    /// received from the network during this callback interval.
-    fn on_progress(&self, _name: &str, _bytes_delta: u64, _network_bytes_delta: u64, _speed: u64) {}
+    /// `total_bytes_delta` includes any locally reused bytes revealed by
+    /// resume revalidation, while `network_bytes_delta` counts only fresh
+    /// bytes received from the network during this callback interval.
+    fn on_progress(&self, _name: &str, _delta: ProgressDelta) {}
 
     /// Called when a file download completes successfully.
     fn on_file_complete(&self, _name: &str, _stats: &FileStats) {}
@@ -873,12 +874,16 @@ impl<F: FileSystem> Downloader<F> {
             if delta > 0 {
                 let reused_delta = consume_reused_bytes(&reused_remaining, delta);
                 let fresh_delta = delta.saturating_sub(reused_delta);
-                let speed = if fresh_delta > 0 {
-                    stats_clone.record_bytes(fresh_delta)
-                } else {
-                    0
-                };
-                progress_clone.on_progress(&name_for_cb, delta, fresh_delta, speed);
+                if fresh_delta > 0 {
+                    let _ = stats_clone.record_bytes(fresh_delta);
+                }
+                progress_clone.on_progress(
+                    &name_for_cb,
+                    ProgressDelta {
+                        total_bytes_delta: delta,
+                        network_bytes_delta: fresh_delta,
+                    },
+                );
             }
         };
         let verify_tracker = Arc::clone(&tracker);

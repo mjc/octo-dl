@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::{DownloadProgress, FileStats};
+use crate::{DownloadProgress, FileStats, core::ProgressDelta};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -31,9 +31,7 @@ pub enum DownloadEvent {
     },
     Progress {
         id: Arc<str>,
-        bytes_delta: u64,
-        network_bytes_delta: u64,
-        speed: u64,
+        delta: ProgressDelta,
     },
     ResumeReused {
         id: String,
@@ -117,14 +115,9 @@ impl DownloadProgress for TuiProgress {
         });
     }
 
-    fn on_progress(&self, name: &str, bytes_delta: u64, network_bytes_delta: u64, speed: u64) {
+    fn on_progress(&self, name: &str, delta: ProgressDelta) {
         let id = self.intern_id(name);
-        let _ = self.tx.send(DownloadEvent::Progress {
-            id,
-            bytes_delta,
-            network_bytes_delta,
-            speed,
-        });
+        let _ = self.tx.send(DownloadEvent::Progress { id, delta });
     }
 
     fn on_resume_reused(&self, name: &str, chunks: usize, bytes: u64) {
