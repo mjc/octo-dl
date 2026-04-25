@@ -27,7 +27,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     FileEntryStatus, ServiceConfig, SessionState, SessionStatus, UrlStatus,
-    core::{FileLifecycle, RestartSnapshot, reconcile_restart, scan_filesystem},
+    core::{CoreEvent, FileLifecycle, RestartSnapshot, reconcile_restart, scan_filesystem},
     format_bytes,
 };
 use app::FileStatus;
@@ -188,11 +188,13 @@ pub(crate) fn resume_session(app: &mut App) {
         })
         .collect();
     let _ = session.save();
+    app.core_state = restart.state.clone();
     app.urls.clone_from(&resumed_urls);
     for url in resumed_urls {
         let _ = app.url_tx.send(url);
     }
     app.session = Some(session);
+    app.seed_core_session_from_session();
 }
 
 /// Syncs the session file list with visible UI files before shutdown.
@@ -544,16 +546,34 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
             }
         }
         UiAction::DeleteFile(id) => {
+            let core_row = app
+                .files
+                .iter()
+                .find(|f| f.id == id)
+                .map(|f| {
+                    (
+                        f.source_url.clone(),
+                        f.name.clone(),
+                        f.size,
+                        f.counts_toward_progress,
+                    )
+                });
             let artifact_path = app
                 .files
                 .iter()
                 .find(|f| f.id == id)
                 .map(|f| f.name.clone())
                 .unwrap_or_else(|| id.clone());
+            if let Some((Some(source_url), name, size, counts_toward_progress)) = core_row {
+                app.ensure_core_file(&id, &source_url, &name, size, counts_toward_progress);
+            }
             if let Some(token) = app.cancellation_tokens.remove(&id) {
                 token.cancel();
             }
             app.deleted_files.insert(id.clone());
+            app.apply_core_event(CoreEvent::FileDeleted {
+                file_id: id.clone(),
+            });
             app.files.retain(|f| f.id != id);
             download::schedule_download_artifact_delete(artifact_path);
             if let Some(ref mut session) = app.session {
@@ -562,6 +582,18 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
             app.recompute_totals();
         }
         UiAction::RetryFile(id) => {
+            let core_row = app
+                .files
+                .iter()
+                .find(|f| f.id == id)
+                .map(|f| {
+                    (
+                        f.source_url.clone(),
+                        f.name.clone(),
+                        f.size,
+                        f.counts_toward_progress,
+                    )
+                });
             let source_url = if let Some(f) = app.find_file_mut(&id) {
                 f.status = FileStatus::Queued;
                 f.counts_toward_progress = true;
@@ -571,6 +603,12 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
             } else {
                 None
             };
+            if let Some((Some(source_url), name, size, counts_toward_progress)) = core_row {
+                app.ensure_core_file(&id, &source_url, &name, size, counts_toward_progress);
+            }
+            app.apply_core_event(CoreEvent::FileRetryRequested {
+                file_id: id.clone(),
+            });
             if let Some(url) = source_url {
                 app.recompute_totals();
                 let _ = app.url_tx.send(url);

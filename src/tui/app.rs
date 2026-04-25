@@ -9,7 +9,12 @@ use serde::Serialize;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::{DownloadConfig, SessionState};
+use crate::{
+    DownloadConfig, SessionState,
+    core::{
+        CoreEffect, CoreEvent, DownloadState, ResolvedFile, ResolvedPackage, SessionMeta, reduce,
+    },
+};
 
 use super::event::{DownloadEvent, TokenMessage};
 
@@ -378,6 +383,7 @@ pub struct App {
     pub deleted_files: HashSet<String>,
     // Session
     pub session: Option<SessionState>,
+    pub core_state: DownloadState,
     // API port for display
     pub api_port: u16,
     // API key for authentication
@@ -391,6 +397,22 @@ pub struct App {
 
 impl App {
     fn snapshot_packages(&self) -> Vec<serde_json::Value> {
+        if !self.core_state.packages.is_empty() {
+            return self
+                .core_state
+                .packages
+                .values()
+                .map(|package| {
+                    serde_json::json!({
+                        "id": package.id,
+                        "source_url": package.source_url,
+                        "display_name": package.display_name,
+                        "status": package.status,
+                        "file_ids": package.file_ids,
+                    })
+                })
+                .collect();
+        }
         let mut packages = IndexMap::<String, Vec<&FileEntry>>::new();
         for file in &self.files {
             let package_id = file
@@ -546,6 +568,10 @@ impl App {
             cancellation_tokens: HashMap::new(),
             deleted_files: HashSet::new(),
             session: None,
+            core_state: DownloadState::new(SessionMeta {
+                config: DownloadConfig::default(),
+                ..SessionMeta::default()
+            }),
             api_port,
             api_key: None,
             cpu_usage: 0.0,
@@ -556,6 +582,110 @@ impl App {
 
     pub fn find_file_mut(&mut self, id: &str) -> Option<&mut FileEntry> {
         self.files.iter_mut().find(|f| f.id == id)
+    }
+
+    pub(crate) fn seed_core_session_from_session(&mut self) {
+        if let Some(session) = self.session.as_ref() {
+            self.core_state.session_meta = SessionMeta {
+                session_id: session.id.clone(),
+                created: session.created,
+                status: match session.status {
+                    crate::SessionStatus::InProgress => crate::core::SessionRunStatus::InProgress,
+                    crate::SessionStatus::Completed => crate::core::SessionRunStatus::Completed,
+                    crate::SessionStatus::Paused => crate::core::SessionRunStatus::Paused,
+                },
+                config: session.config.clone(),
+                credentials: crate::core::SavedCredentials {
+                    email: session.credentials.email.clone(),
+                    password: session.credentials.password.clone(),
+                    mfa: session.credentials.mfa.clone(),
+                },
+            };
+        } else {
+            self.core_state.session_meta.config = self.config.config.clone();
+        }
+    }
+
+    pub(crate) fn apply_core_event(&mut self, event: CoreEvent) {
+        self.seed_core_session_from_session();
+        let effects = reduce(&mut self.core_state, event);
+        self.apply_core_effects(effects);
+    }
+
+    fn apply_core_effects(&mut self, effects: Vec<CoreEffect>) {
+        for effect in effects {
+            match effect {
+                CoreEffect::PersistSession(snapshot) => {
+                    if let Some(ref mut session) = self.session {
+                        let next = SessionState::from_v3(snapshot);
+                        session.id = next.id;
+                        session.created = next.created;
+                        session.status = next.status;
+                        session.config = next.config;
+                        session.credentials = next.credentials;
+                        let mut merged_files = session.files.clone();
+                        for next_file in next.files {
+                            if let Some(existing) = merged_files
+                                .iter_mut()
+                                .find(|file| file.path == next_file.path || file.key == next_file.key)
+                            {
+                                *existing = next_file;
+                            } else {
+                                merged_files.push(next_file);
+                            }
+                        }
+                        session.files = merged_files;
+                        for url in next.urls {
+                            if !session.urls.iter().any(|entry| entry.url == url.url) {
+                                session.urls.push(url);
+                            }
+                        }
+                    }
+                }
+                CoreEffect::PublishStatusMessage(message) => {
+                    self.status = message;
+                }
+                CoreEffect::EnqueueUrlResolution { .. }
+                | CoreEffect::EnqueueFileDownload { .. }
+                | CoreEffect::DeleteOutputArtifacts { .. }
+                | CoreEffect::DeleteResumeArtifacts { .. }
+                | CoreEffect::PublishViewSnapshot => {}
+            }
+        }
+    }
+
+    pub(crate) fn ensure_core_file(
+        &mut self,
+        file_id: &str,
+        source_url: &str,
+        path: &str,
+        size: u64,
+        counts_toward_progress: bool,
+    ) {
+        self.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: source_url.to_string(),
+                source_url: source_url.to_string(),
+                display_name: source_url.to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.to_string(),
+                    path: path.to_string(),
+                    size,
+                }],
+                collision: None,
+            },
+        });
+        self.apply_core_event(CoreEvent::FileQueued {
+            file_id: file_id.to_string(),
+        });
+        if let Some(file) = self.core_state.files.get_mut(file_id) {
+            file.size = size;
+            file.path = path.to_string();
+            file.runtime.counts_in_run_totals = counts_toward_progress;
+            if !counts_toward_progress {
+                file.runtime.preexisting_complete = true;
+            }
+        }
     }
 
     pub(crate) fn reset_aggregate_rate(&mut self) {
@@ -645,6 +775,24 @@ impl App {
             config: &'a DownloadConfig,
         }
 
+        let run_totals = if !self.core_state.files.is_empty() {
+            RunTotals {
+                run_total_bytes: self.core_state.totals.run_total_bytes,
+                run_completed_bytes: self.core_state.totals.run_completed_bytes,
+                run_file_total: self.core_state.totals.run_file_total,
+                run_file_completed: self.core_state.totals.run_file_completed,
+                displayed_network_rate_bps: self.current_speed,
+            }
+        } else {
+            RunTotals {
+                run_total_bytes: self.total_size,
+                run_completed_bytes: self.total_downloaded,
+                run_file_total: self.files_total,
+                run_file_completed: self.files_completed,
+                displayed_network_rate_bps: self.current_speed,
+            }
+        };
+
         let snap = Snapshot {
             authenticated: self.authenticated,
             paused: self.paused,
@@ -659,13 +807,7 @@ impl App {
             files_total: self.files_total,
             current_speed: self.current_speed,
             displayed_network_rate_bps: self.current_speed,
-            run_totals: RunTotals {
-                run_total_bytes: self.total_size,
-                run_completed_bytes: self.total_downloaded,
-                run_file_total: self.files_total,
-                run_file_completed: self.files_completed,
-                displayed_network_rate_bps: self.current_speed,
-            },
+            run_totals,
             cpu_usage: self.cpu_usage,
             memory_rss: self.memory_rss,
             api_port: self.api_port,
