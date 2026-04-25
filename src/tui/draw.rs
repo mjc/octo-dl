@@ -196,6 +196,14 @@ fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .map(|(display_index, file_index)| {
             let f = &app.files[*file_index];
             let selected = app.file_list_state.selected() == Some(display_index);
+            let package_label = app.package_label_for_file(&f.id);
+            let show_package_label = display_index == 0
+                || package_label
+                    != sorted_indices
+                        .get(display_index.saturating_sub(1))
+                        .and_then(|previous_index| {
+                            app.package_label_for_file(&app.files[*previous_index].id)
+                        });
 
             let (icon, color) = match &f.status {
                 FileStatus::Downloading => ("\u{25cf}", Color::Yellow),
@@ -232,8 +240,22 @@ fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 Style::default().fg(color)
             };
 
-            let text = format!(" {icon} {:<30}  {detail}", f.name);
-            ListItem::new(text).style(style)
+            let mut lines = Vec::new();
+            if show_package_label
+                && let Some(package_label) = package_label
+            {
+                lines.push(Line::from(vec![Span::styled(
+                    format!(" Package: {package_label}"),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )]));
+            }
+            lines.push(Line::from(vec![Span::styled(
+                format!(" {icon} {:<30}  {detail}", f.name),
+                style,
+            )]));
+            ListItem::new(lines)
         })
         .collect();
 

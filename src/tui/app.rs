@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
+use std::cmp::Ordering;
 
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
@@ -397,6 +398,43 @@ pub struct App {
 }
 
 impl App {
+    fn package_sort_key_for(&self, file: &FileEntry) -> (usize, String) {
+        if let Some(core_file) = self.core_state.files.get(&file.id) {
+            let package_order = self
+                .core_state
+                .packages
+                .get_index_of(&core_file.package_id)
+                .unwrap_or(usize::MAX);
+            let display_name = self
+                .core_state
+                .packages
+                .get(&core_file.package_id)
+                .map(|package| package.display_name.clone())
+                .unwrap_or_else(|| core_file.package_id.clone());
+            return (package_order, display_name);
+        }
+
+        (
+            usize::MAX,
+            file.source_url.clone().unwrap_or_else(|| file.id.clone()),
+        )
+    }
+
+    pub(crate) fn package_label_for_file(&self, file_id: &str) -> Option<String> {
+        if let Some(core_file) = self.core_state.files.get(file_id) {
+            return self
+                .core_state
+                .packages
+                .get(&core_file.package_id)
+                .map(|package| package.display_name.clone());
+        }
+
+        self.files
+            .iter()
+            .find(|file| file.id == file_id)
+            .and_then(|file| file.source_url.clone())
+    }
+
     fn project_core_file(
         file: &FileState,
         package: Option<&PackageState>,
@@ -517,11 +555,33 @@ impl App {
 
     pub fn sorted_file_indices(&self) -> Vec<usize> {
         let mut indices: Vec<_> = (0..self.files.len()).collect();
-        indices.sort_by_key(|&i| match &self.files[i].status {
-            FileStatus::Downloading => 0,
-            FileStatus::Queued => 1,
-            FileStatus::Complete => 2,
-            FileStatus::Error(_) => 3,
+        indices.sort_by(|&left, &right| {
+            let left_file = &self.files[left];
+            let right_file = &self.files[right];
+            let left_package = self.package_sort_key_for(left_file);
+            let right_package = self.package_sort_key_for(right_file);
+
+            match left_package.cmp(&right_package) {
+                Ordering::Equal => {}
+                other => return other,
+            }
+
+            let left_rank = match &left_file.status {
+                FileStatus::Downloading => 0,
+                FileStatus::Queued => 1,
+                FileStatus::Complete => 2,
+                FileStatus::Error(_) => 3,
+            };
+            let right_rank = match &right_file.status {
+                FileStatus::Downloading => 0,
+                FileStatus::Queued => 1,
+                FileStatus::Complete => 2,
+                FileStatus::Error(_) => 3,
+            };
+            left_rank
+                .cmp(&right_rank)
+                .then_with(|| left_file.name.cmp(&right_file.name))
+                .then_with(|| left_file.id.cmp(&right_file.id))
         });
         indices
     }
@@ -1211,5 +1271,68 @@ mod tests {
 
         assert_eq!(accepted, 10);
         assert_eq!(file.downloaded, 100);
+    }
+
+    #[test]
+    fn sorted_file_indices_group_by_package_before_status() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "pkg-a".to_string(),
+                source_url: "https://mega.nz/folder/a".to_string(),
+                display_name: "Package A".to_string(),
+                files: vec![
+                    ResolvedFile {
+                        file_id: "a-queued.bin".to_string(),
+                        path: "a-queued.bin".to_string(),
+                        size: 10,
+                    },
+                    ResolvedFile {
+                        file_id: "a-complete.bin".to_string(),
+                        path: "a-complete.bin".to_string(),
+                        size: 10,
+                    },
+                ],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "pkg-b".to_string(),
+                source_url: "https://mega.nz/folder/b".to_string(),
+                display_name: "Package B".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "b-downloading.bin".to_string(),
+                    path: "b-downloading.bin".to_string(),
+                    size: 10,
+                }],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileQueued {
+            file_id: "a-queued.bin".to_string(),
+        });
+        app.apply_core_event(CoreEvent::FileCompleted {
+            file_id: "a-complete.bin".to_string(),
+        });
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: "b-downloading.bin".to_string(),
+            size: 10,
+        });
+
+        let ordered: Vec<_> = app
+            .sorted_file_indices()
+            .into_iter()
+            .map(|index| app.files[index].id.clone())
+            .collect();
+
+        assert_eq!(
+            ordered,
+            vec![
+                "a-queued.bin".to_string(),
+                "a-complete.bin".to_string(),
+                "b-downloading.bin".to_string(),
+            ]
+        );
     }
 }
