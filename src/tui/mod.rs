@@ -585,11 +585,7 @@ fn handle_ui_action(app: &mut App, action: UiAction) {
                 let _ = app.url_tx.send(url);
             } else {
                 app.status = format!("Retry unavailable for {id}");
-                if app.core_state.files.contains_key(&id) {
-                    if let Some(f) = app.find_file_mut(&id) {
-                        f.status = FileStatus::Error("Retry unavailable for this file".to_string());
-                    }
-                } else if let Some(f) = app.overlay_file_mut(&id) {
+                if let Some(f) = app.overlay_file_mut(&id) {
                     f.status = FileStatus::Error("Retry unavailable for this file".to_string());
                     app.sync_visible_files();
                 }
