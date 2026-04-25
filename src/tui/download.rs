@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     DlcKeyCache, DownloadConfig, DownloadProgress, SavedCredentials, SessionState, UrlEntry,
     UrlStatus,
-    core::ProgressDelta,
+    core::{CoreEvent, ProgressDelta},
     file_key, format_bytes, is_dlc_path,
 };
 use dirs;
@@ -339,6 +339,17 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             if app.deleted_files.contains(&id) {
                 return;
             }
+            let source_url = app
+                .files
+                .iter()
+                .find(|entry| entry.id == id)
+                .and_then(|entry| entry.source_url.clone())
+                .unwrap_or_else(|| id.clone());
+            app.ensure_core_file(&id, &source_url, &name, size, true);
+            app.apply_core_event(CoreEvent::FileStarted {
+                file_id: id.clone(),
+                size,
+            });
             if let Some(fp) = app.find_file_mut(&id) {
                 fp.status = FileStatus::Downloading;
                 fp.name = name;
@@ -364,6 +375,11 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             if app.deleted_files.contains(id.as_ref()) {
                 return;
             }
+            app.apply_core_event(CoreEvent::FileProgress {
+                file_id: id.to_string(),
+                total_bytes_delta: delta.total_bytes_delta,
+                network_bytes_delta: delta.network_bytes_delta,
+            });
             let now = std::time::Instant::now();
             if let Some(fp) = app.find_file_mut(id.as_ref()) {
                 let accepted_delta = fp.record_progress(delta.total_bytes_delta, now);
@@ -375,6 +391,11 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             if app.deleted_files.contains(&id) {
                 return;
             }
+            app.apply_core_event(CoreEvent::FileReuseDetected {
+                file_id: id.clone(),
+                reused_bytes: bytes,
+                reused_chunks: chunks,
+            });
             log::info!(
                 "Reusing {chunks} verified chunk(s) for {id} ({})",
                 format_bytes(bytes)
@@ -394,6 +415,9 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 }
                 return;
             }
+            app.apply_core_event(CoreEvent::FileCompleted {
+                file_id: id.clone(),
+            });
             handle_file_complete(app, &id, &name);
             app.recompute_totals();
         }
@@ -408,6 +432,9 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 return;
             }
             app.cancellation_tokens.remove(&id);
+            app.apply_core_event(CoreEvent::FileCancelled {
+                file_id: id.clone(),
+            });
             if let Some(fp) = app.find_file_mut(&id) {
                 fp.status = FileStatus::Queued;
                 fp.reset_rate();
@@ -446,6 +473,10 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 show_error_ui_only(app, &name, &error);
             } else if let Some(id) = id {
                 // For actual file download errors, mark as error and keep in session for retry
+                app.apply_core_event(CoreEvent::FileFailed {
+                    file_id: id.clone(),
+                    message: error.clone(),
+                });
                 handle_file_error(app, &id, &name, &error);
             } else {
                 show_error_ui_only(app, &name, &error);
@@ -498,6 +529,7 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             }) {
                 return;
             }
+            app.ensure_core_file(&id, &source_url, &name, size, count_toward_progress);
             // Add a real file entry with stable identity and size.
             if let Some(fp) = app.find_file_mut(&id) {
                 fp.name = name.clone();
@@ -618,6 +650,7 @@ fn start_download_task(app: &mut App) {
         );
         let _ = session.save();
         app.session = Some(session);
+        app.seed_core_session_from_session();
     }
 
     // Take the oneshot receiver with the pre-authenticated client

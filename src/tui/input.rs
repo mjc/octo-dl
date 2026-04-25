@@ -2,6 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::core::CoreEvent;
 use crate::extract_urls;
 
 use super::app::{App, ConfigField, FileStatus, LoginState, Popup};
@@ -164,10 +165,26 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
                 && matches!(app.files[selected].status, FileStatus::Error(_))
             {
                 let source_url = app.files[selected].source_url.clone();
+                let file_id = app.files[selected].id.clone();
+                let file_name = app.files[selected].name.clone();
+                let file_size = app.files[selected].size;
+                let counts_toward_progress = app.files[selected].counts_toward_progress;
+                if let Some(url) = source_url.as_deref() {
+                    app.ensure_core_file(
+                        &file_id,
+                        url,
+                        &file_name,
+                        file_size,
+                        counts_toward_progress,
+                    );
+                }
                 app.files[selected].status = FileStatus::Queued;
                 app.files[selected].counts_toward_progress = true;
                 app.files[selected].downloaded = 0;
                 app.files[selected].reset_rate();
+                app.apply_core_event(CoreEvent::FileRetryRequested {
+                    file_id,
+                });
                 if let Some(url) = source_url {
                     app.recompute_totals();
                     let _ = app.url_tx.send(url);
@@ -232,6 +249,14 @@ fn reset_selected(app: &mut App) {
         return;
     };
 
+    app.ensure_core_file(
+        &file_id,
+        &source_url,
+        &artifact_path,
+        app.files[selected].size,
+        app.files[selected].counts_toward_progress,
+    );
+
     if let Some(token) = app.cancellation_tokens.remove(&file_id) {
         token.cancel();
     }
@@ -241,6 +266,9 @@ fn reset_selected(app: &mut App) {
     file.counts_toward_progress = true;
     file.downloaded = 0;
     file.reset_rate();
+    app.apply_core_event(CoreEvent::FileResetRequested {
+        file_id: file_id.clone(),
+    });
     app.recompute_totals();
 
     schedule_download_artifact_delete(artifact_path);
@@ -287,8 +315,12 @@ fn delete_selected(app: &mut App) {
     };
     let selected_row = app.file_list_state.selected().unwrap_or(0);
     let file = &app.files[selected_file];
+    let file_status = file.status.clone();
+    let file_size = file.size;
+    let counts_toward_progress = file.counts_toward_progress;
+    let source_url = file.source_url.clone();
     let can_remove = matches!(
-        file.status,
+        file_status,
         FileStatus::Queued
             | FileStatus::Error(_)
             | FileStatus::Downloading
@@ -300,12 +332,24 @@ fn delete_selected(app: &mut App) {
 
     let file_id = file.id.clone();
     let artifact_path = file.name.clone();
-    if matches!(file.status, FileStatus::Downloading)
+    if let Some(source_url) = source_url.as_deref() {
+        app.ensure_core_file(
+            &file_id,
+            source_url,
+            &artifact_path,
+            file_size,
+            counts_toward_progress,
+        );
+    }
+    if matches!(file_status, FileStatus::Downloading)
         && let Some(token) = app.cancellation_tokens.remove(&file_id)
     {
         token.cancel();
     }
     app.deleted_files.insert(file_id.clone());
+    app.apply_core_event(CoreEvent::FileDeleted {
+        file_id: file_id.clone(),
+    });
     app.files.remove(selected_file);
     schedule_download_artifact_delete(artifact_path);
     app.recompute_totals();
@@ -341,6 +385,7 @@ pub fn add_url(app: &mut App, url: String) {
         return;
     }
     app.urls.push(url.clone());
+    app.apply_core_event(CoreEvent::UrlSubmitted { url: url.clone() });
     // Persist the URL in the session so it survives restarts
     if let Some(ref mut session) = app.session
         && !session.urls.iter().any(|u| u.url == url)
