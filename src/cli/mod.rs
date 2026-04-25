@@ -13,7 +13,9 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use crate::{
     DlcKeyCache, DownloadConfig, DownloadItem, DownloadProgress, FileEntry, FileEntryStatus,
     FileStats, NoProgress, SavedCredentials, SessionState, SessionStats, SessionStatsBuilder,
-    SessionStatus, UrlEntry, UrlStatus, file_key, format_bytes, format_duration, is_dlc_path,
+    SessionStatus, UrlEntry, UrlStatus,
+    core::{RestartSnapshot, reconcile_restart, scan_filesystem},
+    file_key, format_bytes, format_duration, is_dlc_path,
 };
 
 const DEFAULT_CONCURRENT_FILES: usize = 4;
@@ -224,13 +226,27 @@ fn print_summary(stats: &SessionStats) {
     println!("{SEPARATOR}");
 }
 
+fn build_restart_snapshot(session: &SessionState) -> RestartSnapshot {
+    reconcile_restart(
+        Some(session.to_v3()),
+        scan_filesystem(session.files.iter().map(|file| file.path.clone())),
+        session.urls.iter().map(|entry| entry.url.clone()).collect(),
+    )
+}
+
+#[cfg(test)]
 fn resumable_urls(session: &SessionState) -> Vec<(usize, String)> {
-    session
-        .urls
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| session.url_should_resume(*idx))
-        .map(|(idx, u)| (idx, u.url.clone()))
+    let restart = build_restart_snapshot(session);
+    restart
+        .resumable_urls()
+        .into_iter()
+        .filter_map(|url| {
+            session
+                .urls
+                .iter()
+                .position(|entry| entry.url == url)
+                .map(|idx| (idx, url))
+        })
         .collect()
 }
 
@@ -581,6 +597,7 @@ pub async fn run() -> crate::Result<()> {
 
 /// Resume a previous incomplete session.
 async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate::Result<()> {
+    let restart = build_restart_snapshot(&session);
     // Decrypt credentials
     let (email, password, mfa) = session
         .credentials
@@ -599,7 +616,17 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
     let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
     // Re-fetch URLs and collect remaining files
-    let remaining_urls = resumable_urls(&session);
+    let remaining_urls = restart
+        .resumable_urls()
+        .into_iter()
+        .filter_map(|url| {
+            session
+                .urls
+                .iter()
+                .position(|entry| entry.url == url)
+                .map(|idx| (idx, url))
+        })
+        .collect::<Vec<_>>();
 
     println!(
         "Fetching file lists from {} URL(s)...\n",
@@ -623,16 +650,14 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
     }
 
     // Completed file paths from session state
-    let ignored_paths: std::collections::HashSet<String> = session
+    let resumable_file_ids: std::collections::HashSet<_> =
+        restart.resume_file_ids.iter().cloned().collect();
+    let ignored_paths: std::collections::HashSet<String> = restart
+        .state
         .files
-        .iter()
-        .filter(|f| {
-            matches!(
-                f.status,
-                FileEntryStatus::Completed | FileEntryStatus::Skipped
-            )
-        })
-        .map(|f| f.key_or_path().to_string())
+        .values()
+        .filter(|file| !resumable_file_ids.contains(&file.id))
+        .map(|file| file.path.clone())
         .collect();
 
     // Collect files, skipping already-completed ones
@@ -643,7 +668,10 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
         let collected = downloader.collect_files(nodes, &no_progress).await;
         for mut item in collected.to_download {
             let key = file_key(*url_idx, &item.path);
-            if ignored_paths.contains(&key) || ignored_paths.contains(&item.path) {
+            if !resumable_file_ids.is_empty()
+                && !resumable_file_ids.contains(&item.path)
+                && (ignored_paths.contains(&key) || ignored_paths.contains(&item.path))
+            {
                 total_skipped += 1;
             } else {
                 item.key = Some(key);

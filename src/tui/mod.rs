@@ -25,7 +25,11 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::{mpsc, watch};
 
-use crate::{FileEntryStatus, ServiceConfig, SessionState, SessionStatus, UrlStatus, format_bytes};
+use crate::{
+    FileEntryStatus, ServiceConfig, SessionState, SessionStatus, UrlStatus,
+    core::{FileLifecycle, RestartSnapshot, reconcile_restart, scan_filesystem},
+    format_bytes,
+};
 use app::FileStatus;
 use sysinfo::System;
 
@@ -77,85 +81,38 @@ use self::input::{add_url, handle_input, handle_paste};
 // Helpers — small, focused functions extracted from the three run variants
 // ---------------------------------------------------------------------------
 
-fn merge_session_file(existing: &mut crate::FileEntry, incoming: crate::FileEntry) {
-    let incoming_status = incoming.status.clone();
-    if existing.key.is_none() {
-        existing.key = incoming.key;
-    }
-    if incoming.size > existing.size {
-        existing.size = incoming.size;
-    }
-    if matches!(incoming_status, FileEntryStatus::Completed) {
-        existing.status = FileEntryStatus::Completed;
-    } else if matches!(incoming_status, FileEntryStatus::Skipped)
-        && !matches!(existing.status, FileEntryStatus::Completed)
-    {
-        existing.status = FileEntryStatus::Skipped;
-    }
-}
-
-fn normalize_session_files(session: &mut SessionState) -> bool {
-    let mut changed = false;
-    let mut merged = Vec::with_capacity(session.files.len());
-    let mut seen = std::collections::HashMap::<(usize, String), usize>::new();
-
-    for file in std::mem::take(&mut session.files) {
-        let identity = (file.url_index, file.path.clone());
-        if let Some(&idx) = seen.get(&identity) {
-            merge_session_file(&mut merged[idx], file);
-            changed = true;
-        } else {
-            seen.insert(identity, merged.len());
-            merged.push(file);
-        }
-    }
-
-    session.files = merged;
-    changed
-}
-
-fn restore_session_files(app: &mut App, session: &SessionState) {
+fn restore_restart_snapshot(app: &mut App, snapshot: &RestartSnapshot) {
     app.files.clear();
-    for file in &session.files {
-        if matches!(file.status, FileEntryStatus::Skipped) {
+    for file in snapshot.state.files.values() {
+        if matches!(file.lifecycle, FileLifecycle::Skipped | FileLifecycle::Deleted) {
             continue;
         }
-        let source_url = session
-            .urls
-            .get(file.url_index)
-            .map(|entry| entry.url.clone());
-        let (status, downloaded) = match &file.status {
-            FileEntryStatus::Skipped => continue,
-            FileEntryStatus::Pending | FileEntryStatus::Downloading | FileEntryStatus::Error(_) => {
-                (FileStatus::Queued, 0)
+        let source_url = snapshot
+            .state
+            .packages
+            .get(&file.package_id)
+            .map(|package| package.source_url.clone());
+        let (status, downloaded) = match file.lifecycle {
+            FileLifecycle::Planned | FileLifecycle::Queued | FileLifecycle::Downloading => {
+                (FileStatus::Queued, file.progress.visible_completed_bytes)
             }
-            FileEntryStatus::Completed => (FileStatus::Complete, file.size),
+            FileLifecycle::Failed => (
+                FileStatus::Error(file.message.clone().unwrap_or_else(|| "failed".to_string())),
+                file.progress.visible_completed_bytes,
+            ),
+            FileLifecycle::Complete => (FileStatus::Complete, file.size),
+            FileLifecycle::Skipped | FileLifecycle::Deleted => continue,
         };
 
-        if let Some(existing) = app.files.iter_mut().find(|entry| entry.id == file.path) {
-            if existing.size < file.size {
-                existing.size = file.size;
-            }
-            if existing.source_url.is_none() {
-                existing.source_url = source_url;
-            }
-            if matches!(status, FileStatus::Complete) {
-                existing.status = FileStatus::Complete;
-                existing.downloaded = existing.size;
-                existing.reset_rate();
-            }
-            continue;
-        }
-
         app.files.push(app::FileEntry {
-            id: file.path.clone(),
+            id: file.id.clone(),
             name: file.path.clone(),
             size: file.size,
             downloaded,
             speed: 0,
             rate: Default::default(),
             source_url,
-            counts_toward_progress: !matches!(file.status, FileEntryStatus::Completed),
+            counts_toward_progress: file.runtime.counts_in_run_totals,
             status,
         });
     }
@@ -177,25 +134,60 @@ pub(crate) fn resume_session(app: &mut App) {
             .set_credentials(email, password, mfa.unwrap_or_default());
     }
 
-    if normalize_session_files(&mut session) {
-        let _ = session.save();
-    }
+    let file_ids = session.files.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
+    let restart = reconcile_restart(
+        Some(session.to_v3()),
+        scan_filesystem(file_ids),
+        session.urls.iter().map(|entry| entry.url.clone()).collect(),
+    );
 
-    restore_session_files(app, &session);
+    restore_restart_snapshot(app, &restart);
 
-    for url_index in 0..session.urls.len() {
-        if session.urls[url_index].status == UrlStatus::Fetched
-            && session.url_should_resume(url_index)
-        {
-            session.urls[url_index].status = UrlStatus::Pending;
+    let resumed_urls = restart.resumable_urls();
+    let resumed_url_set: std::collections::HashSet<_> = resumed_urls.iter().cloned().collect();
+    for entry in &mut session.urls {
+        if !matches!(entry.status, UrlStatus::Error(_)) {
+            entry.status = if resumed_url_set.contains(&entry.url) {
+                UrlStatus::Pending
+            } else {
+                UrlStatus::Fetched
+            };
         }
     }
-    let resumed_urls: Vec<String> = session
-        .urls
-        .iter()
-        .filter(|entry| entry.status == UrlStatus::Pending)
-        .map(|entry| entry.url.clone())
+    session.files = restart
+        .state
+        .files
+        .values()
+        .map(|file| {
+            let url_index = session
+                .urls
+                .iter()
+                .position(|entry| {
+                    restart
+                        .state
+                        .packages
+                        .get(&file.package_id)
+                        .is_some_and(|package| package.source_url == entry.url)
+                })
+                .unwrap_or(0);
+            crate::FileEntry {
+                key: Some(file.id.clone()),
+                url_index,
+                path: file.path.clone(),
+                size: file.size,
+                status: match file.lifecycle {
+                    FileLifecycle::Planned | FileLifecycle::Queued => FileEntryStatus::Pending,
+                    FileLifecycle::Downloading => FileEntryStatus::Downloading,
+                    FileLifecycle::Complete => FileEntryStatus::Completed,
+                    FileLifecycle::Skipped | FileLifecycle::Deleted => FileEntryStatus::Skipped,
+                    FileLifecycle::Failed => FileEntryStatus::Error(
+                        file.message.clone().unwrap_or_else(|| "failed".to_string()),
+                    ),
+                },
+            }
+        })
         .collect();
+    let _ = session.save();
     app.urls.clone_from(&resumed_urls);
     for url in resumed_urls {
         let _ = app.url_tx.send(url);

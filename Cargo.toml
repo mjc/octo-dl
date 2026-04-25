@@ -39,6 +39,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
+indexmap = { version = "2", features = ["serde"] }
 ratatui = { version = "0.29", optional = true, features = ["unstable-backend-writer"] }
 crossterm = { version = "0.28", optional = true }
 uuid = { version = "1", features = ["v4"] }

@@ -289,13 +289,17 @@ fn delete_selected(app: &mut App) {
     let file = &app.files[selected_file];
     let can_remove = matches!(
         file.status,
-        FileStatus::Queued | FileStatus::Error(_) | FileStatus::Downloading
+        FileStatus::Queued
+            | FileStatus::Error(_)
+            | FileStatus::Downloading
+            | FileStatus::Complete
     );
     if !can_remove {
         return;
     }
 
     let file_id = file.id.clone();
+    let artifact_path = file.name.clone();
     if matches!(file.status, FileStatus::Downloading)
         && let Some(token) = app.cancellation_tokens.remove(&file_id)
     {
@@ -303,6 +307,7 @@ fn delete_selected(app: &mut App) {
     }
     app.deleted_files.insert(file_id.clone());
     app.files.remove(selected_file);
+    schedule_download_artifact_delete(artifact_path);
     app.recompute_totals();
     if let Some(ref mut session) = app.session {
         let _ = session.mark_file_skipped(&file_id);
@@ -663,6 +668,39 @@ mod tests {
             url_rx.try_recv().unwrap(),
             "https://mega.nz/file/reset".to_string()
         );
+        assert!(!final_path.exists());
+        assert!(!part_path.exists());
+        assert!(!sidecar_path.exists());
+    }
+
+    #[test]
+    fn handle_main_input_delete_removes_completed_file_and_artifacts() {
+        let dir = tempdir().unwrap();
+        let final_path = dir.path().join("complete.bin");
+        let final_path_string = final_path.to_string_lossy();
+        let part_path = std::path::PathBuf::from(format!("{final_path_string}.part"));
+        let sidecar_path = std::path::PathBuf::from(format!("{final_path_string}.part.meta.json"));
+        std::fs::write(&final_path, b"complete").unwrap();
+        std::fs::write(&part_path, b"partial").unwrap();
+        std::fs::write(&sidecar_path, b"metadata").unwrap();
+
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "complete.bin".to_string(),
+            name: final_path.to_string_lossy().into_owned(),
+            size: 100,
+            downloaded: 100,
+            speed: 0,
+            rate: Default::default(),
+            source_url: Some("https://mega.nz/file/complete".to_string()),
+            counts_toward_progress: false,
+            status: FileStatus::Complete,
+        });
+        app.file_list_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('d')));
+
+        assert!(app.files.is_empty());
         assert!(!final_path.exists());
         assert!(!part_path.exists());
         assert!(!sidecar_path.exists());

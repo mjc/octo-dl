@@ -11,7 +11,7 @@ const fn default_download_path() -> Option<String> {
 }
 
 /// Configuration for download operations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DownloadConfig {
     /// Download directory path (used in service mode).
     #[serde(default = "default_download_path")]
