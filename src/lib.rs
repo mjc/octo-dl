@@ -36,6 +36,7 @@
 #![warn(clippy::nursery)]
 
 pub mod config;
+pub mod core;
 pub mod dlc;
 pub mod download;
 pub mod error;

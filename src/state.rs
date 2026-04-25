@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::session::{FileSnapshot, PackageSnapshot, SessionSnapshotV3};
 use aes::Aes128;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes128Gcm, Nonce};
@@ -135,21 +136,13 @@ impl SessionState {
     /// falling back to `$XDG_DATA_HOME/octo-dl` for interactive use.
     #[must_use]
     pub fn state_dir() -> PathBuf {
-        std::env::var("STATE_DIRECTORY").map_or_else(
-            |_| {
-                dirs::data_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("octo-dl")
-                    .join("sessions")
-            },
-            |state_dir| PathBuf::from(state_dir).join("sessions"),
-        )
+        SessionSnapshotV3::state_dir()
     }
 
     /// Returns the file path for this session's state file.
     #[must_use]
     pub fn state_path(&self) -> PathBuf {
-        Self::state_dir().join(format!("{}.toml", self.id))
+        Self::state_dir().join(format!("session-v3-{}.toml", self.id))
     }
 
     /// Saves the session state to disk atomically (write tmp + rename).
@@ -159,27 +152,7 @@ impl SessionState {
     /// Returns an error if the state directory cannot be created or the file
     /// cannot be written.
     pub fn save(&self) -> std::io::Result<()> {
-        let dir = Self::state_dir();
-        std::fs::create_dir_all(&dir)?;
-
-        let path = self.state_path();
-        let tmp_path = path.with_extension("toml.tmp");
-
-        let toml_str = toml::to_string(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        std::fs::write(&tmp_path, toml_str)?;
-
-        // Set restrictive permissions on Unix (credentials are encrypted but still)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&tmp_path, perms)?;
-        }
-
-        std::fs::rename(&tmp_path, &path)?;
-        Ok(())
+        self.to_v3().save()
     }
 
     /// Loads a session state from a file path.
@@ -188,9 +161,14 @@ impl SessionState {
     ///
     /// Returns an error if the file cannot be read or parsed.
     pub fn load(path: &Path) -> std::io::Result<Self> {
-        let contents = std::fs::read_to_string(path)?;
-        toml::from_str(&contents)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        match SessionSnapshotV3::load(path) {
+            Ok(snapshot) => Ok(Self::from_v3(snapshot)),
+            Err(_) => {
+                let contents = std::fs::read_to_string(path)?;
+                toml::from_str(&contents)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            }
+        }
     }
 
     /// Finds the most recent incomplete session in the state directory.
@@ -199,42 +177,7 @@ impl SessionState {
     /// removed so they never accumulate on disk.
     #[must_use]
     pub fn latest() -> Option<Self> {
-        let dir = Self::state_dir();
-        let read_dir = std::fs::read_dir(&dir).ok()?;
-
-        let mut incomplete: Vec<(PathBuf, Self)> = Vec::new();
-
-        for entry in read_dir.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.extension().is_none_or(|ext| ext != "toml") {
-                continue;
-            }
-            let Ok(session) = Self::load(&path) else {
-                let corrupt_path = path.with_extension("toml.corrupt");
-                log::warn!(
-                    "Session file failed to parse, renaming to {}: {}",
-                    corrupt_path.display(),
-                    path.display()
-                );
-                let _ = std::fs::rename(&path, &corrupt_path);
-                continue;
-            };
-            if session.status == SessionStatus::Completed {
-                // Completed sessions are no longer needed — clean up.
-                let _ = std::fs::remove_file(&path);
-            } else {
-                incomplete.push((path, session));
-            }
-        }
-
-        incomplete.sort_by(|a, b| b.1.created.cmp(&a.1.created));
-
-        // Clean up: remove all stale incomplete sessions except the newest
-        for (path, _) in incomplete.iter().skip(1) {
-            let _ = std::fs::remove_file(path);
-        }
-
-        incomplete.into_iter().next().map(|(_, s)| s)
+        SessionSnapshotV3::latest().map(Self::from_v3)
     }
 
     /// Marks a file as completed by its path and saves the state.
@@ -348,6 +291,165 @@ impl SessionState {
             .iter()
             .filter(|f| !f.status.is_terminal())
             .count()
+    }
+
+    pub(crate) fn to_v3(&self) -> SessionSnapshotV3 {
+        let mut packages = Vec::with_capacity(self.urls.len());
+        for (url_index, url_entry) in self.urls.iter().enumerate() {
+            let file_ids = self
+                .files
+                .iter()
+                .filter(|file| file.url_index == url_index)
+                .map(|file| file.path.clone())
+                .collect();
+            packages.push(PackageSnapshot {
+                id: url_entry.url.clone(),
+                source_url: url_entry.url.clone(),
+                display_name: url_entry.url.clone(),
+                file_ids,
+                error: match &url_entry.status {
+                    UrlStatus::Error(message) => Some(message.clone()),
+                    UrlStatus::Pending | UrlStatus::Fetched => None,
+                },
+            });
+        }
+
+        let files = self
+            .files
+            .iter()
+            .filter_map(|file| {
+                let package_id = self.urls.get(file.url_index)?.url.clone();
+                Some(FileSnapshot {
+                    id: file.path.clone(),
+                    package_id,
+                    path: file.path.clone(),
+                    size: file.size,
+                    lifecycle: match &file.status {
+                        FileEntryStatus::Pending => crate::core::FileLifecycle::Queued,
+                        FileEntryStatus::Downloading => crate::core::FileLifecycle::Downloading,
+                        FileEntryStatus::Completed => crate::core::FileLifecycle::Complete,
+                        FileEntryStatus::Skipped => crate::core::FileLifecycle::Skipped,
+                        FileEntryStatus::Error(message) => {
+                            let _ = message;
+                            crate::core::FileLifecycle::Failed
+                        }
+                    },
+                    progress: crate::core::FileProgressState {
+                        verified_existing_bytes: 0,
+                        downloaded_network_bytes: 0,
+                        visible_completed_bytes: if matches!(file.status, FileEntryStatus::Completed)
+                        {
+                            file.size
+                        } else {
+                            0
+                        },
+                    },
+                    desired: if matches!(file.status, FileEntryStatus::Skipped) {
+                        crate::core::DesiredState::Suppressed
+                    } else {
+                        crate::core::DesiredState::Present
+                    },
+                    runtime: crate::core::RuntimeState {
+                        counts_in_run_totals: !matches!(
+                            file.status,
+                            FileEntryStatus::Completed | FileEntryStatus::Skipped
+                        ),
+                        active: matches!(file.status, FileEntryStatus::Downloading),
+                        preexisting_complete: false,
+                        reused_chunks: 0,
+                    },
+                    message: match &file.status {
+                        FileEntryStatus::Error(message) => Some(message.clone()),
+                        _ => None,
+                    },
+                })
+            })
+            .collect();
+
+        SessionSnapshotV3 {
+            version: 3,
+            id: self.id.clone(),
+            created: self.created,
+            status: match self.status {
+                SessionStatus::InProgress => crate::core::SessionRunStatus::InProgress,
+                SessionStatus::Completed => crate::core::SessionRunStatus::Completed,
+                SessionStatus::Paused => crate::core::SessionRunStatus::Paused,
+            },
+            packages,
+            files,
+            config: self.config.clone(),
+            credentials: crate::core::SavedCredentials {
+                email: self.credentials.email.clone(),
+                password: self.credentials.password.clone(),
+                mfa: self.credentials.mfa.clone(),
+            },
+        }
+    }
+
+    pub(crate) fn from_v3(snapshot: SessionSnapshotV3) -> Self {
+        let urls: Vec<UrlEntry> = snapshot
+            .packages
+            .iter()
+            .map(|package| UrlEntry {
+                url: package.source_url.clone(),
+                status: package.error.as_ref().map_or_else(
+                    || {
+                        if package.file_ids.is_empty() {
+                            UrlStatus::Pending
+                        } else {
+                            UrlStatus::Fetched
+                        }
+                    },
+                    |message| UrlStatus::Error(message.clone()),
+                ),
+            })
+            .collect();
+        let files = snapshot
+            .files
+            .into_iter()
+            .map(|file| {
+                let url_index = snapshot
+                    .packages
+                    .iter()
+                    .position(|package| package.id == file.package_id)
+                    .unwrap_or(0);
+                FileEntry {
+                    key: Some(file.path.clone()),
+                    url_index,
+                    path: file.path.clone(),
+                    size: file.size,
+                    status: match file.lifecycle {
+                        crate::core::FileLifecycle::Planned
+                        | crate::core::FileLifecycle::Queued => FileEntryStatus::Pending,
+                        crate::core::FileLifecycle::Downloading => FileEntryStatus::Downloading,
+                        crate::core::FileLifecycle::Complete => FileEntryStatus::Completed,
+                        crate::core::FileLifecycle::Skipped
+                        | crate::core::FileLifecycle::Deleted => FileEntryStatus::Skipped,
+                        crate::core::FileLifecycle::Failed => {
+                            FileEntryStatus::Error(file.message.unwrap_or_else(|| "failed".to_string()))
+                        }
+                    },
+                }
+            })
+            .collect();
+
+        Self {
+            id: snapshot.id,
+            created: snapshot.created,
+            status: match snapshot.status {
+                crate::core::SessionRunStatus::InProgress => SessionStatus::InProgress,
+                crate::core::SessionRunStatus::Completed => SessionStatus::Completed,
+                crate::core::SessionRunStatus::Paused => SessionStatus::Paused,
+            },
+            credentials: SavedCredentials {
+                email: snapshot.credentials.email,
+                password: snapshot.credentials.password,
+                mfa: snapshot.credentials.mfa,
+            },
+            config: snapshot.config,
+            urls,
+            files,
+        }
     }
 }
 
