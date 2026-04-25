@@ -238,7 +238,9 @@ pub fn handle_login_result(app: &mut App, success: bool, error: Option<String>) 
 
 pub fn handle_file_complete(app: &mut App, id: &str, _name: &str) {
     app.cancellation_tokens.remove(id);
-    if let Some(file) = app.find_file_mut(id) {
+    if !app.core_state.files.contains_key(id)
+        && let Some(file) = app.find_file_mut(id)
+    {
         file.name = _name.to_string();
         file.status = FileStatus::Complete;
         file.downloaded = file.size;
@@ -419,10 +421,8 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             app.apply_core_event(CoreEvent::FileCancelled {
                 file_id: id.clone(),
             });
-            if let Some(fp) = app.find_file_mut(&id)
-                && !matches!(fp.status, FileStatus::Downloading)
-            {
-                fp.speed = 0;
+            if let Some(fp) = app.find_file_mut(&id) {
+                fp.reset_rate();
             }
             if app.paused {
                 app.status = "Paused".to_string();
