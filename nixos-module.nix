@@ -176,8 +176,14 @@ api_key_file = os.environ.get("OCTO_API_KEY_FILE", "")
 existing = {}
 if config_path.exists():
     try:
-        with config_path.open("rb") as fh:
-            existing = tomllib.load(fh)
+        raw = config_path.read_text(encoding="utf-8")
+        try:
+            existing = tomllib.loads(raw)
+        except Exception:
+            if "\\n" in raw:
+                existing = tomllib.loads(raw.replace("\\n", "\n"))
+            else:
+                raise
     except Exception:
         existing = {}
 
@@ -195,16 +201,28 @@ def toml_string(value: str) -> str:
 def toml_bool(value: bool) -> str:
     return "true" if value else "false"
 
+encrypted_value = toml_bool(bool(credentials.get("encrypted", False)))
+email_value = toml_string(str(credentials.get("email", "")))
+password_value = toml_string(str(credentials.get("password", "")))
+mfa_value = toml_string(str(credentials.get("mfa", "")))
+api_host_value = toml_string(os.environ["OCTO_API_HOST"])
+api_port_value = os.environ["OCTO_API_PORT"]
+download_dir_value = toml_string(os.environ["OCTO_DOWNLOAD_DIR"])
+chunks_per_file_value = os.environ["OCTO_CHUNKS_PER_FILE"]
+concurrent_files_value = os.environ["OCTO_CONCURRENT_FILES"]
+force_overwrite_value = toml_bool(os.environ["OCTO_FORCE_OVERWRITE"] == "true")
+cleanup_on_error_value = toml_bool(os.environ["OCTO_CLEANUP_ON_ERROR"] == "true")
+
 lines = [
     "[credentials]",
-    f"encrypted = {toml_bool(bool(credentials.get(\"encrypted\", False)))}",
-    f"email = {toml_string(str(credentials.get(\"email\", \"\")))}",
-    f"password = {toml_string(str(credentials.get(\"password\", \"\")))}",
-    f"mfa = {toml_string(str(credentials.get(\"mfa\", \"\")))}",
+    f"encrypted = {encrypted_value}",
+    f"email = {email_value}",
+    f"password = {password_value}",
+    f"mfa = {mfa_value}",
     "",
     "[api]",
-    f"host = {toml_string(os.environ[\"OCTO_API_HOST\"])}",
-    f"port = {os.environ[\"OCTO_API_PORT\"]}",
+    f"host = {api_host_value}",
+    f"port = {api_port_value}",
 ]
 
 if api_key:
@@ -213,15 +231,15 @@ if api_key:
 lines += [
     "",
     "[download]",
-    f"path = {toml_string(os.environ[\"OCTO_DOWNLOAD_DIR\"])}",
-    f"chunks_per_file = {os.environ[\"OCTO_CHUNKS_PER_FILE\"]}",
-    f"concurrent_files = {os.environ[\"OCTO_CONCURRENT_FILES\"]}",
-    f"force_overwrite = {toml_bool(os.environ[\"OCTO_FORCE_OVERWRITE\"] == \"true\")}",
-    f"cleanup_on_error = {toml_bool(os.environ[\"OCTO_CLEANUP_ON_ERROR\"] == \"true\")}",
+    f"path = {download_dir_value}",
+    f"chunks_per_file = {chunks_per_file_value}",
+    f"concurrent_files = {concurrent_files_value}",
+    f"force_overwrite = {force_overwrite_value}",
+    f"cleanup_on_error = {cleanup_on_error_value}",
     "",
 ]
 
-config_path.write_text("\\n".join(lines), encoding="utf-8")
+config_path.write_text("\n".join(lines), encoding="utf-8")
 PY
         chown ${cfg.user}:${cfg.group} "$OCTO_CONFIG_PATH"
         chmod 600 "$OCTO_CONFIG_PATH"
