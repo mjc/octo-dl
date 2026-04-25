@@ -349,6 +349,7 @@ pub struct App {
     pub urls: Vec<String>,
     // File queue (main content)
     pub files: Vec<FileEntry>,
+    pub(crate) overlay_files: IndexMap<String, FileEntry>,
     pub file_list_state: ListState,
     // Aggregate stats
     pub total_downloaded: u64,
@@ -398,6 +399,18 @@ pub struct App {
 }
 
 impl App {
+    fn seed_overlay_from_visible(&mut self) {
+        for file in &self.files {
+            if !self.core_state.files.contains_key(&file.id)
+                && !self.deleted_files.contains(&file.id)
+            {
+                self.overlay_files
+                    .entry(file.id.clone())
+                    .or_insert_with(|| file.clone());
+            }
+        }
+    }
+
     fn package_sort_key_for(&self, file: &FileEntry) -> (usize, String) {
         if let Some(core_file) = self.core_state.files.get(&file.id) {
             let package_order = self
@@ -433,6 +446,11 @@ impl App {
             .iter()
             .find(|file| file.id == file_id)
             .and_then(|file| file.source_url.clone())
+            .or_else(|| {
+                self.overlay_files
+                    .get(file_id)
+                    .and_then(|file| file.source_url.clone())
+            })
     }
 
     fn project_core_file(
@@ -591,7 +609,7 @@ impl App {
         self.sorted_file_indices().get(selected).copied()
     }
 
-    pub(crate) fn sync_visible_files_from_core(&mut self) {
+    pub(crate) fn sync_visible_files(&mut self) {
         let selected_id = self.selected_file_index().map(|index| self.files[index].id.clone());
         let selected_row = self.file_list_state.selected().unwrap_or(0);
         let core_file_ids: HashSet<_> = self.core_state.files.keys().cloned().collect();
@@ -601,6 +619,13 @@ impl App {
             .collect();
 
         let mut existing = existing;
+        for (id, file) in &existing {
+            if !core_file_ids.contains(id) && !self.deleted_files.contains(id) {
+                self.overlay_files
+                    .entry(id.clone())
+                    .or_insert_with(|| file.clone());
+            }
+        }
         let mut files = Vec::new();
         for file in self.core_state.files.values() {
             let package = self.core_state.packages.get(&file.package_id);
@@ -610,9 +635,9 @@ impl App {
             }
         }
 
-        for (id, entry) in existing {
-            if !core_file_ids.contains(&id) {
-                files.push(entry);
+        for (id, entry) in &self.overlay_files {
+            if !core_file_ids.contains(id) && !self.deleted_files.contains(id) {
+                files.push(entry.clone());
             }
         }
 
@@ -634,6 +659,35 @@ impl App {
             self.file_list_state
                 .select(Some(selected_row.min(self.files.len() - 1)));
         }
+    }
+
+    pub(crate) fn upsert_overlay_file(&mut self, file: FileEntry) {
+        self.overlay_files.insert(file.id.clone(), file);
+        self.sync_visible_files();
+    }
+
+    pub(crate) fn overlay_file_mut(&mut self, id: &str) -> Option<&mut FileEntry> {
+        if !self.overlay_files.contains_key(id) {
+            self.seed_overlay_from_visible();
+        }
+        self.overlay_files.get_mut(id)
+    }
+
+    pub(crate) fn remove_overlay_file(&mut self, id: &str) -> Option<FileEntry> {
+        if !self.overlay_files.contains_key(id) {
+            self.seed_overlay_from_visible();
+        }
+        let removed = self.overlay_files.shift_remove(id);
+        self.sync_visible_files();
+        removed
+    }
+
+    pub(crate) fn drop_overlay_file(&mut self, id: &str) -> Option<FileEntry> {
+        self.deleted_files.insert(id.to_string());
+        let removed = self.overlay_files.shift_remove(id);
+        self.sync_visible_files();
+        self.deleted_files.remove(id);
+        removed
     }
 
     fn update_speeds_at(&mut self, now: Instant) {
@@ -713,6 +767,7 @@ impl App {
             url_input: String::new(),
             urls: Vec::new(),
             files: Vec::new(),
+            overlay_files: IndexMap::new(),
             file_list_state: ListState::default(),
             total_downloaded: 0,
             total_size: 0,
@@ -777,7 +832,7 @@ impl App {
         self.seed_core_session_from_session();
         let effects = reduce(&mut self.core_state, event);
         self.apply_core_effects(effects);
-        self.sync_visible_files_from_core();
+        self.sync_visible_files();
         self.recompute_totals();
     }
 
