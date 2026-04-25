@@ -187,10 +187,7 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
                     }
                     let _ = app.url_tx.send(url);
                 } else {
-                    if app.core_state.files.contains_key(&file_id) {
-                        app.files[selected].status =
-                            FileStatus::Error("Retry unavailable for this file".to_string());
-                    } else if let Some(file) = app.overlay_file_mut(&file_id) {
+                    if let Some(file) = app.overlay_file_mut(&file_id) {
                         file.status = FileStatus::Error("Retry unavailable for this file".to_string());
                         app.sync_visible_files();
                     }
@@ -244,9 +241,7 @@ fn reset_selected(app: &mut App) {
     let file_id = app.files[selected].id.clone();
     let artifact_path = app.files[selected].name.clone();
     let Some(source_url) = app.files[selected].source_url.clone() else {
-        if app.core_state.files.contains_key(&file_id) {
-            app.files[selected].status = FileStatus::Error("Reset unavailable for this file".to_string());
-        } else if let Some(file) = app.overlay_file_mut(&file_id) {
+        if let Some(file) = app.overlay_file_mut(&file_id) {
             file.status = FileStatus::Error("Reset unavailable for this file".to_string());
             app.sync_visible_files();
         }
