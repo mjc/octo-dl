@@ -236,24 +236,21 @@ pub fn handle_login_result(app: &mut App, success: bool, error: Option<String>) 
     }
 }
 
-pub fn handle_file_complete(app: &mut App, id: &str, name: &str) {
-    let mut was_complete = false;
+pub fn handle_file_complete(app: &mut App, id: &str, _name: &str) {
     app.cancellation_tokens.remove(id);
-    if let Some(fp) = app.find_file_mut(id) {
-        was_complete = matches!(fp.status, FileStatus::Complete);
-        fp.status = FileStatus::Complete;
-        fp.downloaded = fp.size;
-        fp.reset_rate();
-        fp.name = name.to_string();
-    }
-    if !was_complete {
-        app.files_completed += 1;
+    if let Some(file) = app.find_file_mut(id) {
+        file.name = _name.to_string();
+        file.status = FileStatus::Complete;
+        file.downloaded = file.size;
+        file.reset_rate();
+        file.speed = 0;
     }
 
     if let Some(ref mut session) = app.session {
         let _ = session.mark_file_complete(id);
     }
 
+    app.recompute_totals();
     if app.files_completed == app.files_total && app.files_total > 0 {
         if let Some(ref mut session) = app.session {
             let _ = session.mark_completed();
@@ -266,7 +263,9 @@ pub fn handle_file_complete(app: &mut App, id: &str, name: &str) {
 
 pub fn handle_file_error(app: &mut App, id: &str, name: &str, error: &str) {
     app.cancellation_tokens.remove(id);
-    if let Some(fp) = app.find_file_mut(id) {
+    if app.core_state.files.contains_key(id) {
+        // Core-backed rows are projected back into the TUI view.
+    } else if let Some(fp) = app.find_file_mut(id) {
         fp.status = FileStatus::Error(error.to_string());
         fp.reset_rate();
         fp.name = name.to_string();
@@ -351,25 +350,8 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 size,
             });
             if let Some(fp) = app.find_file_mut(&id) {
-                fp.status = FileStatus::Downloading;
-                fp.name = name;
-                fp.size = size;
-                fp.counts_toward_progress = true;
                 fp.rate.reset(fp.downloaded, std::time::Instant::now());
-            } else {
-                app.files.push(FileEntry {
-                    id,
-                    name,
-                    size,
-                    downloaded: 0,
-                    speed: 0,
-                    rate: Default::default(),
-                    source_url: None,
-                    counts_toward_progress: true,
-                    status: FileStatus::Downloading,
-                });
             }
-            app.recompute_totals();
         }
         DownloadEvent::Progress { id, delta } => {
             if app.deleted_files.contains(id.as_ref()) {
@@ -418,8 +400,8 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             app.apply_core_event(CoreEvent::FileCompleted {
                 file_id: id.clone(),
             });
-            handle_file_complete(app, &id, &name);
             app.recompute_totals();
+            handle_file_complete(app, &id, &name);
         }
         DownloadEvent::FileCancelled { id, name } => {
             log::info!("Download cancelled: {name}");
@@ -435,14 +417,14 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
             app.apply_core_event(CoreEvent::FileCancelled {
                 file_id: id.clone(),
             });
-            if let Some(fp) = app.find_file_mut(&id) {
-                fp.status = FileStatus::Queued;
-                fp.reset_rate();
+            if let Some(fp) = app.find_file_mut(&id)
+                && !matches!(fp.status, FileStatus::Downloading)
+            {
+                fp.speed = 0;
             }
             if app.paused {
                 app.status = "Paused".to_string();
             }
-            app.recompute_totals();
         }
         DownloadEvent::Error { id, name, error } => {
             log::error!("Download error: {name}: {error}");
@@ -530,31 +512,6 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                 return;
             }
             app.ensure_core_file(&id, &source_url, &name, size, count_toward_progress);
-            // Add a real file entry with stable identity and size.
-            if let Some(fp) = app.find_file_mut(&id) {
-                fp.name = name.clone();
-                fp.size = size;
-                fp.source_url = Some(source_url);
-                fp.counts_toward_progress |= count_toward_progress;
-                if !matches!(fp.status, FileStatus::Complete) {
-                    fp.status = FileStatus::Queued;
-                    fp.downloaded = 0;
-                    fp.reset_rate();
-                }
-            } else {
-                app.files.push(FileEntry {
-                    id: id.clone(),
-                    name: name.clone(),
-                    size,
-                    downloaded: 0,
-                    speed: 0,
-                    rate: Default::default(),
-                    source_url: Some(source_url),
-                    counts_toward_progress: count_toward_progress,
-                    status: FileStatus::Queued,
-                });
-            }
-
             // Track file in session for resume support
             if let Some(ref mut session) = app.session {
                 let url_index = session
@@ -584,7 +541,6 @@ pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
                     let _ = session.save();
                 }
             }
-            app.recompute_totals();
         }
         DownloadEvent::UrlResolved { url } => {
             // Remove the URL placeholder now that real file entries exist

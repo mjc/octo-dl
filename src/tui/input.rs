@@ -178,21 +178,18 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
                         counts_toward_progress,
                     );
                 }
-                app.files[selected].status = FileStatus::Queued;
-                app.files[selected].counts_toward_progress = true;
-                app.files[selected].downloaded = 0;
-                app.files[selected].reset_rate();
                 app.apply_core_event(CoreEvent::FileRetryRequested {
-                    file_id,
+                    file_id: file_id.clone(),
                 });
                 if let Some(url) = source_url {
-                    app.recompute_totals();
+                    if let Some(file) = app.find_file_mut(&file_id) {
+                        file.reset_rate();
+                    }
                     let _ = app.url_tx.send(url);
                 } else {
                     app.files[selected].status =
                         FileStatus::Error("Retry unavailable for this file".to_string());
                     app.status = "Retry unavailable for this file".to_string();
-                    app.recompute_totals();
                 }
             }
         }
@@ -261,15 +258,12 @@ fn reset_selected(app: &mut App) {
         token.cancel();
     }
 
-    let file = &mut app.files[selected];
-    file.status = FileStatus::Queued;
-    file.counts_toward_progress = true;
-    file.downloaded = 0;
-    file.reset_rate();
     app.apply_core_event(CoreEvent::FileResetRequested {
         file_id: file_id.clone(),
     });
-    app.recompute_totals();
+    if let Some(file) = app.find_file_mut(&file_id) {
+        file.reset_rate();
+    }
 
     schedule_download_artifact_delete(artifact_path);
 
@@ -346,21 +340,26 @@ fn delete_selected(app: &mut App) {
     {
         token.cancel();
     }
+    let is_core_backed = app.core_state.files.contains_key(&file_id) || source_url.is_some();
     app.deleted_files.insert(file_id.clone());
     app.apply_core_event(CoreEvent::FileDeleted {
         file_id: file_id.clone(),
     });
-    app.files.remove(selected_file);
+    if !is_core_backed {
+        app.files.remove(selected_file);
+    }
     schedule_download_artifact_delete(artifact_path);
-    app.recompute_totals();
     if let Some(ref mut session) = app.session {
         let _ = session.mark_file_skipped(&file_id);
     }
-    if app.files.is_empty() {
-        app.file_list_state.select(None);
-    } else {
-        app.file_list_state
-            .select(Some(selected_row.min(app.files.len() - 1)));
+    if !is_core_backed {
+        app.recompute_totals();
+        if app.files.is_empty() {
+            app.file_list_state.select(None);
+        } else {
+            app.file_list_state
+                .select(Some(selected_row.min(app.files.len() - 1)));
+        }
     }
 }
 
