@@ -1565,6 +1565,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hostname",
+ "indexmap",
  "indicatif",
  "log",
  "mega",
