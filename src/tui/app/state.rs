@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::core::{
-    CoreEffect, CoreEvent, ResolvedFile, ResolvedPackage, RestartSnapshot, SessionSnapshotV3,
-    reconcile_restart, reduce, scan_filesystem,
+    CoreCommand, CoreEffect, CoreEvent, ResolvedFile, ResolvedPackage, RestartSnapshot,
+    SessionSnapshotV3, reconcile_restart, reduce, scan_filesystem,
 };
 
 use super::{App, SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate};
@@ -27,6 +27,10 @@ impl App {
         self.apply_core_effects(effects);
         self.sync_visible_files();
         self.recompute_totals();
+    }
+
+    pub(crate) fn apply_core_command(&mut self, command: CoreCommand) {
+        self.apply_core_event(command.into_event());
     }
 
     fn apply_core_effects(&mut self, effects: Vec<CoreEffect>) {
