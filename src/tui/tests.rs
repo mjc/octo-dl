@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus},
+    tui::event::DownloadRequest,
     test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot},
 };
 use std::env;
@@ -61,8 +62,18 @@ fn resume_session_requeues_urls() {
     assert_eq!(app.urls, expected_urls);
 
     let mut url_rx = app.url_rx.take().expect("url_rx should exist");
-    assert_eq!(url_rx.try_recv().unwrap(), expected_urls[0]);
-    assert_eq!(url_rx.try_recv().unwrap(), expected_urls[1]);
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::SubmitUrl {
+            url: expected_urls[0].clone()
+        }
+    );
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::SubmitUrl {
+            url: expected_urls[1].clone()
+        }
+    );
     assert!(url_rx.try_recv().is_err());
 
     let session_state = app.session.as_ref().expect("session should be present");
@@ -126,7 +137,10 @@ fn resume_session_restores_files_and_only_requeues_remaining_urls() {
     let mut url_rx = app.url_rx.take().expect("url_rx should exist");
     assert_eq!(
         url_rx.try_recv().unwrap(),
-        "https://mega.nz/file/pending".to_string()
+        DownloadRequest::ResumeFileIds {
+            source_url: "https://mega.nz/file/pending".to_string(),
+            file_ids: vec!["pending.mkv".to_string()]
+        }
     );
     assert!(url_rx.try_recv().is_err());
 
@@ -170,10 +184,17 @@ fn resume_session_requeues_package_url_once_for_multiple_pending_files() {
     assert_eq!(app.urls, vec!["https://mega.nz/folder/pending".to_string()]);
 
     let mut url_rx = app.url_rx.take().expect("url_rx should exist");
-    assert_eq!(
-        url_rx.try_recv().unwrap(),
-        "https://mega.nz/folder/pending".to_string()
-    );
+    if let DownloadRequest::ResumeFileIds {
+        source_url,
+        mut file_ids,
+    } = url_rx.try_recv().unwrap()
+    {
+        assert_eq!(source_url, "https://mega.nz/folder/pending");
+        file_ids.sort();
+        assert_eq!(file_ids, vec!["episode-1.mkv", "episode-2.mkv"]);
+    } else {
+        panic!("expected ResumeFileIds request");
+    }
     assert!(url_rx.try_recv().is_err());
 }
 
@@ -322,8 +343,18 @@ fn ui_add_urls_enqueues_each_unique_url_once() {
             "https://mega.nz/file/two".to_string()
         ]
     );
-    assert_eq!(url_rx.try_recv().unwrap(), "https://mega.nz/file/one");
-    assert_eq!(url_rx.try_recv().unwrap(), "https://mega.nz/file/two");
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::SubmitUrl {
+            url: "https://mega.nz/file/one".to_string()
+        }
+    );
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::SubmitUrl {
+            url: "https://mega.nz/file/two".to_string()
+        }
+    );
     assert!(url_rx.try_recv().is_err());
 }
 
@@ -357,7 +388,10 @@ fn ui_retry_file_recomputes_totals() {
     assert_eq!(app.total_downloaded, 0);
     assert_eq!(
         url_rx.try_recv().unwrap(),
-        "https://mega.nz/file/error".to_string()
+        DownloadRequest::ResumeFileIds {
+            source_url: "https://mega.nz/file/error".to_string(),
+            file_ids: vec!["error.bin".to_string()]
+        }
     );
 }
 
@@ -501,7 +535,10 @@ fn ui_reset_file_resets_progress_and_requeues_url() {
     assert_eq!(app.files[0].downloaded, 0);
     assert_eq!(
         url_rx.try_recv().unwrap(),
-        "https://mega.nz/file/reset".to_string()
+        DownloadRequest::ResumeFileIds {
+            source_url: "https://mega.nz/file/reset".to_string(),
+            file_ids: vec!["active.bin".to_string()]
+        }
     );
     assert!(!file_path.exists());
     assert!(!part_path.exists());

@@ -6,6 +6,7 @@ use crate::core::{
 };
 
 use super::{App, SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate};
+use crate::tui::event::DownloadRequest;
 
 impl App {
     pub(crate) fn seed_core_session_from_session(&mut self) {
@@ -34,15 +35,14 @@ impl App {
     }
 
     fn apply_core_effects(&mut self, effects: Vec<CoreEffect>) {
-        let mut queued_urls = Vec::new();
-        let mut queued_url_set = HashSet::new();
+        let mut queued_file_map: HashMap<String, HashSet<String>> = HashMap::new();
         for effect in effects {
             match effect {
                 CoreEffect::PersistSession(snapshot) => {
                     self.persist_core_session_snapshot(snapshot);
                 }
                 CoreEffect::EnqueueUrlResolution { url } => {
-                    let _ = self.url_tx.send(url);
+                    let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
                 }
                 CoreEffect::DeleteOutputArtifacts { path, .. } => {
                     super::super::download::schedule_output_artifact_delete(path);
@@ -63,16 +63,24 @@ impl App {
                     else {
                         continue;
                     };
-                    if queued_url_set.insert(source_url.clone()) {
-                        queued_urls.push(source_url);
-                    }
+                    queued_file_map
+                        .entry(source_url)
+                        .or_default()
+                        .insert(file_id.clone());
                 }
                 CoreEffect::PublishViewSnapshot => {}
             }
         }
 
-        for url in queued_urls {
-            let _ = self.url_tx.send(url);
+        for (source_url, file_ids) in queued_file_map {
+            if file_ids.is_empty() {
+                continue;
+            }
+            let file_ids = file_ids.into_iter().collect::<Vec<_>>();
+            let _ = self.url_tx.send(DownloadRequest::ResumeFileIds {
+                source_url,
+                file_ids,
+            });
         }
     }
 
@@ -225,11 +233,11 @@ impl App {
             else {
                 continue;
             };
-            if !package.file_ids.is_empty() {
-                continue;
+                if !package.file_ids.is_empty() {
+                    continue;
+                }
+                let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
             }
-            let _ = self.url_tx.send(url);
-        }
         self.save_and_install_session(session);
     }
 

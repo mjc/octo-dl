@@ -3,6 +3,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::extract_urls;
+#[cfg(test)]
+use crate::tui::event::DownloadRequest;
 
 use super::app::{App, ConfigField, FileStatus, LoginState, Popup, UiAction};
 
@@ -542,7 +544,10 @@ mod tests {
         assert_eq!(app.file_speed("active.bin"), 0);
         assert_eq!(
             url_rx.try_recv().unwrap(),
-            "https://mega.nz/file/reset".to_string()
+            DownloadRequest::ResumeFileIds {
+                source_url: "https://mega.nz/file/reset".to_string(),
+                file_ids: vec!["active.bin".to_string()]
+            }
         );
         assert!(!final_path.exists());
         assert!(!part_path.exists());
@@ -633,13 +638,18 @@ mod tests {
     #[test]
     fn add_url_deduplicates() {
         let mut app = test_app();
-        let mut url_rx = app.url_rx.take().expect("url_rx should exist");
-        app.submit_url("https://mega.nz/file/abc".to_string());
-        app.submit_url("https://mega.nz/file/abc".to_string());
-        assert_eq!(app.urls.len(), 1);
-        assert_eq!(url_rx.try_recv().unwrap(), "https://mega.nz/file/abc");
-        assert!(url_rx.try_recv().is_err());
-    }
+    let mut url_rx = app.url_rx.take().expect("url_rx should exist");
+    app.submit_url("https://mega.nz/file/abc".to_string());
+    app.submit_url("https://mega.nz/file/abc".to_string());
+    assert_eq!(app.urls.len(), 1);
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::SubmitUrl {
+            url: "https://mega.nz/file/abc".to_string()
+        }
+    );
+    assert!(url_rx.try_recv().is_err());
+}
 
     #[test]
     fn retry_recomputes_totals_for_errored_file() {
@@ -671,7 +681,10 @@ mod tests {
         assert_eq!(app.total_downloaded, 0);
         assert_eq!(
             url_rx.try_recv().unwrap(),
-            "https://mega.nz/file/error".to_string()
+            DownloadRequest::ResumeFileIds {
+                source_url: "https://mega.nz/file/error".to_string(),
+                file_ids: vec!["error.bin".to_string()]
+            }
         );
     }
 
@@ -687,6 +700,11 @@ mod tests {
 
         assert!(app.url_input.is_empty());
         let received = url_rx.try_recv().unwrap();
-        assert_eq!(received, "https://mega.nz/file/test123");
+        assert_eq!(
+            received,
+            DownloadRequest::SubmitUrl {
+                url: "https://mega.nz/file/test123".to_string()
+            }
+        );
     }
 }
