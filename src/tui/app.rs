@@ -1,5 +1,8 @@
 //! Application state model.
 
+#[path = "app/snapshot.rs"]
+mod snapshot;
+
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
@@ -472,60 +475,6 @@ impl App {
                     .get(file_id)
                     .and_then(|file| file.source_url.clone())
             })
-    }
-
-    fn snapshot_packages(&self) -> Vec<serde_json::Value> {
-        if !self.core_state.packages.is_empty() {
-            return self
-                .core_state
-                .packages
-                .values()
-                .map(|package| {
-                    serde_json::json!({
-                        "id": package.id,
-                        "source_url": package.source_url,
-                        "display_name": package.display_name,
-                        "status": package.status,
-                        "file_ids": package.file_ids,
-                    })
-                })
-                .collect();
-        }
-        let mut packages = IndexMap::<String, Vec<&FileEntry>>::new();
-        for file in &self.files {
-            let package_id = file.source_url.clone().unwrap_or_else(|| file.id.clone());
-            packages.entry(package_id).or_default().push(file);
-        }
-
-        packages
-            .into_iter()
-            .map(|(package_id, files)| {
-                let status = if files
-                    .iter()
-                    .any(|file| matches!(file.status, FileStatus::Error(_)))
-                {
-                    "failed"
-                } else if files
-                    .iter()
-                    .any(|file| matches!(file.status, FileStatus::Downloading))
-                {
-                    "downloading"
-                } else if files.iter().all(|file| matches!(file.status, FileStatus::Complete)) {
-                    "complete"
-                } else if files.iter().any(|file| matches!(file.status, FileStatus::Complete)) {
-                    "partial"
-                } else {
-                    "queued"
-                };
-                serde_json::json!({
-                    "id": package_id,
-                    "source_url": files[0].source_url.clone().unwrap_or_else(|| files[0].id.clone()),
-                    "display_name": files[0].source_url.clone().unwrap_or_else(|| files[0].name.clone()),
-                    "status": status,
-                    "file_ids": files.iter().map(|file| file.id.clone()).collect::<Vec<_>>(),
-                })
-            })
-            .collect()
     }
 
     pub fn sorted_file_indices(&self) -> Vec<usize> {
@@ -1929,97 +1878,7 @@ impl App {
     /// one SSE/API client is connected — never on a blind timer.
     #[allow(dead_code)]
     pub fn to_json(&self) -> String {
-        #[derive(Serialize)]
-        struct RunTotals {
-            run_total_bytes: u64,
-            run_completed_bytes: u64,
-            run_file_total: usize,
-            run_file_completed: usize,
-            displayed_network_rate_bps: u64,
-        }
-
-        #[derive(Serialize)]
-        struct SnapshotFile<'a> {
-            id: &'a str,
-            name: &'a str,
-            size: u64,
-            downloaded: u64,
-            speed: u64,
-            status: &'a FileStatus,
-        }
-
-        #[derive(Serialize)]
-        struct Snapshot<'a> {
-            authenticated: bool,
-            paused: bool,
-            logging_in: bool,
-            login_error: Option<&'a str>,
-            popup: Popup,
-            packages: Vec<serde_json::Value>,
-            files: Vec<SnapshotFile<'a>>,
-            total_downloaded: u64,
-            total_size: u64,
-            files_completed: usize,
-            files_total: usize,
-            current_speed: u64,
-            displayed_network_rate_bps: u64,
-            run_totals: RunTotals,
-            cpu_usage: f32,
-            memory_rss: u64,
-            api_port: u16,
-            config: &'a DownloadConfig,
-        }
-
-        let run_totals = if !self.core_state.files.is_empty() {
-            RunTotals {
-                run_total_bytes: self.core_state.totals.run_total_bytes,
-                run_completed_bytes: self.core_state.totals.run_completed_bytes,
-                run_file_total: self.core_state.totals.run_file_total,
-                run_file_completed: self.core_state.totals.run_file_completed,
-                displayed_network_rate_bps: self.current_speed,
-            }
-        } else {
-            RunTotals {
-                run_total_bytes: self.total_size,
-                run_completed_bytes: self.total_downloaded,
-                run_file_total: self.files_total,
-                run_file_completed: self.files_completed,
-                displayed_network_rate_bps: self.current_speed,
-            }
-        };
-
-        let snap = Snapshot {
-            authenticated: self.authenticated,
-            paused: self.paused,
-            logging_in: self.login.logging_in,
-            login_error: self.login.error.as_deref(),
-            popup: self.popup,
-            packages: self.snapshot_packages(),
-            files: self
-                .files
-                .iter()
-                .map(|file| SnapshotFile {
-                    id: &file.id,
-                    name: &file.name,
-                    size: file.size,
-                    downloaded: file.downloaded,
-                    speed: self.file_speed(&file.id),
-                    status: &file.status,
-                })
-                .collect(),
-            total_downloaded: self.total_downloaded,
-            total_size: self.total_size,
-            files_completed: self.files_completed,
-            files_total: self.files_total,
-            current_speed: self.current_speed,
-            displayed_network_rate_bps: self.current_speed,
-            run_totals,
-            cpu_usage: self.cpu_usage,
-            memory_rss: self.memory_rss,
-            api_port: self.api_port,
-            config: &self.config.config,
-        };
-        serde_json::to_string(&snap).unwrap_or_default()
+        snapshot::to_json(self)
     }
 }
 
