@@ -946,48 +946,16 @@ impl App {
     }
 
     pub(crate) fn seed_core_session_from_session(&mut self) {
-        if let Some(session) = self.session.as_ref() {
-            self.core_state.session_meta = SessionMeta {
-                session_id: session.id.clone(),
-                created: session.created,
-                status: match session.status {
-                    crate::SessionStatus::InProgress => crate::core::SessionRunStatus::InProgress,
-                    crate::SessionStatus::Completed => crate::core::SessionRunStatus::Completed,
-                    crate::SessionStatus::Paused => crate::core::SessionRunStatus::Paused,
-                },
-                config: session.config.clone(),
-                credentials: crate::core::SavedCredentials {
-                    email: session.credentials.email.clone(),
-                    password: session.credentials.password.clone(),
-                    mfa: session.credentials.mfa.clone(),
-                },
-            };
+        if let Some(meta) = self.read_session(Self::session_meta_from_state) {
+            self.core_state.session_meta = meta;
         } else {
             self.core_state.session_meta.config = self.config.config.clone();
         }
     }
 
     pub(crate) fn skipped_session_paths(&self) -> HashMap<String, HashSet<String>> {
-        let mut skipped = HashMap::<String, HashSet<String>>::new();
-        let Some(session) = self.session.as_ref() else {
-            return skipped;
-        };
-
-        for file in &session.files {
-            if !matches!(file.status, FileEntryStatus::Skipped) {
-                continue;
-            }
-            let Some(url) = session
-                .urls
-                .get(file.url_index)
-                .map(|entry| entry.url.clone())
-            else {
-                continue;
-            };
-            skipped.entry(url).or_default().insert(file.path.clone());
-        }
-
-        skipped
+        self.read_session(Self::skipped_paths_by_url)
+            .unwrap_or_default()
     }
 
     pub(crate) fn apply_core_event(&mut self, event: CoreEvent) {
@@ -1017,10 +985,8 @@ impl App {
     }
 
     fn persist_core_session_snapshot(&mut self, snapshot: SessionSnapshotV3) {
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        Self::merge_session_state(session, SessionState::from_v3(snapshot));
+        let next = SessionState::from_v3(snapshot);
+        let _ = self.mutate_session(|session| Self::merge_session_state(session, next));
     }
 
     fn merge_session_state(session: &mut SessionState, next: SessionState) {
@@ -1311,12 +1277,52 @@ impl App {
         })
     }
 
+    fn read_session<R>(&self, f: impl FnOnce(&SessionState) -> R) -> Option<R> {
+        self.session.as_ref().map(f)
+    }
+
     fn session_url_index(session: &SessionState, submitted_url: &str) -> usize {
         session
             .urls
             .iter()
             .position(|entry| entry.url == submitted_url)
             .unwrap_or(0)
+    }
+
+    fn session_meta_from_state(session: &SessionState) -> SessionMeta {
+        SessionMeta {
+            session_id: session.id.clone(),
+            created: session.created,
+            status: match session.status {
+                crate::SessionStatus::InProgress => crate::core::SessionRunStatus::InProgress,
+                crate::SessionStatus::Completed => crate::core::SessionRunStatus::Completed,
+                crate::SessionStatus::Paused => crate::core::SessionRunStatus::Paused,
+            },
+            config: session.config.clone(),
+            credentials: crate::core::SavedCredentials {
+                email: session.credentials.email.clone(),
+                password: session.credentials.password.clone(),
+                mfa: session.credentials.mfa.clone(),
+            },
+        }
+    }
+
+    fn skipped_paths_by_url(session: &SessionState) -> HashMap<String, HashSet<String>> {
+        let mut skipped = HashMap::<String, HashSet<String>>::new();
+        for file in &session.files {
+            if !matches!(file.status, FileEntryStatus::Skipped) {
+                continue;
+            }
+            let Some(url) = session
+                .urls
+                .get(file.url_index)
+                .map(|entry| entry.url.clone())
+            else {
+                continue;
+            };
+            skipped.entry(url).or_default().insert(file.path.clone());
+        }
+        skipped
     }
 
     fn update_session_run_status(&mut self, update: SessionRunUpdate) {
@@ -1448,14 +1454,12 @@ impl App {
     }
 
     pub(crate) fn sync_session_for_shutdown(&mut self) {
-        let visible: HashSet<&str> = self.files.iter().map(|file| file.id.as_str()).collect();
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        Self::sync_session_status_for_shutdown(session, &visible);
+        let visible: HashSet<String> = self.files.iter().map(|file| file.id.clone()).collect();
+        let _ = self
+            .mutate_session(|session| Self::sync_session_status_for_shutdown(session, &visible));
     }
 
-    fn sync_session_status_for_shutdown(session: &mut SessionState, visible: &HashSet<&str>) {
+    fn sync_session_status_for_shutdown(session: &mut SessionState, visible: &HashSet<String>) {
         if session.status == SessionStatus::Completed {
             return;
         }
@@ -1600,9 +1604,8 @@ impl App {
     }
 
     fn is_session_url(&self, url: &str) -> bool {
-        self.session
-            .as_ref()
-            .is_some_and(|session| session.urls.iter().any(|entry| entry.url == url))
+        self.read_session(|session| session.urls.iter().any(|entry| entry.url == url))
+            .unwrap_or(false)
     }
 
     fn handle_session_url_error(&mut self, url: &str, error: &str) {
