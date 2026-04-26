@@ -6,6 +6,7 @@ mod download;
 mod draw;
 mod event;
 mod input;
+mod session;
 mod terminal;
 mod terminal_server;
 pub mod web;
