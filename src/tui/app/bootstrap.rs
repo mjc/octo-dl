@@ -1,17 +1,77 @@
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io;
 use std::path::Path;
+use std::time::Instant;
 
+use indexmap::IndexMap;
+use ratatui::widgets::ListState;
 use tokio::sync::{mpsc, watch};
 
-use crate::ServiceConfig;
 use crate::tui::WebOptions;
+use crate::{
+    DownloadConfig, ServiceConfig,
+    core::{DownloadState, SessionMeta},
+};
 
 use super::{
     App, DownloadEvent, NoCredentialsFallback, Popup, SharedAppState, SharedStateChannels, UiAction,
 };
 
 impl App {
+    pub fn new(
+        api_port: u16,
+        event_tx: mpsc::UnboundedSender<DownloadEvent>,
+        quit_enabled: bool,
+    ) -> Self {
+        let (url_tx, url_rx) = mpsc::unbounded_channel::<String>();
+        let (pause_tx, pause_rx) = watch::channel(false);
+        let (token_tx, token_rx) = mpsc::unbounded_channel::<super::TokenMessage>();
+        Self {
+            popup: super::Popup::None,
+            should_quit: false,
+            quit_policy: super::QuitPolicy::from_bool(quit_enabled),
+            login: super::LoginState::new(),
+            authenticated: false,
+            url_input: String::new(),
+            urls: Vec::new(),
+            files: Vec::new(),
+            overlay_files: IndexMap::new(),
+            file_ui: HashMap::new(),
+            file_list_state: ListState::default(),
+            total_downloaded: 0,
+            total_size: 0,
+            files_completed: 0,
+            files_total: 0,
+            current_speed: 0,
+            total_network_downloaded: 0,
+            aggregate_rate: Default::default(),
+            status: String::new(),
+            paused: false,
+            config: super::ConfigState::new(),
+            event_tx,
+            url_tx,
+            url_rx: Some(url_rx),
+            pause_tx,
+            pause_rx: Some(pause_rx),
+            token_rx,
+            token_tx: Some(token_tx),
+            client_rx: None,
+            cancellation_tokens: HashMap::new(),
+            deleted_files: HashSet::new(),
+            session: None,
+            core_state: DownloadState::new(SessionMeta {
+                config: DownloadConfig::default(),
+                ..SessionMeta::default()
+            }),
+            api_port,
+            api_key: None,
+            cpu_usage: 0.0,
+            last_tick: Instant::now(),
+            memory_rss: 0,
+        }
+    }
+
     pub(crate) fn new_with_optional_service_config(
         event_tx: mpsc::UnboundedSender<DownloadEvent>,
         quit_enabled: bool,

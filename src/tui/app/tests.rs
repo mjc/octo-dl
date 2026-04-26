@@ -1,11 +1,11 @@
 use super::*;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
 use crate::{
-    FileEntry as SessionFileEntry, FileEntryStatus, SavedCredentials, SessionStatus, UrlEntry,
-    UrlStatus,
+    DownloadConfig, FileEntry as SessionFileEntry, FileEntryStatus, SavedCredentials,
+    SessionStatus, UrlEntry, UrlStatus,
     core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage},
 };
 
