@@ -47,16 +47,16 @@ impl RestartSnapshot {
             .filter(|package| {
                 package.error.is_none()
                     && (package.file_ids.is_empty()
-                    || package.file_ids.iter().any(|file_id| {
-                        self.state.files.get(file_id).is_some_and(|file| {
-                            !matches!(
-                                file.lifecycle,
-                                FileLifecycle::Complete
-                                    | FileLifecycle::Skipped
-                                    | FileLifecycle::Deleted
-                            )
-                        })
-                    }))
+                        || package.file_ids.iter().any(|file_id| {
+                            self.state.files.get(file_id).is_some_and(|file| {
+                                !matches!(
+                                    file.lifecycle,
+                                    FileLifecycle::Complete
+                                        | FileLifecycle::Skipped
+                                        | FileLifecycle::Deleted
+                                )
+                            })
+                        }))
             })
             .map(|package| package.source_url.clone())
             .collect()
@@ -119,10 +119,14 @@ pub fn reconcile_restart(
         created: session.as_ref().map_or_else(Utc::now, |snap| snap.created),
         status: session
             .as_ref()
-            .map_or(crate::core::model::SessionRunStatus::InProgress, |snap| snap.status),
+            .map_or(crate::core::model::SessionRunStatus::InProgress, |snap| {
+                snap.status
+            }),
         config: session
             .as_ref()
-            .map_or_else(crate::config::DownloadConfig::default, |snap| snap.config.clone()),
+            .map_or_else(crate::config::DownloadConfig::default, |snap| {
+                snap.config.clone()
+            }),
         credentials: session.as_ref().map_or_else(
             || crate::core::session::SavedCredentials::encrypt("", "", None),
             |snap| snap.credentials.clone(),
@@ -164,20 +168,22 @@ pub fn reconcile_restart(
         let mut collapsed = HashMap::<FileId, CollapsedFile>::new();
         for file in snapshot.files {
             let precedence = precedence(file.lifecycle);
-            let entry = collapsed.entry(file.id.clone()).or_insert_with(|| CollapsedFile {
-                file: FileState {
-                    id: file.id.clone(),
-                    package_id: file.package_id.clone(),
-                    path: file.path.clone(),
-                    size: file.size,
-                    lifecycle: file.lifecycle,
-                    progress: file.progress.clone(),
-                    desired: file.desired,
-                    runtime: file.runtime.clone(),
-                    message: file.message.clone(),
-                },
-                precedence,
-            });
+            let entry = collapsed
+                .entry(file.id.clone())
+                .or_insert_with(|| CollapsedFile {
+                    file: FileState {
+                        id: file.id.clone(),
+                        package_id: file.package_id.clone(),
+                        path: file.path.clone(),
+                        size: file.size,
+                        lifecycle: file.lifecycle,
+                        progress: file.progress.clone(),
+                        desired: file.desired,
+                        runtime: file.runtime.clone(),
+                        message: file.message.clone(),
+                    },
+                    precedence,
+                });
             if precedence < entry.precedence {
                 *entry = CollapsedFile {
                     file: FileState {
@@ -198,8 +204,10 @@ pub fn reconcile_restart(
 
         for (file_id, collapsed) in collapsed {
             let mut file = collapsed.file;
-            if matches!(file.lifecycle, FileLifecycle::Skipped | FileLifecycle::Deleted)
-                || matches!(file.desired, DesiredState::Suppressed)
+            if matches!(
+                file.lifecycle,
+                FileLifecycle::Skipped | FileLifecycle::Deleted
+            ) || matches!(file.desired, DesiredState::Suppressed)
             {
                 file.runtime.counts_in_run_totals = false;
                 suppressed_file_ids.push(file_id.clone());
@@ -378,7 +386,9 @@ fn precedence(lifecycle: FileLifecycle) -> usize {
 mod tests {
     use super::*;
     use crate::core::model::SessionRunStatus;
-    use crate::core::session::{FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3};
+    use crate::core::session::{
+        FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3,
+    };
 
     fn sample_snapshot() -> SessionSnapshotV3 {
         SessionSnapshotV3 {
@@ -428,7 +438,10 @@ mod tests {
             vec!["https://mega.nz/file/test".to_string()],
         );
         assert_eq!(restart.resume_file_ids, vec!["a.bin".to_string()]);
-        assert_eq!(restart.state.files["a.bin"].lifecycle, FileLifecycle::Queued);
+        assert_eq!(
+            restart.state.files["a.bin"].lifecycle,
+            FileLifecycle::Queued
+        );
     }
 
     #[test]
@@ -466,7 +479,10 @@ mod tests {
         }];
         let restart = reconcile_restart(Some(snapshot), FilesystemSnapshot::default(), vec![]);
         assert_eq!(restart.suppressed_file_ids, vec!["a.bin".to_string()]);
-        assert_eq!(restart.state.files["a.bin"].lifecycle, FileLifecycle::Deleted);
+        assert_eq!(
+            restart.state.files["a.bin"].lifecycle,
+            FileLifecycle::Deleted
+        );
     }
 
     #[test]
@@ -497,6 +513,9 @@ mod tests {
             },
         ];
         let restart = reconcile_restart(Some(snapshot), FilesystemSnapshot::default(), vec![]);
-        assert_eq!(restart.state.files["a.bin"].lifecycle, FileLifecycle::Complete);
+        assert_eq!(
+            restart.state.files["a.bin"].lifecycle,
+            FileLifecycle::Complete
+        );
     }
 }

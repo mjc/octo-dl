@@ -337,8 +337,10 @@ impl SessionState {
                     progress: crate::core::FileProgressState {
                         verified_existing_bytes: 0,
                         downloaded_network_bytes: 0,
-                        visible_completed_bytes: if matches!(file.status, FileEntryStatus::Completed)
-                        {
+                        visible_completed_bytes: if matches!(
+                            file.status,
+                            FileEntryStatus::Completed
+                        ) {
                             file.size
                         } else {
                             0
@@ -425,9 +427,9 @@ impl SessionState {
                         crate::core::FileLifecycle::Complete => FileEntryStatus::Completed,
                         crate::core::FileLifecycle::Skipped
                         | crate::core::FileLifecycle::Deleted => FileEntryStatus::Skipped,
-                        crate::core::FileLifecycle::Failed => {
-                            FileEntryStatus::Error(file.message.unwrap_or_else(|| "failed".to_string()))
-                        }
+                        crate::core::FileLifecycle::Failed => FileEntryStatus::Error(
+                            file.message.unwrap_or_else(|| "failed".to_string()),
+                        ),
                     },
                 }
             })

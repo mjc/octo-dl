@@ -225,7 +225,7 @@ fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
                         0
                     };
                     let bar = progress_bar(f.downloaded, f.size, 10);
-                    format!("[{bar}] {pct}%  {}/s", format_bytes(f.speed))
+                    format!("[{bar}] {pct}%  {}/s", format_bytes(app.file_speed(&f.id)))
                 }
                 FileStatus::Queued => "queued".to_string(),
                 FileStatus::Complete => {
@@ -241,9 +241,7 @@ fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
             };
 
             let mut lines = Vec::new();
-            if show_package_label
-                && let Some(package_label) = package_label
-            {
+            if show_package_label && let Some(package_label) = package_label {
                 lines.push(Line::from(vec![Span::styled(
                     format!(" Package: {package_label}"),
                     Style::default()

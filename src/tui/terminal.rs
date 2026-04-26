@@ -1,10 +1,28 @@
 use std::env;
 use std::io::{self, Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use crossterm::event::Event;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use sysinfo::System;
+use tokio::sync::{mpsc, watch};
+
+use crate::ServiceConfig;
+
+use super::app::{App, UiAction};
+use super::draw::draw;
+use super::event::DownloadEvent;
+use super::input::{handle_input, handle_paste};
+use super::terminal_server;
 
 /// Connection to the pseudo-terminal master that allows writing keystrokes.
 #[derive(Clone)]
@@ -45,6 +63,33 @@ impl TerminalBridge {
     }
 }
 
+/// RAII guard that ensures terminal cleanup on drop.
+/// Restores terminal to normal mode even if a panic occurs.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn new() -> io::Result<Self> {
+        enable_raw_mode()?;
+        crossterm::execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            crossterm::event::EnableBracketedPaste
+        )?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = crossterm::execute!(
+            io::stdout(),
+            crossterm::event::DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
+    }
+}
+
 /// Spawns the terminal UI inside a pseudo-terminal and returns a bridge to the master plus the child handle.
 pub fn spawn_tui_process(
     config_path: Option<&Path>,
@@ -82,4 +127,162 @@ pub fn spawn_tui_process(
     let bridge = TerminalBridge::new(pair.master, writer);
 
     Ok((bridge, child))
+}
+
+pub async fn run_terminal_web_bridge(
+    host: &str,
+    port: u16,
+    config_path: Option<&Path>,
+) -> io::Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let log_addr = listener.local_addr()?;
+    let log_addr_string = log_addr.to_string();
+    let log_forwarder = tokio::task::spawn_blocking(move || -> io::Result<()> {
+        let (mut stream, _) = listener.accept()?;
+        let stderr = std::io::stderr();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut handle = stderr.lock();
+                    handle.write_all(&buf[..n])?;
+                    let _ = handle.flush();
+                }
+                Err(ref err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        Ok(())
+    });
+
+    let (bridge, child) = spawn_tui_process(config_path, Some(log_addr_string))?;
+    let bridge = Arc::new(bridge);
+
+    log::debug!("Starting terminal web UI on {host}:{port}");
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server_handle = {
+        let host = host.to_string();
+        let bridge = bridge.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                terminal_server::run_terminal_server(&host, port, bridge, shutdown_rx).await
+            {
+                log::error!("Terminal server error: {e}");
+            }
+        })
+    };
+
+    let child_handle = tokio::task::spawn_blocking(move || {
+        let mut child = child;
+        let status = child.wait();
+        let _ = shutdown_tx.send(());
+        status
+    });
+
+    match child_handle.await {
+        Ok(Ok(status)) => {
+            log::info!("Terminal UI exited with status {status}");
+        }
+        Ok(Err(e)) => {
+            log::error!("Terminal UI wait failed: {e}");
+        }
+        Err(e) => {
+            log::error!("Terminal UI join error: {e}");
+        }
+    }
+
+    let _ = server_handle.await;
+    let _ = log_forwarder.await;
+    Ok(())
+}
+
+pub async fn run_terminal_web_mode(
+    api_host: &str,
+    config_path: Option<&Path>,
+    default_api_port: u16,
+) -> io::Result<()> {
+    let (host, port) = if let Some(path) = config_path {
+        let config = ServiceConfig::load_or_create(path)?;
+        (config.api.host.clone(), config.api.port)
+    } else {
+        let port = env::var("OCTO_API_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(default_api_port);
+        (api_host.to_string(), port)
+    };
+
+    run_terminal_web_bridge(&host, port, config_path).await
+}
+
+pub async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+        match sigterm {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => log::info!("Received SIGINT"),
+                    _ = sigterm.recv() => log::info!("Received SIGTERM"),
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to register SIGTERM handler: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                log::info!("Received SIGINT");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        log::info!("Received Ctrl-C");
+    }
+}
+
+pub async fn run_interactive_tui(
+    app: &mut App,
+    download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
+    action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
+    state_tx: &watch::Sender<String>,
+    web: bool,
+) -> io::Result<()> {
+    let _terminal_guard = TerminalGuard::new()?;
+
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
+    let mut tick_count: u32 = 0;
+    let mut sys = System::new();
+    let pid = sysinfo::get_current_pid().ok();
+
+    loop {
+        terminal.draw(|f| draw(f, app))?;
+
+        tick_count += 1;
+
+        if crossterm::event::poll(Duration::from_millis(100))? {
+            match crossterm::event::read()? {
+                Event::Key(key) => handle_input(app, key),
+                Event::Paste(text) => handle_paste(app, &text),
+                _ => {}
+            }
+        }
+
+        app.handle_terminal_tick(download_rx, action_rx, tick_count, &mut sys, pid);
+        if web {
+            let _ = app.publish_snapshot_if_observed(state_tx);
+        }
+
+        if app.should_quit {
+            app.sync_session_for_shutdown();
+            break;
+        }
+    }
+
+    terminal.show_cursor()?;
+    Ok(())
 }
