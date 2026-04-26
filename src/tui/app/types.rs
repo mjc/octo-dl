@@ -168,6 +168,7 @@ pub(crate) struct OverlayFile {
 #[derive(Debug, Clone)]
 pub(crate) struct VisibleFileContext {
     pub id: String,
+    pub status: FileStatus,
     pub source_url: Option<String>,
     pub artifact_path: String,
     pub size: u64,

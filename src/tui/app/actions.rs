@@ -288,16 +288,26 @@ impl App {
     }
 
     pub(crate) fn perform_retry_file_action(&mut self, id: &str) {
+        let had_core_file = self.core_state.files.contains_key(id);
         let context = self.visible_file_context(id);
-        let source_url = context
+        let has_source_url = context
             .as_ref()
-            .and_then(|context| self.ensure_core_file_from_context(context));
+            .and_then(|context| self.ensure_core_file_from_context(context))
+            .is_some();
+        if !had_core_file
+            && let Some(super::FileStatus::Error(message)) =
+                context.as_ref().map(|context| &context.status)
+        {
+            self.apply_core_event(CoreEvent::FileFailed {
+                file_id: id.to_string(),
+                message: message.clone(),
+            });
+        }
         self.apply_core_command(CoreCommand::RetryFile {
             file_id: id.to_string(),
         });
-        if let Some(url) = source_url {
+        if has_source_url {
             self.reset_file_ui_rate(id);
-            let _ = self.url_tx.send(url);
         } else {
             self.status = format!("Retry unavailable for {id}");
             if !self.core_state.files.contains_key(id) {
@@ -310,7 +320,7 @@ impl App {
         let Some(context) = self.visible_file_context(id) else {
             return;
         };
-        let Some(source_url) = self.ensure_core_file_from_context(&context) else {
+        if self.ensure_core_file_from_context(&context).is_none() {
             if !self.core_state.files.contains_key(id) {
                 self.show_overlay_error(id, id, "Reset unavailable for this file", true);
             }
@@ -325,8 +335,6 @@ impl App {
             file_id: id.to_string(),
         });
         self.reset_file_ui_rate(id);
-
-        let _ = self.url_tx.send(source_url);
     }
 
     pub(crate) fn apply_config_update(

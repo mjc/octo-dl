@@ -34,6 +34,8 @@ impl App {
     }
 
     fn apply_core_effects(&mut self, effects: Vec<CoreEffect>) {
+        let mut queued_urls = Vec::new();
+        let mut queued_url_set = HashSet::new();
         for effect in effects {
             match effect {
                 CoreEffect::PersistSession(snapshot) => {
@@ -51,8 +53,26 @@ impl App {
                 CoreEffect::PublishStatusMessage(message) => {
                     self.status = message;
                 }
-                CoreEffect::EnqueueFileDownload { .. } | CoreEffect::PublishViewSnapshot => {}
+                CoreEffect::EnqueueFileDownload { file_id } => {
+                    let Some(source_url) = self
+                        .core_state
+                        .files
+                        .get(&file_id)
+                        .and_then(|file| self.core_state.packages.get(&file.package_id))
+                        .map(|package| package.source_url.clone())
+                    else {
+                        continue;
+                    };
+                    if queued_url_set.insert(source_url.clone()) {
+                        queued_urls.push(source_url);
+                    }
+                }
+                CoreEffect::PublishViewSnapshot => {}
             }
+        }
+
+        for url in queued_urls {
+            let _ = self.url_tx.send(url);
         }
     }
 
@@ -197,6 +217,17 @@ impl App {
         let resumed_urls = SessionAdapter::apply_restart(&mut session, restart);
         self.urls.clone_from(&resumed_urls);
         for url in resumed_urls {
+            let Some(package) = restart
+                .state
+                .packages
+                .values()
+                .find(|package| package.source_url == url)
+            else {
+                continue;
+            };
+            if !package.file_ids.is_empty() {
+                continue;
+            }
             let _ = self.url_tx.send(url);
         }
         self.save_and_install_session(session);

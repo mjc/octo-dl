@@ -138,6 +138,46 @@ fn resume_session_restores_files_and_only_requeues_remaining_urls() {
 }
 
 #[test]
+fn resume_session_requeues_package_url_once_for_multiple_pending_files() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/folder/pending",
+        UrlFixtureStatus::Fetched,
+    )]);
+    push_file(
+        &mut session,
+        0,
+        "episode-1.mkv",
+        128,
+        FileFixtureStatus::Pending,
+    );
+    push_file(
+        &mut session,
+        0,
+        "episode-2.mkv",
+        256,
+        FileFixtureStatus::Pending,
+    );
+    session.save().unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+
+    app.resume_latest_session();
+
+    assert_eq!(app.urls, vec!["https://mega.nz/folder/pending".to_string()]);
+
+    let mut url_rx = app.url_rx.take().expect("url_rx should exist");
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        "https://mega.nz/folder/pending".to_string()
+    );
+    assert!(url_rx.try_recv().is_err());
+}
+
+#[test]
 fn resume_session_restores_retryable_errors_as_queued() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
