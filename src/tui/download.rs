@@ -84,7 +84,31 @@ fn describe_panic(panic: &(dyn std::any::Any + Send)) -> String {
 
 #[derive(Clone)]
 struct ResolvedUrl {
-    origin: FileOrigin,
+    source_url: String,
+    submitted_url: String,
+}
+
+impl ResolvedUrl {
+    fn direct(url: &str) -> Self {
+        Self {
+            source_url: url.to_string(),
+            submitted_url: url.to_string(),
+        }
+    }
+
+    fn from_source(source_url: String, submitted_url: &str) -> Self {
+        Self {
+            source_url,
+            submitted_url: submitted_url.to_string(),
+        }
+    }
+
+    fn file_origin(&self) -> FileOrigin {
+        FileOrigin {
+            source_url: self.source_url.clone(),
+            submitted_url: self.submitted_url.clone(),
+        }
+    }
 }
 
 struct FetchedNodeSet {
@@ -93,7 +117,7 @@ struct FetchedNodeSet {
 }
 
 struct QueuedDownload {
-    origin: FileOrigin,
+    resolved: ResolvedUrl,
     item: crate::OwnedDownloadItem,
 }
 
@@ -105,6 +129,13 @@ struct CollectedBatch {
     successful_submitted_urls: Vec<String>,
 }
 
+struct CollectedNodeSet {
+    queued_items: Vec<QueuedDownload>,
+    completed_items: Vec<QueuedDownload>,
+    skipped_count: usize,
+    partial_count: usize,
+}
+
 struct BatchContext<'a> {
     http: &'a Arc<reqwest::Client>,
     downloader: &'a Arc<crate::Downloader>,
@@ -112,6 +143,14 @@ struct BatchContext<'a> {
     semaphore: &'a Arc<tokio::sync::Semaphore>,
     event_tx: &'a mpsc::UnboundedSender<DownloadEvent>,
     token_tx: &'a mpsc::UnboundedSender<TokenMessage>,
+}
+
+struct DownloadRuntime {
+    downloader: Arc<crate::Downloader>,
+    http: Arc<reqwest::Client>,
+    dlc_cache: Arc<DlcKeyCache>,
+    progress: Arc<dyn DownloadProgress>,
+    semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 struct DownloadTaskResult {
@@ -199,83 +238,102 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
 
     let _ = tx.send(DownloadEvent::StatusMessage("Ready".to_string()));
 
-    let downloader = Arc::new(crate::Downloader::new(mega_client, config.clone()));
-    let http = Arc::new(http);
-    let dlc_cache = Arc::new(dlc_cache);
-
-    // Shared semaphore across all batches so concurrent_files is a global limit
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(config.concurrent_files));
+    let runtime = DownloadRuntime {
+        downloader: Arc::new(crate::Downloader::new(mega_client, config.clone())),
+        http: Arc::new(http),
+        dlc_cache: Arc::new(dlc_cache),
+        progress,
+        // Shared semaphore across all batches so concurrent_files is a global limit
+        semaphore: Arc::new(tokio::sync::Semaphore::new(config.concurrent_files)),
+    };
     let mut join_set = tokio::task::JoinSet::new();
 
     loop {
         tokio::select! {
             url_opt = url_rx.recv() => {
                 let Some(first_url) = url_opt else { break };
-                let mut batch = vec![first_url];
-                while let Ok(url) = url_rx.try_recv() {
-                    batch.push(url);
-                }
-
-                for url in &batch {
-                    let _ = tx.send(DownloadEvent::UrlQueued { url: url.clone() });
-                }
-
-                let _ = tx.send(DownloadEvent::StatusMessage(format!(
-                    "Processing {} URL(s)...",
-                    batch.len()
-                )));
-
-                // Resolve URLs inline (fast, just URL/DLC parsing)
-                let resolved = resolve_urls(&batch, &http, &dlc_cache, &tx).await;
-
-                // Spawn the download work so we can receive new URLs immediately
-                let dl = Arc::clone(&downloader);
-                let prog = Arc::clone(&progress);
-                let http2 = Arc::clone(&http);
-                let sem = Arc::clone(&semaphore);
-                let tx2 = tx.clone();
-                let token_tx2 = token_tx.clone();
-                let pause_rx2 = pause_rx.clone();
-                let skipped_paths = skipped_session_paths.clone();
-                join_set.spawn(async move {
-                    download_batch(
-                        &resolved,
-                        pause_rx2,
-                        &skipped_paths,
-                        BatchContext {
-                            http: &http2,
-                            downloader: &dl,
-                            progress: &prog,
-                            semaphore: &sem,
-                            event_tx: &tx2,
-                            token_tx: &token_tx2,
-                        },
-                    )
-                    .await;
-                });
+                let batch = collect_url_batch(first_url, &mut url_rx);
+                queue_url_batch(&batch, &tx);
+                spawn_download_batch(
+                    &mut join_set,
+                    batch,
+                    &runtime,
+                    &tx,
+                    &token_tx,
+                    &pause_rx,
+                    &skipped_session_paths,
+                );
             }
             Some(result) = join_set.join_next() => {
-                if let Err(e) = result {
-                    let _ = tx.send(DownloadEvent::Error {
-                        id: None,
-                        name: "download".to_string(),
-                        error: format!("Batch task panicked: {e}"),
-                    });
-                }
+                handle_batch_join_result(result, &tx);
             }
         }
     }
 
     // Drain remaining batch tasks
     while let Some(result) = join_set.join_next().await {
-        if let Err(e) = result {
-            let _ = tx.send(DownloadEvent::Error {
-                id: None,
-                name: "download".to_string(),
-                error: format!("Batch task panicked: {e}"),
-            });
-        }
+        handle_batch_join_result(result, &tx);
     }
+}
+
+fn collect_url_batch(
+    first_url: String,
+    url_rx: &mut mpsc::UnboundedReceiver<String>,
+) -> Vec<String> {
+    let mut batch = vec![first_url];
+    while let Ok(url) = url_rx.try_recv() {
+        batch.push(url);
+    }
+    batch
+}
+
+fn queue_url_batch(batch: &[String], tx: &mpsc::UnboundedSender<DownloadEvent>) {
+    for url in batch {
+        let _ = tx.send(DownloadEvent::UrlQueued { url: url.clone() });
+    }
+
+    let _ = tx.send(DownloadEvent::StatusMessage(format!(
+        "Processing {} URL(s)...",
+        batch.len()
+    )));
+}
+
+fn spawn_download_batch(
+    join_set: &mut tokio::task::JoinSet<()>,
+    batch: Vec<String>,
+    runtime: &DownloadRuntime,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+    token_tx: &mpsc::UnboundedSender<TokenMessage>,
+    pause_rx: &watch::Receiver<bool>,
+    skipped_session_paths: &HashMap<String, HashSet<String>>,
+) {
+    let downloader = Arc::clone(&runtime.downloader);
+    let progress = Arc::clone(&runtime.progress);
+    let http = Arc::clone(&runtime.http);
+    let dlc_cache = Arc::clone(&runtime.dlc_cache);
+    let semaphore = Arc::clone(&runtime.semaphore);
+    let event_tx = tx.clone();
+    let token_tx = token_tx.clone();
+    let pause_rx = pause_rx.clone();
+    let skipped_paths = skipped_session_paths.clone();
+
+    join_set.spawn(async move {
+        let resolved = resolve_urls(&batch, &http, &dlc_cache, &event_tx).await;
+        download_batch(
+            &resolved,
+            pause_rx,
+            &skipped_paths,
+            BatchContext {
+                http: &http,
+                downloader: &downloader,
+                progress: &progress,
+                semaphore: &semaphore,
+                event_tx: &event_tx,
+                token_tx: &token_tx,
+            },
+        )
+        .await;
+    });
 }
 
 /// Resolves raw URL strings (including DLC files) into MEGA URLs.
@@ -287,60 +345,95 @@ async fn resolve_urls(
 ) -> Vec<ResolvedUrl> {
     let mut resolved = Vec::new();
     for url in urls {
-        if is_dlc_path(url) {
-            let _ = tx.send(DownloadEvent::StatusMessage(format!(
-                "Processing DLC: {url}"
-            )));
-            // For local filesystem paths (starting with ~ or /), expand ~ to home directory
-            let dlc_path = if url.starts_with('~') || url.starts_with('/') {
-                if url.starts_with('~') {
-                    if let Some(home) = dirs::home_dir() {
-                        url.replacen('~', home.to_string_lossy().as_ref(), 1)
-                    } else {
-                        let _ = tx.send(DownloadEvent::Error {
-                            id: None,
-                            name: url.clone(),
-                            error: "Could not determine home directory".to_string(),
-                        });
-                        continue;
-                    }
-                } else {
-                    url.clone()
-                }
-            } else {
-                url.clone()
-            };
-            match crate::parse_dlc_file(&dlc_path, http, dlc_cache).await {
-                Ok(dlc_urls) => {
-                    let _ = tx.send(DownloadEvent::StatusMessage(format!(
-                        "DLC {url}: {} MEGA link(s)",
-                        dlc_urls.len()
-                    )));
-                    resolved.extend(dlc_urls.into_iter().map(|resolved_url| ResolvedUrl {
-                        origin: FileOrigin {
-                            source_url: resolved_url,
-                            submitted_url: url.clone(),
-                        },
-                    }));
-                }
-                Err(e) => {
-                    let _ = tx.send(DownloadEvent::Error {
-                        id: None,
-                        name: url.clone(),
-                        error: format!("DLC parse error: {e}"),
-                    });
-                }
-            }
-        } else {
-            resolved.push(ResolvedUrl {
-                origin: FileOrigin {
-                    source_url: url.clone(),
-                    submitted_url: url.clone(),
-                },
-            });
-        }
+        resolved.extend(resolve_submitted_url(url, http, dlc_cache, tx).await);
     }
     resolved
+}
+
+async fn resolve_submitted_url(
+    url: &str,
+    http: &Arc<reqwest::Client>,
+    dlc_cache: &Arc<DlcKeyCache>,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+) -> Vec<ResolvedUrl> {
+    if is_dlc_path(url) {
+        return resolve_dlc_urls(url, http, dlc_cache, tx).await;
+    }
+
+    vec![ResolvedUrl::direct(url)]
+}
+
+async fn resolve_dlc_urls(
+    url: &str,
+    http: &Arc<reqwest::Client>,
+    dlc_cache: &Arc<DlcKeyCache>,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+) -> Vec<ResolvedUrl> {
+    let _ = tx.send(DownloadEvent::StatusMessage(format!(
+        "Processing DLC: {url}"
+    )));
+
+    let dlc_path = match expand_dlc_path(url) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = tx.send(DownloadEvent::Error {
+                id: None,
+                name: url.to_string(),
+                error,
+            });
+            return Vec::new();
+        }
+    };
+
+    match crate::parse_dlc_file(&dlc_path, http, dlc_cache).await {
+        Ok(dlc_urls) => {
+            let _ = tx.send(DownloadEvent::StatusMessage(format!(
+                "DLC {url}: {} MEGA link(s)",
+                dlc_urls.len()
+            )));
+            dlc_urls
+                .into_iter()
+                .map(|resolved_url| ResolvedUrl::from_source(resolved_url, url))
+                .collect()
+        }
+        Err(e) => {
+            let _ = tx.send(DownloadEvent::Error {
+                id: None,
+                name: url.to_string(),
+                error: format!("DLC parse error: {e}"),
+            });
+            Vec::new()
+        }
+    }
+}
+
+fn expand_dlc_path(url: &str) -> Result<String, String> {
+    if !url.starts_with('~') && !url.starts_with('/') {
+        return Ok(url.to_string());
+    }
+
+    if !url.starts_with('~') {
+        return Ok(url.to_string());
+    }
+
+    let Some(home) = dirs::home_dir() else {
+        return Err("Could not determine home directory".to_string());
+    };
+
+    Ok(url.replacen('~', home.to_string_lossy().as_ref(), 1))
+}
+
+fn handle_batch_join_result(
+    result: Result<(), tokio::task::JoinError>,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+) {
+    if let Err(e) = result {
+        let _ = tx.send(DownloadEvent::Error {
+            id: None,
+            name: "download".to_string(),
+            error: format!("Batch task panicked: {e}"),
+        });
+    }
 }
 
 /// Fetches nodes from URLs, collects files, and downloads them.
@@ -645,22 +738,16 @@ mod tests {
     fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
         let resolved = vec![
             ResolvedUrl {
-                origin: FileOrigin {
-                    source_url: "https://mega.nz/file/one".to_string(),
-                    submitted_url: "bundle.dlc".to_string(),
-                },
+                source_url: "https://mega.nz/file/one".to_string(),
+                submitted_url: "bundle.dlc".to_string(),
             },
             ResolvedUrl {
-                origin: FileOrigin {
-                    source_url: "https://mega.nz/file/two".to_string(),
-                    submitted_url: "bundle.dlc".to_string(),
-                },
+                source_url: "https://mega.nz/file/two".to_string(),
+                submitted_url: "bundle.dlc".to_string(),
             },
             ResolvedUrl {
-                origin: FileOrigin {
-                    source_url: "https://mega.nz/file/three".to_string(),
-                    submitted_url: "https://mega.nz/folder/direct".to_string(),
-                },
+                source_url: "https://mega.nz/file/three".to_string(),
+                submitted_url: "https://mega.nz/folder/direct".to_string(),
             },
         ];
 
@@ -672,6 +759,26 @@ mod tests {
                 "bundle.dlc".to_string(),
                 "https://mega.nz/folder/direct".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn resolved_url_direct_uses_same_source_and_submission() {
+        let resolved = ResolvedUrl::direct("https://mega.nz/file/test");
+
+        assert_eq!(resolved.source_url, "https://mega.nz/file/test");
+        assert_eq!(resolved.submitted_url, "https://mega.nz/file/test");
+    }
+
+    #[test]
+    fn expand_dlc_path_leaves_non_filesystem_inputs_unchanged() {
+        assert_eq!(
+            expand_dlc_path("bundle.dlc").unwrap(),
+            "bundle.dlc".to_string()
+        );
+        assert_eq!(
+            expand_dlc_path("/tmp/archive.dlc").unwrap(),
+            "/tmp/archive.dlc".to_string()
         );
     }
 
@@ -767,47 +874,106 @@ async fn download_batch(
 
     let mut join_set = tokio::task::JoinSet::new();
     for item in collected.queued_items {
-        let cancel_token = CancellationToken::new();
-        let _ = ctx.token_tx.send(TokenMessage {
-            file_id: item.item.path.clone(),
-            token: cancel_token.clone(),
-        });
-
-        while *pause_rx.borrow() {
-            if pause_rx.changed().await.is_err() {
-                return;
-            }
+        let cancel_token = register_download_token(&item, ctx.token_tx);
+        if wait_until_resumed(&mut pause_rx).await.is_err() {
+            return;
         }
-        let permit = Arc::clone(ctx.semaphore)
-            .acquire_owned()
-            .await
-            .expect("semaphore not closed");
-        let dl = Arc::clone(ctx.downloader);
-        let event_tx = ctx.event_tx.clone();
-        let pause_rx_for_task = pause_rx.clone();
-        join_set.spawn(async move {
-            let _permit = permit;
-            let prog: Arc<dyn DownloadProgress> = Arc::new(FileProgress {
-                tx: event_tx.clone(),
-                id: item.item.path.clone(),
-            });
-            let result = dl
-                .download_file(&item.item.node, &item.item.path, &prog, Some(cancel_token))
-                .await;
-            if matches!(result, Err(crate::Error::Cancelled)) && *pause_rx_for_task.borrow() {
-                let _ = event_tx.send(DownloadEvent::FileCancelled {
-                    id: item.item.path.clone(),
-                    name: item.item.path.clone(),
-                });
-            }
-            DownloadTaskResult {
-                id: item.item.path,
-                result,
-            }
-        });
+        let permit = acquire_download_permit(ctx.semaphore).await;
+        spawn_file_download(
+            &mut join_set,
+            item,
+            permit,
+            Arc::clone(ctx.downloader),
+            ctx.event_tx.clone(),
+            pause_rx.clone(),
+            cancel_token,
+        );
     }
 
     drain_download_join_set(join_set, ctx.event_tx).await;
+}
+
+fn register_download_token(
+    item: &QueuedDownload,
+    token_tx: &mpsc::UnboundedSender<TokenMessage>,
+) -> CancellationToken {
+    let cancel_token = CancellationToken::new();
+    let _ = token_tx.send(TokenMessage {
+        file_id: item.item.path.clone(),
+        token: cancel_token.clone(),
+    });
+    cancel_token
+}
+
+async fn wait_until_resumed(pause_rx: &mut watch::Receiver<bool>) -> Result<(), ()> {
+    while *pause_rx.borrow() {
+        if pause_rx.changed().await.is_err() {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+async fn acquire_download_permit(
+    semaphore: &Arc<tokio::sync::Semaphore>,
+) -> tokio::sync::OwnedSemaphorePermit {
+    Arc::clone(semaphore)
+        .acquire_owned()
+        .await
+        .expect("semaphore not closed")
+}
+
+fn spawn_file_download(
+    join_set: &mut tokio::task::JoinSet<DownloadTaskResult>,
+    item: QueuedDownload,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    downloader: Arc<crate::Downloader>,
+    event_tx: mpsc::UnboundedSender<DownloadEvent>,
+    pause_rx: watch::Receiver<bool>,
+    cancel_token: CancellationToken,
+) {
+    join_set.spawn(async move {
+        let _permit = permit;
+        let file_id = item.item.path.clone();
+        let progress = file_progress(&file_id, &event_tx);
+        let result = downloader
+            .download_file(
+                &item.item.node,
+                &item.item.path,
+                &progress,
+                Some(cancel_token),
+            )
+            .await;
+        emit_pause_cancellation_if_needed(&file_id, &result, &pause_rx, &event_tx);
+        DownloadTaskResult {
+            id: item.item.path,
+            result,
+        }
+    });
+}
+
+fn file_progress(
+    file_id: &str,
+    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
+) -> Arc<dyn DownloadProgress> {
+    Arc::new(FileProgress {
+        tx: event_tx.clone(),
+        id: file_id.to_string(),
+    })
+}
+
+fn emit_pause_cancellation_if_needed(
+    file_id: &str,
+    result: &crate::Result<crate::FileStats>,
+    pause_rx: &watch::Receiver<bool>,
+    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
+) {
+    if matches!(result, Err(crate::Error::Cancelled)) && *pause_rx.borrow() {
+        let _ = event_tx.send(DownloadEvent::FileCancelled {
+            id: file_id.to_string(),
+            name: file_id.to_string(),
+        });
+    }
 }
 
 async fn fetch_node_sets(
@@ -819,39 +985,41 @@ async fn fetch_node_sets(
     for resolved in urls {
         let _ = event_tx.send(DownloadEvent::StatusMessage(format!(
             "Fetching: {}",
-            resolved.origin.source_url
+            resolved.source_url
         )));
-        let fetch_result = std::panic::AssertUnwindSafe(crate::fetch_public_nodes(
-            http,
-            &resolved.origin.source_url,
-        ))
-        .catch_unwind()
-        .await;
-
-        match fetch_result {
-            Ok(Ok(nodes)) => {
+        match fetch_node_set(resolved, http).await {
+            Ok(nodes) => {
                 node_sets.push(FetchedNodeSet {
                     resolved: resolved.clone(),
                     nodes,
                 });
             }
-            Ok(Err(e)) => {
+            Err(error) => {
                 let _ = event_tx.send(DownloadEvent::Error {
                     id: None,
-                    name: resolved.origin.source_url.clone(),
-                    error: format!("Fetch failed: {e}"),
-                });
-            }
-            Err(panic) => {
-                let _ = event_tx.send(DownloadEvent::Error {
-                    id: None,
-                    name: resolved.origin.source_url.clone(),
-                    error: format!("Fetch panicked: {}", describe_panic(&*panic)),
+                    name: resolved.source_url.clone(),
+                    error,
                 });
             }
         }
     }
     node_sets
+}
+
+async fn fetch_node_set(
+    resolved: &ResolvedUrl,
+    http: &Arc<reqwest::Client>,
+) -> Result<mega::Nodes, String> {
+    let fetch_result =
+        std::panic::AssertUnwindSafe(crate::fetch_public_nodes(http, &resolved.source_url))
+            .catch_unwind()
+            .await;
+
+    match fetch_result {
+        Ok(Ok(nodes)) => Ok(nodes),
+        Ok(Err(e)) => Err(format!("Fetch failed: {e}")),
+        Err(panic) => Err(format!("Fetch panicked: {}", describe_panic(&*panic))),
+    }
 }
 
 async fn collect_batch(
@@ -868,24 +1036,11 @@ async fn collect_batch(
         successful_submitted_urls(node_sets.iter().map(|node_set| &node_set.resolved));
 
     for node_set in node_sets {
-        let resolved = &node_set.resolved;
-        let skipped_for_url = skipped_paths.get(&resolved.origin.submitted_url);
-        let collected = downloader.collect_files(&node_set.nodes, progress).await;
-        skipped_count += collected.skipped;
-        partial_count += collected.partial;
-        let (to_download, completed) = collected.into_owned_parts();
-        queued_items.extend(visible_downloads(
-            to_download,
-            &resolved.origin,
-            skipped_for_url,
-            &mut skipped_count,
-        ));
-        completed_items.extend(visible_downloads(
-            completed,
-            &resolved.origin,
-            skipped_for_url,
-            &mut skipped_count,
-        ));
+        let collected = collect_node_set(node_set, downloader, progress, skipped_paths).await;
+        skipped_count += collected.skipped_count;
+        partial_count += collected.partial_count;
+        queued_items.extend(collected.queued_items);
+        completed_items.extend(collected.completed_items);
     }
     CollectedBatch {
         queued_items,
@@ -896,6 +1051,39 @@ async fn collect_batch(
     }
 }
 
+async fn collect_node_set(
+    node_set: &FetchedNodeSet,
+    downloader: &Arc<crate::Downloader>,
+    progress: &Arc<dyn DownloadProgress>,
+    skipped_paths: &HashMap<String, HashSet<String>>,
+) -> CollectedNodeSet {
+    let skipped_for_url = skipped_paths.get(&node_set.resolved.submitted_url);
+    let collected = downloader.collect_files(&node_set.nodes, progress).await;
+    let mut skipped_count = collected.skipped;
+    let partial_count = collected.partial;
+    let (to_download, completed) = collected.into_owned_parts();
+
+    let queued_items = visible_downloads(
+        to_download,
+        &node_set.resolved,
+        skipped_for_url,
+        &mut skipped_count,
+    );
+    let completed_items = visible_downloads(
+        completed,
+        &node_set.resolved,
+        skipped_for_url,
+        &mut skipped_count,
+    );
+
+    CollectedNodeSet {
+        queued_items,
+        completed_items,
+        skipped_count,
+        partial_count,
+    }
+}
+
 fn successful_submitted_urls<'a>(
     resolved_urls: impl IntoIterator<Item = &'a ResolvedUrl>,
 ) -> Vec<String> {
@@ -903,8 +1091,8 @@ fn successful_submitted_urls<'a>(
     let mut urls = Vec::new();
 
     for resolved in resolved_urls {
-        if seen.insert(resolved.origin.submitted_url.clone()) {
-            urls.push(resolved.origin.submitted_url.clone());
+        if seen.insert(resolved.submitted_url.clone()) {
+            urls.push(resolved.submitted_url.clone());
         }
     }
 
@@ -913,7 +1101,7 @@ fn successful_submitted_urls<'a>(
 
 fn visible_downloads(
     items: Vec<crate::OwnedDownloadItem>,
-    origin: &FileOrigin,
+    resolved: &ResolvedUrl,
     skipped_paths: Option<&HashSet<String>>,
     skipped_count: &mut usize,
 ) -> Vec<QueuedDownload> {
@@ -925,7 +1113,7 @@ fn visible_downloads(
                 return None;
             }
             Some(QueuedDownload {
-                origin: origin.clone(),
+                resolved: resolved.clone(),
                 item,
             })
         })
@@ -957,7 +1145,7 @@ fn send_collection_events(
             id: item.item.path.clone(),
             size: item.item.node.size(),
             count_toward_progress: true,
-            origin: item.origin.clone(),
+            origin: item.resolved.file_origin(),
         }));
     }
 
@@ -966,7 +1154,7 @@ fn send_collection_events(
             id: item.item.path.clone(),
             size: item.item.node.size(),
             count_toward_progress: false,
-            origin: item.origin.clone(),
+            origin: item.resolved.file_origin(),
         }));
         let _ = event_tx.send(DownloadEvent::FileComplete {
             id: item.item.path.clone(),
