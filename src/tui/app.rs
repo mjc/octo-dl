@@ -19,8 +19,9 @@ use crate::{
     DownloadConfig, FileEntry as SessionFileEntry, FileEntryStatus, SavedCredentials,
     ServiceConfig, SessionState, SessionStatus, UrlEntry, UrlStatus,
     core::{
-        CoreEffect, CoreEvent, DownloadState, FileLifecycle, FileState, PackageState, ResolvedFile,
-        ResolvedPackage, RestartSnapshot, SessionMeta, reconcile_restart, reduce, scan_filesystem,
+        CoreEffect, CoreEvent, DownloadState, FileLifecycle, FileState, PackageState,
+        ProgressDelta, ResolvedFile, ResolvedPackage, RestartSnapshot, SessionMeta,
+        reconcile_restart, reduce, scan_filesystem,
     },
     file_key, format_bytes,
 };
@@ -1423,6 +1424,26 @@ impl App {
         })
     }
 
+    fn ensure_core_file_from_context(&mut self, context: &VisibleFileContext) -> Option<String> {
+        let source_url = context.source_url.clone();
+        if let Some(source_url) = source_url.as_ref() {
+            self.ensure_core_file(
+                &context.id,
+                source_url,
+                &context.artifact_path,
+                context.size,
+                context.counts_toward_progress,
+            );
+        }
+        source_url
+    }
+
+    fn cancel_file_token(&mut self, id: &str) {
+        if let Some(token) = self.cancellation_tokens.remove(id) {
+            token.cancel();
+        }
+    }
+
     pub(crate) fn mark_visible_file_complete(&mut self, id: &str, name: &str) {
         self.cancellation_tokens.remove(id);
         if !self.core_state.files.contains_key(id)
@@ -1549,6 +1570,86 @@ impl App {
         self.recompute_totals();
     }
 
+    fn handle_file_start_event(&mut self, id: String, name: String, size: u64) {
+        log::info!("Download started: {name} ({})", format_bytes(size));
+        if self.deleted_files.contains(&id) {
+            return;
+        }
+        let source_url = self
+            .files
+            .iter()
+            .find(|entry| entry.id == id)
+            .and_then(|entry| entry.source_url.clone())
+            .unwrap_or_else(|| id.clone());
+        self.ensure_core_file(&id, &source_url, &name, size, true);
+        self.apply_core_event(CoreEvent::FileStarted {
+            file_id: id.clone(),
+            size,
+        });
+        self.reset_file_ui_rate(&id);
+    }
+
+    fn handle_file_progress_event(&mut self, id: std::sync::Arc<str>, delta: ProgressDelta) {
+        if self.deleted_files.contains(id.as_ref()) {
+            return;
+        }
+        let previous_downloaded = self
+            .files
+            .iter()
+            .find(|file| file.id == id.as_ref())
+            .map_or(0, |file| file.downloaded);
+        self.apply_core_event(CoreEvent::FileProgress {
+            file_id: id.to_string(),
+            total_bytes_delta: delta.total_bytes_delta,
+            network_bytes_delta: delta.network_bytes_delta,
+        });
+        let now = Instant::now();
+        let _ = self.update_file_ui_progress(id.as_ref(), previous_downloaded, now);
+    }
+
+    fn handle_resume_reused_event(&mut self, id: String, chunks: usize, bytes: u64) {
+        if self.deleted_files.contains(&id) {
+            return;
+        }
+        self.apply_core_event(CoreEvent::FileReuseDetected {
+            file_id: id.clone(),
+            reused_bytes: bytes,
+            reused_chunks: chunks,
+        });
+        log::info!(
+            "Reusing {chunks} verified chunk(s) for {id} ({})",
+            format_bytes(bytes)
+        );
+        self.set_resume_reuse_status(&id, chunks, bytes);
+    }
+
+    fn handle_file_complete_event(&mut self, id: String, name: String) {
+        log::info!("Download complete: {name}");
+        if self.handle_deleted_download_artifact(&id, &name) {
+            return;
+        }
+        self.apply_core_event(CoreEvent::FileCompleted {
+            file_id: id.clone(),
+        });
+        self.recompute_totals();
+        self.mark_visible_file_complete(&id, &name);
+    }
+
+    fn handle_file_cancelled_event(&mut self, id: String, name: String) {
+        log::info!("Download cancelled: {name}");
+        if self.handle_deleted_download_artifact(&id, &name) {
+            return;
+        }
+        self.cancellation_tokens.remove(&id);
+        self.apply_core_event(CoreEvent::FileCancelled {
+            file_id: id.clone(),
+        });
+        self.reset_file_ui_rate(&id);
+        if self.paused {
+            self.status = "Paused".to_string();
+        }
+    }
+
     pub(crate) fn perform_delete_file_action(&mut self, id: &str) {
         let context = self.visible_file_context(id);
         let is_core_backed = context
@@ -1557,20 +1658,10 @@ impl App {
         let artifact_path = context
             .as_ref()
             .map_or_else(|| id.to_string(), |context| context.artifact_path.clone());
-        if let Some(context) = context.as_ref()
-            && let Some(source_url) = context.source_url.as_ref()
-        {
-            self.ensure_core_file(
-                &context.id,
-                source_url,
-                &context.artifact_path,
-                context.size,
-                context.counts_toward_progress,
-            );
+        if let Some(context) = context.as_ref() {
+            let _ = self.ensure_core_file_from_context(context);
         }
-        if let Some(token) = self.cancellation_tokens.remove(id) {
-            token.cancel();
-        }
+        self.cancel_file_token(id);
         self.deleted_files.insert(id.to_string());
         if is_core_backed {
             self.apply_core_event(CoreEvent::FileDeleted {
@@ -1590,18 +1681,7 @@ impl App {
         let context = self.visible_file_context(id);
         let source_url = context
             .as_ref()
-            .and_then(|context| context.source_url.clone());
-        if let Some(context) = context.as_ref()
-            && let Some(source_url) = context.source_url.as_ref()
-        {
-            self.ensure_core_file(
-                &context.id,
-                source_url,
-                &context.artifact_path,
-                context.size,
-                context.counts_toward_progress,
-            );
-        }
+            .and_then(|context| self.ensure_core_file_from_context(context));
         self.apply_core_event(CoreEvent::FileRetryRequested {
             file_id: id.to_string(),
         });
@@ -1620,7 +1700,7 @@ impl App {
         let Some(context) = self.visible_file_context(id) else {
             return;
         };
-        let Some(source_url) = context.source_url.clone() else {
+        let Some(source_url) = self.ensure_core_file_from_context(&context) else {
             if !self.core_state.files.contains_key(id) {
                 self.show_overlay_error(id, id, "Reset unavailable for this file", true);
             }
@@ -1629,17 +1709,7 @@ impl App {
             return;
         };
 
-        self.ensure_core_file(
-            &context.id,
-            &source_url,
-            &context.artifact_path,
-            context.size,
-            context.counts_toward_progress,
-        );
-
-        if let Some(token) = self.cancellation_tokens.remove(id) {
-            token.cancel();
-        }
+        self.cancel_file_token(id);
 
         self.apply_core_event(CoreEvent::FileResetRequested {
             file_id: id.to_string(),
@@ -1855,79 +1925,19 @@ impl App {
                 self.set_collection_status(total, skipped, partial, total_bytes);
             }
             DownloadEvent::FileStart { id, name, size } => {
-                log::info!("Download started: {name} ({})", format_bytes(size));
-                if self.deleted_files.contains(&id) {
-                    return;
-                }
-                let source_url = self
-                    .files
-                    .iter()
-                    .find(|entry| entry.id == id)
-                    .and_then(|entry| entry.source_url.clone())
-                    .unwrap_or_else(|| id.clone());
-                self.ensure_core_file(&id, &source_url, &name, size, true);
-                self.apply_core_event(CoreEvent::FileStarted {
-                    file_id: id.clone(),
-                    size,
-                });
-                self.reset_file_ui_rate(&id);
+                self.handle_file_start_event(id, name, size);
             }
             DownloadEvent::Progress { id, delta } => {
-                if self.deleted_files.contains(id.as_ref()) {
-                    return;
-                }
-                let previous_downloaded = self
-                    .files
-                    .iter()
-                    .find(|file| file.id == id.as_ref())
-                    .map_or(0, |file| file.downloaded);
-                self.apply_core_event(CoreEvent::FileProgress {
-                    file_id: id.to_string(),
-                    total_bytes_delta: delta.total_bytes_delta,
-                    network_bytes_delta: delta.network_bytes_delta,
-                });
-                let now = Instant::now();
-                let _ = self.update_file_ui_progress(id.as_ref(), previous_downloaded, now);
+                self.handle_file_progress_event(id, delta);
             }
             DownloadEvent::ResumeReused { id, chunks, bytes } => {
-                if self.deleted_files.contains(&id) {
-                    return;
-                }
-                self.apply_core_event(CoreEvent::FileReuseDetected {
-                    file_id: id.clone(),
-                    reused_bytes: bytes,
-                    reused_chunks: chunks,
-                });
-                log::info!(
-                    "Reusing {chunks} verified chunk(s) for {id} ({})",
-                    format_bytes(bytes)
-                );
-                self.set_resume_reuse_status(&id, chunks, bytes);
+                self.handle_resume_reused_event(id, chunks, bytes);
             }
             DownloadEvent::FileComplete { id, name } => {
-                log::info!("Download complete: {name}");
-                if self.handle_deleted_download_artifact(&id, &name) {
-                    return;
-                }
-                self.apply_core_event(CoreEvent::FileCompleted {
-                    file_id: id.clone(),
-                });
-                self.recompute_totals();
-                self.mark_visible_file_complete(&id, &name);
+                self.handle_file_complete_event(id, name);
             }
             DownloadEvent::FileCancelled { id, name } => {
-                log::info!("Download cancelled: {name}");
-                if self.handle_deleted_download_artifact(&id, &name) {
-                    return;
-                }
-                self.cancellation_tokens.remove(&id);
-                self.apply_core_event(CoreEvent::FileCancelled {
-                    file_id: id.clone(),
-                });
-                self.reset_file_ui_rate(&id);
-                if self.paused {
-                    self.status = "Paused".to_string();
-                }
+                self.handle_file_cancelled_event(id, name);
             }
             DownloadEvent::Error { id, name, error } => {
                 self.handle_download_error_event(id, name, error);
