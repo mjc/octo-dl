@@ -1,4 +1,4 @@
-use super::{App, FileEntry, FileStatus, VisibleFileContext};
+use super::{App, FileEntry, FileStatus, OverlayFile, VisibleFileContext};
 
 impl App {
     fn seed_overlay_from_visible(&mut self) {
@@ -26,12 +26,18 @@ impl App {
             .or_else(|| {
                 self.overlay_files
                     .get(file_id)
-                    .and_then(|file| file.source_url.clone())
+                    .and_then(|file| file.file.source_url.clone())
             })
     }
 
-    pub(crate) fn upsert_overlay_file(&mut self, file: FileEntry) {
-        self.overlay_files.insert(file.id.clone(), file);
+    pub(crate) fn upsert_overlay_file(&mut self, file: FileEntry, counts_toward_progress: bool) {
+        self.overlay_files.insert(
+            file.id.clone(),
+            OverlayFile {
+                file,
+                counts_toward_progress,
+            },
+        );
         self.sync_visible_files();
     }
 
@@ -39,21 +45,21 @@ impl App {
         if !self.overlay_files.contains_key(id) {
             self.seed_overlay_from_visible();
         }
-        self.overlay_files.get_mut(id)
+        self.overlay_files.get_mut(id).map(|file| &mut file.file)
     }
 
     pub(crate) fn remove_overlay_file(&mut self, id: &str) -> Option<FileEntry> {
         if !self.overlay_files.contains_key(id) {
             self.seed_overlay_from_visible();
         }
-        let removed = self.overlay_files.shift_remove(id);
+        let removed = self.overlay_files.shift_remove(id).map(|file| file.file);
         self.sync_visible_files();
         removed
     }
 
     pub(crate) fn drop_overlay_file(&mut self, id: &str) -> Option<FileEntry> {
         self.deleted_files.insert(id.to_string());
-        let removed = self.overlay_files.shift_remove(id);
+        let removed = self.overlay_files.shift_remove(id).map(|file| file.file);
         self.sync_visible_files();
         self.deleted_files.remove(id);
         removed
@@ -61,12 +67,34 @@ impl App {
 
     pub(crate) fn visible_file_context(&self, id: &str) -> Option<VisibleFileContext> {
         self.files.iter().find(|file| file.id == id).map(|file| {
-            let source_url = file.source_url.clone();
+            let source_url = self
+                .core_state
+                .files
+                .get(id)
+                .and_then(|core_file| self.core_state.packages.get(&core_file.package_id))
+                .map(|package| package.source_url.clone())
+                .or_else(|| {
+                    self.overlay_files
+                        .get(id)
+                        .and_then(|overlay| overlay.file.source_url.clone())
+                })
+                .or_else(|| file.source_url.clone());
+            let counts_toward_progress = self
+                .core_state
+                .files
+                .get(id)
+                .map(|file| file.runtime.counts_in_run_totals && !file.runtime.preexisting_complete)
+                .or_else(|| {
+                    self.overlay_files
+                        .get(id)
+                        .map(|overlay| overlay.counts_toward_progress)
+                })
+                .unwrap_or(true);
             VisibleFileContext {
                 id: file.id.clone(),
                 artifact_path: file.name.clone(),
                 size: file.size,
-                counts_toward_progress: file.counts_toward_progress,
+                counts_toward_progress,
                 is_core_backed: self.core_state.files.contains_key(id) || source_url.is_some(),
                 source_url,
             }
@@ -105,15 +133,17 @@ impl App {
             file.name = name.to_string();
             self.sync_visible_files();
         } else {
-            self.upsert_overlay_file(FileEntry {
-                id: id.to_string(),
-                name: name.to_string(),
-                size: 0,
-                downloaded: 0,
-                source_url: None,
+            self.upsert_overlay_file(
+                FileEntry {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    size: 0,
+                    downloaded: 0,
+                    source_url: None,
+                    status: FileStatus::Error(error.to_string()),
+                },
                 counts_toward_progress,
-                status: FileStatus::Error(error.to_string()),
-            });
+            );
         }
         self.reset_file_ui_rate(id);
     }
@@ -125,5 +155,12 @@ impl App {
 
     pub(crate) fn show_ui_error_only(&mut self, name: &str, error: &str) {
         self.show_overlay_error(name, name, error, false);
+    }
+
+    pub(crate) fn overlay_counts_toward_progress(&self, id: &str) -> bool {
+        self.overlay_files
+            .get(id)
+            .map(|overlay| overlay.counts_toward_progress)
+            .unwrap_or(true)
     }
 }

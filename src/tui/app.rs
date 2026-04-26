@@ -39,7 +39,7 @@ pub use self::types::{
     ConfigField, ConfigState, FileEntry, FileStatus, LoginState, NoCredentialsFallback, Popup,
     QuitPolicy, SharedAppState, UiAction,
 };
-pub(crate) use self::types::{SharedStateChannels, VisibleFileContext};
+pub(crate) use self::types::{OverlayFile, SharedStateChannels, VisibleFileContext};
 
 use super::event::{DownloadEvent, QueuedFile, TokenMessage};
 use super::session::{SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate};
@@ -58,7 +58,7 @@ pub struct App {
     pub urls: Vec<String>,
     // File queue (main content)
     pub files: Vec<FileEntry>,
-    pub(crate) overlay_files: IndexMap<String, FileEntry>,
+    pub(crate) overlay_files: IndexMap<String, OverlayFile>,
     pub(crate) file_ui: HashMap<String, FileUiState>,
     pub file_list_state: ListState,
     // Aggregate stats

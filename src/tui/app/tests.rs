@@ -137,7 +137,6 @@ fn to_json_contains_visible_file_state_without_internal_fields() {
         size: 128,
         downloaded: 64,
         source_url: Some("https://mega.nz/file/abc".to_string()),
-        counts_toward_progress: true,
         status: FileStatus::Downloading,
     });
     app.file_ui.insert(
@@ -202,7 +201,6 @@ fn aggregate_rate_uses_progress_since_current_baseline() {
         size: 2_000,
         downloaded: 1_000,
         source_url: None,
-        counts_toward_progress: true,
         status: FileStatus::Downloading,
     });
     app.total_downloaded = 1_000;
@@ -226,7 +224,6 @@ fn aggregate_rate_ignores_reused_bytes() {
         size: 2_000,
         downloaded: 1_000,
         source_url: None,
-        counts_toward_progress: true,
         status: FileStatus::Downloading,
     });
     app.total_downloaded = 1_000;
@@ -248,7 +245,6 @@ fn record_progress_caps_downloaded_at_file_size() {
         size: 100,
         downloaded: 90,
         source_url: None,
-        counts_toward_progress: true,
         status: FileStatus::Downloading,
     };
     let now = Instant::now();
