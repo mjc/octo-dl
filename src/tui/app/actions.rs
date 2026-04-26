@@ -1,7 +1,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::{core::CoreEvent, format_bytes};
+use crate::{
+    core::{CoreCommand, CoreEvent},
+    format_bytes,
+};
 
 use super::{
     App, ProgressDelta, QueuedFile, SessionAdapter, SessionFileUpdate, SessionUrlUpdate, UiAction,
@@ -14,7 +17,7 @@ impl App {
             return;
         }
         self.urls.push(url.clone());
-        self.apply_core_event(CoreEvent::UrlSubmitted { url: url.clone() });
+        self.apply_core_command(CoreCommand::SubmitUrl { url: url.clone() });
         self.update_session_url(&url, SessionUrlUpdate::Pending);
     }
 
@@ -271,7 +274,7 @@ impl App {
         self.cancel_file_token(id);
         self.deleted_files.insert(id.to_string());
         if is_core_backed {
-            self.apply_core_event(CoreEvent::FileDeleted {
+            self.apply_core_command(CoreCommand::DeleteFile {
                 file_id: id.to_string(),
             });
         } else {
@@ -289,7 +292,7 @@ impl App {
         let source_url = context
             .as_ref()
             .and_then(|context| self.ensure_core_file_from_context(context));
-        self.apply_core_event(CoreEvent::FileRetryRequested {
+        self.apply_core_command(CoreCommand::RetryFile {
             file_id: id.to_string(),
         });
         if let Some(url) = source_url {
@@ -318,7 +321,7 @@ impl App {
 
         self.cancel_file_token(id);
 
-        self.apply_core_event(CoreEvent::FileResetRequested {
+        self.apply_core_command(CoreCommand::ResetFile {
             file_id: id.to_string(),
         });
         self.reset_file_ui_rate(id);
