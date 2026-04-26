@@ -817,8 +817,7 @@ async fn resume_session(mut session: SessionSnapshotV3, config: &CliConfig) -> c
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::SavedCredentials as LegacySavedCredentials;
-    use crate::{FileEntry, FileEntryStatus, SessionState, UrlEntry, UrlStatus};
+    use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
 
     #[test]
     fn progress_bar_creation() {
@@ -828,26 +827,16 @@ mod tests {
 
     #[test]
     fn resume_url_selection_includes_pending_and_fetched() {
-        let session = SessionState::new(
-            LegacySavedCredentials::encrypt("test@example.com", "password", None),
-            DownloadConfig::default(),
-            vec![
-                UrlEntry {
-                    url: "https://mega.nz/file/pending".to_string(),
-                    status: UrlStatus::Pending,
-                },
-                UrlEntry {
-                    url: "https://mega.nz/file/fetched".to_string(),
-                    status: UrlStatus::Fetched,
-                },
-                UrlEntry {
-                    url: "https://mega.nz/file/error".to_string(),
-                    status: UrlStatus::Error("nope".to_string()),
-                },
-            ],
-        );
+        let session = session_snapshot(vec![
+            ("https://mega.nz/file/pending", UrlFixtureStatus::Pending),
+            ("https://mega.nz/file/fetched", UrlFixtureStatus::Fetched),
+            (
+                "https://mega.nz/file/error",
+                UrlFixtureStatus::Error("nope".to_string()),
+            ),
+        ]);
 
-        let urls = resumable_urls(&session.to_v3());
+        let urls = resumable_urls(&session);
         assert_eq!(
             urls,
             vec![
@@ -859,23 +848,13 @@ mod tests {
 
     #[test]
     fn resume_url_selection_excludes_fetched_urls_with_only_terminal_files() {
-        let mut session = SessionState::new(
-            LegacySavedCredentials::encrypt("test@example.com", "password", None),
-            DownloadConfig::default(),
-            vec![UrlEntry {
-                url: "https://mega.nz/file/skipped".to_string(),
-                status: UrlStatus::Fetched,
-            }],
-        );
-        session.files = vec![FileEntry {
-            key: Some("0:skip.bin".to_string()),
-            url_index: 0,
-            path: "skip.bin".to_string(),
-            size: 123,
-            status: FileEntryStatus::Skipped,
-        }];
+        let mut session = session_snapshot(vec![(
+            "https://mega.nz/file/skipped",
+            UrlFixtureStatus::Fetched,
+        )]);
+        push_file(&mut session, 0, "skip.bin", 123, FileFixtureStatus::Skipped);
 
-        let urls = resumable_urls(&session.to_v3());
+        let urls = resumable_urls(&session);
         assert!(urls.is_empty());
     }
 }

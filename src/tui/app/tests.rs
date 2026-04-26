@@ -3,11 +3,9 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
-use crate::state::SavedCredentials as LegacySavedCredentials;
 use crate::{
-    DownloadConfig, FileEntry as SessionFileEntry, FileEntryStatus, SessionState, SessionStatus,
-    UrlEntry, UrlStatus,
-    core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage},
+    core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus},
+    test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot},
 };
 
 fn test_app() -> App {
@@ -263,44 +261,14 @@ fn record_progress_caps_downloaded_at_file_size() {
 #[test]
 fn skipped_session_paths_groups_only_skipped_files_by_url() {
     let mut app = test_app();
-    let mut session = SessionState::new(
-        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-        DownloadConfig::default(),
-        vec![
-            UrlEntry {
-                url: "https://mega.nz/file/a".to_string(),
-                status: UrlStatus::Fetched,
-            },
-            UrlEntry {
-                url: "https://mega.nz/file/b".to_string(),
-                status: UrlStatus::Fetched,
-            },
-        ],
-    );
-    session.files = vec![
-        SessionFileEntry {
-            key: Some("0:skip-a.bin".to_string()),
-            url_index: 0,
-            path: "skip-a.bin".to_string(),
-            size: 1,
-            status: FileEntryStatus::Skipped,
-        },
-        SessionFileEntry {
-            key: Some("1:skip-b.bin".to_string()),
-            url_index: 1,
-            path: "skip-b.bin".to_string(),
-            size: 1,
-            status: FileEntryStatus::Skipped,
-        },
-        SessionFileEntry {
-            key: Some("0:pending.bin".to_string()),
-            url_index: 0,
-            path: "pending.bin".to_string(),
-            size: 1,
-            status: FileEntryStatus::Pending,
-        },
-    ];
-    app.session = Some(session.to_v3());
+    let mut session = session_snapshot(vec![
+        ("https://mega.nz/file/a", UrlFixtureStatus::Fetched),
+        ("https://mega.nz/file/b", UrlFixtureStatus::Fetched),
+    ]);
+    push_file(&mut session, 0, "skip-a.bin", 1, FileFixtureStatus::Skipped);
+    push_file(&mut session, 1, "skip-b.bin", 1, FileFixtureStatus::Skipped);
+    push_file(&mut session, 0, "pending.bin", 1, FileFixtureStatus::Pending);
+    app.session = Some(session);
 
     let skipped = app.skipped_session_paths();
 
@@ -319,22 +287,12 @@ fn skipped_session_paths_groups_only_skipped_files_by_url() {
 #[test]
 fn register_session_queued_file_does_not_revive_skipped_entry() {
     let mut app = test_app();
-    let mut session = SessionState::new(
-        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-        DownloadConfig::default(),
-        vec![UrlEntry {
-            url: "https://mega.nz/file/a".to_string(),
-            status: UrlStatus::Fetched,
-        }],
-    );
-    session.files.push(SessionFileEntry {
-        key: None,
-        url_index: 0,
-        path: "skip-a.bin".to_string(),
-        size: 1,
-        status: FileEntryStatus::Skipped,
-    });
-    app.session = Some(session.to_v3());
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/a",
+        UrlFixtureStatus::Fetched,
+    )]);
+    push_file(&mut session, 0, "skip-a.bin", 1, FileFixtureStatus::Skipped);
+    app.session = Some(session);
 
     let should_queue = app.register_session_queued_file("https://mega.nz/file/a", "skip-a.bin", 1);
 
@@ -352,17 +310,10 @@ fn register_session_queued_file_does_not_revive_skipped_entry() {
 fn url_resolved_updates_session_status_and_clears_overlay() {
     let mut app = test_app();
     let url = "https://mega.nz/folder/root".to_string();
-    app.session = Some(
-        SessionState::new(
-            LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-            DownloadConfig::default(),
-            vec![UrlEntry {
-                url: url.clone(),
-                status: UrlStatus::Pending,
-            }],
-        )
-        .to_v3(),
-    );
+    app.session = Some(session_snapshot(vec![(
+        url.as_str(),
+        UrlFixtureStatus::Pending,
+    )]));
 
     app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
     assert!(app.overlay_files.contains_key(&url));
@@ -378,22 +329,12 @@ fn url_resolved_updates_session_status_and_clears_overlay() {
 #[test]
 fn mark_visible_file_error_updates_session_file_status() {
     let mut app = test_app();
-    let mut session = SessionState::new(
-        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-        DownloadConfig::default(),
-        vec![UrlEntry {
-            url: "https://mega.nz/file/root".to_string(),
-            status: UrlStatus::Fetched,
-        }],
-    );
-    session.files.push(SessionFileEntry {
-        key: Some("0:file-id".to_string()),
-        url_index: 0,
-        path: "file-id".to_string(),
-        size: 128,
-        status: FileEntryStatus::Pending,
-    });
-    app.session = Some(session.to_v3());
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/root",
+        UrlFixtureStatus::Fetched,
+    )]);
+    push_file(&mut session, 0, "file-id", 128, FileFixtureStatus::Pending);
+    app.session = Some(session);
 
     app.mark_visible_file_error("file-id", "file-id", "network failure");
 
@@ -407,65 +348,22 @@ fn mark_visible_file_error_updates_session_file_status() {
 
 #[test]
 fn session_adapter_merge_state_updates_matching_files_and_preserves_unmatched_entries() {
-    let mut session = SessionState::new(
-        LegacySavedCredentials::encrypt("old@example.com", "hunter2", None),
-        DownloadConfig::default(),
-        vec![UrlEntry {
-            url: "https://mega.nz/file/a".to_string(),
-            status: UrlStatus::Pending,
-        }],
-    );
-    session.files = vec![
-        SessionFileEntry {
-            key: Some("0:keep.bin".to_string()),
-            url_index: 0,
-            path: "keep.bin".to_string(),
-            size: 1,
-            status: FileEntryStatus::Pending,
-        },
-        SessionFileEntry {
-            key: Some("0:stale.bin".to_string()),
-            url_index: 0,
-            path: "stale.bin".to_string(),
-            size: 1,
-            status: FileEntryStatus::Pending,
-        },
-    ];
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/a",
+        UrlFixtureStatus::Pending,
+    )]);
+    push_file(&mut session, 0, "keep.bin", 1, FileFixtureStatus::Pending);
+    push_file(&mut session, 0, "stale.bin", 1, FileFixtureStatus::Pending);
 
-    let mut next = SessionState::new(
-        LegacySavedCredentials::encrypt("new@example.com", "hunter2", None),
-        DownloadConfig::default(),
-        vec![
-            UrlEntry {
-                url: "https://mega.nz/file/a".to_string(),
-                status: UrlStatus::Fetched,
-            },
-            UrlEntry {
-                url: "https://mega.nz/file/b".to_string(),
-                status: UrlStatus::Pending,
-            },
-        ],
-    );
-    next.status = SessionStatus::Paused;
-    next.files = vec![
-        SessionFileEntry {
-            key: Some("0:keep.bin".to_string()),
-            url_index: 0,
-            path: "keep.bin".to_string(),
-            size: 5,
-            status: FileEntryStatus::Completed,
-        },
-        SessionFileEntry {
-            key: Some("1:new.bin".to_string()),
-            url_index: 1,
-            path: "new.bin".to_string(),
-            size: 2,
-            status: FileEntryStatus::Pending,
-        },
-    ];
+    let mut next = session_snapshot(vec![
+        ("https://mega.nz/file/a", UrlFixtureStatus::Fetched),
+        ("https://mega.nz/file/b", UrlFixtureStatus::Pending),
+    ]);
+    next.status = SessionRunStatus::Paused;
+    push_file(&mut next, 0, "keep.bin", 5, FileFixtureStatus::Completed);
+    push_file(&mut next, 1, "new.bin", 2, FileFixtureStatus::Pending);
 
-    let mut session = session.to_v3();
-    SessionAdapter::merge_state(&mut session, next.to_v3());
+    SessionAdapter::merge_state(&mut session, next);
 
     assert_eq!(session.status, crate::core::SessionRunStatus::Paused);
     assert_eq!(session.packages.len(), 2);
