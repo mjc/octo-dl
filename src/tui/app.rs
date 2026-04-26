@@ -319,6 +319,12 @@ pub(crate) struct VisibleFileContext {
     pub is_core_backed: bool,
 }
 
+enum SessionFileUpdate<'a> {
+    Complete,
+    Error(&'a str),
+    Skipped,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuitPolicy {
     Enabled,
@@ -1227,16 +1233,12 @@ impl App {
         });
     }
 
-    pub(crate) fn session_mark_file_complete(&mut self, file_id: &str) {
-        let _ = self.mutate_session(|session| session.mark_file_complete(file_id));
-    }
-
-    pub(crate) fn session_mark_file_error(&mut self, file_id: &str, error: &str) {
-        let _ = self.mutate_session(|session| session.mark_file_error(file_id, error));
-    }
-
-    pub(crate) fn session_mark_file_skipped(&mut self, file_id: &str) {
-        let _ = self.mutate_session(|session| session.mark_file_skipped(file_id));
+    fn update_session_file(&mut self, file_id: &str, update: SessionFileUpdate<'_>) {
+        let _ = self.mutate_session(|session| match update {
+            SessionFileUpdate::Complete => session.mark_file_complete(file_id),
+            SessionFileUpdate::Error(error) => session.mark_file_error(file_id, error),
+            SessionFileUpdate::Skipped => session.mark_file_skipped(file_id),
+        });
     }
 
     pub(crate) fn session_mark_completed(&mut self) {
@@ -1482,7 +1484,7 @@ impl App {
     }
 
     fn sync_session_after_file_complete(&mut self, id: &str) {
-        self.session_mark_file_complete(id);
+        self.update_session_file(id, SessionFileUpdate::Complete);
         if self.files_completed == self.files_total && self.files_total > 0 {
             self.session_mark_completed();
         }
@@ -1554,11 +1556,11 @@ impl App {
     }
 
     fn note_file_error(&mut self, id: &str, error: &str) {
-        self.session_mark_file_error(id, error);
+        self.update_session_file(id, SessionFileUpdate::Error(error));
     }
 
     fn mark_file_skipped(&mut self, id: &str) {
-        self.session_mark_file_skipped(id);
+        self.update_session_file(id, SessionFileUpdate::Skipped);
     }
 
     fn handle_deleted_download_artifact(&mut self, id: &str, artifact_path: &str) -> bool {
