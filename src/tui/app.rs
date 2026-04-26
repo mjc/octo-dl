@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     DownloadConfig, SessionState,
-    core::{CoreEvent, DownloadState, ProgressDelta, SessionMeta},
+    core::{DownloadState, ProgressDelta, SessionMeta},
 };
 
 use self::progress::TransferRate;
@@ -183,70 +183,6 @@ impl App {
             last_tick: Instant::now(),
             memory_rss: 0,
         }
-    }
-
-    pub(crate) fn submit_url(&mut self, url: String) {
-        if self.urls.contains(&url) {
-            return;
-        }
-        self.urls.push(url.clone());
-        self.apply_core_event(CoreEvent::UrlSubmitted { url: url.clone() });
-        self.update_session_url(&url, SessionUrlUpdate::Pending);
-        let _ = self.url_tx.send(url);
-    }
-
-    pub(crate) fn drain_ui_actions(
-        &mut self,
-        action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
-    ) -> bool {
-        let mut handled = false;
-        while let Ok(action) = action_rx.try_recv() {
-            self.handle_ui_action(action);
-            handled = true;
-        }
-        handled
-    }
-
-    pub fn set_paused(&mut self, paused: bool) {
-        self.paused = paused;
-        let _ = self.pause_tx.send(paused);
-    }
-
-    pub fn pause_downloads(&mut self) {
-        if self.paused {
-            return;
-        }
-        let downloading_ids: Vec<_> = self
-            .files
-            .iter()
-            .filter(|file| matches!(file.status, FileStatus::Downloading))
-            .map(|file| file.id.clone())
-            .collect();
-        self.set_paused(true);
-        for token in self.cancellation_tokens.values() {
-            token.cancel();
-        }
-        for file_id in downloading_ids {
-            if self.core_state.files.contains_key(&file_id) {
-                self.apply_core_event(CoreEvent::FileCancelled {
-                    file_id: file_id.clone(),
-                });
-            } else if let Some(file) = self.overlay_file_mut(&file_id) {
-                file.status = FileStatus::Queued;
-                self.sync_visible_files();
-            }
-            self.reset_file_ui_rate(&file_id);
-        }
-        self.reset_aggregate_rate();
-        self.status = "Paused".to_string();
-    }
-
-    pub fn resume_downloads(&mut self) {
-        if !self.paused {
-            return;
-        }
-        self.set_paused(false);
-        self.status = "Resuming downloads...".to_string();
     }
 
     /// Serialises UI-visible state to a JSON string.

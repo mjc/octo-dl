@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::{
     FileEntry as SessionFileEntry, FileEntryStatus, SavedCredentials, SessionStatus, UrlEntry,
     UrlStatus,
-    core::{FileLifecycle, ResolvedFile, ResolvedPackage},
+    core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage},
 };
 
 fn test_app() -> App {
