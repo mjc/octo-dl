@@ -184,9 +184,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                     file.lifecycle = FileLifecycle::Queued;
                     file.runtime.active = false;
                     file.message = None;
-                    effects.push(CoreEffect::EnqueueFileDownload {
-                        file_id: file.id.clone(),
-                    });
                 }
             }
         }

@@ -91,6 +91,7 @@ impl App {
                 .unwrap_or(true);
             VisibleFileContext {
                 id: file.id.clone(),
+                status: file.status.clone(),
                 artifact_path: file.name.clone(),
                 size: file.size,
                 counts_toward_progress,
