@@ -325,6 +325,12 @@ enum SessionFileUpdate<'a> {
     Skipped,
 }
 
+enum SessionUrlUpdate<'a> {
+    Pending,
+    Fetched,
+    Error(&'a str),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuitPolicy {
     Enabled,
@@ -1078,7 +1084,7 @@ impl App {
         }
         self.urls.push(url.clone());
         self.apply_core_event(CoreEvent::UrlSubmitted { url: url.clone() });
-        self.session_add_pending_url(&url);
+        self.update_session_url(&url, SessionUrlUpdate::Pending);
         let _ = self.url_tx.send(url);
     }
 
@@ -1221,14 +1227,26 @@ impl App {
         Ok((service_config.api.host, service_config.api.port))
     }
 
-    pub(crate) fn session_add_pending_url(&mut self, url: &str) {
+    fn update_session_url(&mut self, url: &str, update: SessionUrlUpdate<'_>) {
         let url = url.to_string();
-        let _ = self.mutate_session_and_save(|session| {
-            if !session.urls.iter().any(|entry| entry.url == url) {
-                session.urls.push(UrlEntry {
-                    url,
-                    status: UrlStatus::Pending,
-                });
+        let _ = self.mutate_session_and_save(|session| match update {
+            SessionUrlUpdate::Pending => {
+                if !session.urls.iter().any(|entry| entry.url == url) {
+                    session.urls.push(UrlEntry {
+                        url,
+                        status: UrlStatus::Pending,
+                    });
+                }
+            }
+            SessionUrlUpdate::Fetched => {
+                if let Some(entry) = session.urls.iter_mut().find(|entry| entry.url == url) {
+                    entry.status = UrlStatus::Fetched;
+                }
+            }
+            SessionUrlUpdate::Error(error) => {
+                if let Some(entry) = session.urls.iter_mut().find(|entry| entry.url == url) {
+                    entry.status = UrlStatus::Error(error.to_string());
+                }
             }
         });
     }
@@ -1245,21 +1263,7 @@ impl App {
         let _ = self.mutate_session(SessionState::mark_completed);
     }
 
-    pub(crate) fn session_set_url_status(&mut self, url: &str, status: UrlStatus) {
-        let url = url.to_string();
-        let _ = self.mutate_session_and_save(|session| {
-            if let Some(entry) = session.urls.iter_mut().find(|entry| entry.url == url) {
-                entry.status = status;
-            }
-        });
-    }
-
-    pub(crate) fn session_register_queued_file(
-        &mut self,
-        submitted_url: &str,
-        path: &str,
-        size: u64,
-    ) -> bool {
+    fn register_session_queued_file(&mut self, submitted_url: &str, path: &str, size: u64) -> bool {
         self.mutate_session_and_save(|session| {
             let url_index = Self::session_url_index(session, submitted_url);
             let stable_key = file_key(url_index, path);
@@ -1581,7 +1585,7 @@ impl App {
     }
 
     fn handle_session_url_error(&mut self, url: &str, error: &str) {
-        self.session_set_url_status(url, UrlStatus::Error(error.to_string()));
+        self.update_session_url(url, SessionUrlUpdate::Error(error));
         let _ = self.remove_overlay_file(url);
         self.show_ui_error_only(url, error);
     }
@@ -1610,7 +1614,7 @@ impl App {
     }
 
     fn register_queued_file(&mut self, file: &QueuedFile) -> bool {
-        if !self.session_register_queued_file(&file.origin.submitted_url, &file.id, file.size) {
+        if !self.register_session_queued_file(&file.origin.submitted_url, &file.id, file.size) {
             return false;
         }
         self.ensure_core_file(
@@ -1634,7 +1638,7 @@ impl App {
 
     fn handle_session_url_fetched(&mut self, url: &str) {
         let _ = self.drop_overlay_file(url);
-        self.session_set_url_status(url, UrlStatus::Fetched);
+        self.update_session_url(url, SessionUrlUpdate::Fetched);
         self.recompute_totals();
     }
 
@@ -2723,7 +2727,7 @@ mod tests {
     }
 
     #[test]
-    fn session_register_queued_file_does_not_revive_skipped_entry() {
+    fn register_session_queued_file_does_not_revive_skipped_entry() {
         let mut app = test_app();
         let mut session = SessionState::new(
             SavedCredentials::encrypt("test@example.com", "hunter2", None),
@@ -2743,7 +2747,7 @@ mod tests {
         app.session = Some(session);
 
         let should_queue =
-            app.session_register_queued_file("https://mega.nz/file/a", "skip-a.bin", 1);
+            app.register_session_queued_file("https://mega.nz/file/a", "skip-a.bin", 1);
 
         assert!(!should_queue);
         let session = app.session.as_ref().unwrap();
