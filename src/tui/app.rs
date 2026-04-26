@@ -39,6 +39,7 @@ pub use self::types::{
 pub(crate) use self::types::{OverlayFile, SharedStateChannels, VisibleFileContext};
 
 use super::event::{DownloadEvent, QueuedFile, TokenMessage};
+use super::event::DownloadRequest;
 use super::session::{SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate};
 use super::visible;
 
@@ -74,9 +75,9 @@ pub struct App {
     // Channels
     pub event_tx: mpsc::UnboundedSender<DownloadEvent>,
     /// Always valid — URLs buffer in the channel until the download task starts.
-    pub url_tx: mpsc::UnboundedSender<String>,
+    pub url_tx: mpsc::UnboundedSender<DownloadRequest>,
     /// Taken by `start_download_task` to give the receiver to the download task.
-    pub(super) url_rx: Option<mpsc::UnboundedReceiver<String>>,
+    pub(super) url_rx: Option<mpsc::UnboundedReceiver<DownloadRequest>>,
     /// Broadcasts pause state changes to the background download task.
     pub pause_tx: watch::Sender<bool>,
     /// Taken by `start_download_task` to give the receiver to the download task.

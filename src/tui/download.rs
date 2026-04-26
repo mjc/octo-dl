@@ -10,13 +10,15 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
+use crate::download::part_path;
 use crate::{DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, is_dlc_path};
 use dirs;
 
 #[cfg(test)]
 use super::app::{FileEntry, FileStatus};
 use super::event::{
-    DownloadChannels, DownloadEvent, FileOrigin, QueuedFile, TokenMessage, TuiProgress,
+    DownloadChannels, DownloadEvent, DownloadRequest, FileOrigin, QueuedFile, TokenMessage,
+    TuiProgress,
 };
 
 pub(crate) fn schedule_resume_artifact_delete(path: String) {
@@ -119,7 +121,9 @@ impl ResolvedUrl {
 
 struct FetchedNodeSet {
     resolved: ResolvedUrl,
-    nodes: mega::Nodes,
+    nodes: Option<mega::Nodes>,
+    requested_file_ids: Option<HashSet<String>>,
+    emit_url_resolved: bool,
 }
 
 struct QueuedDownload {
@@ -206,7 +210,6 @@ struct CollectedNodeSet {
 }
 
 struct BatchContext<'a> {
-    http: &'a Arc<reqwest::Client>,
     downloader: &'a Arc<crate::Downloader>,
     progress: &'a Arc<dyn DownloadProgress>,
     semaphore: &'a Arc<tokio::sync::Semaphore>,
@@ -314,10 +317,10 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
 
     loop {
         tokio::select! {
-            url_opt = url_rx.recv() => {
-                let Some(first_url) = url_opt else { break };
-                let batch = collect_url_batch(first_url, &mut url_rx);
-                queue_url_batch(&batch, &tx);
+            request_opt = url_rx.recv() => {
+                let Some(first_request) = request_opt else { break };
+                let batch = collect_download_requests(first_request, &mut url_rx);
+                queue_download_batch_events(&batch, &tx);
                 spawn_download_batch(
                     &mut join_set,
                     batch,
@@ -340,31 +343,36 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
     }
 }
 
-fn collect_url_batch(
-    first_url: String,
-    url_rx: &mut mpsc::UnboundedReceiver<String>,
-) -> Vec<String> {
-    let mut batch = vec![first_url];
-    while let Ok(url) = url_rx.try_recv() {
-        batch.push(url);
+fn collect_download_requests(
+    first_request: DownloadRequest,
+    url_rx: &mut mpsc::UnboundedReceiver<DownloadRequest>,
+) -> Vec<DownloadRequest> {
+    let mut batch = vec![first_request];
+    while let Ok(request) = url_rx.try_recv() {
+        batch.push(request);
     }
     batch
 }
 
-fn queue_url_batch(batch: &[String], tx: &mpsc::UnboundedSender<DownloadEvent>) {
+fn queue_download_batch_events(
+    batch: &[DownloadRequest],
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+) {
     for url in batch {
-        let _ = tx.send(DownloadEvent::UrlQueued { url: url.clone() });
+        if let DownloadRequest::SubmitUrl { url } = url {
+            let _ = tx.send(DownloadEvent::UrlQueued { url: url.clone() });
+        }
     }
 
     let _ = tx.send(DownloadEvent::StatusMessage(format!(
         "Processing {} URL(s)...",
-        batch.len()
+        batch.iter().count()
     )));
 }
 
 fn spawn_download_batch(
     join_set: &mut tokio::task::JoinSet<()>,
-    batch: Vec<String>,
+    batch: Vec<DownloadRequest>,
     runtime: &DownloadRuntime,
     tx: &mpsc::UnboundedSender<DownloadEvent>,
     token_tx: &mpsc::UnboundedSender<TokenMessage>,
@@ -382,13 +390,12 @@ fn spawn_download_batch(
     let skipped_paths = skipped_session_paths.clone();
 
     join_set.spawn(async move {
-        let resolved = resolve_urls(&batch, &http, &dlc_cache, &event_tx).await;
+        let resolved = resolve_download_requests(&batch, &http, &dlc_cache, &event_tx).await;
         download_batch(
             &resolved,
             pause_rx,
             &skipped_paths,
             BatchContext {
-                http: &http,
                 downloader: &downloader,
                 progress: &progress,
                 semaphore: &semaphore,
@@ -400,17 +407,69 @@ fn spawn_download_batch(
     });
 }
 
-/// Resolves raw URL strings (including DLC files) into MEGA URLs.
-async fn resolve_urls(
-    urls: &[String],
+/// Resolves download requests (including DLC files) into MEGA URLs.
+async fn resolve_download_requests(
+    requests: &[DownloadRequest],
     http: &Arc<reqwest::Client>,
     dlc_cache: &Arc<DlcKeyCache>,
     tx: &mpsc::UnboundedSender<DownloadEvent>,
-) -> Vec<ResolvedUrl> {
-    let mut resolved = Vec::new();
-    for url in urls {
-        resolved.extend(resolve_submitted_url(url, http, dlc_cache, tx).await);
+) -> Vec<FetchedNodeSet> {
+    let mut by_source: HashMap<String, (Option<HashSet<String>>, bool)> = HashMap::new();
+
+    for request in requests {
+        match request {
+            DownloadRequest::SubmitUrl { url } => {
+                by_source
+                    .entry(url.clone())
+                    .and_modify(|entry| {
+                        entry.0 = None;
+                        entry.1 = true;
+                    })
+                    .or_insert((None, true));
+            }
+            DownloadRequest::ResumeFileIds {
+                source_url,
+                file_ids,
+            } => {
+                let file_ids = file_ids.iter().cloned().collect::<HashSet<_>>();
+                let entry = by_source.entry(source_url.clone()).or_insert_with(|| (None, false));
+                match entry.0.as_mut() {
+                    Some(existing) => {
+                        existing.extend(file_ids);
+                    }
+                    None => {
+                        // A submit request for this URL takes precedence and should force all
+                        // files to be resolved.
+                    }
+                }
+            }
+        }
     }
+
+    let mut resolved = Vec::new();
+    for (submitted_url, (file_ids, emit_url_resolved)) in by_source {
+        let sources = resolve_submitted_url(&submitted_url, http, dlc_cache, tx).await;
+        for source in sources {
+            let requested_file_ids = file_ids.clone();
+            let nodes = match fetch_node_set(&source, http).await {
+                Ok(nodes) => Some(nodes),
+                Err(error) => {
+                    let _ = tx.send(DownloadEvent::ScopeError {
+                        scope: source.source_url.clone(),
+                        error,
+                    });
+                    None
+                }
+            };
+            resolved.push(FetchedNodeSet {
+                resolved: source,
+                nodes,
+                requested_file_ids,
+                emit_url_resolved,
+            });
+        }
+    }
+
     resolved
 }
 
@@ -775,17 +834,32 @@ mod tests {
     #[test]
     fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
         let resolved = vec![
-            ResolvedUrl {
-                source_url: "https://mega.nz/file/one".to_string(),
-                submitted_url: "bundle.dlc".to_string(),
+            FetchedNodeSet {
+                resolved: ResolvedUrl {
+                    source_url: "https://mega.nz/file/one".to_string(),
+                    submitted_url: "bundle.dlc".to_string(),
+                },
+                nodes: None,
+                requested_file_ids: None,
+                emit_url_resolved: true,
             },
-            ResolvedUrl {
-                source_url: "https://mega.nz/file/two".to_string(),
-                submitted_url: "bundle.dlc".to_string(),
+            FetchedNodeSet {
+                resolved: ResolvedUrl {
+                    source_url: "https://mega.nz/file/two".to_string(),
+                    submitted_url: "bundle.dlc".to_string(),
+                },
+                nodes: None,
+                requested_file_ids: None,
+                emit_url_resolved: true,
             },
-            ResolvedUrl {
-                source_url: "https://mega.nz/file/three".to_string(),
-                submitted_url: "https://mega.nz/folder/direct".to_string(),
+            FetchedNodeSet {
+                resolved: ResolvedUrl {
+                    source_url: "https://mega.nz/file/three".to_string(),
+                    submitted_url: "https://mega.nz/folder/direct".to_string(),
+                },
+                nodes: None,
+                requested_file_ids: None,
+                emit_url_resolved: true,
             },
         ];
 
@@ -892,12 +966,11 @@ mod tests {
 }
 
 async fn download_batch(
-    urls: &[ResolvedUrl],
+    node_sets: &[FetchedNodeSet],
     mut pause_rx: watch::Receiver<bool>,
     skipped_session_paths: &HashMap<String, HashSet<String>>,
     ctx: BatchContext<'_>,
 ) {
-    let node_sets = fetch_node_sets(urls, ctx.http, ctx.event_tx).await;
     let collected = collect_batch(
         &node_sets,
         ctx.downloader,
@@ -1011,35 +1084,6 @@ fn emit_pause_cancellation_if_needed(
     }
 }
 
-async fn fetch_node_sets(
-    urls: &[ResolvedUrl],
-    http: &Arc<reqwest::Client>,
-    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
-) -> Vec<FetchedNodeSet> {
-    let mut node_sets = Vec::new();
-    for resolved in urls {
-        let _ = event_tx.send(DownloadEvent::StatusMessage(format!(
-            "Fetching: {}",
-            resolved.source_url
-        )));
-        match fetch_node_set(resolved, http).await {
-            Ok(nodes) => {
-                node_sets.push(FetchedNodeSet {
-                    resolved: resolved.clone(),
-                    nodes,
-                });
-            }
-            Err(error) => {
-                let _ = event_tx.send(DownloadEvent::ScopeError {
-                    scope: resolved.source_url.clone(),
-                    error,
-                });
-            }
-        }
-    }
-    node_sets
-}
-
 async fn fetch_node_set(
     resolved: &ResolvedUrl,
     http: &Arc<reqwest::Client>,
@@ -1066,8 +1110,7 @@ async fn collect_batch(
     let mut completed_items = Vec::new();
     let mut skipped_count = 0;
     let mut partial_count = 0;
-    let successful_submitted_urls =
-        successful_submitted_urls(node_sets.iter().map(|node_set| &node_set.resolved));
+    let successful_submitted_urls = successful_submitted_urls(node_sets.iter());
 
     for node_set in node_sets {
         let collected = collect_node_set(node_set, downloader, progress, skipped_paths).await;
@@ -1091,11 +1134,70 @@ async fn collect_node_set(
     progress: &Arc<dyn DownloadProgress>,
     skipped_paths: &HashMap<String, HashSet<String>>,
 ) -> CollectedNodeSet {
+    let Some(nodes) = node_set.nodes.as_ref() else {
+        return CollectedNodeSet {
+            queued_items: Vec::new(),
+            completed_items: Vec::new(),
+            skipped_count: 0,
+            partial_count: 0,
+        };
+    };
+
     let skipped_for_url = skipped_paths.get(&node_set.resolved.submitted_url);
-    let collected = downloader.collect_files(&node_set.nodes, progress).await;
-    let mut skipped_count = collected.skipped;
-    let partial_count = collected.partial;
-    let (to_download, completed) = collected.into_owned_parts();
+    let collected = downloader.collect_files(nodes, progress).await;
+    let mut skipped_count = 0;
+    let keep_file = |path: &str| -> bool {
+        node_set
+            .requested_file_ids
+            .as_ref()
+            .is_none_or(|ids| ids.contains(path))
+    };
+
+    let to_download = collected
+        .to_download
+        .into_iter()
+        .filter(|item| keep_file(&item.path))
+        .collect::<Vec<_>>();
+    let completed = collected
+        .completed
+        .into_iter()
+        .filter(|item| keep_file(&item.path))
+        .collect::<Vec<_>>();
+
+    let mut partial_count: usize = 0;
+    for item in &to_download {
+        if downloader.config().force_overwrite {
+            continue;
+        }
+        if tokio::fs::metadata(&item.path)
+            .await
+            .is_ok_and(|metadata| metadata.len() == item.node.size())
+        {
+            continue;
+        }
+        if tokio::fs::metadata(part_path(&item.path))
+            .await
+            .is_ok()
+        {
+            partial_count = partial_count.saturating_add(1);
+        }
+    }
+
+    let to_download = to_download
+        .into_iter()
+        .map(|item| crate::OwnedDownloadItem {
+            path: item.path.to_string(),
+            node: item.node.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let completed = completed
+        .into_iter()
+        .map(|item| crate::OwnedDownloadItem {
+            path: item.path.to_string(),
+            node: item.node.clone(),
+        })
+        .collect::<Vec<_>>();
 
     let queued_items = visible_downloads(
         to_download,
@@ -1119,14 +1221,17 @@ async fn collect_node_set(
 }
 
 fn successful_submitted_urls<'a>(
-    resolved_urls: impl IntoIterator<Item = &'a ResolvedUrl>,
+    resolved_urls: impl IntoIterator<Item = &'a FetchedNodeSet>,
 ) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut urls = Vec::new();
 
     for resolved in resolved_urls {
-        if seen.insert(resolved.submitted_url.clone()) {
-            urls.push(resolved.submitted_url.clone());
+        if !resolved.emit_url_resolved {
+            continue;
+        }
+        if seen.insert(resolved.resolved.submitted_url.clone()) {
+            urls.push(resolved.resolved.submitted_url.clone());
         }
     }
 

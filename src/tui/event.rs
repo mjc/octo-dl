@@ -31,10 +31,21 @@ pub struct QueuedFile {
 pub struct DownloadChannels {
     pub client_rx: Option<tokio::sync::oneshot::Receiver<(mega::Client, reqwest::Client)>>,
     pub event_tx: mpsc::UnboundedSender<DownloadEvent>,
-    pub url_rx: mpsc::UnboundedReceiver<String>,
+    pub url_rx: mpsc::UnboundedReceiver<DownloadRequest>,
     pub token_tx: mpsc::UnboundedSender<TokenMessage>,
     pub pause_rx: tokio::sync::watch::Receiver<bool>,
     pub skipped_session_paths: HashMap<String, HashSet<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadRequest {
+    SubmitUrl {
+        url: String,
+    },
+    ResumeFileIds {
+        source_url: String,
+        file_ids: Vec<String>,
+    },
 }
 
 #[derive(Debug)]

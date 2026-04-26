@@ -17,6 +17,7 @@ use crate::{
 use super::{
     App, DownloadEvent, NoCredentialsFallback, Popup, SharedAppState, SharedStateChannels, UiAction,
 };
+use crate::tui::event::DownloadRequest;
 
 impl App {
     pub fn new(
@@ -24,7 +25,7 @@ impl App {
         event_tx: mpsc::UnboundedSender<DownloadEvent>,
         quit_enabled: bool,
     ) -> Self {
-        let (url_tx, url_rx) = mpsc::unbounded_channel::<String>();
+        let (url_tx, url_rx) = mpsc::unbounded_channel::<DownloadRequest>();
         let (pause_tx, pause_rx) = watch::channel(false);
         let (token_tx, token_rx) = mpsc::unbounded_channel::<super::TokenMessage>();
         Self {
