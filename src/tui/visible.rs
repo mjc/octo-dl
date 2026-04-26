@@ -8,7 +8,11 @@ use crate::core::{DownloadState, FileLifecycle, FileState, PackageState};
 
 use super::app::{FileEntry, FileStatus, FileUiState, OverlayFile};
 
-fn package_sort_key_for(core_state: &DownloadState, file: &FileEntry) -> (usize, String) {
+fn package_sort_key_for(
+    core_state: &DownloadState,
+    overlay_files: &IndexMap<String, OverlayFile>,
+    file: &FileEntry,
+) -> (usize, String) {
     if let Some(core_file) = core_state.files.get(&file.id) {
         let package_order = core_state
             .packages
@@ -24,13 +28,16 @@ fn package_sort_key_for(core_state: &DownloadState, file: &FileEntry) -> (usize,
 
     (
         usize::MAX,
-        file.source_url.clone().unwrap_or_else(|| file.id.clone()),
+        overlay_files
+            .get(&file.id)
+            .and_then(|file| file.source_url.clone())
+            .unwrap_or_else(|| file.id.clone()),
     )
 }
 
 fn project_core_file(
     file: &FileState,
-    package: Option<&PackageState>,
+    _package: Option<&PackageState>,
     existing: Option<FileEntry>,
 ) -> Option<FileEntry> {
     let status = match file.lifecycle {
@@ -47,12 +54,10 @@ fn project_core_file(
         FileLifecycle::Complete => file.size,
         _ => file.progress.visible_completed_bytes.min(file.size),
     };
-    let source_url = package.map(|package| package.source_url.clone());
     if let Some(mut existing) = existing {
         existing.name = file.path.clone();
         existing.size = file.size;
         existing.downloaded = downloaded;
-        existing.source_url = source_url;
         existing.status = status;
         return Some(existing);
     }
@@ -62,18 +67,21 @@ fn project_core_file(
         name: file.path.clone(),
         size: file.size,
         downloaded,
-        source_url,
         status,
     })
 }
 
-pub(super) fn sorted_file_indices(files: &[FileEntry], core_state: &DownloadState) -> Vec<usize> {
+pub(super) fn sorted_file_indices(
+    files: &[FileEntry],
+    core_state: &DownloadState,
+    overlay_files: &IndexMap<String, OverlayFile>,
+) -> Vec<usize> {
     let mut indices: Vec<_> = (0..files.len()).collect();
     indices.sort_by(|&left, &right| {
         let left_file = &files[left];
         let right_file = &files[right];
-        let left_package = package_sort_key_for(core_state, left_file);
-        let right_package = package_sort_key_for(core_state, right_file);
+        let left_package = package_sort_key_for(core_state, overlay_files, left_file);
+        let right_package = package_sort_key_for(core_state, overlay_files, right_file);
 
         match left_package.cmp(&right_package) {
             Ordering::Equal => {}
@@ -104,9 +112,10 @@ pub(super) fn selected_file_index(
     file_list_state: &ListState,
     files: &[FileEntry],
     core_state: &DownloadState,
+    overlay_files: &IndexMap<String, OverlayFile>,
 ) -> Option<usize> {
     let selected = file_list_state.selected()?;
-    sorted_file_indices(files, core_state)
+    sorted_file_indices(files, core_state, overlay_files)
         .get(selected)
         .copied()
 }
@@ -123,6 +132,7 @@ pub(super) fn seed_overlay_from_visible(
                 .entry(file.id.clone())
                 .or_insert_with(|| OverlayFile {
                     file: file.clone(),
+                    source_url: None,
                     counts_toward_progress: true,
                 });
         }
@@ -137,7 +147,7 @@ pub(super) fn sync_visible_files(
     core_state: &DownloadState,
     deleted_files: &HashSet<String>,
 ) {
-    let selected_id = selected_file_index(file_list_state, files, core_state)
+    let selected_id = selected_file_index(file_list_state, files, core_state, overlay_files)
         .map(|index| files[index].id.clone());
     let selected_row = file_list_state.selected().unwrap_or(0);
     let core_file_ids: HashSet<_> = core_state.files.keys().cloned().collect();
@@ -153,6 +163,7 @@ pub(super) fn sync_visible_files(
                 .entry(id.clone())
                 .or_insert_with(|| OverlayFile {
                     file: file.clone(),
+                    source_url: None,
                     counts_toward_progress: true,
                 });
         }
@@ -176,7 +187,7 @@ pub(super) fn sync_visible_files(
     let visible_ids: HashSet<_> = files.iter().map(|file| file.id.clone()).collect();
     file_ui.retain(|file_id, _| visible_ids.contains(file_id));
     if let Some(selected_id) = selected_id {
-        if let Some(display_row) = sorted_file_indices(files, core_state)
+        if let Some(display_row) = sorted_file_indices(files, core_state, overlay_files)
             .into_iter()
             .position(|index| files[index].id == selected_id)
         {

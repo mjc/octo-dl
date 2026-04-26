@@ -66,7 +66,11 @@ pub(super) fn snapshot_packages(app: &App) -> Vec<serde_json::Value> {
 
     let mut packages = IndexMap::<String, Vec<&FileEntry>>::new();
     for file in &app.files {
-        let package_id = file.source_url.clone().unwrap_or_else(|| file.id.clone());
+        let package_id = app
+            .overlay_files
+            .get(&file.id)
+            .and_then(|overlay| overlay.source_url.clone())
+            .unwrap_or_else(|| file.id.clone());
         packages.entry(package_id).or_default().push(file);
     }
 
@@ -83,17 +87,28 @@ pub(super) fn snapshot_packages(app: &App) -> Vec<serde_json::Value> {
                 .any(|file| matches!(file.status, FileStatus::Downloading))
             {
                 "downloading"
-            } else if files.iter().all(|file| matches!(file.status, FileStatus::Complete)) {
+            } else if files
+                .iter()
+                .all(|file| matches!(file.status, FileStatus::Complete))
+            {
                 "complete"
-            } else if files.iter().any(|file| matches!(file.status, FileStatus::Complete)) {
+            } else if files
+                .iter()
+                .any(|file| matches!(file.status, FileStatus::Complete))
+            {
                 "partial"
             } else {
                 "queued"
             };
+            let source_url = app
+                .overlay_files
+                .get(&files[0].id)
+                .and_then(|overlay| overlay.source_url.clone())
+                .unwrap_or_else(|| files[0].id.clone());
             serde_json::json!({
                 "id": package_id,
-                "source_url": files[0].source_url.clone().unwrap_or_else(|| files[0].id.clone()),
-                "display_name": files[0].source_url.clone().unwrap_or_else(|| files[0].name.clone()),
+                "source_url": source_url.clone(),
+                "display_name": source_url,
                 "status": status,
                 "file_ids": files.iter().map(|file| file.id.clone()).collect::<Vec<_>>(),
             })

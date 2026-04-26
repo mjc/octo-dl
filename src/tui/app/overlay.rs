@@ -19,22 +19,22 @@ impl App {
                 .map(|package| package.display_name.clone());
         }
 
-        self.files
-            .iter()
-            .find(|file| file.id == file_id)
+        self.overlay_files
+            .get(file_id)
             .and_then(|file| file.source_url.clone())
-            .or_else(|| {
-                self.overlay_files
-                    .get(file_id)
-                    .and_then(|file| file.file.source_url.clone())
-            })
     }
 
-    pub(crate) fn upsert_overlay_file(&mut self, file: FileEntry, counts_toward_progress: bool) {
+    pub(crate) fn upsert_overlay_file(
+        &mut self,
+        file: FileEntry,
+        source_url: Option<String>,
+        counts_toward_progress: bool,
+    ) {
         self.overlay_files.insert(
             file.id.clone(),
             OverlayFile {
                 file,
+                source_url,
                 counts_toward_progress,
             },
         );
@@ -76,9 +76,8 @@ impl App {
                 .or_else(|| {
                     self.overlay_files
                         .get(id)
-                        .and_then(|overlay| overlay.file.source_url.clone())
-                })
-                .or_else(|| file.source_url.clone());
+                        .and_then(|overlay| overlay.source_url.clone())
+                });
             let counts_toward_progress = self
                 .core_state
                 .files
@@ -139,9 +138,9 @@ impl App {
                     name: name.to_string(),
                     size: 0,
                     downloaded: 0,
-                    source_url: None,
                     status: FileStatus::Error(error.to_string()),
                 },
+                None,
                 counts_toward_progress,
             );
         }

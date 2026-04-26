@@ -155,14 +155,13 @@ pub struct FileEntry {
     pub name: String,
     pub size: u64,
     pub downloaded: u64,
-    #[serde(skip)]
-    pub source_url: Option<String>,
     pub status: FileStatus,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct OverlayFile {
     pub file: FileEntry,
+    pub source_url: Option<String>,
     pub counts_toward_progress: bool,
 }
 

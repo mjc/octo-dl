@@ -110,11 +110,16 @@ pub struct App {
 
 impl App {
     pub fn sorted_file_indices(&self) -> Vec<usize> {
-        visible::sorted_file_indices(&self.files, &self.core_state)
+        visible::sorted_file_indices(&self.files, &self.core_state, &self.overlay_files)
     }
 
     pub fn selected_file_index(&self) -> Option<usize> {
-        visible::selected_file_index(&self.file_list_state, &self.files, &self.core_state)
+        visible::selected_file_index(
+            &self.file_list_state,
+            &self.files,
+            &self.core_state,
+            &self.overlay_files,
+        )
     }
 
     pub(crate) fn sync_visible_files(&mut self) {

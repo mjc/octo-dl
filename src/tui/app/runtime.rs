@@ -108,9 +108,9 @@ impl App {
                     name: url,
                     size: 0,
                     downloaded: 0,
-                    source_url: None,
                     status: FileStatus::Queued,
                 },
+                None,
                 false,
             );
         }

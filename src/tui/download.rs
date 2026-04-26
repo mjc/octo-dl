@@ -588,7 +588,6 @@ mod tests {
             name: "first.bin".to_string(),
             size: 64,
             downloaded: 16,
-            source_url: Some("https://mega.nz/file/first".to_string()),
             status: FileStatus::Downloading,
         });
         app.recompute_totals();
@@ -623,7 +622,6 @@ mod tests {
             name: "old-name.mkv".to_string(),
             size: 64,
             downloaded: 17,
-            source_url: Some("https://mega.nz/file/old".to_string()),
             status: FileStatus::Error("stale error".to_string()),
         });
 
@@ -640,7 +638,11 @@ mod tests {
         let file = app.files.iter().find(|file| file.id == "file-id").unwrap();
         assert_eq!(file.name, "file-id");
         assert_eq!(file.size, 128);
-        assert_eq!(file.source_url.as_deref(), Some("https://mega.nz/file/new"));
+        assert_eq!(
+            app.visible_file_context("file-id")
+                .and_then(|context| context.source_url),
+            Some("https://mega.nz/file/new".to_string())
+        );
         assert_eq!(file.status, FileStatus::Queued);
         assert_eq!(file.downloaded, 0);
         assert_eq!(app.file_speed("file-id"), 0);
@@ -741,7 +743,6 @@ mod tests {
             name: "file.mkv".to_string(),
             size: 128,
             downloaded: 128,
-            source_url: Some("https://mega.nz/file/root".to_string()),
             status: FileStatus::Complete,
         });
         app.recompute_totals();
@@ -764,9 +765,9 @@ mod tests {
                 name: "episode.mkv".to_string(),
                 size: 128,
                 downloaded: 128,
-                source_url: Some("https://mega.nz/file/root".to_string()),
                 status: FileStatus::Complete,
             },
+            Some("https://mega.nz/file/root".to_string()),
             false,
         );
         app.recompute_totals();

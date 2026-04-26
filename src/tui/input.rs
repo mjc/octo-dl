@@ -403,7 +403,6 @@ mod tests {
             name: "test.zip".to_string(),
             size: 1000,
             downloaded: 500,
-            source_url: None,
             status: FileStatus::Downloading,
         });
         app.cancellation_tokens
@@ -426,7 +425,6 @@ mod tests {
                 name: "first.bin".to_string(),
                 size: 10,
                 downloaded: 0,
-                source_url: Some("https://mega.nz/file/first".to_string()),
                 status: FileStatus::Queued,
             },
             FileEntry {
@@ -434,7 +432,6 @@ mod tests {
                 name: "second.bin".to_string(),
                 size: 20,
                 downloaded: 0,
-                source_url: Some("https://mega.nz/file/second".to_string()),
                 status: FileStatus::Queued,
             },
         ];
@@ -501,7 +498,6 @@ mod tests {
                 name: "complete.bin".to_string(),
                 size: 10,
                 downloaded: 10,
-                source_url: None,
                 status: FileStatus::Complete,
             },
             FileEntry {
@@ -509,7 +505,6 @@ mod tests {
                 name: "active.bin".to_string(),
                 size: 20,
                 downloaded: 5,
-                source_url: None,
                 status: FileStatus::Downloading,
             },
         ];
@@ -537,14 +532,17 @@ mod tests {
         let (url_tx, mut url_rx) = mpsc::unbounded_channel();
         app.url_tx = url_tx;
         let token = tokio_util::sync::CancellationToken::new();
-        app.files.push(FileEntry {
-            id: "active.bin".to_string(),
-            name: final_path.to_string_lossy().into_owned(),
-            size: 100,
-            downloaded: 80,
-            source_url: Some("https://mega.nz/file/reset".to_string()),
-            status: FileStatus::Downloading,
-        });
+        app.upsert_overlay_file(
+            FileEntry {
+                id: "active.bin".to_string(),
+                name: final_path.to_string_lossy().into_owned(),
+                size: 100,
+                downloaded: 80,
+                status: FileStatus::Downloading,
+            },
+            Some("https://mega.nz/file/reset".to_string()),
+            true,
+        );
         app.cancellation_tokens
             .insert("active.bin".to_string(), token.clone());
         app.file_list_state.select(Some(0));
@@ -582,9 +580,9 @@ mod tests {
                 name: final_path.to_string_lossy().into_owned(),
                 size: 100,
                 downloaded: 100,
-                source_url: Some("https://mega.nz/file/complete".to_string()),
                 status: FileStatus::Complete,
             },
+            Some("https://mega.nz/file/complete".to_string()),
             false,
         );
         app.file_list_state.select(Some(0));
@@ -661,14 +659,17 @@ mod tests {
         let mut app = test_app();
         let (url_tx, mut url_rx) = mpsc::unbounded_channel();
         app.url_tx = url_tx;
-        app.files.push(FileEntry {
-            id: "error.bin".to_string(),
-            name: "error.bin".to_string(),
-            size: 100,
-            downloaded: 42,
-            source_url: Some("https://mega.nz/file/error".to_string()),
-            status: FileStatus::Error("boom".to_string()),
-        });
+        app.upsert_overlay_file(
+            FileEntry {
+                id: "error.bin".to_string(),
+                name: "error.bin".to_string(),
+                size: 100,
+                downloaded: 42,
+                status: FileStatus::Error("boom".to_string()),
+            },
+            Some("https://mega.nz/file/error".to_string()),
+            true,
+        );
         app.recompute_totals();
         app.file_list_state.select(Some(0));
 
