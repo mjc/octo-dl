@@ -1481,6 +1481,24 @@ impl App {
         }
     }
 
+    fn sync_session_after_file_complete(&mut self, id: &str) {
+        self.session_mark_file_complete(id);
+        if self.files_completed == self.files_total && self.files_total > 0 {
+            self.session_mark_completed();
+        }
+    }
+
+    fn update_download_status_message(&mut self) {
+        if self.files_completed == self.files_total && self.files_total > 0 {
+            self.status = "All downloads complete".to_string();
+        } else {
+            self.status = format!(
+                "Downloading ({}/{})",
+                self.files_completed, self.files_total
+            );
+        }
+    }
+
     pub(crate) fn mark_visible_file_complete(&mut self, id: &str, name: &str) {
         self.cancellation_tokens.remove(id);
         if !self.core_state.files.contains_key(id)
@@ -1492,18 +1510,10 @@ impl App {
             self.sync_visible_files();
         }
         self.reset_file_ui_rate(id);
-        self.session_mark_file_complete(id);
 
         self.recompute_totals();
-        if self.files_completed == self.files_total && self.files_total > 0 {
-            self.session_mark_completed();
-            self.status = "All downloads complete".to_string();
-        } else {
-            self.status = format!(
-                "Downloading ({}/{})",
-                self.files_completed, self.files_total
-            );
-        }
+        self.sync_session_after_file_complete(id);
+        self.update_download_status_message();
     }
 
     pub(crate) fn show_overlay_error(
@@ -1536,11 +1546,15 @@ impl App {
 
     pub(crate) fn mark_visible_file_error(&mut self, id: &str, name: &str, error: &str) {
         self.show_overlay_error(id, name, error, true);
-        self.session_mark_file_error(id, error);
+        self.note_file_error(id, error);
     }
 
     pub(crate) fn show_ui_error_only(&mut self, name: &str, error: &str) {
         self.show_overlay_error(name, name, error, false);
+    }
+
+    fn note_file_error(&mut self, id: &str, error: &str) {
+        self.session_mark_file_error(id, error);
     }
 
     fn mark_file_skipped(&mut self, id: &str) {
@@ -2757,6 +2771,35 @@ mod tests {
         assert!(!app.overlay_files.contains_key(&url));
         let session = app.session.as_ref().expect("session should remain");
         assert_eq!(session.urls[0].status, UrlStatus::Fetched);
+    }
+
+    #[test]
+    fn mark_visible_file_error_updates_session_file_status() {
+        let mut app = test_app();
+        let mut session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![UrlEntry {
+                url: "https://mega.nz/file/root".to_string(),
+                status: UrlStatus::Fetched,
+            }],
+        );
+        session.files.push(SessionFileEntry {
+            key: Some("0:file-id".to_string()),
+            url_index: 0,
+            path: "file-id".to_string(),
+            size: 128,
+            status: FileEntryStatus::Pending,
+        });
+        app.session = Some(session);
+
+        app.mark_visible_file_error("file-id", "file-id", "network failure");
+
+        let session = app.session.as_ref().expect("session should remain");
+        assert!(matches!(
+            session.files[0].status,
+            FileEntryStatus::Error(ref msg) if msg == "network failure"
+        ));
     }
 
     #[test]
