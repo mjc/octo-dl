@@ -1,17 +1,4 @@
-//! Download task management and event handling.
-//!
-//! # TODO: Package-based download grouping
-//!
-//! Currently, downloads are tracked as a flat list of files keyed by filename.
-//! This causes collisions when different MEGA folders contain files with the
-//! same name. Instead, downloads should be grouped into **packages** (similar
-//! to `JDownloader2`), where each MEGA URL/folder submission becomes a package
-//! that contains its files. This would:
-//!
-//! - Eliminate filename collisions across different sources
-//! - Allow per-package progress, pause/resume, and cancellation
-//! - Enable collapsible package groups in the TUI file list
-//! - Make session persistence more robust (key by package+path, not filename)
+//! Download task management and transport-side event emission.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -21,13 +8,11 @@ use futures_util::FutureExt;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    DlcKeyCache, DownloadConfig, DownloadProgress, SavedCredentials, SessionState, UrlEntry,
-    UrlStatus, core::ProgressDelta, is_dlc_path,
-};
+use crate::{DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, is_dlc_path};
+#[cfg(test)]
+use crate::{SavedCredentials, SessionState, UrlEntry, UrlStatus};
 use dirs;
 
-use super::app::App;
 #[cfg(test)]
 use super::app::{FileEntry, FileStatus};
 use super::event::{DownloadChannels, DownloadEvent, TokenMessage, TuiProgress};
@@ -75,7 +60,7 @@ pub(crate) fn schedule_download_artifact_delete(path: String) {
     }
 }
 
-fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
+pub(super) fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .pool_idle_timeout(Duration::from_secs(60))
         .pool_max_idle_per_host(8)
@@ -164,136 +149,15 @@ impl DownloadProgress for FileProgress {
     }
 }
 
-/// Spawns the login task which sends back `LoginResult`.
-///
-/// On success, the authenticated `mega::Client` and `reqwest::Client` are sent
-/// via the oneshot channel in `app.client_rx` so the download task can reuse
-/// them without logging in a second time.
-pub fn start_login(app: &mut App) {
-    let tx = app.event_tx.clone();
-    let email = app.login.email().to_owned();
-    let password = app.login.password().to_owned();
-    let mfa = app.login.mfa_option().map(str::to_owned);
-
-    let (client_tx, client_rx) = tokio::sync::oneshot::channel();
-    app.client_rx = Some(client_rx);
-
-    tokio::spawn(async move {
-        let _ = tx.send(DownloadEvent::StatusMessage("Logging in...".to_string()));
-
-        let http = match build_http_client() {
-            Ok(http) => http,
-            Err(e) => {
-                let _ = tx.send(DownloadEvent::LoginResult {
-                    success: false,
-                    error: Some(format!("Failed to build HTTP client: {e}")),
-                });
-                return;
-            }
-        };
-
-        let mut mega_client = match mega::Client::builder().build(http.clone()) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx.send(DownloadEvent::LoginResult {
-                    success: false,
-                    error: Some(format!("Failed to create MEGA client: {e}")),
-                });
-                return;
-            }
-        };
-
-        if let Err(e) = mega_client.login(&email, &password, mfa.as_deref()).await {
-            let _ = tx.send(DownloadEvent::LoginResult {
-                success: false,
-                error: Some(format!("Login failed: {e}")),
-            });
-            return;
-        }
-
-        let _ = client_tx.send((mega_client, http));
-        let _ = tx.send(DownloadEvent::LoginResult {
-            success: true,
-            error: None,
-        });
-    });
-}
-
-#[cfg(test)]
-pub fn handle_file_complete(app: &mut App, id: &str, _name: &str) {
-    app.mark_visible_file_complete(id, _name);
-}
-
-#[cfg(test)]
-pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
-    app.handle_download_event(event);
-}
-
-/// Starts the persistent download task. Called once after login succeeds.
-///
-/// Expects `app.client_rx` to contain the oneshot receiver from `start_login`.
-pub(super) fn start_download_task(app: &mut App) {
-    let tx = app.event_tx.clone();
-    let config = app.config.config.clone();
-
-    let url_rx = app.url_rx.take().expect("start_download_task called twice");
-    let pause_rx = app
-        .pause_rx
-        .take()
-        .expect("start_download_task called twice");
-    let token_tx = app
-        .token_tx
-        .take()
-        .expect("start_download_task called twice");
-
-    // Reuse existing session on resume, or create a new one
-    if app.session.is_none() {
-        let email = app.login.email().to_owned();
-        let password = app.login.password().to_owned();
-        let mfa = app.login.mfa_option().map(str::to_owned);
-        let url_entries: Vec<UrlEntry> = app
-            .urls
-            .iter()
-            .map(|url| UrlEntry {
-                url: url.clone(),
-                status: UrlStatus::Pending,
-            })
-            .collect();
-
-        let session = SessionState::new(
-            SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
-            config.clone(),
-            url_entries,
-        );
-        let _ = session.save();
-        app.session = Some(session);
-        app.seed_core_session_from_session();
-    }
-
-    // Take the oneshot receiver with the pre-authenticated client
-    let client_rx = app.client_rx.take();
-
-    let channels = DownloadChannels {
-        client_rx,
-        event_tx: tx,
-        url_rx,
-        token_tx,
-        pause_rx,
-    };
-
-    tokio::spawn(async move {
-        run_download(channels, config).await;
-    });
-}
-
 #[allow(clippy::too_many_lines)]
-async fn run_download(channels: DownloadChannels, config: DownloadConfig) {
+pub(super) async fn run_download(channels: DownloadChannels, config: DownloadConfig) {
     let DownloadChannels {
         client_rx,
         event_tx: tx,
         mut url_rx,
         token_tx,
         pause_rx,
+        skipped_session_paths,
     } = channels;
 
     let progress: Arc<dyn DownloadProgress> = Arc::new(TuiProgress::new(tx.clone()));
@@ -357,11 +221,12 @@ async fn run_download(channels: DownloadChannels, config: DownloadConfig) {
                 let tx2 = tx.clone();
                 let token_tx2 = token_tx.clone();
                 let pause_rx2 = pause_rx.clone();
+                let skipped_paths = skipped_session_paths.clone();
                 join_set.spawn(async move {
                     download_batch(
                         &resolved,
-                        &batch,
                         pause_rx2,
+                        &skipped_paths,
                         BatchContext {
                             http: &http2,
                             downloader: &dl,
@@ -556,7 +421,7 @@ mod tests {
         let session_path = session.state_path();
         app.session = Some(session);
 
-        handle_file_complete(&mut app, "first.bin", "renamed.bin");
+        app.mark_visible_file_complete("first.bin", "renamed.bin");
 
         let file = app
             .files
@@ -588,17 +453,14 @@ mod tests {
             status: FileStatus::Error("stale error".to_string()),
         });
 
-        handle_download_event(
-            &mut app,
-            DownloadEvent::FileQueued {
-                id: "file-id".to_string(),
-                name: "new-name.mkv".to_string(),
-                size: 128,
-                count_toward_progress: true,
-                source_url: "https://mega.nz/file/new".to_string(),
-                session_url: "https://mega.nz/folder/root".to_string(),
-            },
-        );
+        app.handle_download_event(DownloadEvent::FileQueued {
+            id: "file-id".to_string(),
+            name: "new-name.mkv".to_string(),
+            size: 128,
+            count_toward_progress: true,
+            source_url: "https://mega.nz/file/new".to_string(),
+            session_url: "https://mega.nz/folder/root".to_string(),
+        });
 
         let file = app.files.iter().find(|file| file.id == "file-id").unwrap();
         assert_eq!(file.name, "new-name.mkv");
@@ -631,17 +493,14 @@ mod tests {
         });
         app.session = Some(session);
 
-        handle_download_event(
-            &mut app,
-            DownloadEvent::FileQueued {
-                id: "episode.mkv".to_string(),
-                name: "episode.mkv".to_string(),
-                size: 128,
-                count_toward_progress: true,
-                source_url: "https://mega.nz/file/root".to_string(),
-                session_url: "https://mega.nz/file/root".to_string(),
-            },
-        );
+        app.handle_download_event(DownloadEvent::FileQueued {
+            id: "episode.mkv".to_string(),
+            name: "episode.mkv".to_string(),
+            size: 128,
+            count_toward_progress: true,
+            source_url: "https://mega.nz/file/root".to_string(),
+            session_url: "https://mega.nz/file/root".to_string(),
+        });
 
         assert!(app.files.is_empty());
         let session = app.session.as_ref().expect("session should remain");
@@ -654,11 +513,11 @@ mod tests {
         let mut app = test_app();
         let url = "https://mega.nz/folder/root".to_string();
 
-        handle_download_event(&mut app, DownloadEvent::UrlQueued { url: url.clone() });
+        app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
         assert!(app.overlay_files.contains_key(&url));
         assert!(app.files.iter().any(|file| file.id == url));
 
-        handle_download_event(&mut app, DownloadEvent::UrlResolved { url: url.clone() });
+        app.handle_download_event(DownloadEvent::UrlResolved { url: url.clone() });
         assert!(!app.overlay_files.contains_key(&url));
         assert!(!app.files.iter().any(|file| file.id == url));
     }
@@ -679,15 +538,12 @@ mod tests {
         );
         app.session = Some(session);
 
-        handle_download_event(&mut app, DownloadEvent::UrlQueued { url: url.clone() });
-        handle_download_event(
-            &mut app,
-            DownloadEvent::Error {
-                id: None,
-                name: url.clone(),
-                error: "bad folder".to_string(),
-            },
-        );
+        app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
+        app.handle_download_event(DownloadEvent::Error {
+            id: None,
+            name: url.clone(),
+            error: "bad folder".to_string(),
+        });
 
         let overlay = app
             .overlay_files
@@ -716,7 +572,7 @@ mod tests {
         app.recompute_totals();
         assert_eq!(app.files_completed, 1);
 
-        handle_file_complete(&mut app, "file-id", "file.mkv");
+        app.mark_visible_file_complete("file-id", "file.mkv");
 
         assert_eq!(app.files_completed, 1);
         let file = app.files.iter().find(|file| file.id == "file-id").unwrap();
@@ -738,24 +594,18 @@ mod tests {
         });
         app.recompute_totals();
 
-        handle_download_event(
-            &mut app,
-            DownloadEvent::FileQueued {
-                id: "episode.mkv".to_string(),
-                name: "episode.mkv".to_string(),
-                size: 128,
-                count_toward_progress: false,
-                source_url: "https://mega.nz/file/root".to_string(),
-                session_url: "https://mega.nz/file/root".to_string(),
-            },
-        );
-        handle_download_event(
-            &mut app,
-            DownloadEvent::FileComplete {
-                id: "episode.mkv".to_string(),
-                name: "episode.mkv".to_string(),
-            },
-        );
+        app.handle_download_event(DownloadEvent::FileQueued {
+            id: "episode.mkv".to_string(),
+            name: "episode.mkv".to_string(),
+            size: 128,
+            count_toward_progress: false,
+            source_url: "https://mega.nz/file/root".to_string(),
+            session_url: "https://mega.nz/file/root".to_string(),
+        });
+        app.handle_download_event(DownloadEvent::FileComplete {
+            id: "episode.mkv".to_string(),
+            name: "episode.mkv".to_string(),
+        });
 
         assert_eq!(app.files.len(), 1);
         let file = app
@@ -769,6 +619,34 @@ mod tests {
         assert_eq!(app.files_total, 0);
     }
 
+    #[test]
+    fn successful_session_urls_deduplicates_only_fetched_submissions() {
+        let resolved = vec![
+            ResolvedUrl {
+                url: "https://mega.nz/file/one".to_string(),
+                session_url: "bundle.dlc".to_string(),
+            },
+            ResolvedUrl {
+                url: "https://mega.nz/file/two".to_string(),
+                session_url: "bundle.dlc".to_string(),
+            },
+            ResolvedUrl {
+                url: "https://mega.nz/file/three".to_string(),
+                session_url: "https://mega.nz/folder/direct".to_string(),
+            },
+        ];
+
+        let urls = successful_session_urls(resolved.iter());
+
+        assert_eq!(
+            urls,
+            vec![
+                "bundle.dlc".to_string(),
+                "https://mega.nz/folder/direct".to_string()
+            ]
+        );
+    }
+
     /// Regression test: the mega library reports *cumulative* bytes downloaded,
     /// but `on_progress` must send true deltas.  If cumulative values leak
     /// through as deltas, `downloaded` will vastly exceed `size`.
@@ -778,29 +656,23 @@ mod tests {
         let file_size: u64 = 1_000_000;
 
         // Simulate FileStart
-        handle_download_event(
-            &mut app,
-            DownloadEvent::FileStart {
-                id: "test.bin".to_string(),
-                name: "test.bin".to_string(),
-                size: file_size,
-            },
-        );
+        app.handle_download_event(DownloadEvent::FileStart {
+            id: "test.bin".to_string(),
+            name: "test.bin".to_string(),
+            size: file_size,
+        });
 
         // Simulate a sequence of correct *delta* progress events
         // (as they should arrive after the cumulative→delta fix in download.rs).
         let deltas = [100_000u64, 250_000, 350_000, 200_000, 100_000]; // sum = 1_000_000
         for d in deltas {
-            handle_download_event(
-                &mut app,
-                DownloadEvent::Progress {
-                    id: std::sync::Arc::<str>::from("test.bin"),
-                    delta: ProgressDelta {
-                        total_bytes_delta: d,
-                        network_bytes_delta: d,
-                    },
+            app.handle_download_event(DownloadEvent::Progress {
+                id: std::sync::Arc::<str>::from("test.bin"),
+                delta: ProgressDelta {
+                    total_bytes_delta: d,
+                    network_bytes_delta: d,
                 },
-            );
+            });
         }
 
         let file = app.files.iter().find(|f| f.id == "test.bin").unwrap();
@@ -824,28 +696,22 @@ mod tests {
         let mut app = test_app();
         let file_size: u64 = 1_000_000;
 
-        handle_download_event(
-            &mut app,
-            DownloadEvent::FileStart {
-                id: "test.bin".to_string(),
-                name: "test.bin".to_string(),
-                size: file_size,
-            },
-        );
+        app.handle_download_event(DownloadEvent::FileStart {
+            id: "test.bin".to_string(),
+            name: "test.bin".to_string(),
+            size: file_size,
+        });
 
         // Simulate the OLD bug: cumulative totals sent as bytes_delta
         let cumulatives = [100_000u64, 350_000, 700_000, 900_000, 1_000_000];
         for c in cumulatives {
-            handle_download_event(
-                &mut app,
-                DownloadEvent::Progress {
-                    id: std::sync::Arc::<str>::from("test.bin"),
-                    delta: ProgressDelta {
-                        total_bytes_delta: c, // wrong! these are cumulative
-                        network_bytes_delta: c,
-                    },
+            app.handle_download_event(DownloadEvent::Progress {
+                id: std::sync::Arc::<str>::from("test.bin"),
+                delta: ProgressDelta {
+                    total_bytes_delta: c, // wrong! these are cumulative
+                    network_bytes_delta: c,
                 },
-            );
+            });
         }
 
         let file = app.files.iter().find(|f| f.id == "test.bin").unwrap();
@@ -856,20 +722,28 @@ mod tests {
 
 async fn download_batch(
     urls: &[ResolvedUrl],
-    source_urls: &[String],
     mut pause_rx: watch::Receiver<bool>,
+    skipped_session_paths: &HashMap<String, HashSet<String>>,
     ctx: BatchContext<'_>,
 ) {
     let node_sets = fetch_node_sets(urls, ctx.http, ctx.event_tx).await;
+    let successful_session_urls =
+        successful_session_urls(node_sets.iter().map(|(resolved, _)| resolved));
     let (all_queued_items, all_completed_items, actual_skipped, actual_partial) =
-        collect_queued_items(&node_sets, ctx.downloader, ctx.progress).await;
+        collect_queued_items(
+            &node_sets,
+            ctx.downloader,
+            ctx.progress,
+            skipped_session_paths,
+        )
+        .await;
 
     send_collection_events(
         &all_queued_items,
         &all_completed_items,
         actual_skipped,
         actual_partial,
-        source_urls,
+        &successful_session_urls,
         ctx.event_tx,
     );
 
@@ -955,33 +829,12 @@ async fn fetch_node_sets(
     node_sets
 }
 
-fn load_skipped_session_paths() -> HashMap<String, HashSet<String>> {
-    let Some(session) = SessionState::latest() else {
-        return HashMap::new();
-    };
-    let mut skipped = HashMap::<String, HashSet<String>>::new();
-    for file in session.files {
-        if !matches!(file.status, crate::FileEntryStatus::Skipped) {
-            continue;
-        }
-        let Some(url) = session
-            .urls
-            .get(file.url_index)
-            .map(|entry| entry.url.clone())
-        else {
-            continue;
-        };
-        skipped.entry(url).or_default().insert(file.path);
-    }
-    skipped
-}
-
 async fn collect_queued_items(
     node_sets: &[(ResolvedUrl, mega::Nodes)],
     downloader: &Arc<crate::Downloader>,
     progress: &Arc<dyn DownloadProgress>,
+    skipped_paths: &HashMap<String, HashSet<String>>,
 ) -> (Vec<QueuedDownload>, Vec<QueuedDownload>, usize, usize) {
-    let skipped_paths = load_skipped_session_paths();
     let mut all_queued_items = Vec::new();
     let mut all_completed_items = Vec::new();
     let mut actual_skipped = 0;
@@ -1028,12 +881,27 @@ async fn collect_queued_items(
     )
 }
 
+fn successful_session_urls<'a>(
+    resolved_urls: impl IntoIterator<Item = &'a ResolvedUrl>,
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut urls = Vec::new();
+
+    for resolved in resolved_urls {
+        if seen.insert(resolved.session_url.clone()) {
+            urls.push(resolved.session_url.clone());
+        }
+    }
+
+    urls
+}
+
 fn send_collection_events(
     all_queued_items: &[QueuedDownload],
     all_completed_items: &[QueuedDownload],
     actual_skipped: usize,
     actual_partial: usize,
-    source_urls: &[String],
+    successful_session_urls: &[String],
     event_tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) {
     let total_bytes: u64 = all_queued_items
@@ -1078,7 +946,7 @@ fn send_collection_events(
     }
 
     // Remove URL placeholders now that real file entries exist
-    for source_url in source_urls {
+    for source_url in successful_session_urls {
         let _ = event_tx.send(DownloadEvent::UrlResolved {
             url: source_url.clone(),
         });

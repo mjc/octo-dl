@@ -16,8 +16,8 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    DownloadConfig, FileEntry as SessionFileEntry, FileEntryStatus, ServiceConfig, SessionState,
-    SessionStatus, UrlEntry, UrlStatus,
+    DownloadConfig, FileEntry as SessionFileEntry, FileEntryStatus, SavedCredentials,
+    ServiceConfig, SessionState, SessionStatus, UrlEntry, UrlStatus,
     core::{
         CoreEffect, CoreEvent, DownloadState, FileLifecycle, FileState, PackageState, ResolvedFile,
         ResolvedPackage, RestartSnapshot, SessionMeta, reconcile_restart, reduce, scan_filesystem,
@@ -948,6 +948,29 @@ impl App {
         }
     }
 
+    pub(crate) fn skipped_session_paths(&self) -> HashMap<String, HashSet<String>> {
+        let mut skipped = HashMap::<String, HashSet<String>>::new();
+        let Some(session) = self.session.as_ref() else {
+            return skipped;
+        };
+
+        for file in &session.files {
+            if !matches!(file.status, FileEntryStatus::Skipped) {
+                continue;
+            }
+            let Some(url) = session
+                .urls
+                .get(file.url_index)
+                .map(|entry| entry.url.clone())
+            else {
+                continue;
+            };
+            skipped.entry(url).or_default().insert(file.path.clone());
+        }
+
+        skipped
+    }
+
     pub(crate) fn apply_core_event(&mut self, event: CoreEvent) {
         self.seed_core_session_from_session();
         let effects = reduce(&mut self.core_state, event);
@@ -1045,7 +1068,53 @@ impl App {
         self.login.error = None;
         self.login.logging_in = true;
         self.status = "Logging in...".to_string();
-        download::start_login(self);
+        let tx = self.event_tx.clone();
+        let email = self.login.email().to_owned();
+        let password = self.login.password().to_owned();
+        let mfa = self.login.mfa_option().map(str::to_owned);
+
+        let (client_tx, client_rx) = tokio::sync::oneshot::channel();
+        self.client_rx = Some(client_rx);
+
+        tokio::spawn(async move {
+            let _ = tx.send(DownloadEvent::StatusMessage("Logging in...".to_string()));
+
+            let http = match download::build_http_client() {
+                Ok(http) => http,
+                Err(e) => {
+                    let _ = tx.send(DownloadEvent::LoginResult {
+                        success: false,
+                        error: Some(format!("Failed to build HTTP client: {e}")),
+                    });
+                    return;
+                }
+            };
+
+            let mut mega_client = match mega::Client::builder().build(http.clone()) {
+                Ok(client) => client,
+                Err(e) => {
+                    let _ = tx.send(DownloadEvent::LoginResult {
+                        success: false,
+                        error: Some(format!("Failed to create MEGA client: {e}")),
+                    });
+                    return;
+                }
+            };
+
+            if let Err(e) = mega_client.login(&email, &password, mfa.as_deref()).await {
+                let _ = tx.send(DownloadEvent::LoginResult {
+                    success: false,
+                    error: Some(format!("Login failed: {e}")),
+                });
+                return;
+            }
+
+            let _ = client_tx.send((mega_client, http));
+            let _ = tx.send(DownloadEvent::LoginResult {
+                success: true,
+                error: None,
+            });
+        });
     }
 
     pub(crate) fn auto_login(&mut self, fallback: NoCredentialsFallback) -> bool {
@@ -1179,28 +1248,12 @@ impl App {
         }
     }
 
-    pub(crate) fn session_has_skipped_file(&self, session_url: &str, path: &str) -> bool {
-        self.session.as_ref().is_some_and(|session| {
-            session
-                .urls
-                .iter()
-                .position(|entry| entry.url == session_url)
-                .is_some_and(|url_index| {
-                    session.files.iter().any(|file| {
-                        file.url_index == url_index
-                            && file.path == path
-                            && matches!(file.status, FileEntryStatus::Skipped)
-                    })
-                })
-        })
-    }
-
     pub(crate) fn session_register_queued_file(
         &mut self,
         session_url: &str,
         path: &str,
         size: u64,
-    ) {
+    ) -> bool {
         if let Some(ref mut session) = self.session {
             let url_index = session
                 .urls
@@ -1214,10 +1267,18 @@ impl App {
                 .iter_mut()
                 .find(|file| file.url_index == url_index && file.path == path)
             {
+                if matches!(file.status, FileEntryStatus::Skipped) {
+                    if file.key.is_none() {
+                        file.key = Some(stable_key);
+                        let _ = session.save();
+                    }
+                    return false;
+                }
                 if file.key.is_none() {
                     file.key = Some(stable_key);
                     let _ = session.save();
                 }
+                return true;
             } else {
                 session.files.push(SessionFileEntry {
                     key: Some(stable_key),
@@ -1227,8 +1288,10 @@ impl App {
                     status: FileEntryStatus::Pending,
                 });
                 let _ = session.save();
+                return true;
             }
         }
+        true
     }
 
     pub(crate) fn restore_restart_snapshot(&mut self, snapshot: &RestartSnapshot) {
@@ -1605,11 +1668,65 @@ impl App {
             self.authenticated = true;
             self.popup = Popup::None;
             self.status = "Login successful".to_string();
-            download::start_download_task(self);
+            self.start_download_task();
         } else {
             self.login.error = error;
             self.popup = Popup::Login;
         }
+    }
+
+    pub(crate) fn start_download_task(&mut self) {
+        let tx = self.event_tx.clone();
+        let config = self.config.config.clone();
+
+        let url_rx = self
+            .url_rx
+            .take()
+            .expect("start_download_task called twice");
+        let pause_rx = self
+            .pause_rx
+            .take()
+            .expect("start_download_task called twice");
+        let token_tx = self
+            .token_tx
+            .take()
+            .expect("start_download_task called twice");
+
+        if self.session.is_none() {
+            let email = self.login.email().to_owned();
+            let password = self.login.password().to_owned();
+            let mfa = self.login.mfa_option().map(str::to_owned);
+            let url_entries: Vec<UrlEntry> = self
+                .urls
+                .iter()
+                .map(|url| UrlEntry {
+                    url: url.clone(),
+                    status: UrlStatus::Pending,
+                })
+                .collect();
+
+            let session = SessionState::new(
+                SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
+                config.clone(),
+                url_entries,
+            );
+            let _ = session.save();
+            self.session = Some(session);
+            self.seed_core_session_from_session();
+        }
+
+        let channels = super::event::DownloadChannels {
+            client_rx: self.client_rx.take(),
+            event_tx: tx,
+            url_rx,
+            token_tx,
+            pause_rx,
+            skipped_session_paths: self.skipped_session_paths(),
+        };
+
+        tokio::spawn(async move {
+            download::run_download(channels, config).await;
+        });
     }
 
     pub(crate) fn set_collection_status(
@@ -1800,11 +1917,10 @@ impl App {
                 if self.deleted_files.contains(&id) {
                     return;
                 }
-                if self.session_has_skipped_file(&session_url, &name) {
+                if !self.session_register_queued_file(&session_url, &name, size) {
                     return;
                 }
                 self.ensure_core_file(&id, &source_url, &name, size, count_toward_progress);
-                self.session_register_queued_file(&session_url, &name, size);
             }
             DownloadEvent::UrlResolved { url } => {
                 let _ = self.drop_overlay_file(&url);
@@ -2444,6 +2560,92 @@ mod tests {
 
         assert_eq!(accepted, 10);
         assert!(app.file_speed("file.bin") <= u64::MAX);
+    }
+
+    #[test]
+    fn skipped_session_paths_groups_only_skipped_files_by_url() {
+        let mut app = test_app();
+        let mut session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![
+                UrlEntry {
+                    url: "https://mega.nz/file/a".to_string(),
+                    status: UrlStatus::Fetched,
+                },
+                UrlEntry {
+                    url: "https://mega.nz/file/b".to_string(),
+                    status: UrlStatus::Fetched,
+                },
+            ],
+        );
+        session.files = vec![
+            SessionFileEntry {
+                key: Some("0:skip-a.bin".to_string()),
+                url_index: 0,
+                path: "skip-a.bin".to_string(),
+                size: 1,
+                status: FileEntryStatus::Skipped,
+            },
+            SessionFileEntry {
+                key: Some("1:skip-b.bin".to_string()),
+                url_index: 1,
+                path: "skip-b.bin".to_string(),
+                size: 1,
+                status: FileEntryStatus::Skipped,
+            },
+            SessionFileEntry {
+                key: Some("0:pending.bin".to_string()),
+                url_index: 0,
+                path: "pending.bin".to_string(),
+                size: 1,
+                status: FileEntryStatus::Pending,
+            },
+        ];
+        app.session = Some(session);
+
+        let skipped = app.skipped_session_paths();
+
+        assert_eq!(skipped.len(), 2);
+        assert!(
+            skipped["https://mega.nz/file/a"].contains("skip-a.bin"),
+            "skipped paths should include skipped file under original URL"
+        );
+        assert!(
+            !skipped["https://mega.nz/file/a"].contains("pending.bin"),
+            "non-skipped files must not appear in the snapshot"
+        );
+        assert!(skipped["https://mega.nz/file/b"].contains("skip-b.bin"));
+    }
+
+    #[test]
+    fn session_register_queued_file_does_not_revive_skipped_entry() {
+        let mut app = test_app();
+        let mut session = SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![UrlEntry {
+                url: "https://mega.nz/file/a".to_string(),
+                status: UrlStatus::Fetched,
+            }],
+        );
+        session.files.push(SessionFileEntry {
+            key: None,
+            url_index: 0,
+            path: "skip-a.bin".to_string(),
+            size: 1,
+            status: FileEntryStatus::Skipped,
+        });
+        app.session = Some(session);
+
+        let should_queue =
+            app.session_register_queued_file("https://mega.nz/file/a", "skip-a.bin", 1);
+
+        assert!(!should_queue);
+        let session = app.session.as_ref().unwrap();
+        assert_eq!(session.files.len(), 1);
+        assert!(matches!(session.files[0].status, FileEntryStatus::Skipped));
+        assert_eq!(session.files[0].key.as_deref(), Some("0:skip-a.bin"));
     }
 
     #[test]
