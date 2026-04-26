@@ -1205,48 +1205,40 @@ impl App {
     }
 
     pub(crate) fn session_add_pending_url(&mut self, url: &str) {
-        if let Some(ref mut session) = self.session
-            && !session.urls.iter().any(|entry| entry.url == url)
-        {
-            session.urls.push(UrlEntry {
-                url: url.to_string(),
-                status: UrlStatus::Pending,
-            });
-            let _ = session.save();
-        }
+        let url = url.to_string();
+        let _ = self.mutate_session_and_save(|session| {
+            if !session.urls.iter().any(|entry| entry.url == url) {
+                session.urls.push(UrlEntry {
+                    url,
+                    status: UrlStatus::Pending,
+                });
+            }
+        });
     }
 
     pub(crate) fn session_mark_file_complete(&mut self, file_id: &str) {
-        if let Some(ref mut session) = self.session {
-            let _ = session.mark_file_complete(file_id);
-        }
+        let _ = self.mutate_session(|session| session.mark_file_complete(file_id));
     }
 
     pub(crate) fn session_mark_file_error(&mut self, file_id: &str, error: &str) {
-        if let Some(ref mut session) = self.session {
-            let _ = session.mark_file_error(file_id, error);
-        }
+        let _ = self.mutate_session(|session| session.mark_file_error(file_id, error));
     }
 
     pub(crate) fn session_mark_file_skipped(&mut self, file_id: &str) {
-        if let Some(ref mut session) = self.session {
-            let _ = session.mark_file_skipped(file_id);
-        }
+        let _ = self.mutate_session(|session| session.mark_file_skipped(file_id));
     }
 
     pub(crate) fn session_mark_completed(&mut self) {
-        if let Some(ref mut session) = self.session {
-            let _ = session.mark_completed();
-        }
+        let _ = self.mutate_session(SessionState::mark_completed);
     }
 
     pub(crate) fn session_set_url_status(&mut self, url: &str, status: UrlStatus) {
-        if let Some(ref mut session) = self.session {
+        let url = url.to_string();
+        let _ = self.mutate_session_and_save(|session| {
             if let Some(entry) = session.urls.iter_mut().find(|entry| entry.url == url) {
                 entry.status = status;
             }
-            let _ = session.save();
-        }
+        });
     }
 
     pub(crate) fn session_register_queued_file(
@@ -1255,12 +1247,8 @@ impl App {
         path: &str,
         size: u64,
     ) -> bool {
-        if let Some(ref mut session) = self.session {
-            let url_index = session
-                .urls
-                .iter()
-                .position(|entry| entry.url == submitted_url)
-                .unwrap_or(0);
+        self.mutate_session_and_save(|session| {
+            let url_index = Self::session_url_index(session, submitted_url);
             let stable_key = file_key(url_index, path);
 
             if let Some(file) = session
@@ -1271,28 +1259,45 @@ impl App {
                 if matches!(file.status, FileEntryStatus::Skipped) {
                     if file.key.is_none() {
                         file.key = Some(stable_key);
-                        let _ = session.save();
                     }
                     return false;
                 }
                 if file.key.is_none() {
                     file.key = Some(stable_key);
-                    let _ = session.save();
                 }
                 return true;
-            } else {
-                session.files.push(SessionFileEntry {
-                    key: Some(stable_key),
-                    url_index,
-                    path: path.to_string(),
-                    size,
-                    status: FileEntryStatus::Pending,
-                });
-                let _ = session.save();
-                return true;
             }
-        }
-        true
+
+            session.files.push(SessionFileEntry {
+                key: Some(stable_key),
+                url_index,
+                path: path.to_string(),
+                size,
+                status: FileEntryStatus::Pending,
+            });
+            true
+        })
+        .unwrap_or(true)
+    }
+
+    fn mutate_session<R>(&mut self, f: impl FnOnce(&mut SessionState) -> R) -> Option<R> {
+        self.session.as_mut().map(f)
+    }
+
+    fn mutate_session_and_save<R>(&mut self, f: impl FnOnce(&mut SessionState) -> R) -> Option<R> {
+        self.session.as_mut().map(|session| {
+            let result = f(session);
+            let _ = session.save();
+            result
+        })
+    }
+
+    fn session_url_index(session: &SessionState, submitted_url: &str) -> usize {
+        session
+            .urls
+            .iter()
+            .position(|entry| entry.url == submitted_url)
+            .unwrap_or(0)
     }
 
     pub(crate) fn restore_restart_snapshot(&mut self, snapshot: &RestartSnapshot) {
