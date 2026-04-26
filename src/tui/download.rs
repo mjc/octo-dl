@@ -8,9 +8,11 @@ use futures_util::FutureExt;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+use crate::state::SavedCredentials as LegacySavedCredentials;
 use crate::{DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, is_dlc_path};
 #[cfg(test)]
-use crate::{SavedCredentials, SessionState, UrlEntry, UrlStatus};
+use crate::{SessionState, UrlEntry, UrlStatus};
 use dirs;
 
 #[cfg(test)]
@@ -510,7 +512,8 @@ mod tests {
     use super::super::app::App;
     use super::super::event::DownloadEvent;
     use super::*;
-    use crate::{FileEntry as SessionFileEntry, FileEntryStatus, SessionStatus};
+    use crate::core::{FileLifecycle, SessionRunStatus};
+    use crate::{FileEntry as SessionFileEntry, FileEntryStatus};
     use std::env;
     use std::path::Path;
     use tempfile::tempdir;
@@ -550,7 +553,7 @@ mod tests {
 
     fn session_with_file(path: &str, size: u64) -> SessionState {
         let mut session = SessionState::new(
-            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
             DownloadConfig::default(),
             vec![UrlEntry {
                 url: "https://mega.nz/folder/root".to_string(),
@@ -593,7 +596,7 @@ mod tests {
         app.recompute_totals();
         let session = session_with_file("first.bin", 64);
         let session_path = session.state_path();
-        app.session = Some(session);
+        app.session = Some(session.to_v3());
 
         app.mark_visible_file_complete("first.bin", "renamed.bin");
 
@@ -610,8 +613,8 @@ mod tests {
 
         let session = app.session.as_ref().expect("session should remain");
         assert_eq!(session.files.len(), 1);
-        assert_eq!(session.files[0].status, FileEntryStatus::Completed);
-        assert_eq!(session.status, SessionStatus::Completed);
+        assert_eq!(session.files[0].lifecycle, FileLifecycle::Complete);
+        assert_eq!(session.status, SessionRunStatus::Completed);
     }
 
     #[test]
@@ -654,7 +657,7 @@ mod tests {
         let _guard = StateDirectoryGuard::set(dir.path());
         let mut app = test_app();
         let mut session = SessionState::new(
-            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
             DownloadConfig::default(),
             vec![UrlEntry {
                 url: "https://mega.nz/file/root".to_string(),
@@ -668,7 +671,7 @@ mod tests {
             size: 128,
             status: FileEntryStatus::Skipped,
         });
-        app.session = Some(session);
+        app.session = Some(session.to_v3());
 
         app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
             id: "episode.mkv".to_string(),
@@ -683,7 +686,7 @@ mod tests {
         assert!(app.files.is_empty());
         let session = app.session.as_ref().expect("session should remain");
         assert_eq!(session.files.len(), 1);
-        assert_eq!(session.files[0].status, FileEntryStatus::Skipped);
+        assert_eq!(session.files[0].lifecycle, FileLifecycle::Skipped);
     }
 
     #[test]
@@ -707,14 +710,14 @@ mod tests {
         let mut app = test_app();
         let url = "https://mega.nz/folder/root".to_string();
         let session = SessionState::new(
-            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
             DownloadConfig::default(),
             vec![UrlEntry {
                 url: url.clone(),
                 status: UrlStatus::Pending,
             }],
         );
-        app.session = Some(session);
+        app.session = Some(session.to_v3());
 
         app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
         app.handle_download_event(DownloadEvent::Error {
@@ -729,10 +732,8 @@ mod tests {
             .expect("url-level errors should remain in overlay");
         assert!(matches!(overlay.file.status, FileStatus::Error(ref msg) if msg == "bad folder"));
         let session = app.session.as_ref().expect("session should remain");
-        assert!(matches!(
-            session.urls[0].status,
-            UrlStatus::Error(ref msg) if msg == "bad folder"
-        ));
+        assert_eq!(session.packages[0].source_url, url);
+        assert_eq!(session.packages[0].error.as_deref(), Some("bad folder"));
     }
 
     #[test]

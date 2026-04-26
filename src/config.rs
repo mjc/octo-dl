@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::{decrypt_credential, encrypt_credential};
+use crate::core::{decrypt_credential, encrypt_credential};
 
 const fn default_download_path() -> Option<String> {
     None

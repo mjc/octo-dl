@@ -268,9 +268,10 @@ pub fn handle_paste(app: &mut App, text: &str) {
 mod tests {
     use super::super::app::{App, FileEntry, FileStatus, Popup, QuitPolicy};
     use super::*;
+    use crate::state::SavedCredentials as LegacySavedCredentials;
     use crate::{
-        DownloadConfig, FileEntry as SessionFileEntry, FileEntryStatus, SavedCredentials,
-        SessionState, UrlEntry, UrlStatus,
+        DownloadConfig, FileEntry as SessionFileEntry, FileEntryStatus, SessionState, UrlEntry,
+        UrlStatus,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use std::env;
@@ -439,7 +440,7 @@ mod tests {
         app.file_list_state.select(Some(0));
 
         let mut session = SessionState::new(
-            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
             DownloadConfig::default(),
             vec![UrlEntry {
                 url: "https://mega.nz/folder/root".to_string(),
@@ -463,7 +464,7 @@ mod tests {
             },
         ];
         let session_path = session.state_path();
-        app.session = Some(session);
+        app.session = Some(session.to_v3());
 
         handle_input(&mut app, key(KeyCode::Delete));
 
@@ -478,13 +479,13 @@ mod tests {
         let statuses: Vec<_> = session
             .files
             .iter()
-            .map(|file| (file.path.as_str(), &file.status))
+            .map(|file| (file.path.as_str(), &file.lifecycle))
             .collect();
         assert_eq!(
             statuses,
             vec![
-                ("first.bin", &FileEntryStatus::Skipped),
-                ("second.bin", &FileEntryStatus::Pending),
+                ("first.bin", &crate::core::FileLifecycle::Skipped),
+                ("second.bin", &crate::core::FileLifecycle::Queued),
             ]
         );
     }

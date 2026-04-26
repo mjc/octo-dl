@@ -1,7 +1,8 @@
 use super::*;
+use crate::state::SavedCredentials as LegacySavedCredentials;
 use crate::{
-    DownloadConfig, FileEntry, FileEntryStatus, SavedCredentials, SessionState, SessionStatus,
-    UrlEntry, UrlStatus,
+    DownloadConfig, FileEntry, FileEntryStatus, SessionState, UrlEntry, UrlStatus,
+    core::{FileLifecycle, SessionRunStatus},
 };
 use std::env;
 use std::path::Path;
@@ -52,7 +53,7 @@ fn resume_session_requeues_urls() {
         },
     ];
     let session = SessionState::new(
-        SavedCredentials::encrypt("test@example.com", "hunter2", None),
+        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
         DownloadConfig::default(),
         urls,
     );
@@ -77,9 +78,9 @@ fn resume_session_requeues_urls() {
     let session_state = app.session.as_ref().expect("session should be present");
     assert!(
         session_state
-            .urls
+            .packages
             .iter()
-            .all(|entry| matches!(entry.status, UrlStatus::Pending))
+            .all(|package| package.error.is_none() && package.file_ids.is_empty())
     );
 }
 
@@ -89,7 +90,7 @@ fn resume_session_restores_files_and_only_requeues_remaining_urls() {
     let _guard = StateDirectoryGuard::set(dir.path());
 
     let mut session = SessionState::new(
-        SavedCredentials::encrypt("test@example.com", "hunter2", None),
+        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
         DownloadConfig::default(),
         vec![
             UrlEntry {
@@ -152,8 +153,10 @@ fn resume_session_restores_files_and_only_requeues_remaining_urls() {
     assert!(url_rx.try_recv().is_err());
 
     let session_state = app.session.as_ref().expect("session should be present");
-    assert_eq!(session_state.urls[0].status, UrlStatus::Fetched);
-    assert_eq!(session_state.urls[1].status, UrlStatus::Pending);
+    assert!(session_state.packages[0].error.is_none());
+    assert!(!session_state.packages[0].file_ids.is_empty());
+    assert!(session_state.packages[1].error.is_none());
+    assert!(!session_state.packages[1].file_ids.is_empty());
 }
 
 #[test]
@@ -162,7 +165,7 @@ fn resume_session_restores_retryable_errors_as_queued() {
     let _guard = StateDirectoryGuard::set(dir.path());
 
     let mut session = SessionState::new(
-        SavedCredentials::encrypt("test@example.com", "hunter2", None),
+        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
         DownloadConfig::default(),
         vec![UrlEntry {
             url: "https://mega.nz/file/retry".to_string(),
@@ -200,7 +203,7 @@ fn resume_session_does_not_restore_or_requeue_skipped_files() {
     let _guard = StateDirectoryGuard::set(dir.path());
 
     let mut session = SessionState::new(
-        SavedCredentials::encrypt("test@example.com", "hunter2", None),
+        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
         DownloadConfig::default(),
         vec![UrlEntry {
             url: "https://mega.nz/file/skipped".to_string(),
@@ -228,8 +231,8 @@ fn resume_session_does_not_restore_or_requeue_skipped_files() {
     assert!(url_rx.try_recv().is_err());
 
     let session_state = app.session.as_ref().expect("session should be present");
-    assert_eq!(session_state.urls[0].status, UrlStatus::Fetched);
-    assert_eq!(session_state.files[0].status, FileEntryStatus::Skipped);
+    assert!(session_state.packages[0].error.is_none());
+    assert_eq!(session_state.files[0].lifecycle, FileLifecycle::Skipped);
 }
 
 #[test]
@@ -238,7 +241,7 @@ fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
     let _guard = StateDirectoryGuard::set(dir.path());
 
     let mut session = SessionState::new(
-        SavedCredentials::encrypt("test@example.com", "hunter2", None),
+        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
         DownloadConfig::default(),
         vec![UrlEntry {
             url: "https://mega.nz/file/root".to_string(),
@@ -280,12 +283,12 @@ fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
             status: FileStatus::Queued,
         },
     ];
-    app.session = Some(session);
+    app.session = Some(session.to_v3());
 
     app.sync_session_for_shutdown();
 
     let session = app.session.as_ref().expect("session should remain");
-    assert_eq!(session.status, SessionStatus::Paused);
+    assert_eq!(session.status, SessionRunStatus::Paused);
     assert_eq!(session.files.len(), 2);
     assert!(
         session
@@ -427,7 +430,7 @@ fn resume_session_deduplicates_duplicate_file_entries_by_path() {
     let _guard = StateDirectoryGuard::set(dir.path());
 
     let mut session = SessionState::new(
-        SavedCredentials::encrypt("test@example.com", "hunter2", None),
+        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
         DownloadConfig::default(),
         vec![UrlEntry {
             url: "https://mega.nz/file/root".to_string(),
@@ -469,5 +472,5 @@ fn resume_session_deduplicates_duplicate_file_entries_by_path() {
     let session = app.session.as_ref().expect("session should be present");
     assert_eq!(session.files.len(), 1);
     assert_eq!(session.files[0].path, "duplicate.mkv");
-    assert_eq!(session.files[0].status, FileEntryStatus::Completed);
+    assert_eq!(session.files[0].lifecycle, FileLifecycle::Complete);
 }

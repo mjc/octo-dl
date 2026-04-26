@@ -1,11 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{
-    SessionState,
-    core::{
-        CoreEffect, CoreEvent, ResolvedFile, ResolvedPackage, RestartSnapshot, SessionSnapshotV3,
-        reconcile_restart, reduce, scan_filesystem,
-    },
+use crate::core::{
+    CoreEffect, CoreEvent, ResolvedFile, ResolvedPackage, RestartSnapshot, SessionSnapshotV3,
+    reconcile_restart, reduce, scan_filesystem,
 };
 
 use super::{App, SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate};
@@ -51,8 +48,7 @@ impl App {
     }
 
     fn persist_core_session_snapshot(&mut self, snapshot: SessionSnapshotV3) {
-        let next = SessionState::from_v3(snapshot);
-        let _ = self.mutate_session(|session| SessionAdapter::merge_state(session, next));
+        let _ = self.mutate_session(|session| SessionAdapter::merge_state(session, snapshot));
     }
 
     pub(crate) fn ensure_core_file(
@@ -113,14 +109,14 @@ impl App {
 
     pub(crate) fn mutate_session<R>(
         &mut self,
-        f: impl FnOnce(&mut SessionState) -> R,
+        f: impl FnOnce(&mut SessionSnapshotV3) -> R,
     ) -> Option<R> {
         self.session.as_mut().map(f)
     }
 
     pub(crate) fn mutate_session_and_save<R>(
         &mut self,
-        f: impl FnOnce(&mut SessionState) -> R,
+        f: impl FnOnce(&mut SessionSnapshotV3) -> R,
     ) -> Option<R> {
         self.session.as_mut().map(|session| {
             let result = f(session);
@@ -129,7 +125,7 @@ impl App {
         })
     }
 
-    pub(crate) fn read_session<R>(&self, f: impl FnOnce(&SessionState) -> R) -> Option<R> {
+    pub(crate) fn read_session<R>(&self, f: impl FnOnce(&SessionSnapshotV3) -> R) -> Option<R> {
         self.session.as_ref().map(f)
     }
 
@@ -137,12 +133,12 @@ impl App {
         let _ = self.mutate_session(|session| SessionAdapter::apply_run_update(session, update));
     }
 
-    pub(crate) fn install_session(&mut self, session: SessionState) {
+    pub(crate) fn install_session(&mut self, session: SessionSnapshotV3) {
         self.session = Some(session);
         self.seed_core_session_from_session();
     }
 
-    pub(crate) fn save_and_install_session(&mut self, session: SessionState) {
+    pub(crate) fn save_and_install_session(&mut self, session: SessionSnapshotV3) {
         let _ = session.save();
         self.install_session(session);
     }
@@ -154,7 +150,7 @@ impl App {
     }
 
     pub(crate) fn resume_latest_session(&mut self) {
-        let Some(session) = SessionState::latest() else {
+        let Some(session) = SessionSnapshotV3::latest() else {
             return;
         };
         log::info!("Resuming session {}", session.id);
@@ -170,9 +166,13 @@ impl App {
             .map(|file| file.path.clone())
             .collect::<Vec<_>>();
         let restart = reconcile_restart(
-            Some(session.to_v3()),
+            Some(session.clone()),
             scan_filesystem(file_ids),
-            session.urls.iter().map(|entry| entry.url.clone()).collect(),
+            session
+                .packages
+                .iter()
+                .map(|package| package.source_url.clone())
+                .collect(),
         );
 
         self.resume_from_restart(session, &restart);
@@ -180,7 +180,7 @@ impl App {
 
     pub(crate) fn resume_from_restart(
         &mut self,
-        mut session: SessionState,
+        mut session: SessionSnapshotV3,
         restart: &RestartSnapshot,
     ) {
         self.restore_restart_snapshot(restart);

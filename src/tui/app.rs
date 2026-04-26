@@ -28,10 +28,7 @@ use ratatui::widgets::ListState;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    SessionState,
-    core::{DownloadState, ProgressDelta},
-};
+use crate::core::{DownloadState, ProgressDelta, SessionSnapshotV3};
 
 pub(crate) use self::progress::FileUiState;
 use self::progress::TransferRate;
@@ -95,7 +92,7 @@ pub struct App {
     // Files deleted from the UI — used to suppress stale download events
     pub deleted_files: HashSet<String>,
     // Session
-    pub session: Option<SessionState>,
+    pub session: Option<SessionSnapshotV3>,
     pub core_state: DownloadState,
     // API port for display
     pub api_port: u16,
