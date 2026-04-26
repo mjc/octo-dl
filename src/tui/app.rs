@@ -1543,6 +1543,10 @@ impl App {
         self.show_overlay_error(name, name, error, false);
     }
 
+    fn mark_file_skipped(&mut self, id: &str) {
+        self.session_mark_file_skipped(id);
+    }
+
     fn handle_deleted_download_artifact(&mut self, id: &str, artifact_path: &str) -> bool {
         if !self.deleted_files.remove(id) {
             return false;
@@ -1550,7 +1554,7 @@ impl App {
 
         self.cancellation_tokens.remove(id);
         download::schedule_resume_artifact_delete(artifact_path.to_string());
-        self.session_mark_file_skipped(id);
+        self.mark_file_skipped(id);
         true
     }
 
@@ -1558,6 +1562,12 @@ impl App {
         self.session
             .as_ref()
             .is_some_and(|session| session.urls.iter().any(|entry| entry.url == url))
+    }
+
+    fn handle_session_url_error(&mut self, url: &str, error: &str) {
+        self.session_set_url_status(url, UrlStatus::Error(error.to_string()));
+        let _ = self.remove_overlay_file(url);
+        self.show_ui_error_only(url, error);
     }
 
     fn handle_download_error_event(&mut self, id: Option<String>, name: String, error: String) {
@@ -1569,9 +1579,7 @@ impl App {
         }
 
         if self.is_session_url(&name) {
-            self.session_set_url_status(&name, UrlStatus::Error(error.clone()));
-            let _ = self.remove_overlay_file(&name);
-            self.show_ui_error_only(&name, &error);
+            self.handle_session_url_error(&name, &error);
         } else if let Some(id) = id {
             self.apply_core_event(CoreEvent::FileFailed {
                 file_id: id.clone(),
@@ -1585,12 +1593,9 @@ impl App {
         self.recompute_totals();
     }
 
-    fn handle_file_queued_event(&mut self, file: QueuedFile) {
-        if self.deleted_files.contains(&file.id) {
-            return;
-        }
+    fn register_queued_file(&mut self, file: &QueuedFile) -> bool {
         if !self.session_register_queued_file(&file.origin.submitted_url, &file.id, file.size) {
-            return;
+            return false;
         }
         self.ensure_core_file(
             &file.id,
@@ -1599,12 +1604,26 @@ impl App {
             file.size,
             file.count_toward_progress,
         );
+        true
+    }
+
+    fn handle_file_queued_event(&mut self, file: QueuedFile) {
+        if self.deleted_files.contains(&file.id) {
+            return;
+        }
+        if !self.register_queued_file(&file) {
+            return;
+        }
+    }
+
+    fn handle_session_url_fetched(&mut self, url: &str) {
+        let _ = self.drop_overlay_file(url);
+        self.session_set_url_status(url, UrlStatus::Fetched);
+        self.recompute_totals();
     }
 
     fn handle_url_resolved_event(&mut self, url: String) {
-        let _ = self.drop_overlay_file(&url);
-        self.session_set_url_status(&url, UrlStatus::Fetched);
-        self.recompute_totals();
+        self.handle_session_url_fetched(&url);
     }
 
     fn handle_file_start_event(&mut self, id: String, name: String, size: u64) {
@@ -1708,7 +1727,7 @@ impl App {
             let _ = self.remove_overlay_file(id);
         }
         download::schedule_download_artifact_delete(artifact_path);
-        self.session_mark_file_skipped(id);
+        self.mark_file_skipped(id);
         if !is_core_backed {
             self.recompute_totals();
         }
@@ -2715,6 +2734,29 @@ mod tests {
         assert_eq!(session.files.len(), 1);
         assert!(matches!(session.files[0].status, FileEntryStatus::Skipped));
         assert_eq!(session.files[0].key.as_deref(), Some("0:skip-a.bin"));
+    }
+
+    #[test]
+    fn url_resolved_updates_session_status_and_clears_overlay() {
+        let mut app = test_app();
+        let url = "https://mega.nz/folder/root".to_string();
+        app.session = Some(SessionState::new(
+            SavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![UrlEntry {
+                url: url.clone(),
+                status: UrlStatus::Pending,
+            }],
+        ));
+
+        app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
+        assert!(app.overlay_files.contains_key(&url));
+
+        app.handle_download_event(DownloadEvent::UrlResolved { url: url.clone() });
+
+        assert!(!app.overlay_files.contains_key(&url));
+        let session = app.session.as_ref().expect("session should remain");
+        assert_eq!(session.urls[0].status, UrlStatus::Fetched);
     }
 
     #[test]
