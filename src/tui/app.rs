@@ -1250,7 +1250,7 @@ impl App {
 
     pub(crate) fn session_register_queued_file(
         &mut self,
-        session_url: &str,
+        submitted_url: &str,
         path: &str,
         size: u64,
     ) -> bool {
@@ -1258,7 +1258,7 @@ impl App {
             let url_index = session
                 .urls
                 .iter()
-                .position(|entry| entry.url == session_url)
+                .position(|entry| entry.url == submitted_url)
                 .unwrap_or(0);
             let stable_key = file_key(url_index, path);
 
@@ -1910,12 +1910,16 @@ impl App {
                 if self.deleted_files.contains(&file.id) {
                     return;
                 }
-                if !self.session_register_queued_file(&file.session_url, &file.id, file.size) {
+                if !self.session_register_queued_file(
+                    &file.origin.submitted_url,
+                    &file.id,
+                    file.size,
+                ) {
                     return;
                 }
                 self.ensure_core_file(
                     &file.id,
-                    &file.source_url,
+                    &file.origin.source_url,
                     &file.id,
                     file.size,
                     file.count_toward_progress,

@@ -14,12 +14,17 @@ pub struct TokenMessage {
 }
 
 #[derive(Debug, Clone)]
+pub struct FileOrigin {
+    pub source_url: String,
+    pub submitted_url: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct QueuedFile {
     pub id: String,
     pub size: u64,
     pub count_toward_progress: bool,
-    pub source_url: String,
-    pub session_url: String,
+    pub origin: FileOrigin,
 }
 
 /// Channel endpoints consumed by the background download task.
