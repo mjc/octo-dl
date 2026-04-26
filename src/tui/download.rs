@@ -134,7 +134,6 @@ impl QueuedDownload {
     fn complete_event(&self) -> DownloadEvent {
         DownloadEvent::FileComplete {
             id: self.item.path.clone(),
-            name: self.item.path.clone(),
         }
     }
 }
@@ -231,7 +230,6 @@ impl DownloadProgress for FileProgress {
     fn on_file_start(&self, _name: &str, size: u64) {
         let _ = self.tx.send(DownloadEvent::FileStart {
             id: self.id.clone(),
-            name: self.id.clone(),
             size,
         });
     }
@@ -254,7 +252,6 @@ impl DownloadProgress for FileProgress {
     fn on_file_complete(&self, _name: &str, _stats: &crate::FileStats) {
         let _ = self.tx.send(DownloadEvent::FileComplete {
             id: self.id.clone(),
-            name: self.id.clone(),
         });
     }
 
@@ -760,7 +757,6 @@ mod tests {
         }));
         app.handle_download_event(DownloadEvent::FileComplete {
             id: "episode.mkv".to_string(),
-            name: "episode.mkv".to_string(),
         });
 
         assert_eq!(app.files.len(), 1);
@@ -834,7 +830,6 @@ mod tests {
         // Simulate FileStart
         app.handle_download_event(DownloadEvent::FileStart {
             id: "test.bin".to_string(),
-            name: "test.bin".to_string(),
             size: file_size,
         });
 
@@ -874,7 +869,6 @@ mod tests {
 
         app.handle_download_event(DownloadEvent::FileStart {
             id: "test.bin".to_string(),
-            name: "test.bin".to_string(),
             size: file_size,
         });
 
@@ -1012,7 +1006,6 @@ fn emit_pause_cancellation_if_needed(
     if matches!(result, Err(crate::Error::Cancelled)) && *pause_rx.borrow() {
         let _ = event_tx.send(DownloadEvent::FileCancelled {
             id: file_id.to_string(),
-            name: file_id.to_string(),
         });
     }
 }

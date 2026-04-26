@@ -148,8 +148,8 @@ impl App {
                 );
                 self.set_collection_status(total, skipped, partial, total_bytes);
             }
-            DownloadEvent::FileStart { id, name, size } => {
-                self.handle_file_start_event(id, name, size);
+            DownloadEvent::FileStart { id, size } => {
+                self.handle_file_start_event(id, size);
             }
             DownloadEvent::Progress { id, delta } => {
                 self.handle_file_progress_event(id, delta);
@@ -157,11 +157,11 @@ impl App {
             DownloadEvent::ResumeReused { id, chunks, bytes } => {
                 self.handle_resume_reused_event(id, chunks, bytes);
             }
-            DownloadEvent::FileComplete { id, name } => {
-                self.handle_file_complete_event(id, name);
+            DownloadEvent::FileComplete { id } => {
+                self.handle_file_complete_event(id);
             }
-            DownloadEvent::FileCancelled { id, name } => {
-                self.handle_file_cancelled_event(id, name);
+            DownloadEvent::FileCancelled { id } => {
+                self.handle_file_cancelled_event(id);
             }
             DownloadEvent::Error { id, name, error } => {
                 self.handle_download_error_event(id, name, error);

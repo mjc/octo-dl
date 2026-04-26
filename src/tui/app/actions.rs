@@ -184,8 +184,8 @@ impl App {
         self.handle_session_url_fetched(&url);
     }
 
-    pub(crate) fn handle_file_start_event(&mut self, id: String, name: String, size: u64) {
-        log::info!("Download started: {name} ({})", format_bytes(size));
+    pub(crate) fn handle_file_start_event(&mut self, id: String, size: u64) {
+        log::info!("Download started: {id} ({})", format_bytes(size));
         if self.deleted_files.contains(&id) {
             return;
         }
@@ -193,7 +193,7 @@ impl App {
             .visible_file_context(&id)
             .and_then(|context| context.source_url)
             .unwrap_or_else(|| id.clone());
-        self.ensure_core_file(&id, &source_url, &name, size, true);
+        self.ensure_core_file(&id, &source_url, &id, size, true);
         self.apply_core_event(CoreEvent::FileStarted {
             file_id: id.clone(),
             size,
@@ -235,21 +235,21 @@ impl App {
         self.set_resume_reuse_status(&id, chunks, bytes);
     }
 
-    pub(crate) fn handle_file_complete_event(&mut self, id: String, name: String) {
-        log::info!("Download complete: {name}");
-        if self.handle_deleted_download_artifact(&id, &name) {
+    pub(crate) fn handle_file_complete_event(&mut self, id: String) {
+        log::info!("Download complete: {id}");
+        if self.handle_deleted_download_artifact(&id, &id) {
             return;
         }
         self.apply_core_event(CoreEvent::FileCompleted {
             file_id: id.clone(),
         });
         self.recompute_totals();
-        self.mark_visible_file_complete(&id, &name);
+        self.mark_visible_file_complete(&id, &id);
     }
 
-    pub(crate) fn handle_file_cancelled_event(&mut self, id: String, name: String) {
-        log::info!("Download cancelled: {name}");
-        if self.handle_deleted_download_artifact(&id, &name) {
+    pub(crate) fn handle_file_cancelled_event(&mut self, id: String) {
+        log::info!("Download cancelled: {id}");
+        if self.handle_deleted_download_artifact(&id, &id) {
             return;
         }
         self.cancellation_tokens.remove(&id);

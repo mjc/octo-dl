@@ -41,7 +41,6 @@ pub struct DownloadChannels {
 pub enum DownloadEvent {
     FileStart {
         id: String,
-        name: String,
         size: u64,
     },
     Progress {
@@ -55,11 +54,9 @@ pub enum DownloadEvent {
     },
     FileComplete {
         id: String,
-        name: String,
     },
     FileCancelled {
         id: String,
-        name: String,
     },
     Error {
         id: Option<String>,
@@ -118,7 +115,6 @@ impl DownloadProgress for TuiProgress {
         let _ = self.intern_id(name);
         let _ = self.tx.send(DownloadEvent::FileStart {
             id: name.to_string(),
-            name: name.to_string(),
             size,
         });
     }
@@ -140,7 +136,6 @@ impl DownloadProgress for TuiProgress {
     fn on_file_complete(&self, name: &str, _stats: &FileStats) {
         let _ = self.tx.send(DownloadEvent::FileComplete {
             id: name.to_string(),
-            name: name.to_string(),
         });
     }
 
