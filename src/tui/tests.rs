@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    core::{FileLifecycle, SessionRunStatus},
+    core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus},
     test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot},
 };
 use std::env;
@@ -16,7 +16,9 @@ struct StateDirectoryGuard {
 
 impl StateDirectoryGuard {
     fn set(path: &Path) -> Self {
-        let lock = crate::core::session::STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
+        let lock = crate::core::session::STATE_DIRECTORY_TEST_LOCK
+            .lock()
+            .unwrap();
         let previous = env::var_os("STATE_DIRECTORY");
         unsafe { env::set_var("STATE_DIRECTORY", path) };
         Self {
@@ -345,6 +347,86 @@ fn ui_delete_file_removes_completed_artifact_from_disk() {
 
     assert!(app.files.is_empty());
     assert!(!file_path.exists());
+}
+
+#[test]
+fn ui_delete_core_backed_file_removes_output_and_resume_artifacts() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("core-backed.bin");
+    let part_path = dir.path().join("core-backed.bin.part");
+    let sidecar_path = dir.path().join("core-backed.bin.part.meta.json");
+    std::fs::write(&file_path, b"done").unwrap();
+    std::fs::write(&part_path, b"partial").unwrap();
+    std::fs::write(&sidecar_path, b"{}").unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+    let file_id = file_path.to_string_lossy().into_owned();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: "https://mega.nz/file/core-delete".to_string(),
+            source_url: "https://mega.nz/file/core-delete".to_string(),
+            display_name: "Core Delete".to_string(),
+            files: vec![ResolvedFile {
+                file_id: file_id.clone(),
+                path: file_id.clone(),
+                size: 4,
+            }],
+            collision: None,
+        },
+    });
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: file_id.clone(),
+    });
+
+    app.handle_ui_action(UiAction::DeleteFile(file_id));
+
+    assert!(!file_path.exists());
+    assert!(!part_path.exists());
+    assert!(!sidecar_path.exists());
+}
+
+#[test]
+fn deleted_file_completion_event_redeletes_output_artifacts() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("late-complete.bin");
+    let part_path = dir.path().join("late-complete.bin.part");
+    let sidecar_path = dir.path().join("late-complete.bin.part.meta.json");
+    std::fs::write(&file_path, b"done").unwrap();
+    std::fs::write(&part_path, b"partial").unwrap();
+    std::fs::write(&sidecar_path, b"{}").unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+    let file_id = file_path.to_string_lossy().into_owned();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: "https://mega.nz/file/late-complete".to_string(),
+            source_url: "https://mega.nz/file/late-complete".to_string(),
+            display_name: "Late Complete".to_string(),
+            files: vec![ResolvedFile {
+                file_id: file_id.clone(),
+                path: file_id.clone(),
+                size: 4,
+            }],
+            collision: None,
+        },
+    });
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: file_id.clone(),
+        size: 4,
+    });
+
+    app.handle_ui_action(UiAction::DeleteFile(file_id.clone()));
+
+    std::fs::write(&file_path, b"done").unwrap();
+    std::fs::write(&part_path, b"partial").unwrap();
+    std::fs::write(&sidecar_path, b"{}").unwrap();
+    app.handle_download_event(DownloadEvent::FileComplete { id: file_id });
+
+    assert!(!file_path.exists());
+    assert!(!part_path.exists());
+    assert!(!sidecar_path.exists());
 }
 
 #[test]

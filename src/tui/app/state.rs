@@ -35,13 +35,17 @@ impl App {
                 CoreEffect::PersistSession(snapshot) => {
                     self.persist_core_session_snapshot(snapshot);
                 }
+                CoreEffect::DeleteOutputArtifacts { path, .. } => {
+                    super::super::download::schedule_output_artifact_delete(path);
+                }
+                CoreEffect::DeleteResumeArtifacts { path, .. } => {
+                    super::super::download::schedule_resume_artifact_delete(path);
+                }
                 CoreEffect::PublishStatusMessage(message) => {
                     self.status = message;
                 }
                 CoreEffect::EnqueueUrlResolution { .. }
                 | CoreEffect::EnqueueFileDownload { .. }
-                | CoreEffect::DeleteOutputArtifacts { .. }
-                | CoreEffect::DeleteResumeArtifacts { .. }
                 | CoreEffect::PublishViewSnapshot => {}
             }
         }

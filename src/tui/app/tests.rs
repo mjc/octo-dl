@@ -267,7 +267,13 @@ fn skipped_session_paths_groups_only_skipped_files_by_url() {
     ]);
     push_file(&mut session, 0, "skip-a.bin", 1, FileFixtureStatus::Skipped);
     push_file(&mut session, 1, "skip-b.bin", 1, FileFixtureStatus::Skipped);
-    push_file(&mut session, 0, "pending.bin", 1, FileFixtureStatus::Pending);
+    push_file(
+        &mut session,
+        0,
+        "pending.bin",
+        1,
+        FileFixtureStatus::Pending,
+    );
     app.session = Some(session);
 
     let skipped = app.skipped_session_paths();
@@ -287,10 +293,7 @@ fn skipped_session_paths_groups_only_skipped_files_by_url() {
 #[test]
 fn register_session_queued_file_does_not_revive_skipped_entry() {
     let mut app = test_app();
-    let mut session = session_snapshot(vec![(
-        "https://mega.nz/file/a",
-        UrlFixtureStatus::Fetched,
-    )]);
+    let mut session = session_snapshot(vec![("https://mega.nz/file/a", UrlFixtureStatus::Fetched)]);
     push_file(&mut session, 0, "skip-a.bin", 1, FileFixtureStatus::Skipped);
     app.session = Some(session);
 
@@ -348,10 +351,7 @@ fn mark_visible_file_error_updates_session_file_status() {
 
 #[test]
 fn session_adapter_merge_state_updates_matching_files_and_preserves_unmatched_entries() {
-    let mut session = session_snapshot(vec![(
-        "https://mega.nz/file/a",
-        UrlFixtureStatus::Pending,
-    )]);
+    let mut session = session_snapshot(vec![("https://mega.nz/file/a", UrlFixtureStatus::Pending)]);
     push_file(&mut session, 0, "keep.bin", 1, FileFixtureStatus::Pending);
     push_file(&mut session, 0, "stale.bin", 1, FileFixtureStatus::Pending);
 

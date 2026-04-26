@@ -8,9 +8,9 @@ use futures_util::FutureExt;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::{DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, is_dlc_path};
 #[cfg(test)]
 use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
+use crate::{DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, is_dlc_path};
 use dirs;
 
 #[cfg(test)]
@@ -45,11 +45,13 @@ pub(crate) fn schedule_resume_artifact_delete(path: String) {
     }
 }
 
-pub(crate) fn schedule_download_artifact_delete(path: String) {
+pub(crate) fn schedule_output_artifact_delete(path: String) {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
-            if let Err(e) = crate::delete_download_artifacts(&path).await {
-                log::warn!("Failed to delete download artifacts for {path}: {e}");
+            if let Err(e) = tokio::fs::remove_file(&path).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                log::warn!("Failed to delete output artifact {path}: {e}");
             }
         });
     } else {
@@ -58,8 +60,12 @@ pub(crate) fn schedule_download_artifact_delete(path: String) {
         {
             log::warn!("Failed to delete output artifact {path}: {e}");
         }
-        schedule_resume_artifact_delete(path);
     }
+}
+
+pub(crate) fn schedule_download_artifact_delete(path: String) {
+    schedule_output_artifact_delete(path.clone());
+    schedule_resume_artifact_delete(path);
 }
 
 pub(super) fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
@@ -514,7 +520,9 @@ mod tests {
 
     impl StateDirectoryGuard {
         fn set(path: &Path) -> Self {
-            let lock = crate::core::session::STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
+            let lock = crate::core::session::STATE_DIRECTORY_TEST_LOCK
+                .lock()
+                .unwrap();
             let previous = env::var_os("STATE_DIRECTORY");
             unsafe { env::set_var("STATE_DIRECTORY", path) };
             Self {

@@ -107,7 +107,7 @@ impl App {
         }
 
         self.cancellation_tokens.remove(id);
-        super::super::download::schedule_resume_artifact_delete(artifact_path.to_string());
+        super::super::download::schedule_download_artifact_delete(artifact_path.to_string());
         self.mark_file_skipped(id);
         true
     }
@@ -277,8 +277,8 @@ impl App {
             });
         } else {
             let _ = self.remove_overlay_file(id);
+            super::super::download::schedule_download_artifact_delete(artifact_path);
         }
-        super::super::download::schedule_download_artifact_delete(artifact_path);
         self.mark_file_skipped(id);
         if !is_core_backed {
             self.recompute_totals();
@@ -323,8 +323,6 @@ impl App {
             file_id: id.to_string(),
         });
         self.reset_file_ui_rate(id);
-
-        super::super::download::schedule_download_artifact_delete(context.artifact_path);
 
         let _ = self.url_tx.send(source_url);
     }
