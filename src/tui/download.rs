@@ -121,12 +121,76 @@ struct QueuedDownload {
     item: crate::OwnedDownloadItem,
 }
 
+impl QueuedDownload {
+    fn queued_event(&self, count_toward_progress: bool) -> QueuedFile {
+        QueuedFile {
+            id: self.item.path.clone(),
+            size: self.item.node.size(),
+            count_toward_progress,
+            origin: self.resolved.file_origin(),
+        }
+    }
+
+    fn complete_event(&self) -> DownloadEvent {
+        DownloadEvent::FileComplete {
+            id: self.item.path.clone(),
+            name: self.item.path.clone(),
+        }
+    }
+}
+
 struct CollectedBatch {
     queued_items: Vec<QueuedDownload>,
     completed_items: Vec<QueuedDownload>,
     skipped_count: usize,
     partial_count: usize,
     successful_submitted_urls: Vec<String>,
+}
+
+impl CollectedBatch {
+    fn total_bytes(&self) -> u64 {
+        self.queued_items
+            .iter()
+            .chain(self.completed_items.iter())
+            .map(|item| item.item.node.size())
+            .sum()
+    }
+
+    fn file_total(&self) -> usize {
+        self.queued_items.len() + self.completed_items.len()
+    }
+
+    fn emit_events(&self, event_tx: &mpsc::UnboundedSender<DownloadEvent>) {
+        let _ = event_tx.send(DownloadEvent::FilesCollected {
+            total: self.file_total(),
+            skipped: self.skipped_count,
+            partial: self.partial_count,
+            total_bytes: self.total_bytes(),
+        });
+
+        self.emit_file_queue_events(event_tx);
+        self.emit_completed_file_events(event_tx);
+        self.emit_url_resolved_events(event_tx);
+    }
+
+    fn emit_file_queue_events(&self, event_tx: &mpsc::UnboundedSender<DownloadEvent>) {
+        for item in &self.queued_items {
+            let _ = event_tx.send(DownloadEvent::FileQueued(item.queued_event(true)));
+        }
+    }
+
+    fn emit_completed_file_events(&self, event_tx: &mpsc::UnboundedSender<DownloadEvent>) {
+        for item in &self.completed_items {
+            let _ = event_tx.send(DownloadEvent::FileQueued(item.queued_event(false)));
+            let _ = event_tx.send(item.complete_event());
+        }
+    }
+
+    fn emit_url_resolved_events(&self, event_tx: &mpsc::UnboundedSender<DownloadEvent>) {
+        for url in &self.successful_submitted_urls {
+            let _ = event_tx.send(DownloadEvent::UrlResolved { url: url.clone() });
+        }
+    }
 }
 
 struct CollectedNodeSet {
@@ -870,7 +934,7 @@ async fn download_batch(
     )
     .await;
 
-    send_collection_events(&collected, ctx.event_tx);
+    collected.emit_events(ctx.event_tx);
 
     let mut join_set = tokio::task::JoinSet::new();
     for item in collected.queued_items {
@@ -1120,83 +1184,40 @@ fn visible_downloads(
         .collect()
 }
 
-fn send_collection_events(
-    collected: &CollectedBatch,
-    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
-) {
-    let total_bytes: u64 = collected
-        .queued_items
-        .iter()
-        .chain(collected.completed_items.iter())
-        .map(|i| i.item.node.size())
-        .sum();
-    let total_files = collected.queued_items.len() + collected.completed_items.len();
-
-    let _ = event_tx.send(DownloadEvent::FilesCollected {
-        total: total_files,
-        skipped: collected.skipped_count,
-        partial: collected.partial_count,
-        total_bytes,
-    });
-
-    // Queue all files so they appear in the list immediately
-    for item in &collected.queued_items {
-        let _ = event_tx.send(DownloadEvent::FileQueued(QueuedFile {
-            id: item.item.path.clone(),
-            size: item.item.node.size(),
-            count_toward_progress: true,
-            origin: item.resolved.file_origin(),
-        }));
-    }
-
-    for item in &collected.completed_items {
-        let _ = event_tx.send(DownloadEvent::FileQueued(QueuedFile {
-            id: item.item.path.clone(),
-            size: item.item.node.size(),
-            count_toward_progress: false,
-            origin: item.resolved.file_origin(),
-        }));
-        let _ = event_tx.send(DownloadEvent::FileComplete {
-            id: item.item.path.clone(),
-            name: item.item.path.clone(),
-        });
-    }
-
-    // Remove URL placeholders now that real file entries exist
-    for source_url in &collected.successful_submitted_urls {
-        let _ = event_tx.send(DownloadEvent::UrlResolved {
-            url: source_url.clone(),
-        });
-    }
-}
-
 async fn drain_download_join_set(
     mut join_set: tokio::task::JoinSet<DownloadTaskResult>,
     event_tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) {
     while let Some(result) = join_set.join_next().await {
-        match result {
-            Ok(DownloadTaskResult {
-                result: Ok(_stats), ..
-            }) => {}
-            Ok(DownloadTaskResult {
-                result: Err(crate::Error::Cancelled),
-                ..
-            }) => {} // user cancelled
-            Ok(DownloadTaskResult { id, result: Err(e) }) => {
-                let _ = event_tx.send(DownloadEvent::Error {
-                    id: Some(id.clone()),
-                    name: id.clone(),
-                    error: format!("Download failed: {e}"),
-                });
-            }
-            Err(e) => {
-                let _ = event_tx.send(DownloadEvent::Error {
-                    id: None,
-                    name: "download".to_string(),
-                    error: format!("Task panicked: {e}"),
-                });
-            }
+        handle_download_join_result(result, event_tx);
+    }
+}
+
+fn handle_download_join_result(
+    result: Result<DownloadTaskResult, tokio::task::JoinError>,
+    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
+) {
+    match result {
+        Ok(DownloadTaskResult {
+            result: Ok(_stats), ..
+        }) => {}
+        Ok(DownloadTaskResult {
+            result: Err(crate::Error::Cancelled),
+            ..
+        }) => {} // user cancelled
+        Ok(DownloadTaskResult { id, result: Err(e) }) => {
+            let _ = event_tx.send(DownloadEvent::Error {
+                id: Some(id.clone()),
+                name: id.clone(),
+                error: format!("Download failed: {e}"),
+            });
+        }
+        Err(e) => {
+            let _ = event_tx.send(DownloadEvent::Error {
+                id: None,
+                name: "download".to_string(),
+                error: format!("Task panicked: {e}"),
+            });
         }
     }
 }
