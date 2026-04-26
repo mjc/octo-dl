@@ -16,7 +16,6 @@ impl App {
         self.urls.push(url.clone());
         self.apply_core_event(CoreEvent::UrlSubmitted { url: url.clone() });
         self.update_session_url(&url, SessionUrlUpdate::Pending);
-        let _ = self.url_tx.send(url);
     }
 
     pub(crate) fn drain_ui_actions(
