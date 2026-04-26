@@ -29,10 +29,11 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    DownloadConfig, SessionState,
-    core::{DownloadState, ProgressDelta, SessionMeta},
+    SessionState,
+    core::{DownloadState, ProgressDelta},
 };
 
+pub(crate) use self::progress::FileUiState;
 use self::progress::TransferRate;
 pub use self::types::{
     ConfigField, ConfigState, FileEntry, FileStatus, LoginState, NoCredentialsFallback, Popup,
@@ -43,11 +44,6 @@ pub(crate) use self::types::{SharedStateChannels, VisibleFileContext};
 use super::event::{DownloadEvent, QueuedFile, TokenMessage};
 use super::session::{SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate};
 use super::visible;
-#[derive(Debug, Clone, Default)]
-pub(crate) struct FileUiState {
-    pub speed: u64,
-    pub rate: TransferRate,
-}
 
 pub struct App {
     pub popup: Popup,
@@ -130,59 +126,6 @@ impl App {
             &self.core_state,
             &self.deleted_files,
         );
-    }
-
-    pub fn new(
-        api_port: u16,
-        event_tx: mpsc::UnboundedSender<DownloadEvent>,
-        quit_enabled: bool,
-    ) -> Self {
-        let (url_tx, url_rx) = mpsc::unbounded_channel::<String>();
-        let (pause_tx, pause_rx) = watch::channel(false);
-        let (token_tx, token_rx) = mpsc::unbounded_channel::<TokenMessage>();
-        Self {
-            popup: Popup::None,
-            should_quit: false,
-            quit_policy: QuitPolicy::from_bool(quit_enabled),
-            login: LoginState::new(),
-            authenticated: false,
-            url_input: String::new(),
-            urls: Vec::new(),
-            files: Vec::new(),
-            overlay_files: IndexMap::new(),
-            file_ui: HashMap::new(),
-            file_list_state: ListState::default(),
-            total_downloaded: 0,
-            total_size: 0,
-            files_completed: 0,
-            files_total: 0,
-            current_speed: 0,
-            total_network_downloaded: 0,
-            aggregate_rate: Default::default(),
-            status: String::new(),
-            paused: false,
-            config: ConfigState::new(),
-            event_tx,
-            url_tx,
-            url_rx: Some(url_rx),
-            pause_tx,
-            pause_rx: Some(pause_rx),
-            token_rx,
-            token_tx: Some(token_tx),
-            client_rx: None,
-            cancellation_tokens: HashMap::new(),
-            deleted_files: HashSet::new(),
-            session: None,
-            core_state: DownloadState::new(SessionMeta {
-                config: DownloadConfig::default(),
-                ..SessionMeta::default()
-            }),
-            api_port,
-            api_key: None,
-            cpu_usage: 0.0,
-            last_tick: Instant::now(),
-            memory_rss: 0,
-        }
     }
 
     /// Serialises UI-visible state to a JSON string.

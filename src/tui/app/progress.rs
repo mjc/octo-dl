@@ -5,6 +5,12 @@ use super::{App, FileStatus};
 const MIN_RATE_SAMPLE_SPAN: Duration = Duration::from_secs(1);
 const THROUGHPUT_DECAY: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FileUiState {
+    pub speed: u64,
+    pub rate: TransferRate,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TransferRate {
     start_time: Instant,
