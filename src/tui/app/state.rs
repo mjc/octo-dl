@@ -149,9 +149,9 @@ impl App {
     }
 
     pub(crate) fn restore_restart_snapshot(&mut self, snapshot: &RestartSnapshot) {
-        self.core_state = snapshot.state.clone();
-        self.sync_visible_files();
-        self.recompute_totals();
+        self.apply_core_event(CoreEvent::RestartReconciled {
+            snapshot: snapshot.clone(),
+        });
     }
 
     pub(crate) fn resume_latest_session(&mut self) {
