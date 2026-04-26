@@ -28,7 +28,7 @@ use crate::{
 use super::WebOptions;
 use super::api;
 use super::download;
-use super::event::{DownloadEvent, TokenMessage};
+use super::event::{DownloadEvent, QueuedFile, TokenMessage};
 
 const MIN_RATE_SAMPLE_SPAN: Duration = Duration::from_secs(1);
 const THROUGHPUT_DECAY: Duration = Duration::from_secs(30);
@@ -1485,6 +1485,70 @@ impl App {
         self.show_overlay_error(name, name, error, false);
     }
 
+    fn handle_deleted_download_artifact(&mut self, id: &str, artifact_path: &str) -> bool {
+        if !self.deleted_files.remove(id) {
+            return false;
+        }
+
+        self.cancellation_tokens.remove(id);
+        download::schedule_resume_artifact_delete(artifact_path.to_string());
+        self.session_mark_file_skipped(id);
+        true
+    }
+
+    fn is_session_url(&self, url: &str) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.urls.iter().any(|entry| entry.url == url))
+    }
+
+    fn handle_download_error_event(&mut self, id: Option<String>, name: String, error: String) {
+        log::error!("Download error: {name}: {error}");
+        if let Some(id) = id.as_ref()
+            && self.handle_deleted_download_artifact(id, &name)
+        {
+            return;
+        }
+
+        if self.is_session_url(&name) {
+            self.session_set_url_status(&name, UrlStatus::Error(error.clone()));
+            let _ = self.remove_overlay_file(&name);
+            self.show_ui_error_only(&name, &error);
+        } else if let Some(id) = id {
+            self.apply_core_event(CoreEvent::FileFailed {
+                file_id: id.clone(),
+                message: error.clone(),
+            });
+            self.mark_visible_file_error(&id, &name, &error);
+        } else {
+            self.show_ui_error_only(&name, &error);
+        }
+
+        self.recompute_totals();
+    }
+
+    fn handle_file_queued_event(&mut self, file: QueuedFile) {
+        if self.deleted_files.contains(&file.id) {
+            return;
+        }
+        if !self.session_register_queued_file(&file.origin.submitted_url, &file.id, file.size) {
+            return;
+        }
+        self.ensure_core_file(
+            &file.id,
+            &file.origin.source_url,
+            &file.id,
+            file.size,
+            file.count_toward_progress,
+        );
+    }
+
+    fn handle_url_resolved_event(&mut self, url: String) {
+        let _ = self.drop_overlay_file(&url);
+        self.session_set_url_status(&url, UrlStatus::Fetched);
+        self.recompute_totals();
+    }
+
     pub(crate) fn perform_delete_file_action(&mut self, id: &str) {
         let context = self.visible_file_context(id);
         let is_core_backed = context
@@ -1842,10 +1906,7 @@ impl App {
             }
             DownloadEvent::FileComplete { id, name } => {
                 log::info!("Download complete: {name}");
-                if self.deleted_files.remove(&id) {
-                    self.cancellation_tokens.remove(&id);
-                    download::schedule_resume_artifact_delete(name);
-                    self.session_mark_file_skipped(&id);
+                if self.handle_deleted_download_artifact(&id, &name) {
                     return;
                 }
                 self.apply_core_event(CoreEvent::FileCompleted {
@@ -1856,10 +1917,7 @@ impl App {
             }
             DownloadEvent::FileCancelled { id, name } => {
                 log::info!("Download cancelled: {name}");
-                if self.deleted_files.remove(&id) {
-                    self.cancellation_tokens.remove(&id);
-                    download::schedule_resume_artifact_delete(name);
-                    self.session_mark_file_skipped(&id);
+                if self.handle_deleted_download_artifact(&id, &name) {
                     return;
                 }
                 self.cancellation_tokens.remove(&id);
@@ -1872,33 +1930,7 @@ impl App {
                 }
             }
             DownloadEvent::Error { id, name, error } => {
-                log::error!("Download error: {name}: {error}");
-                if let Some(id) = id.as_ref()
-                    && self.deleted_files.remove(id)
-                {
-                    self.cancellation_tokens.remove(id);
-                    download::schedule_resume_artifact_delete(name);
-                    self.session_mark_file_skipped(id);
-                    return;
-                }
-                if self
-                    .session
-                    .as_ref()
-                    .is_some_and(|session| session.urls.iter().any(|u| u.url == name))
-                {
-                    self.session_set_url_status(&name, UrlStatus::Error(error.clone()));
-                    let _ = self.remove_overlay_file(&name);
-                    self.show_ui_error_only(&name, &error);
-                } else if let Some(id) = id {
-                    self.apply_core_event(CoreEvent::FileFailed {
-                        file_id: id.clone(),
-                        message: error.clone(),
-                    });
-                    self.mark_visible_file_error(&id, &name, &error);
-                } else {
-                    self.show_ui_error_only(&name, &error);
-                }
-                self.recompute_totals();
+                self.handle_download_error_event(id, name, error);
             }
             DownloadEvent::UrlQueued { url } => {
                 if self.deleted_files.contains(&url) {
@@ -1907,28 +1939,10 @@ impl App {
                 self.queue_url_placeholder(url);
             }
             DownloadEvent::FileQueued(file) => {
-                if self.deleted_files.contains(&file.id) {
-                    return;
-                }
-                if !self.session_register_queued_file(
-                    &file.origin.submitted_url,
-                    &file.id,
-                    file.size,
-                ) {
-                    return;
-                }
-                self.ensure_core_file(
-                    &file.id,
-                    &file.origin.source_url,
-                    &file.id,
-                    file.size,
-                    file.count_toward_progress,
-                );
+                self.handle_file_queued_event(file);
             }
             DownloadEvent::UrlResolved { url } => {
-                let _ = self.drop_overlay_file(&url);
-                self.session_set_url_status(&url, UrlStatus::Fetched);
-                self.recompute_totals();
+                self.handle_url_resolved_event(url);
             }
             DownloadEvent::StatusMessage(message) => {
                 log::info!("Status: {message}");
