@@ -85,20 +85,10 @@ pub enum CoreEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreEffect {
     PersistSession(SessionSnapshotV3),
-    EnqueueUrlResolution {
-        url: UrlId,
-    },
-    EnqueueFileDownload {
-        file_id: FileId,
-    },
-    DeleteOutputArtifacts {
-        file_id: FileId,
-        path: String,
-    },
-    DeleteResumeArtifacts {
-        file_id: FileId,
-        path: String,
-    },
+    EnqueueUrlResolution { url: UrlId },
+    EnqueueFileDownload { file_id: FileId },
+    DeleteOutputArtifacts { file_id: FileId, path: String },
+    DeleteResumeArtifacts { file_id: FileId, path: String },
     PublishStatusMessage(String),
     PublishViewSnapshot,
 }
@@ -125,17 +115,18 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
         }
         CoreEvent::PackageResolved { package } => {
             let package_id = package.id.clone();
-            let package_entry = state
-                .packages
-                .entry(package_id.clone())
-                .or_insert_with(|| PackageState {
-                    id: package_id.clone(),
-                    source_url: package.source_url.clone(),
-                    display_name: package.display_name.clone(),
-                    status: PackageStatus::Pending,
-                    file_ids: Vec::new(),
-                    error: None,
-                });
+            let package_entry =
+                state
+                    .packages
+                    .entry(package_id.clone())
+                    .or_insert_with(|| PackageState {
+                        id: package_id.clone(),
+                        source_url: package.source_url.clone(),
+                        display_name: package.display_name.clone(),
+                        status: PackageStatus::Pending,
+                        file_ids: Vec::new(),
+                        error: None,
+                    });
             package_entry.source_url = package.source_url.clone();
             package_entry.display_name = package.display_name.clone();
             package_entry.error = package
@@ -186,7 +177,10 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
         }
         CoreEvent::FileQueued { file_id } => {
             if let Some(file) = state.files.get_mut(&file_id) {
-                if !matches!(file.lifecycle, FileLifecycle::Skipped | FileLifecycle::Deleted) {
+                if !matches!(
+                    file.lifecycle,
+                    FileLifecycle::Skipped | FileLifecycle::Deleted
+                ) {
                     file.lifecycle = FileLifecycle::Queued;
                     file.runtime.active = false;
                     file.message = None;
@@ -198,7 +192,10 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
         }
         CoreEvent::FileStarted { file_id, size } => {
             if let Some(file) = state.files.get_mut(&file_id) {
-                if !matches!(file.lifecycle, FileLifecycle::Skipped | FileLifecycle::Deleted) {
+                if !matches!(
+                    file.lifecycle,
+                    FileLifecycle::Skipped | FileLifecycle::Deleted
+                ) {
                     file.size = size;
                     file.lifecycle = FileLifecycle::Downloading;
                     file.runtime.active = true;
@@ -213,7 +210,10 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             network_bytes_delta,
         } => {
             if let Some(file) = state.files.get_mut(&file_id) {
-                if matches!(file.lifecycle, FileLifecycle::Downloading | FileLifecycle::Queued) {
+                if matches!(
+                    file.lifecycle,
+                    FileLifecycle::Downloading | FileLifecycle::Queued
+                ) {
                     file.progress.visible_completed_bytes = file
                         .progress
                         .visible_completed_bytes
@@ -247,7 +247,8 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                     .visible_completed_bytes
                     .saturating_add(reused_bytes)
                     .min(file.size);
-                file.runtime.reused_chunks = file.runtime.reused_chunks.saturating_add(reused_chunks);
+                file.runtime.reused_chunks =
+                    file.runtime.reused_chunks.saturating_add(reused_chunks);
             }
         }
         CoreEvent::FileCompleted { file_id } => {
@@ -426,7 +427,15 @@ fn recompute_derived(state: &mut DownloadState) {
             PackageStatus::Deleted
         } else if all_skipped && has_present {
             PackageStatus::Skipped
-        } else if has_complete && (has_queued || package.file_ids.iter().any(|file_id| state.files.get(file_id).is_some_and(|file| matches!(file.lifecycle, FileLifecycle::Downloading)))) {
+        } else if has_complete
+            && (has_queued
+                || package.file_ids.iter().any(|file_id| {
+                    state
+                        .files
+                        .get(file_id)
+                        .is_some_and(|file| matches!(file.lifecycle, FileLifecycle::Downloading))
+                }))
+        {
             PackageStatus::Partial
         } else if has_complete && has_present {
             PackageStatus::Complete
@@ -441,7 +450,10 @@ fn recompute_derived(state: &mut DownloadState) {
     for file in state.files.values() {
         if !file.runtime.counts_in_run_totals
             || file.runtime.preexisting_complete
-            || matches!(file.lifecycle, FileLifecycle::Skipped | FileLifecycle::Deleted)
+            || matches!(
+                file.lifecycle,
+                FileLifecycle::Skipped | FileLifecycle::Deleted
+            )
         {
             continue;
         }
@@ -458,7 +470,12 @@ fn recompute_derived(state: &mut DownloadState) {
         }
     }
     state.totals = totals;
-    if state.files.values().all(|file| file.lifecycle.is_terminal()) && !state.files.is_empty() {
+    if state
+        .files
+        .values()
+        .all(|file| file.lifecycle.is_terminal())
+        && !state.files.is_empty()
+    {
         state.session_meta.status = SessionRunStatus::Completed;
     }
 }

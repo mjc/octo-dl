@@ -23,15 +23,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     DlcKeyCache, DownloadConfig, DownloadProgress, SavedCredentials, SessionState, UrlEntry,
-    UrlStatus,
-    core::{CoreEvent, ProgressDelta},
-    file_key, format_bytes, is_dlc_path,
+    UrlStatus, core::ProgressDelta, is_dlc_path,
 };
 use dirs;
 
-use super::app::{App, FileEntry, FileStatus, Popup};
+use super::app::App;
+#[cfg(test)]
+use super::app::{FileEntry, FileStatus};
 use super::event::{DownloadChannels, DownloadEvent, TokenMessage, TuiProgress};
-use super::input::add_url;
 
 pub(crate) fn schedule_resume_artifact_delete(path: String) {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -220,360 +219,20 @@ pub fn start_login(app: &mut App) {
     });
 }
 
-pub fn handle_login_result(app: &mut App, success: bool, error: Option<String>) {
-    app.login.logging_in = false;
-    if success {
-        app.authenticated = true;
-        app.popup = Popup::None;
-        app.status = "Login successful".to_string();
-
-        // Start the download task — it takes the url_rx and immediately
-        // receives any URLs that were already buffered in the channel.
-        start_download_task(app);
-    } else {
-        app.login.error = error;
-        app.popup = Popup::Login;
-    }
-}
-
+#[cfg(test)]
 pub fn handle_file_complete(app: &mut App, id: &str, _name: &str) {
-    app.cancellation_tokens.remove(id);
-    if !app.core_state.files.contains_key(id)
-        && let Some(file) = app.find_file_mut(id)
-    {
-        file.name = _name.to_string();
-        file.status = FileStatus::Complete;
-        file.downloaded = file.size;
-        file.reset_rate();
-        file.speed = 0;
-    }
-
-    if let Some(ref mut session) = app.session {
-        let _ = session.mark_file_complete(id);
-    }
-
-    app.recompute_totals();
-    if app.files_completed == app.files_total && app.files_total > 0 {
-        if let Some(ref mut session) = app.session {
-            let _ = session.mark_completed();
-        }
-        app.status = "All downloads complete".to_string();
-    } else {
-        app.status = format!("Downloading ({}/{})", app.files_completed, app.files_total);
-    }
+    app.mark_visible_file_complete(id, _name);
 }
 
-pub fn handle_file_error(app: &mut App, id: &str, name: &str, error: &str) {
-    app.cancellation_tokens.remove(id);
-    if app.core_state.files.contains_key(id) {
-        // Core-backed rows are projected back into the TUI view.
-    } else if let Some(fp) = app.overlay_file_mut(id) {
-        fp.status = FileStatus::Error(error.to_string());
-        fp.reset_rate();
-        fp.name = name.to_string();
-        app.sync_visible_files();
-    } else {
-        app.upsert_overlay_file(FileEntry {
-            id: id.to_string(),
-            name: name.to_string(),
-            size: 0,
-            downloaded: 0,
-            speed: 0,
-            rate: Default::default(),
-            source_url: None,
-            counts_toward_progress: true,
-            status: FileStatus::Error(error.to_string()),
-        });
-    }
-
-    if let Some(ref mut session) = app.session {
-        let _ = session.mark_file_error(id, error);
-    }
-}
-
-/// Show error in UI without persisting to session.
-/// Used for URL-level errors that should never be retried.
-pub fn show_error_ui_only(app: &mut App, name: &str, error: &str) {
-    app.cancellation_tokens.remove(name);
-    if let Some(fp) = app.overlay_file_mut(name) {
-        fp.status = FileStatus::Error(error.to_string());
-        fp.reset_rate();
-        app.sync_visible_files();
-    } else {
-        app.upsert_overlay_file(FileEntry {
-            id: name.to_string(),
-            name: name.to_string(),
-            size: 0,
-            downloaded: 0,
-            speed: 0,
-            rate: Default::default(),
-            source_url: None,
-            counts_toward_progress: false,
-            status: FileStatus::Error(error.to_string()),
-        });
-    }
-}
-
-#[allow(clippy::too_many_lines)]
+#[cfg(test)]
 pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
-    match event {
-        DownloadEvent::LoginResult { success, error } => {
-            if success {
-                log::info!("Login successful");
-            } else {
-                log::error!("Login failed: {}", error.as_deref().unwrap_or("unknown"));
-            }
-            handle_login_result(app, success, error);
-        }
-        DownloadEvent::FilesCollected {
-            total,
-            skipped,
-            partial,
-            total_bytes,
-        } => {
-            log::info!(
-                "Files collected: {total} total, {skipped} skipped, {partial} partial, {}",
-                format_bytes(total_bytes)
-            );
-            app.status = format!("Found {total} files ({skipped} skipped, {partial} partial)");
-        }
-        DownloadEvent::FileStart { id, name, size } => {
-            log::info!("Download started: {name} ({})", format_bytes(size));
-            if app.deleted_files.contains(&id) {
-                return;
-            }
-            let source_url = app
-                .files
-                .iter()
-                .find(|entry| entry.id == id)
-                .and_then(|entry| entry.source_url.clone())
-                .unwrap_or_else(|| id.clone());
-            app.ensure_core_file(&id, &source_url, &name, size, true);
-            app.apply_core_event(CoreEvent::FileStarted {
-                file_id: id.clone(),
-                size,
-            });
-            if let Some(fp) = app.find_file_mut(&id) {
-                fp.rate.reset(fp.downloaded, std::time::Instant::now());
-            }
-        }
-        DownloadEvent::Progress { id, delta } => {
-            if app.deleted_files.contains(id.as_ref()) {
-                return;
-            }
-            app.apply_core_event(CoreEvent::FileProgress {
-                file_id: id.to_string(),
-                total_bytes_delta: delta.total_bytes_delta,
-                network_bytes_delta: delta.network_bytes_delta,
-            });
-            let now = std::time::Instant::now();
-            if let Some(fp) = app.find_file_mut(id.as_ref()) {
-                let accepted_delta = fp.record_progress(delta.total_bytes_delta, now);
-                let accepted_network_delta = delta.network_bytes_delta.min(accepted_delta);
-                app.record_total_progress(accepted_delta, accepted_network_delta, now);
-            }
-        }
-        DownloadEvent::ResumeReused { id, chunks, bytes } => {
-            if app.deleted_files.contains(&id) {
-                return;
-            }
-            app.apply_core_event(CoreEvent::FileReuseDetected {
-                file_id: id.clone(),
-                reused_bytes: bytes,
-                reused_chunks: chunks,
-            });
-            log::info!(
-                "Reusing {chunks} verified chunk(s) for {id} ({})",
-                format_bytes(bytes)
-            );
-            app.status = format!(
-                "Reusing {chunks} verified chunk(s) for {id} ({})",
-                format_bytes(bytes)
-            );
-        }
-        DownloadEvent::FileComplete { id, name } => {
-            log::info!("Download complete: {name}");
-            if app.deleted_files.remove(&id) {
-                app.cancellation_tokens.remove(&id);
-                schedule_resume_artifact_delete(name);
-                if let Some(ref mut session) = app.session {
-                    let _ = session.mark_file_skipped(&id);
-                }
-                return;
-            }
-            app.apply_core_event(CoreEvent::FileCompleted {
-                file_id: id.clone(),
-            });
-            app.recompute_totals();
-            handle_file_complete(app, &id, &name);
-        }
-        DownloadEvent::FileCancelled { id, name } => {
-            log::info!("Download cancelled: {name}");
-            if app.deleted_files.remove(&id) {
-                app.cancellation_tokens.remove(&id);
-                schedule_resume_artifact_delete(name);
-                if let Some(ref mut session) = app.session {
-                    let _ = session.mark_file_skipped(&id);
-                }
-                return;
-            }
-            app.cancellation_tokens.remove(&id);
-            app.apply_core_event(CoreEvent::FileCancelled {
-                file_id: id.clone(),
-            });
-            if let Some(fp) = app.find_file_mut(&id) {
-                fp.reset_rate();
-            }
-            if app.paused {
-                app.status = "Paused".to_string();
-            }
-        }
-        DownloadEvent::Error { id, name, error } => {
-            log::error!("Download error: {name}: {error}");
-            if let Some(id) = id.as_ref()
-                && app.deleted_files.remove(id)
-            {
-                app.cancellation_tokens.remove(id);
-                schedule_resume_artifact_delete(name);
-                if let Some(ref mut session) = app.session {
-                    let _ = session.mark_file_skipped(id);
-                }
-                return;
-            }
-            // URL-level fetch/parse errors are terminal for resume purposes.
-            if app
-                .session
-                .as_ref()
-                .is_some_and(|session| session.urls.iter().any(|u| u.url == name))
-            {
-                if let Some(ref mut session) = app.session {
-                    if let Some(url_entry) = session.urls.iter_mut().find(|u| u.url == name) {
-                        url_entry.status = UrlStatus::Error(error.clone());
-                    }
-                    let _ = session.save();
-                }
-                // Remove URL placeholder from UI and show error without persisting as file
-                let _ = app.remove_overlay_file(&name);
-                show_error_ui_only(app, &name, &error);
-            } else if let Some(id) = id {
-                // For actual file download errors, mark as error and keep in session for retry
-                app.apply_core_event(CoreEvent::FileFailed {
-                    file_id: id.clone(),
-                    message: error.clone(),
-                });
-                handle_file_error(app, &id, &name, &error);
-            } else {
-                show_error_ui_only(app, &name, &error);
-            }
-            app.recompute_totals();
-        }
-        DownloadEvent::UrlQueued { url } => {
-            if app.deleted_files.contains(&url) {
-                return;
-            }
-            // Add a placeholder entry showing the URL while we fetch file info
-            if !app.overlay_files.contains_key(&url) {
-                app.upsert_overlay_file(FileEntry {
-                    id: url.clone(),
-                    name: url,
-                    size: 0,
-                    downloaded: 0,
-                    speed: 0,
-                    rate: Default::default(),
-                    source_url: None,
-                    counts_toward_progress: false,
-                    status: FileStatus::Queued,
-                });
-            }
-            app.recompute_totals();
-        }
-        DownloadEvent::FileQueued {
-            id,
-            name,
-            size,
-            count_toward_progress,
-            source_url,
-            session_url,
-        } => {
-            if app.deleted_files.contains(&id) {
-                return;
-            }
-            if app.session.as_ref().is_some_and(|session| {
-                session
-                    .urls
-                    .iter()
-                    .position(|u| u.url == session_url)
-                    .is_some_and(|url_index| {
-                        session.files.iter().any(|file| {
-                            file.url_index == url_index
-                                && file.path == name
-                                && matches!(file.status, crate::FileEntryStatus::Skipped)
-                        })
-                    })
-            }) {
-                return;
-            }
-            app.ensure_core_file(&id, &source_url, &name, size, count_toward_progress);
-            // Track file in session for resume support
-            if let Some(ref mut session) = app.session {
-                let url_index = session
-                    .urls
-                    .iter()
-                    .position(|u| u.url == session_url)
-                    .unwrap_or(0);
-                let stable_key = file_key(url_index, &name);
-
-                if let Some(file) = session
-                    .files
-                    .iter_mut()
-                    .find(|f| f.url_index == url_index && f.path == name)
-                {
-                    if file.key.is_none() {
-                        file.key = Some(stable_key);
-                        let _ = session.save();
-                    }
-                } else {
-                    session.files.push(crate::FileEntry {
-                        key: Some(stable_key),
-                        url_index,
-                        path: name,
-                        size,
-                        status: crate::FileEntryStatus::Pending,
-                    });
-                    let _ = session.save();
-                }
-            }
-        }
-        DownloadEvent::UrlResolved { url } => {
-            // Remove the URL placeholder now that real file entries exist
-            let _ = app.drop_overlay_file(&url);
-            // Mark URL as fetched in session so it's not re-sent on resume
-            if let Some(ref mut session) = app.session {
-                if let Some(entry) = session.urls.iter_mut().find(|u| u.url == url) {
-                    entry.status = UrlStatus::Fetched;
-                }
-                let _ = session.save();
-            }
-            app.recompute_totals();
-        }
-        DownloadEvent::StatusMessage(msg) => {
-            log::info!("Status: {msg}");
-            app.status = msg;
-        }
-        DownloadEvent::UrlsReceived { urls } => {
-            let count = urls.len();
-            for url in urls {
-                add_url(app, url);
-            }
-            app.status = format!("Received {count} URL(s) from bookmarklet");
-        }
-    }
+    app.handle_download_event(event);
 }
 
 /// Starts the persistent download task. Called once after login succeeds.
 ///
 /// Expects `app.client_rx` to contain the oneshot receiver from `start_login`.
-fn start_download_task(app: &mut App) {
+pub(super) fn start_download_task(app: &mut App) {
     let tx = app.event_tx.clone();
     let config = app.config.config.clone();
 
@@ -888,8 +547,6 @@ mod tests {
             name: "first.bin".to_string(),
             size: 64,
             downloaded: 16,
-            speed: 12,
-            rate: Default::default(),
             source_url: Some("https://mega.nz/file/first".to_string()),
             counts_toward_progress: true,
             status: FileStatus::Downloading,
@@ -926,8 +583,6 @@ mod tests {
             name: "old-name.mkv".to_string(),
             size: 64,
             downloaded: 17,
-            speed: 12,
-            rate: Default::default(),
             source_url: Some("https://mega.nz/file/old".to_string()),
             counts_toward_progress: true,
             status: FileStatus::Error("stale error".to_string()),
@@ -951,7 +606,7 @@ mod tests {
         assert_eq!(file.source_url.as_deref(), Some("https://mega.nz/file/new"));
         assert_eq!(file.status, FileStatus::Queued);
         assert_eq!(file.downloaded, 0);
-        assert_eq!(file.speed, 0);
+        assert_eq!(app.file_speed("file-id"), 0);
     }
 
     #[test]
@@ -1054,8 +709,6 @@ mod tests {
             name: "file.mkv".to_string(),
             size: 128,
             downloaded: 128,
-            speed: 0,
-            rate: Default::default(),
             source_url: Some("https://mega.nz/file/root".to_string()),
             counts_toward_progress: true,
             status: FileStatus::Complete,
@@ -1079,8 +732,6 @@ mod tests {
             name: "episode.mkv".to_string(),
             size: 128,
             downloaded: 128,
-            speed: 0,
-            rate: Default::default(),
             source_url: Some("https://mega.nz/file/root".to_string()),
             counts_toward_progress: false,
             status: FileStatus::Complete,

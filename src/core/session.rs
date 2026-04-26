@@ -196,7 +196,10 @@ impl SessionSnapshotV3 {
             let _ = std::fs::remove_file(path);
         }
 
-        (v3_sessions.into_iter().next().map(|(_, session)| session), backups)
+        (
+            v3_sessions.into_iter().next().map(|(_, session)| session),
+            backups,
+        )
     }
 }
 
@@ -388,13 +391,17 @@ mod tests {
     fn latest_prefers_newest_v3_session() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
-        let mut first =
-            SessionSnapshotV3::new(DownloadConfig::default(), SavedCredentials::encrypt("a", "b", None));
+        let mut first = SessionSnapshotV3::new(
+            DownloadConfig::default(),
+            SavedCredentials::encrypt("a", "b", None),
+        );
         first.created = Utc::now() - chrono::TimeDelta::minutes(5);
         first.save().unwrap();
 
-        let second =
-            SessionSnapshotV3::new(DownloadConfig::default(), SavedCredentials::encrypt("a", "b", None));
+        let second = SessionSnapshotV3::new(
+            DownloadConfig::default(),
+            SavedCredentials::encrypt("a", "b", None),
+        );
         let second_id = second.id.clone();
         second.save().unwrap();
 

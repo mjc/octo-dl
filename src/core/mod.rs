@@ -11,9 +11,7 @@ pub use model::{
     PackageState, PackageStatus, RuntimeState, SessionMeta, SessionRunStatus, TotalsState, UrlId,
 };
 pub use progress::{DownloadProgressSink, ProgressDelta, RateEstimator};
-pub use reducer::{
-    CoreEffect, CoreEvent, PackageCollision, ResolvedFile, ResolvedPackage, reduce,
-};
+pub use reducer::{CoreEffect, CoreEvent, PackageCollision, ResolvedFile, ResolvedPackage, reduce};
 pub use restart::{
     FilesystemFile, FilesystemSnapshot, PartialFileSnapshot, RestartSnapshot, reconcile_restart,
     scan_filesystem,

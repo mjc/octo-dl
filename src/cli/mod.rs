@@ -41,6 +41,19 @@ struct CliConfig {
     resume: bool,
 }
 
+struct CliPackageFiles<'a> {
+    source_url: String,
+    files: Vec<DownloadItem<'a>>,
+    skipped: usize,
+    partial: usize,
+}
+
+impl CliPackageFiles<'_> {
+    fn total_size(&self) -> u64 {
+        self.files.iter().map(|item| item.node.size()).sum()
+    }
+}
+
 // ============================================================================
 // Progress Bar Implementation
 // ============================================================================
@@ -160,26 +173,49 @@ impl DownloadProgress for CliDownloadProgress {
     }
 }
 
-fn print_file_list(files: &[DownloadItem], skipped: usize, partial: usize) {
-    if files.is_empty() && skipped == 0 {
+fn print_file_list(packages: &[CliPackageFiles<'_>]) {
+    let queued_files: usize = packages.iter().map(|package| package.files.len()).sum();
+    let skipped: usize = packages.iter().map(|package| package.skipped).sum();
+    let partial: usize = packages.iter().map(|package| package.partial).sum();
+
+    if queued_files == 0 && skipped == 0 {
         println!("No files found.");
         return;
     }
 
-    let total_size: u64 = files.iter().map(|i| i.node.size()).sum();
+    let total_size: u64 = packages.iter().map(CliPackageFiles::total_size).sum();
 
     println!("\n{SEPARATOR}");
-    println!("Files to download:");
+    println!("Packages to download:");
     println!("{SEPARATOR}");
 
-    for item in files {
-        println!("  {} ({})", item.path, format_bytes(item.node.size()));
+    for package in packages {
+        println!("Package: {}", package.source_url);
+
+        for item in &package.files {
+            println!("  {} ({})", item.path, format_bytes(item.node.size()));
+        }
+
+        println!(
+            "  queued: {} file(s), {}",
+            package.files.len(),
+            format_bytes(package.total_size())
+        );
+        if package.skipped > 0 {
+            println!("  skipped: {} file(s) already complete", package.skipped);
+        }
+        if package.partial > 0 {
+            println!(
+                "  partial: {} file(s) with verified resumable data",
+                package.partial
+            );
+        }
+        println!("{SEPARATOR}");
     }
 
-    println!("{SEPARATOR}");
     println!(
-        "  {} file(s), {} total",
-        files.len(),
+        "  {} queued file(s), {} total",
+        queued_files,
         format_bytes(total_size)
     );
     if skipped > 0 {
@@ -506,7 +542,7 @@ pub async fn run() -> crate::Result<()> {
 
     // Phase 1: Fetch all URLs and collect files
     println!("Fetching file lists from {} URL(s)...\n", config.urls.len());
-    let mut all_nodes: Vec<(String, mega::Nodes)> = Vec::new();
+    let mut all_nodes: Vec<(usize, String, mega::Nodes)> = Vec::new();
     for (idx, url) in config.urls.iter().enumerate() {
         print!("  {url} ... ");
         match crate::fetch_public_nodes(&http, url).await {
@@ -515,7 +551,7 @@ pub async fn run() -> crate::Result<()> {
                 let file_count = collected_tmp.to_download.len() + collected_tmp.skipped;
                 println!("{file_count} file(s)");
                 session_state.urls[idx].status = UrlStatus::Fetched;
-                all_nodes.push((url.clone(), nodes));
+                all_nodes.push((idx, url.clone(), nodes));
             }
             Err(e) => {
                 println!("ERROR: {e:?}");
@@ -524,35 +560,46 @@ pub async fn run() -> crate::Result<()> {
         }
     }
 
-    // Collect files from all fetched nodes
-    let mut all_files: Vec<DownloadItem> = Vec::new();
-    let mut total_skipped = 0;
-    let mut total_partial = 0;
-    for (url_idx, (_url, nodes)) in all_nodes.iter().enumerate() {
+    // Collect files from all fetched nodes, preserving the original URL index
+    let mut package_files = Vec::new();
+    for (url_idx, url, nodes) in &all_nodes {
         let collected = downloader.collect_files(nodes, &no_progress).await;
+
+        let mut files = Vec::new();
         // Record files in session state
         for item in &collected.to_download {
             session_state.files.push(FileEntry {
-                key: Some(file_key(url_idx, &item.path)),
-                url_index: url_idx,
+                key: Some(file_key(*url_idx, &item.path)),
+                url_index: *url_idx,
                 path: item.path.clone(),
                 size: item.node.size(),
                 status: FileEntryStatus::Pending,
             });
         }
-        all_files.extend(collected.to_download.into_iter().map(|mut item| {
-            item.key = Some(file_key(url_idx, &item.path));
-            item
-        }));
-        total_skipped += collected.skipped;
-        total_partial += collected.partial;
+        for mut item in collected.to_download {
+            item.key = Some(file_key(*url_idx, &item.path));
+            files.push(item);
+        }
+
+        package_files.push(CliPackageFiles {
+            source_url: url.clone(),
+            files,
+            skipped: collected.skipped,
+            partial: collected.partial,
+        });
     }
 
     // Save initial session state
     let _ = session_state.save();
 
     // Phase 2: Print what we found
-    print_file_list(&all_files, total_skipped, total_partial);
+    print_file_list(&package_files);
+
+    let total_skipped: usize = package_files.iter().map(|package| package.skipped).sum();
+    let all_files: Vec<DownloadItem> = package_files
+        .into_iter()
+        .flat_map(|package| package.files)
+        .collect();
 
     if all_files.is_empty() {
         if total_skipped > 0 {
@@ -661,28 +708,43 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
         .collect();
 
     // Collect files, skipping already-completed ones
-    let mut all_files: Vec<DownloadItem> = Vec::new();
-    let mut total_skipped = 0;
-    let mut total_partial = 0;
+    let mut package_files = Vec::new();
     for (url_idx, _url, nodes) in &all_nodes {
         let collected = downloader.collect_files(nodes, &no_progress).await;
+        let mut files = Vec::new();
+        let mut skipped = collected.skipped;
         for mut item in collected.to_download {
             let key = file_key(*url_idx, &item.path);
             if !resumable_file_ids.is_empty()
                 && !resumable_file_ids.contains(&item.path)
                 && (ignored_paths.contains(&key) || ignored_paths.contains(&item.path))
             {
-                total_skipped += 1;
+                skipped += 1;
             } else {
                 item.key = Some(key);
-                all_files.push(item);
+                files.push(item);
             }
         }
-        total_skipped += collected.skipped;
-        total_partial += collected.partial;
+
+        package_files.push(CliPackageFiles {
+            source_url: session
+                .urls
+                .get(*url_idx)
+                .map(|entry| entry.url.clone())
+                .unwrap_or_else(|| format!("url:{url_idx}")),
+            files,
+            skipped,
+            partial: collected.partial,
+        });
     }
 
-    print_file_list(&all_files, total_skipped, total_partial);
+    print_file_list(&package_files);
+
+    let total_skipped: usize = package_files.iter().map(|package| package.skipped).sum();
+    let all_files: Vec<DownloadItem> = package_files
+        .into_iter()
+        .flat_map(|package| package.files)
+        .collect();
 
     if all_files.is_empty() {
         println!("All files already downloaded.");

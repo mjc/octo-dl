@@ -2,11 +2,9 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::core::CoreEvent;
 use crate::extract_urls;
 
-use super::app::{App, ConfigField, FileStatus, LoginState, Popup};
-use super::download::start_login;
+use super::app::{App, ConfigField, FileStatus, LoginState, Popup, UiAction};
 
 pub fn handle_input(app: &mut App, key: KeyEvent) {
     // Global quit
@@ -50,9 +48,11 @@ fn handle_login_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Enter => {
             if app.login.has_credentials() {
-                app.login.error = None;
-                app.login.logging_in = true;
-                start_login(app);
+                app.handle_ui_action(UiAction::Login {
+                    email: app.login.email().to_string(),
+                    password: app.login.password().to_string(),
+                    mfa: app.login.mfa().to_string(),
+                });
             } else {
                 app.login.error = Some("Email and password are required".to_string());
             }
@@ -86,45 +86,71 @@ fn handle_config_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('+' | '=') | KeyCode::Right => {
             match ConfigField::ALL[app.config.active_field] {
-                ConfigField::ChunksPerFile => {
-                    app.config.config.chunks_per_file =
-                        app.config.config.chunks_per_file.saturating_add(1);
-                }
-                ConfigField::ConcurrentFiles => {
-                    app.config.config.concurrent_files =
-                        app.config.config.concurrent_files.saturating_add(1);
-                }
-                ConfigField::ForceOverwrite => {
-                    app.config.config.force_overwrite = !app.config.config.force_overwrite;
-                }
-                ConfigField::CleanupOnError => {
-                    app.config.config.cleanup_on_error = !app.config.config.cleanup_on_error;
-                }
+                ConfigField::ChunksPerFile => app.handle_ui_action(UiAction::UpdateConfig {
+                    chunks_per_file: Some(app.config.config.chunks_per_file.saturating_add(1)),
+                    concurrent_files: None,
+                    force_overwrite: None,
+                    cleanup_on_error: None,
+                }),
+                ConfigField::ConcurrentFiles => app.handle_ui_action(UiAction::UpdateConfig {
+                    chunks_per_file: None,
+                    concurrent_files: Some(app.config.config.concurrent_files.saturating_add(1)),
+                    force_overwrite: None,
+                    cleanup_on_error: None,
+                }),
+                ConfigField::ForceOverwrite => app.handle_ui_action(UiAction::UpdateConfig {
+                    chunks_per_file: None,
+                    concurrent_files: None,
+                    force_overwrite: Some(!app.config.config.force_overwrite),
+                    cleanup_on_error: None,
+                }),
+                ConfigField::CleanupOnError => app.handle_ui_action(UiAction::UpdateConfig {
+                    chunks_per_file: None,
+                    concurrent_files: None,
+                    force_overwrite: None,
+                    cleanup_on_error: Some(!app.config.config.cleanup_on_error),
+                }),
             }
         }
         KeyCode::Char('-') | KeyCode::Left => match ConfigField::ALL[app.config.active_field] {
-            ConfigField::ChunksPerFile => {
-                app.config.config.chunks_per_file =
-                    app.config.config.chunks_per_file.saturating_sub(1).max(1);
-            }
-            ConfigField::ConcurrentFiles => {
-                app.config.config.concurrent_files =
-                    app.config.config.concurrent_files.saturating_sub(1).max(1);
-            }
-            ConfigField::ForceOverwrite => {
-                app.config.config.force_overwrite = !app.config.config.force_overwrite;
-            }
-            ConfigField::CleanupOnError => {
-                app.config.config.cleanup_on_error = !app.config.config.cleanup_on_error;
-            }
+            ConfigField::ChunksPerFile => app.handle_ui_action(UiAction::UpdateConfig {
+                chunks_per_file: Some(app.config.config.chunks_per_file.saturating_sub(1).max(1)),
+                concurrent_files: None,
+                force_overwrite: None,
+                cleanup_on_error: None,
+            }),
+            ConfigField::ConcurrentFiles => app.handle_ui_action(UiAction::UpdateConfig {
+                chunks_per_file: None,
+                concurrent_files: Some(app.config.config.concurrent_files.saturating_sub(1).max(1)),
+                force_overwrite: None,
+                cleanup_on_error: None,
+            }),
+            ConfigField::ForceOverwrite => app.handle_ui_action(UiAction::UpdateConfig {
+                chunks_per_file: None,
+                concurrent_files: None,
+                force_overwrite: Some(!app.config.config.force_overwrite),
+                cleanup_on_error: None,
+            }),
+            ConfigField::CleanupOnError => app.handle_ui_action(UiAction::UpdateConfig {
+                chunks_per_file: None,
+                concurrent_files: None,
+                force_overwrite: None,
+                cleanup_on_error: Some(!app.config.config.cleanup_on_error),
+            }),
         },
         KeyCode::Char(' ') => match ConfigField::ALL[app.config.active_field] {
-            ConfigField::ForceOverwrite => {
-                app.config.config.force_overwrite = !app.config.config.force_overwrite;
-            }
-            ConfigField::CleanupOnError => {
-                app.config.config.cleanup_on_error = !app.config.config.cleanup_on_error;
-            }
+            ConfigField::ForceOverwrite => app.handle_ui_action(UiAction::UpdateConfig {
+                chunks_per_file: None,
+                concurrent_files: None,
+                force_overwrite: Some(!app.config.config.force_overwrite),
+                cleanup_on_error: None,
+            }),
+            ConfigField::CleanupOnError => app.handle_ui_action(UiAction::UpdateConfig {
+                chunks_per_file: None,
+                concurrent_files: None,
+                force_overwrite: None,
+                cleanup_on_error: Some(!app.config.config.cleanup_on_error),
+            }),
             _ => {}
         },
         KeyCode::Enter | KeyCode::Esc => {
@@ -139,18 +165,12 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             let extracted = extract_urls(&app.url_input);
             if !extracted.is_empty() {
-                for url in extracted {
-                    add_url(app, url);
-                }
+                app.handle_ui_action(UiAction::AddUrls(extracted));
                 app.url_input.clear();
             }
         }
         KeyCode::Char('p') if app.url_input.is_empty() => {
-            if app.paused {
-                app.resume_downloads();
-            } else {
-                app.pause_downloads();
-            }
+            app.handle_ui_action(UiAction::TogglePause);
         }
         KeyCode::Char('d') | KeyCode::Delete if app.url_input.is_empty() => delete_selected(app),
         KeyCode::Char('R') if app.url_input.is_empty() => reset_selected(app),
@@ -164,35 +184,8 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
             if let Some(selected) = app.selected_file_index()
                 && matches!(app.files[selected].status, FileStatus::Error(_))
             {
-                let source_url = app.files[selected].source_url.clone();
                 let file_id = app.files[selected].id.clone();
-                let file_name = app.files[selected].name.clone();
-                let file_size = app.files[selected].size;
-                let counts_toward_progress = app.files[selected].counts_toward_progress;
-                if let Some(url) = source_url.as_deref() {
-                    app.ensure_core_file(
-                        &file_id,
-                        url,
-                        &file_name,
-                        file_size,
-                        counts_toward_progress,
-                    );
-                }
-                app.apply_core_event(CoreEvent::FileRetryRequested {
-                    file_id: file_id.clone(),
-                });
-                if let Some(url) = source_url {
-                    if let Some(file) = app.find_file_mut(&file_id) {
-                        file.reset_rate();
-                    }
-                    let _ = app.url_tx.send(url);
-                } else {
-                    if let Some(file) = app.overlay_file_mut(&file_id) {
-                        file.status = FileStatus::Error("Retry unavailable for this file".to_string());
-                        app.sync_visible_files();
-                    }
-                    app.status = "Retry unavailable for this file".to_string();
-                }
+                app.handle_ui_action(UiAction::RetryFile(file_id));
             }
         }
         KeyCode::Char('c') if app.url_input.is_empty() => {
@@ -237,135 +230,23 @@ fn reset_selected(app: &mut App) {
     let Some(selected) = app.selected_file_index() else {
         return;
     };
-
-    let file_id = app.files[selected].id.clone();
-    let artifact_path = app.files[selected].name.clone();
-    let Some(source_url) = app.files[selected].source_url.clone() else {
-        if let Some(file) = app.overlay_file_mut(&file_id) {
-            file.status = FileStatus::Error("Reset unavailable for this file".to_string());
-            app.sync_visible_files();
-        }
-        app.status = "Reset unavailable for selected file".to_string();
-        app.recompute_totals();
-        return;
-    };
-
-    app.ensure_core_file(
-        &file_id,
-        &source_url,
-        &artifact_path,
-        app.files[selected].size,
-        app.files[selected].counts_toward_progress,
-    );
-
-    if let Some(token) = app.cancellation_tokens.remove(&file_id) {
-        token.cancel();
-    }
-
-    app.apply_core_event(CoreEvent::FileResetRequested {
-        file_id: file_id.clone(),
-    });
-    if let Some(file) = app.find_file_mut(&file_id) {
-        file.reset_rate();
-    }
-
-    schedule_download_artifact_delete(artifact_path);
-
-    let _ = app.url_tx.send(source_url);
-}
-
-fn schedule_download_artifact_delete(path: String) {
-    let part = std::path::PathBuf::from(format!("{path}.part"));
-    let sidecar = std::path::PathBuf::from(format!("{path}.part.meta.json"));
-
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async move {
-            remove_file_if_exists(&path).await;
-            remove_file_if_exists(part).await;
-            remove_file_if_exists(sidecar).await;
-        });
-    } else {
-        remove_file_if_exists_sync(&path);
-        remove_file_if_exists_sync(part);
-        remove_file_if_exists_sync(sidecar);
-    }
-}
-
-async fn remove_file_if_exists(path: impl AsRef<std::path::Path>) {
-    if let Err(e) = tokio::fs::remove_file(path.as_ref()).await
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        log::warn!("Failed to delete artifact {}: {e}", path.as_ref().display());
-    }
-}
-
-fn remove_file_if_exists_sync(path: impl AsRef<std::path::Path>) {
-    if let Err(e) = std::fs::remove_file(path.as_ref())
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        log::warn!("Failed to delete artifact {}: {e}", path.as_ref().display());
-    }
+    app.handle_ui_action(UiAction::ResetFile(app.files[selected].id.clone()));
 }
 
 fn delete_selected(app: &mut App) {
     let Some(selected_file) = app.selected_file_index() else {
         return;
     };
-    let selected_row = app.file_list_state.selected().unwrap_or(0);
     let file = &app.files[selected_file];
     let file_status = file.status.clone();
-    let file_size = file.size;
-    let counts_toward_progress = file.counts_toward_progress;
-    let source_url = file.source_url.clone();
     let can_remove = matches!(
         file_status,
-        FileStatus::Queued
-            | FileStatus::Error(_)
-            | FileStatus::Downloading
-            | FileStatus::Complete
+        FileStatus::Queued | FileStatus::Error(_) | FileStatus::Downloading | FileStatus::Complete
     );
     if !can_remove {
         return;
     }
-
-    let file_id = file.id.clone();
-    let artifact_path = file.name.clone();
-    if let Some(source_url) = source_url.as_deref() {
-        app.ensure_core_file(
-            &file_id,
-            source_url,
-            &artifact_path,
-            file_size,
-            counts_toward_progress,
-        );
-    }
-    if matches!(file_status, FileStatus::Downloading)
-        && let Some(token) = app.cancellation_tokens.remove(&file_id)
-    {
-        token.cancel();
-    }
-    let is_core_backed = app.core_state.files.contains_key(&file_id) || source_url.is_some();
-    app.deleted_files.insert(file_id.clone());
-    if is_core_backed {
-        app.apply_core_event(CoreEvent::FileDeleted {
-            file_id: file_id.clone(),
-        });
-    } else {
-        let _ = app.remove_overlay_file(&file_id);
-    }
-    schedule_download_artifact_delete(artifact_path);
-    if let Some(ref mut session) = app.session {
-        let _ = session.mark_file_skipped(&file_id);
-    }
-    if !is_core_backed {
-        app.recompute_totals();
-        if app.files.is_empty() {
-            app.file_list_state.select(None);
-        } else {
-            app.file_list_state
-                .select(Some(selected_row.min(app.files.len() - 1)));
-        }
-    }
+    app.handle_ui_action(UiAction::DeleteFile(file.id.clone()));
 }
 
 pub fn handle_paste(app: &mut App, text: &str) {
@@ -381,27 +262,6 @@ pub fn handle_paste(app: &mut App, text: &str) {
             app.url_input.push_str(&text.replace(['\n', '\r'], " "));
         }
     }
-}
-
-/// Adds a URL and sends it to the download task if authenticated.
-pub fn add_url(app: &mut App, url: String) {
-    if app.urls.contains(&url) {
-        return;
-    }
-    app.urls.push(url.clone());
-    app.apply_core_event(CoreEvent::UrlSubmitted { url: url.clone() });
-    // Persist the URL in the session so it survives restarts
-    if let Some(ref mut session) = app.session
-        && !session.urls.iter().any(|u| u.url == url)
-    {
-        session.urls.push(crate::UrlEntry {
-            url: url.clone(),
-            status: crate::UrlStatus::Pending,
-        });
-        let _ = session.save();
-    }
-    // Always succeeds — URLs buffer in the channel until the download task starts.
-    let _ = app.url_tx.send(url);
 }
 
 #[cfg(test)]
@@ -543,8 +403,6 @@ mod tests {
             name: "test.zip".to_string(),
             size: 1000,
             downloaded: 500,
-            speed: 100,
-            rate: Default::default(),
             source_url: None,
             counts_toward_progress: true,
             status: FileStatus::Downloading,
@@ -569,8 +427,6 @@ mod tests {
                 name: "first.bin".to_string(),
                 size: 10,
                 downloaded: 0,
-                speed: 0,
-                rate: Default::default(),
                 source_url: Some("https://mega.nz/file/first".to_string()),
                 counts_toward_progress: true,
                 status: FileStatus::Queued,
@@ -580,8 +436,6 @@ mod tests {
                 name: "second.bin".to_string(),
                 size: 20,
                 downloaded: 0,
-                speed: 0,
-                rate: Default::default(),
                 source_url: Some("https://mega.nz/file/second".to_string()),
                 counts_toward_progress: true,
                 status: FileStatus::Queued,
@@ -650,8 +504,6 @@ mod tests {
                 name: "complete.bin".to_string(),
                 size: 10,
                 downloaded: 10,
-                speed: 0,
-                rate: Default::default(),
                 source_url: None,
                 counts_toward_progress: true,
                 status: FileStatus::Complete,
@@ -661,8 +513,6 @@ mod tests {
                 name: "active.bin".to_string(),
                 size: 20,
                 downloaded: 5,
-                speed: 1,
-                rate: Default::default(),
                 source_url: None,
                 counts_toward_progress: true,
                 status: FileStatus::Downloading,
@@ -697,8 +547,6 @@ mod tests {
             name: final_path.to_string_lossy().into_owned(),
             size: 100,
             downloaded: 80,
-            speed: 25,
-            rate: Default::default(),
             source_url: Some("https://mega.nz/file/reset".to_string()),
             counts_toward_progress: true,
             status: FileStatus::Downloading,
@@ -712,7 +560,7 @@ mod tests {
         assert!(token.is_cancelled());
         assert_eq!(app.files[0].status, FileStatus::Queued);
         assert_eq!(app.files[0].downloaded, 0);
-        assert_eq!(app.files[0].speed, 0);
+        assert_eq!(app.file_speed("active.bin"), 0);
         assert_eq!(
             url_rx.try_recv().unwrap(),
             "https://mega.nz/file/reset".to_string()
@@ -739,8 +587,6 @@ mod tests {
             name: final_path.to_string_lossy().into_owned(),
             size: 100,
             downloaded: 100,
-            speed: 0,
-            rate: Default::default(),
             source_url: Some("https://mega.nz/file/complete".to_string()),
             counts_toward_progress: false,
             status: FileStatus::Complete,
@@ -807,8 +653,8 @@ mod tests {
     fn add_url_deduplicates() {
         let mut app = test_app();
         let mut url_rx = app.url_rx.take().expect("url_rx should exist");
-        add_url(&mut app, "https://mega.nz/file/abc".to_string());
-        add_url(&mut app, "https://mega.nz/file/abc".to_string());
+        app.submit_url("https://mega.nz/file/abc".to_string());
+        app.submit_url("https://mega.nz/file/abc".to_string());
         assert_eq!(app.urls.len(), 1);
         assert_eq!(url_rx.try_recv().unwrap(), "https://mega.nz/file/abc");
         assert!(url_rx.try_recv().is_err());
@@ -824,8 +670,6 @@ mod tests {
             name: "error.bin".to_string(),
             size: 100,
             downloaded: 42,
-            speed: 0,
-            rate: Default::default(),
             source_url: Some("https://mega.nz/file/error".to_string()),
             counts_toward_progress: true,
             status: FileStatus::Error("boom".to_string()),

@@ -1,23 +1,33 @@
 //! Application state model.
 
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
+use std::env;
+use std::future::Future;
+use std::io;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 use serde::Serialize;
+use sysinfo::{ProcessesToUpdate, System};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    DownloadConfig, SessionState,
+    DownloadConfig, FileEntry as SessionFileEntry, FileEntryStatus, ServiceConfig, SessionState,
+    SessionStatus, UrlEntry, UrlStatus,
     core::{
-        CoreEffect, CoreEvent, DownloadState, FileLifecycle, FileState, PackageState,
-        ResolvedFile, ResolvedPackage, SessionMeta, reduce,
+        CoreEffect, CoreEvent, DownloadState, FileLifecycle, FileState, PackageState, ResolvedFile,
+        ResolvedPackage, RestartSnapshot, SessionMeta, reconcile_restart, reduce, scan_filesystem,
     },
+    file_key, format_bytes,
 };
 
+use super::WebOptions;
+use super::api;
+use super::download;
 use super::event::{DownloadEvent, TokenMessage};
 
 const MIN_RATE_SAMPLE_SPAN: Duration = Duration::from_secs(1);
@@ -285,9 +295,6 @@ pub struct FileEntry {
     pub name: String,
     pub size: u64,
     pub downloaded: u64,
-    pub speed: u64,
-    #[serde(skip)]
-    pub(crate) rate: TransferRate,
     #[serde(skip)]
     pub source_url: Option<String>,
     #[serde(skip)]
@@ -295,25 +302,20 @@ pub struct FileEntry {
     pub status: FileStatus,
 }
 
-impl FileEntry {
-    pub(crate) fn reset_rate(&mut self) {
-        self.speed = 0;
-        self.rate.reset(self.downloaded, Instant::now());
-    }
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FileUiState {
+    pub speed: u64,
+    pub rate: TransferRate,
+}
 
-    pub(crate) fn record_progress(&mut self, bytes_delta: u64, now: Instant) -> u64 {
-        let next = self.downloaded.saturating_add(bytes_delta);
-        let next = if self.size > 0 {
-            next.min(self.size)
-        } else {
-            next
-        };
-        let accepted = next.saturating_sub(self.downloaded);
-        self.downloaded = next;
-        self.rate.record(self.downloaded, now);
-        self.speed = self.rate.bytes_per_sec(now);
-        accepted
-    }
+#[derive(Debug, Clone)]
+pub(crate) struct VisibleFileContext {
+    pub id: String,
+    pub source_url: Option<String>,
+    pub artifact_path: String,
+    pub size: u64,
+    pub counts_toward_progress: bool,
+    pub is_core_backed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -350,6 +352,7 @@ pub struct App {
     // File queue (main content)
     pub files: Vec<FileEntry>,
     pub(crate) overlay_files: IndexMap<String, FileEntry>,
+    pub(crate) file_ui: HashMap<String, FileUiState>,
     pub file_list_state: ListState,
     // Aggregate stats
     pub total_downloaded: u64,
@@ -409,6 +412,45 @@ impl App {
                     .or_insert_with(|| file.clone());
             }
         }
+    }
+
+    pub(crate) fn file_speed(&self, file_id: &str) -> u64 {
+        self.file_ui.get(file_id).map_or(0, |state| state.speed)
+    }
+
+    fn ensure_file_ui(&mut self, file_id: &str, downloaded: u64, reset: bool) {
+        let state = self.file_ui.entry(file_id.to_string()).or_default();
+        if reset {
+            state.speed = 0;
+            state.rate.reset(downloaded, Instant::now());
+        }
+    }
+
+    pub(crate) fn reset_file_ui_rate(&mut self, file_id: &str) {
+        let downloaded = self
+            .files
+            .iter()
+            .find(|file| file.id == file_id)
+            .map_or(0, |file| file.downloaded);
+        self.ensure_file_ui(file_id, downloaded, true);
+    }
+
+    pub(crate) fn update_file_ui_progress(
+        &mut self,
+        file_id: &str,
+        previous_downloaded: u64,
+        now: Instant,
+    ) -> u64 {
+        let downloaded = self
+            .files
+            .iter()
+            .find(|file| file.id == file_id)
+            .map_or(previous_downloaded, |file| file.downloaded);
+        let accepted = downloaded.saturating_sub(previous_downloaded);
+        let state = self.file_ui.entry(file_id.to_string()).or_default();
+        state.rate.record(downloaded, now);
+        state.speed = state.rate.bytes_per_sec(now);
+        accepted
     }
 
     fn package_sort_key_for(&self, file: &FileEntry) -> (usize, String) {
@@ -475,39 +517,21 @@ impl App {
         let source_url = package.map(|package| package.source_url.clone());
         let counts_toward_progress =
             file.runtime.counts_in_run_totals && !file.runtime.preexisting_complete;
-        let now = Instant::now();
-
         if let Some(mut existing) = existing {
             existing.name = file.path.clone();
             existing.size = file.size;
             existing.downloaded = downloaded;
             existing.source_url = source_url;
             existing.counts_toward_progress = counts_toward_progress;
-            if matches!(status, FileStatus::Downloading) {
-                if !matches!(existing.status, FileStatus::Downloading)
-                    || existing.downloaded > downloaded
-                {
-                    existing.rate.reset(downloaded, now);
-                    existing.speed = 0;
-                }
-            } else {
-                existing.speed = 0;
-            }
             existing.status = status;
             return Some(existing);
         }
 
-        let mut rate = TransferRate::default();
-        if matches!(status, FileStatus::Downloading) {
-            rate.reset(downloaded, now);
-        }
         Some(FileEntry {
             id: file.id.clone(),
             name: file.path.clone(),
             size: file.size,
             downloaded,
-            speed: 0,
-            rate,
             source_url,
             counts_toward_progress,
             status,
@@ -533,10 +557,7 @@ impl App {
         }
         let mut packages = IndexMap::<String, Vec<&FileEntry>>::new();
         for file in &self.files {
-            let package_id = file
-                .source_url
-                .clone()
-                .unwrap_or_else(|| file.id.clone());
+            let package_id = file.source_url.clone().unwrap_or_else(|| file.id.clone());
             packages.entry(package_id).or_default().push(file);
         }
 
@@ -610,7 +631,9 @@ impl App {
     }
 
     pub(crate) fn sync_visible_files(&mut self) {
-        let selected_id = self.selected_file_index().map(|index| self.files[index].id.clone());
+        let selected_id = self
+            .selected_file_index()
+            .map(|index| self.files[index].id.clone());
         let selected_row = self.file_list_state.selected().unwrap_or(0);
         let core_file_ids: HashSet<_> = self.core_state.files.keys().cloned().collect();
         let existing: IndexMap<_, _> = std::mem::take(&mut self.files)
@@ -642,6 +665,9 @@ impl App {
         }
 
         self.files = files;
+        let visible_ids: HashSet<_> = self.files.iter().map(|file| file.id.clone()).collect();
+        self.file_ui
+            .retain(|file_id, _| visible_ids.contains(file_id));
         if let Some(selected_id) = selected_id {
             if let Some(display_row) = self
                 .sorted_file_indices()
@@ -693,11 +719,15 @@ impl App {
     fn update_speeds_at(&mut self, now: Instant) {
         self.last_tick = now;
 
-        for f in &mut self.files {
-            if matches!(f.status, FileStatus::Downloading) {
-                f.speed = f.rate.bytes_per_sec(now);
+        for file in &self.files {
+            if let Some(state) = self.file_ui.get_mut(&file.id) {
+                if matches!(file.status, FileStatus::Downloading) {
+                    state.speed = state.rate.bytes_per_sec(now);
+                } else {
+                    state.speed = 0;
+                }
             } else {
-                f.speed = 0;
+                self.file_ui.entry(file.id.clone()).or_default();
             }
         }
 
@@ -735,8 +765,9 @@ impl App {
             }
             self.total_size = self.total_size.saturating_add(file.size);
             self.total_downloaded = self.total_downloaded.saturating_add(file.downloaded);
-            self.total_network_downloaded =
-                self.total_network_downloaded.saturating_add(file.downloaded);
+            self.total_network_downloaded = self
+                .total_network_downloaded
+                .saturating_add(file.downloaded);
             if matches!(file.status, FileStatus::Complete) {
                 self.files_completed = self.files_completed.saturating_add(1);
             }
@@ -768,6 +799,7 @@ impl App {
             urls: Vec::new(),
             files: Vec::new(),
             overlay_files: IndexMap::new(),
+            file_ui: HashMap::new(),
             file_list_state: ListState::default(),
             total_downloaded: 0,
             total_size: 0,
@@ -802,8 +834,96 @@ impl App {
         }
     }
 
-    pub fn find_file_mut(&mut self, id: &str) -> Option<&mut FileEntry> {
-        self.files.iter_mut().find(|f| f.id == id)
+    pub(crate) fn new_with_optional_service_config(
+        event_tx: mpsc::UnboundedSender<DownloadEvent>,
+        quit_enabled: bool,
+        config_path: Option<&Path>,
+        default_api_port: u16,
+    ) -> io::Result<(Self, String, u16)> {
+        if let Some(path) = config_path {
+            let mut app = Self::new(0, event_tx, quit_enabled);
+            let (host, port) = app.apply_service_config(path)?;
+            app.api_port = port;
+            return Ok((app, host, port));
+        }
+
+        let api_port = env::var("OCTO_API_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(default_api_port);
+        Ok((
+            Self::new(api_port, event_tx, quit_enabled),
+            "127.0.0.1".to_string(),
+            api_port,
+        ))
+    }
+
+    pub(crate) fn require_credentials(&self, config_path: &Path) -> io::Result<()> {
+        if self.login.has_credentials() {
+            return Ok(());
+        }
+
+        log::error!(
+            "No credentials configured. Edit {} and set email/password under [credentials], then restart.",
+            config_path.display()
+        );
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("No credentials in {}", config_path.display()),
+        ))
+    }
+
+    pub(crate) fn prepare_interactive_startup(&mut self) {
+        self.resume_latest_session();
+        self.load_credentials_from_env();
+        self.auto_login(NoCredentialsFallback::ShowPopup);
+    }
+
+    pub(crate) fn prepare_headless_startup(&mut self, config_path: &Path) -> io::Result<()> {
+        self.load_credentials_from_env();
+        self.require_credentials(config_path)?;
+        self.resume_latest_session();
+        self.auto_login(NoCredentialsFallback::Silent);
+        Ok(())
+    }
+
+    pub(crate) fn shared_state_channels(&self, enabled: bool) -> SharedStateChannels {
+        let (action_tx, action_rx) = mpsc::unbounded_channel::<UiAction>();
+        let (state_tx, state_rx) = watch::channel(self.to_json());
+        let shared_state = enabled.then_some(SharedAppState {
+            action_tx,
+            state_rx,
+        });
+        SharedStateChannels {
+            action_rx,
+            state_tx,
+            shared_state,
+        }
+    }
+
+    pub(crate) fn spawn_api_server(
+        &self,
+        host: String,
+        port: u16,
+        web_opts: Option<WebOptions>,
+        shared_state: Option<SharedAppState>,
+    ) {
+        let api_tx = self.event_tx.clone();
+        let api_key = self.api_key.clone();
+        tokio::spawn(async move {
+            if let Err(e) = api::run_api_server(
+                api_tx,
+                &host,
+                port,
+                web_opts.as_ref(),
+                shared_state,
+                api_key,
+            )
+            .await
+            {
+                log::error!("API server error: {e}");
+            }
+        });
     }
 
     pub(crate) fn seed_core_session_from_session(&mut self) {
@@ -849,10 +969,9 @@ impl App {
                         session.credentials = next.credentials;
                         let mut merged_files = session.files.clone();
                         for next_file in next.files {
-                            if let Some(existing) = merged_files
-                                .iter_mut()
-                                .find(|file| file.path == next_file.path || file.key == next_file.key)
-                            {
+                            if let Some(existing) = merged_files.iter_mut().find(|file| {
+                                file.path == next_file.path || file.key == next_file.key
+                            }) {
                                 *existing = next_file;
                             } else {
                                 merged_files.push(next_file);
@@ -912,23 +1031,974 @@ impl App {
         }
     }
 
+    pub(crate) fn submit_url(&mut self, url: String) {
+        if self.urls.contains(&url) {
+            return;
+        }
+        self.urls.push(url.clone());
+        self.apply_core_event(CoreEvent::UrlSubmitted { url: url.clone() });
+        self.session_add_pending_url(&url);
+        let _ = self.url_tx.send(url);
+    }
+
+    pub(crate) fn begin_login(&mut self) {
+        self.login.error = None;
+        self.login.logging_in = true;
+        self.status = "Logging in...".to_string();
+        download::start_login(self);
+    }
+
+    pub(crate) fn auto_login(&mut self, fallback: NoCredentialsFallback) -> bool {
+        if self.login.has_credentials() {
+            self.begin_login();
+            true
+        } else {
+            if fallback == NoCredentialsFallback::ShowPopup {
+                self.popup = Popup::Login;
+            }
+            false
+        }
+    }
+
+    pub(crate) fn load_credentials_from_env(&mut self) {
+        let email = env::var("MEGA_EMAIL").unwrap_or_default();
+        let password = env::var("MEGA_PASSWORD").unwrap_or_default();
+        let mfa = env::var("MEGA_MFA").unwrap_or_default();
+        if !email.is_empty() || !password.is_empty() {
+            log::info!("Using MEGA credentials from environment variables");
+        }
+        self.login
+            .set_credentials_if_missing(&email, &password, &mfa);
+    }
+
+    pub(crate) fn apply_service_config(&mut self, config_path: &Path) -> io::Result<(String, u16)> {
+        let mut service_config = ServiceConfig::load_or_create(config_path)?;
+        log::info!("Loaded config from {}", config_path.display());
+
+        if let Some(ref dl_path) = service_config.download.path {
+            let download_dir = Path::new(dl_path);
+            if !download_dir.exists() {
+                std::fs::create_dir_all(download_dir)?;
+            }
+            std::env::set_current_dir(download_dir)?;
+            log::info!("Download directory: {dl_path}");
+        }
+
+        self.config.config = service_config.download.clone();
+        self.api_key.clone_from(&service_config.api.api_key);
+
+        let mut credentials_from_config = false;
+        if service_config.credentials.has_credentials() {
+            if let Some((email, password, mfa)) = service_config.credentials.decrypt_if_needed() {
+                log::info!("Loaded credentials from config file");
+                credentials_from_config = self.login.set_credentials(email, password, mfa);
+
+                if !service_config.credentials.encrypted {
+                    log::info!("Encrypting plaintext credentials in config file");
+                    service_config.credentials.encrypt_in_place();
+                    service_config.save(config_path)?;
+                }
+            } else {
+                log::warn!(
+                    "Failed to decrypt credentials from config (machine key mismatch?). Falling back to environment variables."
+                );
+            }
+        }
+
+        if !credentials_from_config {
+            if let (Ok(email), Ok(password)) = (env::var("MEGA_EMAIL"), env::var("MEGA_PASSWORD")) {
+                log::info!(
+                    "Using credentials from MEGA_EMAIL and MEGA_PASSWORD environment variables"
+                );
+                self.login.set_credentials(
+                    email,
+                    password,
+                    env::var("MEGA_MFA").unwrap_or_default(),
+                );
+            } else if service_config.credentials.has_credentials() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Failed to decrypt credentials from config file. Set MEGA_EMAIL and MEGA_PASSWORD environment variables, or re-create the config file as the current user.",
+                ));
+            }
+        }
+
+        if service_config.api.api_key.is_none() {
+            let key = uuid::Uuid::new_v4().simple().to_string();
+            log::info!("Generated API key: {key}");
+            service_config.api.api_key = Some(key);
+            service_config.save(config_path)?;
+            self.api_key.clone_from(&service_config.api.api_key);
+        }
+
+        Ok((service_config.api.host, service_config.api.port))
+    }
+
+    pub(crate) fn session_add_pending_url(&mut self, url: &str) {
+        if let Some(ref mut session) = self.session
+            && !session.urls.iter().any(|entry| entry.url == url)
+        {
+            session.urls.push(UrlEntry {
+                url: url.to_string(),
+                status: UrlStatus::Pending,
+            });
+            let _ = session.save();
+        }
+    }
+
+    pub(crate) fn session_mark_file_complete(&mut self, file_id: &str) {
+        if let Some(ref mut session) = self.session {
+            let _ = session.mark_file_complete(file_id);
+        }
+    }
+
+    pub(crate) fn session_mark_file_error(&mut self, file_id: &str, error: &str) {
+        if let Some(ref mut session) = self.session {
+            let _ = session.mark_file_error(file_id, error);
+        }
+    }
+
+    pub(crate) fn session_mark_file_skipped(&mut self, file_id: &str) {
+        if let Some(ref mut session) = self.session {
+            let _ = session.mark_file_skipped(file_id);
+        }
+    }
+
+    pub(crate) fn session_mark_completed(&mut self) {
+        if let Some(ref mut session) = self.session {
+            let _ = session.mark_completed();
+        }
+    }
+
+    pub(crate) fn session_set_url_status(&mut self, url: &str, status: UrlStatus) {
+        if let Some(ref mut session) = self.session {
+            if let Some(entry) = session.urls.iter_mut().find(|entry| entry.url == url) {
+                entry.status = status;
+            }
+            let _ = session.save();
+        }
+    }
+
+    pub(crate) fn session_has_skipped_file(&self, session_url: &str, path: &str) -> bool {
+        self.session.as_ref().is_some_and(|session| {
+            session
+                .urls
+                .iter()
+                .position(|entry| entry.url == session_url)
+                .is_some_and(|url_index| {
+                    session.files.iter().any(|file| {
+                        file.url_index == url_index
+                            && file.path == path
+                            && matches!(file.status, FileEntryStatus::Skipped)
+                    })
+                })
+        })
+    }
+
+    pub(crate) fn session_register_queued_file(
+        &mut self,
+        session_url: &str,
+        path: &str,
+        size: u64,
+    ) {
+        if let Some(ref mut session) = self.session {
+            let url_index = session
+                .urls
+                .iter()
+                .position(|entry| entry.url == session_url)
+                .unwrap_or(0);
+            let stable_key = file_key(url_index, path);
+
+            if let Some(file) = session
+                .files
+                .iter_mut()
+                .find(|file| file.url_index == url_index && file.path == path)
+            {
+                if file.key.is_none() {
+                    file.key = Some(stable_key);
+                    let _ = session.save();
+                }
+            } else {
+                session.files.push(SessionFileEntry {
+                    key: Some(stable_key),
+                    url_index,
+                    path: path.to_string(),
+                    size,
+                    status: FileEntryStatus::Pending,
+                });
+                let _ = session.save();
+            }
+        }
+    }
+
+    pub(crate) fn restore_restart_snapshot(&mut self, snapshot: &RestartSnapshot) {
+        self.core_state = snapshot.state.clone();
+        self.sync_visible_files();
+        self.recompute_totals();
+    }
+
+    pub(crate) fn resume_latest_session(&mut self) {
+        let Some(session) = SessionState::latest() else {
+            return;
+        };
+        log::info!("Resuming session {}", session.id);
+
+        if let Some((email, password, mfa)) = session.credentials.decrypt() {
+            self.login
+                .set_credentials(email, password, mfa.unwrap_or_default());
+        }
+
+        let file_ids = session
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        let restart = reconcile_restart(
+            Some(session.to_v3()),
+            scan_filesystem(file_ids),
+            session.urls.iter().map(|entry| entry.url.clone()).collect(),
+        );
+
+        self.resume_from_restart(session, &restart);
+    }
+
+    pub(crate) fn resume_from_restart(
+        &mut self,
+        mut session: SessionState,
+        restart: &RestartSnapshot,
+    ) {
+        self.restore_restart_snapshot(restart);
+
+        let resumed_urls = restart.resumable_urls();
+        let resumed_url_set: HashSet<_> = resumed_urls.iter().cloned().collect();
+        for entry in &mut session.urls {
+            if !matches!(entry.status, UrlStatus::Error(_)) {
+                entry.status = if resumed_url_set.contains(&entry.url) {
+                    UrlStatus::Pending
+                } else {
+                    UrlStatus::Fetched
+                };
+            }
+        }
+        session.files = restart
+            .state
+            .files
+            .values()
+            .map(|file| {
+                let url_index = session
+                    .urls
+                    .iter()
+                    .position(|entry| {
+                        restart
+                            .state
+                            .packages
+                            .get(&file.package_id)
+                            .is_some_and(|package| package.source_url == entry.url)
+                    })
+                    .unwrap_or(0);
+                SessionFileEntry {
+                    key: Some(file.id.clone()),
+                    url_index,
+                    path: file.path.clone(),
+                    size: file.size,
+                    status: match file.lifecycle {
+                        FileLifecycle::Planned | FileLifecycle::Queued => FileEntryStatus::Pending,
+                        FileLifecycle::Downloading => FileEntryStatus::Downloading,
+                        FileLifecycle::Complete => FileEntryStatus::Completed,
+                        FileLifecycle::Skipped | FileLifecycle::Deleted => FileEntryStatus::Skipped,
+                        FileLifecycle::Failed => FileEntryStatus::Error(
+                            file.message.clone().unwrap_or_else(|| "failed".to_string()),
+                        ),
+                    },
+                }
+            })
+            .collect();
+        let _ = session.save();
+        self.urls.clone_from(&resumed_urls);
+        for url in resumed_urls {
+            let _ = self.url_tx.send(url);
+        }
+        self.session = Some(session);
+        self.seed_core_session_from_session();
+    }
+
+    pub(crate) fn sync_session_for_shutdown(&mut self) {
+        let Some(ref mut session) = self.session else {
+            return;
+        };
+        if session.status == SessionStatus::Completed {
+            return;
+        }
+
+        let visible: HashSet<&str> = self.files.iter().map(|file| file.id.as_str()).collect();
+
+        session.files.retain(|file| {
+            matches!(file.status, FileEntryStatus::Skipped)
+                || visible.contains(file.path.as_str())
+                || visible.contains(file.key_or_path())
+        });
+
+        if session.files.is_empty() {
+            let _ = session.mark_completed();
+        } else {
+            log::info!("Marking session as paused for later resume");
+            let _ = session.mark_paused();
+        }
+    }
+
+    pub(crate) fn visible_file_context(&self, id: &str) -> Option<VisibleFileContext> {
+        self.files.iter().find(|file| file.id == id).map(|file| {
+            let source_url = file.source_url.clone();
+            VisibleFileContext {
+                id: file.id.clone(),
+                artifact_path: file.name.clone(),
+                size: file.size,
+                counts_toward_progress: file.counts_toward_progress,
+                is_core_backed: self.core_state.files.contains_key(id) || source_url.is_some(),
+                source_url,
+            }
+        })
+    }
+
+    pub(crate) fn mark_visible_file_complete(&mut self, id: &str, name: &str) {
+        self.cancellation_tokens.remove(id);
+        if !self.core_state.files.contains_key(id)
+            && let Some(file) = self.overlay_file_mut(id)
+        {
+            file.name = name.to_string();
+            file.status = FileStatus::Complete;
+            file.downloaded = file.size;
+            self.sync_visible_files();
+        }
+        self.reset_file_ui_rate(id);
+        self.session_mark_file_complete(id);
+
+        self.recompute_totals();
+        if self.files_completed == self.files_total && self.files_total > 0 {
+            self.session_mark_completed();
+            self.status = "All downloads complete".to_string();
+        } else {
+            self.status = format!(
+                "Downloading ({}/{})",
+                self.files_completed, self.files_total
+            );
+        }
+    }
+
+    pub(crate) fn show_overlay_error(
+        &mut self,
+        id: &str,
+        name: &str,
+        error: &str,
+        counts_toward_progress: bool,
+    ) {
+        self.cancellation_tokens.remove(id);
+        if self.core_state.files.contains_key(id) {
+            // Core-backed rows are projected back into the TUI view.
+        } else if let Some(file) = self.overlay_file_mut(id) {
+            file.status = FileStatus::Error(error.to_string());
+            file.name = name.to_string();
+            self.sync_visible_files();
+        } else {
+            self.upsert_overlay_file(FileEntry {
+                id: id.to_string(),
+                name: name.to_string(),
+                size: 0,
+                downloaded: 0,
+                source_url: None,
+                counts_toward_progress,
+                status: FileStatus::Error(error.to_string()),
+            });
+        }
+        self.reset_file_ui_rate(id);
+    }
+
+    pub(crate) fn mark_visible_file_error(&mut self, id: &str, name: &str, error: &str) {
+        self.show_overlay_error(id, name, error, true);
+        self.session_mark_file_error(id, error);
+    }
+
+    pub(crate) fn show_ui_error_only(&mut self, name: &str, error: &str) {
+        self.show_overlay_error(name, name, error, false);
+    }
+
+    pub(crate) fn perform_delete_file_action(&mut self, id: &str) {
+        let context = self.visible_file_context(id);
+        let is_core_backed = context
+            .as_ref()
+            .is_some_and(|context| context.is_core_backed);
+        let artifact_path = context
+            .as_ref()
+            .map_or_else(|| id.to_string(), |context| context.artifact_path.clone());
+        if let Some(context) = context.as_ref()
+            && let Some(source_url) = context.source_url.as_ref()
+        {
+            self.ensure_core_file(
+                &context.id,
+                source_url,
+                &context.artifact_path,
+                context.size,
+                context.counts_toward_progress,
+            );
+        }
+        if let Some(token) = self.cancellation_tokens.remove(id) {
+            token.cancel();
+        }
+        self.deleted_files.insert(id.to_string());
+        if is_core_backed {
+            self.apply_core_event(CoreEvent::FileDeleted {
+                file_id: id.to_string(),
+            });
+        } else {
+            let _ = self.remove_overlay_file(id);
+        }
+        download::schedule_download_artifact_delete(artifact_path);
+        self.session_mark_file_skipped(id);
+        if !is_core_backed {
+            self.recompute_totals();
+        }
+    }
+
+    pub(crate) fn perform_retry_file_action(&mut self, id: &str) {
+        let context = self.visible_file_context(id);
+        let source_url = context
+            .as_ref()
+            .and_then(|context| context.source_url.clone());
+        if let Some(context) = context.as_ref()
+            && let Some(source_url) = context.source_url.as_ref()
+        {
+            self.ensure_core_file(
+                &context.id,
+                source_url,
+                &context.artifact_path,
+                context.size,
+                context.counts_toward_progress,
+            );
+        }
+        self.apply_core_event(CoreEvent::FileRetryRequested {
+            file_id: id.to_string(),
+        });
+        if let Some(url) = source_url {
+            self.reset_file_ui_rate(id);
+            let _ = self.url_tx.send(url);
+        } else {
+            self.status = format!("Retry unavailable for {id}");
+            if !self.core_state.files.contains_key(id) {
+                self.show_overlay_error(id, id, "Retry unavailable for this file", true);
+            }
+        }
+    }
+
+    pub(crate) fn perform_reset_file_action(&mut self, id: &str) {
+        let Some(context) = self.visible_file_context(id) else {
+            return;
+        };
+        let Some(source_url) = context.source_url.clone() else {
+            if !self.core_state.files.contains_key(id) {
+                self.show_overlay_error(id, id, "Reset unavailable for this file", true);
+            }
+            self.status = "Reset unavailable for selected file".to_string();
+            self.recompute_totals();
+            return;
+        };
+
+        self.ensure_core_file(
+            &context.id,
+            &source_url,
+            &context.artifact_path,
+            context.size,
+            context.counts_toward_progress,
+        );
+
+        if let Some(token) = self.cancellation_tokens.remove(id) {
+            token.cancel();
+        }
+
+        self.apply_core_event(CoreEvent::FileResetRequested {
+            file_id: id.to_string(),
+        });
+        self.reset_file_ui_rate(id);
+
+        download::schedule_download_artifact_delete(context.artifact_path);
+
+        let _ = self.url_tx.send(source_url);
+    }
+
+    pub(crate) fn apply_config_update(
+        &mut self,
+        chunks_per_file: Option<usize>,
+        concurrent_files: Option<usize>,
+        force_overwrite: Option<bool>,
+        cleanup_on_error: Option<bool>,
+    ) {
+        if let Some(value) = chunks_per_file {
+            self.config.config.chunks_per_file = value.max(1);
+        }
+        if let Some(value) = concurrent_files {
+            self.config.config.concurrent_files = value.max(1);
+        }
+        if let Some(value) = force_overwrite {
+            self.config.config.force_overwrite = value;
+        }
+        if let Some(value) = cleanup_on_error {
+            self.config.config.cleanup_on_error = value;
+        }
+    }
+
+    pub(crate) fn handle_ui_action(&mut self, action: UiAction) {
+        match action {
+            UiAction::AddUrls(urls) => {
+                let count = urls.len();
+                for url in urls {
+                    self.submit_url(url);
+                }
+                self.status = format!("Received {count} URL(s) from bookmarklet");
+            }
+            UiAction::Login {
+                email,
+                password,
+                mfa,
+            } => {
+                if self.login.set_credentials(email, password, mfa) {
+                    self.begin_login();
+                }
+            }
+            UiAction::TogglePause => {
+                if self.paused {
+                    self.resume_downloads();
+                } else {
+                    self.pause_downloads();
+                }
+            }
+            UiAction::DeleteFile(id) => self.perform_delete_file_action(&id),
+            UiAction::RetryFile(id) => self.perform_retry_file_action(&id),
+            UiAction::ResetFile(id) => self.perform_reset_file_action(&id),
+            UiAction::UpdateConfig {
+                chunks_per_file,
+                concurrent_files,
+                force_overwrite,
+                cleanup_on_error,
+            } => self.apply_config_update(
+                chunks_per_file,
+                concurrent_files,
+                force_overwrite,
+                cleanup_on_error,
+            ),
+        }
+    }
+
+    pub(crate) fn drain_ui_actions(
+        &mut self,
+        action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
+    ) -> bool {
+        let mut handled = false;
+        while let Ok(action) = action_rx.try_recv() {
+            self.handle_ui_action(action);
+            handled = true;
+        }
+        handled
+    }
+
+    pub(crate) fn complete_login(&mut self, success: bool, error: Option<String>) {
+        self.login.logging_in = false;
+        if success {
+            self.authenticated = true;
+            self.popup = Popup::None;
+            self.status = "Login successful".to_string();
+            download::start_download_task(self);
+        } else {
+            self.login.error = error;
+            self.popup = Popup::Login;
+        }
+    }
+
+    pub(crate) fn set_collection_status(
+        &mut self,
+        total: usize,
+        skipped: usize,
+        partial: usize,
+        total_bytes: u64,
+    ) {
+        self.status = format!(
+            "Found {total} files ({skipped} skipped, {partial} partial, {})",
+            format_bytes(total_bytes)
+        );
+    }
+
+    pub(crate) fn set_resume_reuse_status(&mut self, id: &str, chunks: usize, bytes: u64) {
+        self.status = format!(
+            "Reusing {chunks} verified chunk(s) for {id} ({})",
+            format_bytes(bytes)
+        );
+    }
+
+    pub(crate) fn queue_url_placeholder(&mut self, url: String) {
+        if !self.overlay_files.contains_key(&url) {
+            self.upsert_overlay_file(FileEntry {
+                id: url.clone(),
+                name: url,
+                size: 0,
+                downloaded: 0,
+                source_url: None,
+                counts_toward_progress: false,
+                status: FileStatus::Queued,
+            });
+        }
+        self.recompute_totals();
+    }
+
+    pub(crate) fn set_status_message(&mut self, message: String) {
+        self.status = message;
+    }
+
+    pub(crate) fn handle_download_event(&mut self, event: DownloadEvent) {
+        match event {
+            DownloadEvent::LoginResult { success, error } => {
+                if success {
+                    log::info!("Login successful");
+                } else {
+                    log::error!("Login failed: {}", error.as_deref().unwrap_or("unknown"));
+                }
+                self.complete_login(success, error);
+            }
+            DownloadEvent::FilesCollected {
+                total,
+                skipped,
+                partial,
+                total_bytes,
+            } => {
+                log::info!(
+                    "Files collected: {total} total, {skipped} skipped, {partial} partial, {}",
+                    format_bytes(total_bytes)
+                );
+                self.set_collection_status(total, skipped, partial, total_bytes);
+            }
+            DownloadEvent::FileStart { id, name, size } => {
+                log::info!("Download started: {name} ({})", format_bytes(size));
+                if self.deleted_files.contains(&id) {
+                    return;
+                }
+                let source_url = self
+                    .files
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .and_then(|entry| entry.source_url.clone())
+                    .unwrap_or_else(|| id.clone());
+                self.ensure_core_file(&id, &source_url, &name, size, true);
+                self.apply_core_event(CoreEvent::FileStarted {
+                    file_id: id.clone(),
+                    size,
+                });
+                self.reset_file_ui_rate(&id);
+            }
+            DownloadEvent::Progress { id, delta } => {
+                if self.deleted_files.contains(id.as_ref()) {
+                    return;
+                }
+                let previous_downloaded = self
+                    .files
+                    .iter()
+                    .find(|file| file.id == id.as_ref())
+                    .map_or(0, |file| file.downloaded);
+                self.apply_core_event(CoreEvent::FileProgress {
+                    file_id: id.to_string(),
+                    total_bytes_delta: delta.total_bytes_delta,
+                    network_bytes_delta: delta.network_bytes_delta,
+                });
+                let now = Instant::now();
+                let _ = self.update_file_ui_progress(id.as_ref(), previous_downloaded, now);
+            }
+            DownloadEvent::ResumeReused { id, chunks, bytes } => {
+                if self.deleted_files.contains(&id) {
+                    return;
+                }
+                self.apply_core_event(CoreEvent::FileReuseDetected {
+                    file_id: id.clone(),
+                    reused_bytes: bytes,
+                    reused_chunks: chunks,
+                });
+                log::info!(
+                    "Reusing {chunks} verified chunk(s) for {id} ({})",
+                    format_bytes(bytes)
+                );
+                self.set_resume_reuse_status(&id, chunks, bytes);
+            }
+            DownloadEvent::FileComplete { id, name } => {
+                log::info!("Download complete: {name}");
+                if self.deleted_files.remove(&id) {
+                    self.cancellation_tokens.remove(&id);
+                    download::schedule_resume_artifact_delete(name);
+                    self.session_mark_file_skipped(&id);
+                    return;
+                }
+                self.apply_core_event(CoreEvent::FileCompleted {
+                    file_id: id.clone(),
+                });
+                self.recompute_totals();
+                self.mark_visible_file_complete(&id, &name);
+            }
+            DownloadEvent::FileCancelled { id, name } => {
+                log::info!("Download cancelled: {name}");
+                if self.deleted_files.remove(&id) {
+                    self.cancellation_tokens.remove(&id);
+                    download::schedule_resume_artifact_delete(name);
+                    self.session_mark_file_skipped(&id);
+                    return;
+                }
+                self.cancellation_tokens.remove(&id);
+                self.apply_core_event(CoreEvent::FileCancelled {
+                    file_id: id.clone(),
+                });
+                self.reset_file_ui_rate(&id);
+                if self.paused {
+                    self.status = "Paused".to_string();
+                }
+            }
+            DownloadEvent::Error { id, name, error } => {
+                log::error!("Download error: {name}: {error}");
+                if let Some(id) = id.as_ref()
+                    && self.deleted_files.remove(id)
+                {
+                    self.cancellation_tokens.remove(id);
+                    download::schedule_resume_artifact_delete(name);
+                    self.session_mark_file_skipped(id);
+                    return;
+                }
+                if self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.urls.iter().any(|u| u.url == name))
+                {
+                    self.session_set_url_status(&name, UrlStatus::Error(error.clone()));
+                    let _ = self.remove_overlay_file(&name);
+                    self.show_ui_error_only(&name, &error);
+                } else if let Some(id) = id {
+                    self.apply_core_event(CoreEvent::FileFailed {
+                        file_id: id.clone(),
+                        message: error.clone(),
+                    });
+                    self.mark_visible_file_error(&id, &name, &error);
+                } else {
+                    self.show_ui_error_only(&name, &error);
+                }
+                self.recompute_totals();
+            }
+            DownloadEvent::UrlQueued { url } => {
+                if self.deleted_files.contains(&url) {
+                    return;
+                }
+                self.queue_url_placeholder(url);
+            }
+            DownloadEvent::FileQueued {
+                id,
+                name,
+                size,
+                count_toward_progress,
+                source_url,
+                session_url,
+            } => {
+                if self.deleted_files.contains(&id) {
+                    return;
+                }
+                if self.session_has_skipped_file(&session_url, &name) {
+                    return;
+                }
+                self.ensure_core_file(&id, &source_url, &name, size, count_toward_progress);
+                self.session_register_queued_file(&session_url, &name, size);
+            }
+            DownloadEvent::UrlResolved { url } => {
+                let _ = self.drop_overlay_file(&url);
+                self.session_set_url_status(&url, UrlStatus::Fetched);
+                self.recompute_totals();
+            }
+            DownloadEvent::StatusMessage(message) => {
+                log::info!("Status: {message}");
+                self.set_status_message(message);
+            }
+            DownloadEvent::UrlsReceived { urls } => {
+                self.handle_ui_action(UiAction::AddUrls(urls));
+            }
+        }
+    }
+
+    pub(crate) fn drain_download_events(
+        &mut self,
+        download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
+    ) {
+        while let Ok(event) = download_rx.try_recv() {
+            self.handle_download_event(event);
+        }
+    }
+
+    pub(crate) fn drain_token_messages(&mut self) {
+        while let Ok(msg) = self.token_rx.try_recv() {
+            self.cancellation_tokens.insert(msg.file_id, msg.token);
+        }
+    }
+
+    pub(crate) fn log_progress_summary(&mut self) {
+        self.update_speeds();
+        if self.files_total == 0 {
+            return;
+        }
+        let pct = if self.total_size > 0 {
+            self.total_downloaded * 100 / self.total_size
+        } else {
+            0
+        };
+        if pct > 0 && pct < 100 {
+            log::info!(
+                "[progress] {}/{} files, {} / {} ({}%), {}/s",
+                self.files_completed,
+                self.files_total,
+                format_bytes(self.total_downloaded),
+                format_bytes(self.total_size),
+                pct,
+                format_bytes(self.current_speed),
+            );
+        }
+    }
+
+    pub(crate) fn refresh_resource_usage(&mut self, sys: &mut System, pid: Option<sysinfo::Pid>) {
+        if let Some(pid) = pid {
+            sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
+            if let Some(proc) = sys.process(pid) {
+                self.cpu_usage = proc.cpu_usage();
+                self.memory_rss = proc.memory();
+            }
+        }
+    }
+
+    pub(crate) fn publish_snapshot_if_observed(&self, state_tx: &watch::Sender<String>) -> bool {
+        if state_tx.receiver_count() > 1 {
+            state_tx.send_replace(self.to_json());
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn handle_terminal_tick(
+        &mut self,
+        download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
+        action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
+        tick_count: u32,
+        sys: &mut System,
+        pid: Option<sysinfo::Pid>,
+    ) {
+        if tick_count.is_multiple_of(50) {
+            self.refresh_resource_usage(sys, pid);
+        }
+
+        self.drain_download_events(download_rx);
+        self.update_speeds();
+        if tick_count.is_multiple_of(50) {
+            self.log_progress_summary();
+        }
+        self.drain_token_messages();
+        let _ = self.drain_ui_actions(action_rx);
+    }
+
+    pub(crate) async fn run_headless_until_shutdown<F>(
+        &mut self,
+        download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
+        shutdown: F,
+    ) where
+        F: Future<Output = ()>,
+    {
+        let mut progress_interval = tokio::time::interval(Duration::from_secs(30));
+        progress_interval.tick().await;
+
+        tokio::pin!(shutdown);
+
+        loop {
+            tokio::select! {
+                () = &mut shutdown => break,
+                event = download_rx.recv() => {
+                    if let Some(evt) = event {
+                        self.handle_download_event(evt);
+                    } else {
+                        log::warn!("Event channel closed");
+                        break;
+                    }
+                }
+                _ = progress_interval.tick() => {
+                    self.log_progress_summary();
+                }
+            }
+
+            self.drain_download_events(download_rx);
+            self.drain_token_messages();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn run_web_until_shutdown<F>(
+        &mut self,
+        download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
+        action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
+        state_tx: &watch::Sender<String>,
+        shutdown: F,
+    ) where
+        F: Future<Output = ()>,
+    {
+        let mut progress_interval = tokio::time::interval(Duration::from_secs(30));
+        progress_interval.tick().await;
+
+        let mut fast_tick = tokio::time::interval(Duration::from_millis(100));
+        fast_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let mut resource_tick = tokio::time::interval(Duration::from_secs(5));
+        resource_tick.tick().await;
+        let mut sys = System::new();
+        let pid = sysinfo::get_current_pid().ok();
+
+        let mut dirty = true;
+
+        tokio::pin!(shutdown);
+
+        loop {
+            tokio::select! {
+                () = &mut shutdown => break,
+                event = download_rx.recv() => {
+                    if let Some(evt) = event {
+                        self.handle_download_event(evt);
+                        self.drain_download_events(download_rx);
+                        self.drain_token_messages();
+                        dirty = true;
+                    } else {
+                        log::warn!("Event channel closed");
+                        break;
+                    }
+                }
+                Some(action) = action_rx.recv() => {
+                    self.handle_ui_action(action);
+                    dirty = true;
+                }
+                _ = fast_tick.tick() => {
+                    self.drain_download_events(download_rx);
+                    self.update_speeds();
+                    self.drain_token_messages();
+                    dirty |= self.drain_ui_actions(action_rx);
+                }
+                _ = resource_tick.tick() => {
+                    self.refresh_resource_usage(&mut sys, pid);
+                    dirty = true;
+                }
+                _ = progress_interval.tick() => {
+                    self.log_progress_summary();
+                }
+            }
+
+            if dirty && self.publish_snapshot_if_observed(state_tx) {
+                dirty = false;
+            }
+        }
+    }
+
     pub(crate) fn reset_aggregate_rate(&mut self) {
         self.current_speed = 0;
         self.aggregate_rate
             .reset(self.total_network_downloaded, Instant::now());
-    }
-
-    pub(crate) fn record_total_progress(
-        &mut self,
-        bytes_delta: u64,
-        network_bytes_delta: u64,
-        now: Instant,
-    ) {
-        self.total_downloaded = self.total_downloaded.saturating_add(bytes_delta);
-        self.total_network_downloaded = self
-            .total_network_downloaded
-            .saturating_add(network_bytes_delta);
-        let _ = now;
     }
 
     pub fn set_paused(&mut self, paused: bool) {
@@ -957,12 +2027,9 @@ impl App {
                 });
             } else if let Some(file) = self.overlay_file_mut(&file_id) {
                 file.status = FileStatus::Queued;
-                file.reset_rate();
                 self.sync_visible_files();
             }
-            if let Some(file) = self.find_file_mut(&file_id) {
-                file.reset_rate();
-            }
+            self.reset_file_ui_rate(&file_id);
         }
         self.reset_aggregate_rate();
         self.status = "Paused".to_string();
@@ -992,6 +2059,16 @@ impl App {
         }
 
         #[derive(Serialize)]
+        struct SnapshotFile<'a> {
+            id: &'a str,
+            name: &'a str,
+            size: u64,
+            downloaded: u64,
+            speed: u64,
+            status: &'a FileStatus,
+        }
+
+        #[derive(Serialize)]
         struct Snapshot<'a> {
             authenticated: bool,
             paused: bool,
@@ -999,7 +2076,7 @@ impl App {
             login_error: Option<&'a str>,
             popup: Popup,
             packages: Vec<serde_json::Value>,
-            files: &'a [FileEntry],
+            files: Vec<SnapshotFile<'a>>,
             total_downloaded: u64,
             total_size: u64,
             files_completed: usize,
@@ -1038,7 +2115,18 @@ impl App {
             login_error: self.login.error.as_deref(),
             popup: self.popup,
             packages: self.snapshot_packages(),
-            files: &self.files,
+            files: self
+                .files
+                .iter()
+                .map(|file| SnapshotFile {
+                    id: &file.id,
+                    name: &file.name,
+                    size: file.size,
+                    downloaded: file.downloaded,
+                    speed: self.file_speed(&file.id),
+                    status: &file.status,
+                })
+                .collect(),
             total_downloaded: self.total_downloaded,
             total_size: self.total_size,
             files_completed: self.files_completed,
@@ -1072,6 +2160,7 @@ pub enum UiAction {
     TogglePause,
     DeleteFile(String),
     RetryFile(String),
+    ResetFile(String),
     UpdateConfig {
         chunks_per_file: Option<usize>,
         concurrent_files: Option<usize>,
@@ -1090,6 +2179,12 @@ pub enum UiAction {
 pub struct SharedAppState {
     pub action_tx: mpsc::UnboundedSender<UiAction>,
     pub state_rx: watch::Receiver<String>,
+}
+
+pub(crate) struct SharedStateChannels {
+    pub action_rx: mpsc::UnboundedReceiver<UiAction>,
+    pub state_tx: watch::Sender<String>,
+    pub shared_state: Option<SharedAppState>,
 }
 
 #[cfg(test)]
@@ -1224,12 +2319,17 @@ mod tests {
             name: "file.bin".to_string(),
             size: 128,
             downloaded: 64,
-            speed: 32,
-            rate: Default::default(),
             source_url: Some("https://mega.nz/file/abc".to_string()),
             counts_toward_progress: true,
             status: FileStatus::Downloading,
         });
+        app.file_ui.insert(
+            "stable/file.bin".to_string(),
+            FileUiState {
+                speed: 32,
+                rate: Default::default(),
+            },
+        );
         app.cpu_usage = 12.5;
         app.memory_rss = 4096;
         app.recompute_totals();
@@ -1240,7 +2340,10 @@ mod tests {
 
         assert_eq!(file["id"], "stable/file.bin");
         assert_eq!(file["status"], "downloading");
-        assert_eq!(snapshot["packages"][0]["source_url"], "https://mega.nz/file/abc");
+        assert_eq!(
+            snapshot["packages"][0]["source_url"],
+            "https://mega.nz/file/abc"
+        );
         assert_eq!(snapshot["total_downloaded"], 64);
         assert_eq!(snapshot["total_size"], 128);
         assert_eq!(snapshot["run_totals"]["run_total_bytes"], 128);
@@ -1281,8 +2384,6 @@ mod tests {
             name: "file.bin".to_string(),
             size: 2_000,
             downloaded: 1_000,
-            speed: 0,
-            rate: Default::default(),
             source_url: None,
             counts_toward_progress: true,
             status: FileStatus::Downloading,
@@ -1291,7 +2392,8 @@ mod tests {
         app.total_network_downloaded = 1_000;
         app.aggregate_rate.reset(1_000, start);
 
-        app.record_total_progress(100, 100, start + Duration::from_secs(1));
+        app.total_downloaded = app.total_downloaded.saturating_add(100);
+        app.total_network_downloaded = app.total_network_downloaded.saturating_add(100);
         app.update_speeds_at(start + Duration::from_secs(1));
 
         assert!((95..=105).contains(&app.current_speed));
@@ -1306,8 +2408,6 @@ mod tests {
             name: "file.bin".to_string(),
             size: 2_000,
             downloaded: 1_000,
-            speed: 0,
-            rate: Default::default(),
             source_url: None,
             counts_toward_progress: true,
             status: FileStatus::Downloading,
@@ -1315,7 +2415,7 @@ mod tests {
         app.total_downloaded = 1_000;
         app.aggregate_rate.reset(0, start);
 
-        app.record_total_progress(1_000, 0, start + Duration::from_secs(1));
+        app.total_downloaded = app.total_downloaded.saturating_add(1_000);
         app.update_speeds_at(start + Duration::from_secs(1));
 
         assert_eq!(app.current_speed, 0);
@@ -1324,22 +2424,26 @@ mod tests {
 
     #[test]
     fn record_progress_caps_downloaded_at_file_size() {
-        let mut file = FileEntry {
+        let mut app = test_app();
+        let file = FileEntry {
             id: "file.bin".to_string(),
             name: "file.bin".to_string(),
             size: 100,
             downloaded: 90,
-            speed: 0,
-            rate: Default::default(),
             source_url: None,
             counts_toward_progress: true,
             status: FileStatus::Downloading,
         };
+        let now = Instant::now();
 
-        let accepted = file.record_progress(25, Instant::now());
+        app.file_ui
+            .insert("file.bin".to_string(), FileUiState::default());
+        app.files.push(file.clone());
+        app.files[0].downloaded = 100;
+        let accepted = app.update_file_ui_progress("file.bin", 90, now);
 
         assert_eq!(accepted, 10);
-        assert_eq!(file.downloaded, 100);
+        assert!(app.file_speed("file.bin") <= u64::MAX);
     }
 
     #[test]
@@ -1445,5 +2549,42 @@ mod tests {
                 .status,
             FileStatus::Queued
         );
+    }
+
+    #[test]
+    fn sync_visible_files_prunes_stale_file_ui_state() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "pkg".to_string(),
+                source_url: "https://mega.nz/file/test".to_string(),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "kept.bin".to_string(),
+                    path: "kept.bin".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        app.file_ui.insert(
+            "kept.bin".to_string(),
+            FileUiState {
+                speed: 42,
+                rate: Default::default(),
+            },
+        );
+        app.file_ui.insert(
+            "stale.bin".to_string(),
+            FileUiState {
+                speed: 99,
+                rate: Default::default(),
+            },
+        );
+
+        app.sync_visible_files();
+
+        assert!(app.file_ui.contains_key("kept.bin"));
+        assert!(!app.file_ui.contains_key("stale.bin"));
     }
 }
