@@ -15,7 +15,7 @@ use dirs;
 
 #[cfg(test)]
 use super::app::{FileEntry, FileStatus};
-use super::event::{DownloadChannels, DownloadEvent, TokenMessage, TuiProgress};
+use super::event::{DownloadChannels, DownloadEvent, QueuedFile, TokenMessage, TuiProgress};
 
 pub(crate) fn schedule_resume_artifact_delete(path: String) {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -88,7 +88,6 @@ struct ResolvedUrl {
 
 struct QueuedDownload {
     id: String,
-    name: String,
     source_url: String,
     session_url: String,
     item: crate::OwnedDownloadItem,
@@ -453,17 +452,16 @@ mod tests {
             status: FileStatus::Error("stale error".to_string()),
         });
 
-        app.handle_download_event(DownloadEvent::FileQueued {
+        app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
             id: "file-id".to_string(),
-            name: "new-name.mkv".to_string(),
             size: 128,
             count_toward_progress: true,
             source_url: "https://mega.nz/file/new".to_string(),
             session_url: "https://mega.nz/folder/root".to_string(),
-        });
+        }));
 
         let file = app.files.iter().find(|file| file.id == "file-id").unwrap();
-        assert_eq!(file.name, "new-name.mkv");
+        assert_eq!(file.name, "file-id");
         assert_eq!(file.size, 128);
         assert_eq!(file.source_url.as_deref(), Some("https://mega.nz/file/new"));
         assert_eq!(file.status, FileStatus::Queued);
@@ -493,14 +491,13 @@ mod tests {
         });
         app.session = Some(session);
 
-        app.handle_download_event(DownloadEvent::FileQueued {
+        app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
             id: "episode.mkv".to_string(),
-            name: "episode.mkv".to_string(),
             size: 128,
             count_toward_progress: true,
             source_url: "https://mega.nz/file/root".to_string(),
             session_url: "https://mega.nz/file/root".to_string(),
-        });
+        }));
 
         assert!(app.files.is_empty());
         let session = app.session.as_ref().expect("session should remain");
@@ -594,14 +591,13 @@ mod tests {
         });
         app.recompute_totals();
 
-        app.handle_download_event(DownloadEvent::FileQueued {
+        app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
             id: "episode.mkv".to_string(),
-            name: "episode.mkv".to_string(),
             size: 128,
             count_toward_progress: false,
             source_url: "https://mega.nz/file/root".to_string(),
             session_url: "https://mega.nz/file/root".to_string(),
-        });
+        }));
         app.handle_download_event(DownloadEvent::FileComplete {
             id: "episode.mkv".to_string(),
             name: "episode.mkv".to_string(),
@@ -772,7 +768,7 @@ async fn download_batch(
             let prog: Arc<dyn DownloadProgress> = Arc::new(FileProgress {
                 tx: event_tx.clone(),
                 id: item.id.clone(),
-                name: item.name.clone(),
+                name: item.id.clone(),
             });
             let result = dl
                 .download_file(&item.item.node, &item.item.path, &prog, Some(cancel_token))
@@ -780,10 +776,10 @@ async fn download_batch(
             if matches!(result, Err(crate::Error::Cancelled)) && *pause_rx_for_task.borrow() {
                 let _ = event_tx.send(DownloadEvent::FileCancelled {
                     id: item.id.clone(),
-                    name: item.name.clone(),
+                    name: item.id.clone(),
                 });
             }
-            (item.id, item.name, result)
+            (item.id.clone(), item.id, result)
         });
     }
 
@@ -853,7 +849,6 @@ async fn collect_queued_items(
             }
             Some(QueuedDownload {
                 id: item.path.clone(),
-                name: item.path.clone(),
                 source_url: resolved.url.clone(),
                 session_url: resolved.session_url.clone(),
                 item,
@@ -866,7 +861,6 @@ async fn collect_queued_items(
             }
             Some(QueuedDownload {
                 id: item.path.clone(),
-                name: item.path.clone(),
                 source_url: resolved.url.clone(),
                 session_url: resolved.session_url.clone(),
                 item,
@@ -920,28 +914,26 @@ fn send_collection_events(
 
     // Queue all files so they appear in the list immediately
     for item in all_queued_items {
-        let _ = event_tx.send(DownloadEvent::FileQueued {
+        let _ = event_tx.send(DownloadEvent::FileQueued(QueuedFile {
             id: item.id.clone(),
-            name: item.name.clone(),
             size: item.item.node.size(),
             count_toward_progress: true,
             source_url: item.source_url.clone(),
             session_url: item.session_url.clone(),
-        });
+        }));
     }
 
     for item in all_completed_items {
-        let _ = event_tx.send(DownloadEvent::FileQueued {
+        let _ = event_tx.send(DownloadEvent::FileQueued(QueuedFile {
             id: item.id.clone(),
-            name: item.name.clone(),
             size: item.item.node.size(),
             count_toward_progress: false,
             source_url: item.source_url.clone(),
             session_url: item.session_url.clone(),
-        });
+        }));
         let _ = event_tx.send(DownloadEvent::FileComplete {
             id: item.id.clone(),
-            name: item.name.clone(),
+            name: item.id.clone(),
         });
     }
 

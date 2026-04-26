@@ -13,6 +13,15 @@ pub struct TokenMessage {
     pub token: CancellationToken,
 }
 
+#[derive(Debug, Clone)]
+pub struct QueuedFile {
+    pub id: String,
+    pub size: u64,
+    pub count_toward_progress: bool,
+    pub source_url: String,
+    pub session_url: String,
+}
+
 /// Channel endpoints consumed by the background download task.
 pub struct DownloadChannels {
     pub client_rx: Option<tokio::sync::oneshot::Receiver<(mega::Client, reqwest::Client)>>,
@@ -65,14 +74,7 @@ pub enum DownloadEvent {
     UrlQueued {
         url: String,
     },
-    FileQueued {
-        id: String,
-        name: String,
-        size: u64,
-        count_toward_progress: bool,
-        source_url: String,
-        session_url: String,
-    },
+    FileQueued(QueuedFile),
     UrlResolved {
         url: String,
     },

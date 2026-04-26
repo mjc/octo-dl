@@ -1906,21 +1906,20 @@ impl App {
                 }
                 self.queue_url_placeholder(url);
             }
-            DownloadEvent::FileQueued {
-                id,
-                name,
-                size,
-                count_toward_progress,
-                source_url,
-                session_url,
-            } => {
-                if self.deleted_files.contains(&id) {
+            DownloadEvent::FileQueued(file) => {
+                if self.deleted_files.contains(&file.id) {
                     return;
                 }
-                if !self.session_register_queued_file(&session_url, &name, size) {
+                if !self.session_register_queued_file(&file.session_url, &file.id, file.size) {
                     return;
                 }
-                self.ensure_core_file(&id, &source_url, &name, size, count_toward_progress);
+                self.ensure_core_file(
+                    &file.id,
+                    &file.source_url,
+                    &file.id,
+                    file.size,
+                    file.count_toward_progress,
+                );
             }
             DownloadEvent::UrlResolved { url } => {
                 let _ = self.drop_overlay_file(&url);
