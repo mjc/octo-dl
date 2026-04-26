@@ -282,7 +282,9 @@ mod tests {
 
     impl StateDirectoryGuard {
         fn set(path: &Path) -> Self {
-            let lock = crate::core::session::STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
+            let lock = crate::core::session::STATE_DIRECTORY_TEST_LOCK
+                .lock()
+                .unwrap();
             let previous = env::var_os("STATE_DIRECTORY");
             unsafe { env::set_var("STATE_DIRECTORY", path) };
             Self {
@@ -440,7 +442,13 @@ mod tests {
             UrlFixtureStatus::Fetched,
         )]);
         push_file(&mut session, 0, "first.bin", 10, FileFixtureStatus::Pending);
-        push_file(&mut session, 0, "second.bin", 20, FileFixtureStatus::Pending);
+        push_file(
+            &mut session,
+            0,
+            "second.bin",
+            20,
+            FileFixtureStatus::Pending,
+        );
         let session_path = session.state_path();
         app.session = Some(session);
 

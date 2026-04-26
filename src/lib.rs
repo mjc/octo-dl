@@ -43,9 +43,9 @@ pub mod error;
 pub mod format;
 pub mod fs;
 pub(crate) mod progress;
+pub mod stats;
 #[cfg(test)]
 mod test_support;
-pub mod stats;
 pub mod url;
 
 // Re-export main types for convenience
