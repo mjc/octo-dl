@@ -1,6 +1,5 @@
 //! Application state model.
 
-use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
@@ -18,21 +17,22 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     DownloadConfig, SavedCredentials, ServiceConfig, SessionState, UrlEntry, UrlStatus,
     core::{
-        CoreEffect, CoreEvent, DownloadState, FileLifecycle, FileState, PackageState,
-        ProgressDelta, ResolvedFile, ResolvedPackage, RestartSnapshot, SessionMeta,
-        SessionSnapshotV3, reconcile_restart, reduce, scan_filesystem,
+        CoreEffect, CoreEvent, DownloadState, ProgressDelta, ResolvedFile, ResolvedPackage,
+        RestartSnapshot, SessionMeta, SessionSnapshotV3, reconcile_restart, reduce,
+        scan_filesystem,
     },
     format_bytes,
 };
 
 #[cfg(test)]
-use crate::{FileEntry as SessionFileEntry, FileEntryStatus, SessionStatus};
+use crate::{FileEntry as SessionFileEntry, FileEntryStatus, SessionStatus, core::FileLifecycle};
 
 use super::WebOptions;
 use super::api;
 use super::download;
 use super::event::{DownloadEvent, QueuedFile, TokenMessage};
 use super::session::{SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate};
+use super::visible;
 
 const MIN_RATE_SAMPLE_SPAN: Duration = Duration::from_secs(1);
 const THROUGHPUT_DECAY: Duration = Duration::from_secs(30);
@@ -407,15 +407,12 @@ pub struct App {
 
 impl App {
     fn seed_overlay_from_visible(&mut self) {
-        for file in &self.files {
-            if !self.core_state.files.contains_key(&file.id)
-                && !self.deleted_files.contains(&file.id)
-            {
-                self.overlay_files
-                    .entry(file.id.clone())
-                    .or_insert_with(|| file.clone());
-            }
-        }
+        visible::seed_overlay_from_visible(
+            &self.files,
+            &self.core_state,
+            &self.deleted_files,
+            &mut self.overlay_files,
+        );
     }
 
     pub(crate) fn file_speed(&self, file_id: &str) -> u64 {
@@ -457,28 +454,6 @@ impl App {
         accepted
     }
 
-    fn package_sort_key_for(&self, file: &FileEntry) -> (usize, String) {
-        if let Some(core_file) = self.core_state.files.get(&file.id) {
-            let package_order = self
-                .core_state
-                .packages
-                .get_index_of(&core_file.package_id)
-                .unwrap_or(usize::MAX);
-            let display_name = self
-                .core_state
-                .packages
-                .get(&core_file.package_id)
-                .map(|package| package.display_name.clone())
-                .unwrap_or_else(|| core_file.package_id.clone());
-            return (package_order, display_name);
-        }
-
-        (
-            usize::MAX,
-            file.source_url.clone().unwrap_or_else(|| file.id.clone()),
-        )
-    }
-
     pub(crate) fn package_label_for_file(&self, file_id: &str) -> Option<String> {
         if let Some(core_file) = self.core_state.files.get(file_id) {
             return self
@@ -497,49 +472,6 @@ impl App {
                     .get(file_id)
                     .and_then(|file| file.source_url.clone())
             })
-    }
-
-    fn project_core_file(
-        file: &FileState,
-        package: Option<&PackageState>,
-        existing: Option<FileEntry>,
-    ) -> Option<FileEntry> {
-        let status = match file.lifecycle {
-            FileLifecycle::Planned | FileLifecycle::Queued => FileStatus::Queued,
-            FileLifecycle::Downloading => FileStatus::Downloading,
-            FileLifecycle::Complete => FileStatus::Complete,
-            FileLifecycle::Failed => {
-                FileStatus::Error(file.message.clone().unwrap_or_else(|| "failed".to_string()))
-            }
-            FileLifecycle::Skipped | FileLifecycle::Deleted => return None,
-        };
-
-        let downloaded = match file.lifecycle {
-            FileLifecycle::Complete => file.size,
-            _ => file.progress.visible_completed_bytes.min(file.size),
-        };
-        let source_url = package.map(|package| package.source_url.clone());
-        let counts_toward_progress =
-            file.runtime.counts_in_run_totals && !file.runtime.preexisting_complete;
-        if let Some(mut existing) = existing {
-            existing.name = file.path.clone();
-            existing.size = file.size;
-            existing.downloaded = downloaded;
-            existing.source_url = source_url;
-            existing.counts_toward_progress = counts_toward_progress;
-            existing.status = status;
-            return Some(existing);
-        }
-
-        Some(FileEntry {
-            id: file.id.clone(),
-            name: file.path.clone(),
-            size: file.size,
-            downloaded,
-            source_url,
-            counts_toward_progress,
-            status,
-        })
     }
 
     fn snapshot_packages(&self) -> Vec<serde_json::Value> {
@@ -597,98 +529,22 @@ impl App {
     }
 
     pub fn sorted_file_indices(&self) -> Vec<usize> {
-        let mut indices: Vec<_> = (0..self.files.len()).collect();
-        indices.sort_by(|&left, &right| {
-            let left_file = &self.files[left];
-            let right_file = &self.files[right];
-            let left_package = self.package_sort_key_for(left_file);
-            let right_package = self.package_sort_key_for(right_file);
-
-            match left_package.cmp(&right_package) {
-                Ordering::Equal => {}
-                other => return other,
-            }
-
-            let left_rank = match &left_file.status {
-                FileStatus::Downloading => 0,
-                FileStatus::Queued => 1,
-                FileStatus::Complete => 2,
-                FileStatus::Error(_) => 3,
-            };
-            let right_rank = match &right_file.status {
-                FileStatus::Downloading => 0,
-                FileStatus::Queued => 1,
-                FileStatus::Complete => 2,
-                FileStatus::Error(_) => 3,
-            };
-            left_rank
-                .cmp(&right_rank)
-                .then_with(|| left_file.name.cmp(&right_file.name))
-                .then_with(|| left_file.id.cmp(&right_file.id))
-        });
-        indices
+        visible::sorted_file_indices(&self.files, &self.core_state)
     }
 
     pub fn selected_file_index(&self) -> Option<usize> {
-        let selected = self.file_list_state.selected()?;
-        self.sorted_file_indices().get(selected).copied()
+        visible::selected_file_index(&self.file_list_state, &self.files, &self.core_state)
     }
 
     pub(crate) fn sync_visible_files(&mut self) {
-        let selected_id = self
-            .selected_file_index()
-            .map(|index| self.files[index].id.clone());
-        let selected_row = self.file_list_state.selected().unwrap_or(0);
-        let core_file_ids: HashSet<_> = self.core_state.files.keys().cloned().collect();
-        let existing: IndexMap<_, _> = std::mem::take(&mut self.files)
-            .into_iter()
-            .map(|file| (file.id.clone(), file))
-            .collect();
-
-        let mut existing = existing;
-        for (id, file) in &existing {
-            if !core_file_ids.contains(id) && !self.deleted_files.contains(id) {
-                self.overlay_files
-                    .entry(id.clone())
-                    .or_insert_with(|| file.clone());
-            }
-        }
-        let mut files = Vec::new();
-        for file in self.core_state.files.values() {
-            let package = self.core_state.packages.get(&file.package_id);
-            let existing = existing.shift_remove(&file.id);
-            if let Some(entry) = Self::project_core_file(file, package, existing) {
-                files.push(entry);
-            }
-        }
-
-        for (id, entry) in &self.overlay_files {
-            if !core_file_ids.contains(id) && !self.deleted_files.contains(id) {
-                files.push(entry.clone());
-            }
-        }
-
-        self.files = files;
-        let visible_ids: HashSet<_> = self.files.iter().map(|file| file.id.clone()).collect();
-        self.file_ui
-            .retain(|file_id, _| visible_ids.contains(file_id));
-        if let Some(selected_id) = selected_id {
-            if let Some(display_row) = self
-                .sorted_file_indices()
-                .into_iter()
-                .position(|index| self.files[index].id == selected_id)
-            {
-                self.file_list_state.select(Some(display_row));
-                return;
-            }
-        }
-
-        if self.files.is_empty() {
-            self.file_list_state.select(None);
-        } else {
-            self.file_list_state
-                .select(Some(selected_row.min(self.files.len() - 1)));
-        }
+        visible::sync_visible_files(
+            &mut self.files,
+            &mut self.overlay_files,
+            &mut self.file_ui,
+            &mut self.file_list_state,
+            &self.core_state,
+            &self.deleted_files,
+        );
     }
 
     pub(crate) fn upsert_overlay_file(&mut self, file: FileEntry) {

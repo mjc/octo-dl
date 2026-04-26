@@ -9,6 +9,7 @@ mod input;
 mod session;
 mod terminal;
 mod terminal_server;
+mod visible;
 pub mod web;
 
 use std::io;
