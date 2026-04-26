@@ -4,7 +4,11 @@ use std::time::Duration;
 use sysinfo::{ProcessesToUpdate, System};
 use tokio::sync::{mpsc, watch};
 
-use crate::{DownloadConfig, SavedCredentials, SessionState, UrlEntry, UrlStatus, format_bytes};
+use crate::{
+    DownloadConfig,
+    core::{PackageSnapshot, SavedCredentials, SessionSnapshotV3},
+    format_bytes,
+};
 
 use super::{App, DownloadEvent, FileEntry, FileStatus, UiAction};
 
@@ -63,20 +67,21 @@ impl App {
         let email = self.login.email().to_owned();
         let password = self.login.password().to_owned();
         let mfa = self.login.mfa_option().map(str::to_owned);
-        let url_entries: Vec<UrlEntry> = self
+        let mut session = SessionSnapshotV3::new(
+            config.clone(),
+            SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
+        );
+        session.packages = self
             .urls
             .iter()
-            .map(|url| UrlEntry {
-                url: url.clone(),
-                status: UrlStatus::Pending,
+            .map(|url| PackageSnapshot {
+                id: url.clone(),
+                source_url: url.clone(),
+                display_name: url.clone(),
+                file_ids: Vec::new(),
+                error: None,
             })
             .collect();
-
-        let session = SessionState::new(
-            SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
-            config.clone(),
-            url_entries,
-        );
         self.save_and_install_session(session);
     }
 

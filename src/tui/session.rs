@@ -1,10 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{
-    FileEntry as SessionFileEntry, FileEntryStatus, SessionState, SessionStatus, UrlEntry,
-    UrlStatus,
-    core::{FileLifecycle, FileState, RestartSnapshot, SessionMeta},
-    file_key,
+use crate::core::{
+    DesiredState, FileLifecycle, FileProgressState, FileSnapshot, RuntimeState, SessionMeta,
+    SessionRunStatus, SessionSnapshotV3,
 };
 
 pub(super) enum SessionFileUpdate<'a> {
@@ -28,22 +26,37 @@ pub(super) enum SessionRunUpdate {
 pub(super) struct SessionAdapter;
 
 impl SessionAdapter {
-    pub(super) fn contains_url(session: &SessionState, url: &str) -> bool {
-        session.urls.iter().any(|entry| entry.url == url)
+    pub(super) fn contains_url(session: &SessionSnapshotV3, url: &str) -> bool {
+        session
+            .packages
+            .iter()
+            .any(|package| package.source_url == url)
     }
 
-    pub(super) fn merge_state(session: &mut SessionState, next: SessionState) {
+    pub(super) fn merge_state(session: &mut SessionSnapshotV3, next: SessionSnapshotV3) {
         session.id = next.id;
         session.created = next.created;
         session.status = next.status;
         session.config = next.config;
         session.credentials = next.credentials;
 
+        for next_package in next.packages {
+            if let Some(existing) = session
+                .packages
+                .iter_mut()
+                .find(|package| package.id == next_package.id)
+            {
+                *existing = next_package;
+            } else {
+                session.packages.push(next_package);
+            }
+        }
+
         let mut merged_files = session.files.clone();
         for next_file in next.files {
             if let Some(existing) = merged_files
                 .iter_mut()
-                .find(|file| file.path == next_file.path || file.key == next_file.key)
+                .find(|file| file.id == next_file.id || file.path == next_file.path)
             {
                 *existing = next_file;
             } else {
@@ -51,47 +64,26 @@ impl SessionAdapter {
             }
         }
         session.files = merged_files;
-
-        for url in next.urls {
-            if !session.urls.iter().any(|entry| entry.url == url.url) {
-                session.urls.push(url);
-            }
-        }
     }
 
-    pub(super) fn url_index(session: &SessionState, submitted_url: &str) -> usize {
-        session
-            .urls
-            .iter()
-            .position(|entry| entry.url == submitted_url)
-            .unwrap_or(0)
-    }
-
-    pub(super) fn update_url(session: &mut SessionState, url: &str, update: SessionUrlUpdate<'_>) {
+    pub(super) fn update_url(
+        session: &mut SessionSnapshotV3,
+        url: &str,
+        update: SessionUrlUpdate<'_>,
+    ) {
+        let package = Self::ensure_package(session, url);
         match update {
-            SessionUrlUpdate::Pending => {
-                if !Self::contains_url(session, url) {
-                    session.urls.push(UrlEntry {
-                        url: url.to_string(),
-                        status: UrlStatus::Pending,
-                    });
-                }
-            }
-            SessionUrlUpdate::Fetched => {
-                if let Some(entry) = session.urls.iter_mut().find(|entry| entry.url == url) {
-                    entry.status = UrlStatus::Fetched;
-                }
+            SessionUrlUpdate::Pending | SessionUrlUpdate::Fetched => {
+                package.error = None;
             }
             SessionUrlUpdate::Error(error) => {
-                if let Some(entry) = session.urls.iter_mut().find(|entry| entry.url == url) {
-                    entry.status = UrlStatus::Error(error.to_string());
-                }
+                package.error = Some(error.to_string());
             }
         }
     }
 
     pub(super) fn update_file(
-        session: &mut SessionState,
+        session: &mut SessionSnapshotV3,
         file_id: &str,
         update: SessionFileUpdate<'_>,
     ) {
@@ -108,43 +100,41 @@ impl SessionAdapter {
         }
     }
 
-    pub(super) fn meta(session: &SessionState) -> SessionMeta {
+    pub(super) fn meta(session: &SessionSnapshotV3) -> SessionMeta {
         SessionMeta {
             session_id: session.id.clone(),
             created: session.created,
-            status: match session.status {
-                SessionStatus::InProgress => crate::core::SessionRunStatus::InProgress,
-                SessionStatus::Completed => crate::core::SessionRunStatus::Completed,
-                SessionStatus::Paused => crate::core::SessionRunStatus::Paused,
-            },
+            status: session.status,
             config: session.config.clone(),
-            credentials: crate::core::SavedCredentials {
-                email: session.credentials.email.clone(),
-                password: session.credentials.password.clone(),
-                mfa: session.credentials.mfa.clone(),
-            },
+            credentials: session.credentials.clone(),
         }
     }
 
-    pub(super) fn skipped_paths_by_url(session: &SessionState) -> HashMap<String, HashSet<String>> {
+    pub(super) fn skipped_paths_by_url(
+        session: &SessionSnapshotV3,
+    ) -> HashMap<String, HashSet<String>> {
+        let package_urls: HashMap<_, _> = session
+            .packages
+            .iter()
+            .map(|package| (package.id.clone(), package.source_url.clone()))
+            .collect();
         let mut skipped = HashMap::<String, HashSet<String>>::new();
         for file in &session.files {
-            if !matches!(file.status, FileEntryStatus::Skipped) {
+            if !matches!(file.lifecycle, FileLifecycle::Skipped) {
                 continue;
             }
-            let Some(url) = session
-                .urls
-                .get(file.url_index)
-                .map(|entry| entry.url.clone())
-            else {
+            let Some(url) = package_urls.get(&file.package_id) else {
                 continue;
             };
-            skipped.entry(url).or_default().insert(file.path.clone());
+            skipped
+                .entry(url.clone())
+                .or_default()
+                .insert(file.path.clone());
         }
         skipped
     }
 
-    pub(super) fn apply_run_update(session: &mut SessionState, update: SessionRunUpdate) {
+    pub(super) fn apply_run_update(session: &mut SessionSnapshotV3, update: SessionRunUpdate) {
         match update {
             SessionRunUpdate::Completed => {
                 let _ = session.mark_completed();
@@ -156,72 +146,66 @@ impl SessionAdapter {
     }
 
     pub(super) fn apply_restart(
-        session: &mut SessionState,
-        restart: &RestartSnapshot,
+        session: &mut SessionSnapshotV3,
+        restart: &crate::core::RestartSnapshot,
     ) -> Vec<String> {
         let resumed_urls = restart.resumable_urls();
         let resumed_url_set: HashSet<_> = resumed_urls.iter().cloned().collect();
-        for entry in &mut session.urls {
-            if !matches!(entry.status, UrlStatus::Error(_)) {
-                entry.status = if resumed_url_set.contains(&entry.url) {
-                    UrlStatus::Pending
-                } else {
-                    UrlStatus::Fetched
-                };
+
+        for package in &mut session.packages {
+            if resumed_url_set.contains(&package.source_url) {
+                package.error = None;
             }
         }
+
+        for package in restart.state.packages.values() {
+            if let Some(existing) = session
+                .packages
+                .iter_mut()
+                .find(|entry| entry.id == package.id)
+            {
+                existing.display_name = package.display_name.clone();
+                existing.source_url = package.source_url.clone();
+                existing.file_ids = package.file_ids.clone();
+                if resumed_url_set.contains(&existing.source_url) {
+                    existing.error = None;
+                }
+            } else {
+                session.packages.push(crate::core::PackageSnapshot {
+                    id: package.id.clone(),
+                    source_url: package.source_url.clone(),
+                    display_name: package.display_name.clone(),
+                    file_ids: package.file_ids.clone(),
+                    error: None,
+                });
+            }
+        }
+
         session.files = restart
             .state
             .files
             .values()
-            .map(|file| Self::restart_file_entry(session, restart, file))
+            .map(Self::snapshot_file_from_state)
             .collect();
         resumed_urls
     }
 
-    fn restart_file_entry(
-        session: &SessionState,
-        restart: &RestartSnapshot,
-        file: &FileState,
-    ) -> SessionFileEntry {
-        let url_index = session
-            .urls
-            .iter()
-            .position(|entry| {
-                restart
-                    .state
-                    .packages
-                    .get(&file.package_id)
-                    .is_some_and(|package| package.source_url == entry.url)
-            })
-            .unwrap_or(0);
-        SessionFileEntry {
-            key: Some(file.id.clone()),
-            url_index,
-            path: file.path.clone(),
-            size: file.size,
-            status: match file.lifecycle {
-                FileLifecycle::Planned | FileLifecycle::Queued => FileEntryStatus::Pending,
-                FileLifecycle::Downloading => FileEntryStatus::Downloading,
-                FileLifecycle::Complete => FileEntryStatus::Completed,
-                FileLifecycle::Skipped | FileLifecycle::Deleted => FileEntryStatus::Skipped,
-                FileLifecycle::Failed => FileEntryStatus::Error(
-                    file.message.clone().unwrap_or_else(|| "failed".to_string()),
-                ),
-            },
-        }
-    }
-
-    pub(super) fn sync_for_shutdown(session: &mut SessionState, visible: &HashSet<String>) {
-        if session.status == SessionStatus::Completed {
+    pub(super) fn sync_for_shutdown(session: &mut SessionSnapshotV3, visible: &HashSet<String>) {
+        if session.status == SessionRunStatus::Completed {
             return;
         }
 
         session.files.retain(|file| {
-            matches!(file.status, FileEntryStatus::Skipped)
+            matches!(file.lifecycle, FileLifecycle::Skipped)
                 || visible.contains(file.path.as_str())
-                || visible.contains(file.key_or_path())
+                || visible.contains(file.id.as_str())
         });
+
+        for package in &mut session.packages {
+            package
+                .file_ids
+                .retain(|file_id| session.files.iter().any(|file| &file.id == file_id));
+        }
 
         if session.files.is_empty() {
             Self::apply_run_update(session, SessionRunUpdate::Completed);
@@ -232,38 +216,90 @@ impl SessionAdapter {
     }
 
     pub(super) fn register_queued_file(
-        session: &mut SessionState,
+        session: &mut SessionSnapshotV3,
         submitted_url: &str,
         path: &str,
         size: u64,
     ) -> bool {
-        let url_index = Self::url_index(session, submitted_url);
-        let stable_key = file_key(url_index, path);
-
+        let package_id = {
+            let package = Self::ensure_package(session, submitted_url);
+            package.id.clone()
+        };
         if let Some(file) = session
             .files
             .iter_mut()
-            .find(|file| file.url_index == url_index && file.path == path)
+            .find(|file| file.package_id == package_id && file.path == path)
         {
-            if matches!(file.status, FileEntryStatus::Skipped) {
-                if file.key.is_none() {
-                    file.key = Some(stable_key);
-                }
+            if matches!(file.lifecycle, FileLifecycle::Skipped) {
                 return false;
-            }
-            if file.key.is_none() {
-                file.key = Some(stable_key);
             }
             return true;
         }
 
-        session.files.push(SessionFileEntry {
-            key: Some(stable_key),
-            url_index,
+        let file_id = path.to_string();
+        if let Some(package) = session
+            .packages
+            .iter_mut()
+            .find(|package| package.id == package_id)
+            && !package.file_ids.contains(&file_id)
+        {
+            package.file_ids.push(file_id.clone());
+        }
+        session.files.push(FileSnapshot {
+            id: file_id,
+            package_id,
             path: path.to_string(),
             size,
-            status: FileEntryStatus::Pending,
+            lifecycle: FileLifecycle::Queued,
+            progress: FileProgressState::default(),
+            desired: DesiredState::Present,
+            runtime: RuntimeState {
+                counts_in_run_totals: true,
+                active: false,
+                preexisting_complete: false,
+                reused_chunks: 0,
+            },
+            message: None,
         });
         true
+    }
+
+    fn ensure_package<'a>(
+        session: &'a mut SessionSnapshotV3,
+        submitted_url: &str,
+    ) -> &'a mut crate::core::PackageSnapshot {
+        if let Some(index) = session
+            .packages
+            .iter()
+            .position(|package| package.source_url == submitted_url)
+        {
+            return &mut session.packages[index];
+        }
+
+        session.packages.push(crate::core::PackageSnapshot {
+            id: submitted_url.to_string(),
+            source_url: submitted_url.to_string(),
+            display_name: submitted_url.to_string(),
+            file_ids: Vec::new(),
+            error: None,
+        });
+        session
+            .packages
+            .last_mut()
+            .expect("package was just pushed")
+    }
+
+    fn snapshot_file_from_state(file: &crate::core::FileState) -> FileSnapshot {
+        FileSnapshot {
+            id: file.id.clone(),
+            package_id: file.package_id.clone(),
+            path: file.path.clone(),
+            size: file.size,
+            lifecycle: file.lifecycle,
+            progress: file.progress.clone(),
+            desired: file.desired,
+            runtime: file.runtime.clone(),
+            message: file.message.clone(),
+        }
     }
 }

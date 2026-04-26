@@ -3,9 +3,10 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
+use crate::state::SavedCredentials as LegacySavedCredentials;
 use crate::{
-    DownloadConfig, FileEntry as SessionFileEntry, FileEntryStatus, SavedCredentials,
-    SessionStatus, UrlEntry, UrlStatus,
+    DownloadConfig, FileEntry as SessionFileEntry, FileEntryStatus, SessionState, SessionStatus,
+    UrlEntry, UrlStatus,
     core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage},
 };
 
@@ -263,7 +264,7 @@ fn record_progress_caps_downloaded_at_file_size() {
 fn skipped_session_paths_groups_only_skipped_files_by_url() {
     let mut app = test_app();
     let mut session = SessionState::new(
-        SavedCredentials::encrypt("test@example.com", "hunter2", None),
+        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
         DownloadConfig::default(),
         vec![
             UrlEntry {
@@ -299,7 +300,7 @@ fn skipped_session_paths_groups_only_skipped_files_by_url() {
             status: FileEntryStatus::Pending,
         },
     ];
-    app.session = Some(session);
+    app.session = Some(session.to_v3());
 
     let skipped = app.skipped_session_paths();
 
@@ -319,7 +320,7 @@ fn skipped_session_paths_groups_only_skipped_files_by_url() {
 fn register_session_queued_file_does_not_revive_skipped_entry() {
     let mut app = test_app();
     let mut session = SessionState::new(
-        SavedCredentials::encrypt("test@example.com", "hunter2", None),
+        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
         DownloadConfig::default(),
         vec![UrlEntry {
             url: "https://mega.nz/file/a".to_string(),
@@ -333,29 +334,35 @@ fn register_session_queued_file_does_not_revive_skipped_entry() {
         size: 1,
         status: FileEntryStatus::Skipped,
     });
-    app.session = Some(session);
+    app.session = Some(session.to_v3());
 
     let should_queue = app.register_session_queued_file("https://mega.nz/file/a", "skip-a.bin", 1);
 
     assert!(!should_queue);
     let session = app.session.as_ref().unwrap();
     assert_eq!(session.files.len(), 1);
-    assert!(matches!(session.files[0].status, FileEntryStatus::Skipped));
-    assert_eq!(session.files[0].key.as_deref(), Some("0:skip-a.bin"));
+    assert!(matches!(
+        session.files[0].lifecycle,
+        crate::core::FileLifecycle::Skipped
+    ));
+    assert_eq!(session.files[0].id, "skip-a.bin");
 }
 
 #[test]
 fn url_resolved_updates_session_status_and_clears_overlay() {
     let mut app = test_app();
     let url = "https://mega.nz/folder/root".to_string();
-    app.session = Some(SessionState::new(
-        SavedCredentials::encrypt("test@example.com", "hunter2", None),
-        DownloadConfig::default(),
-        vec![UrlEntry {
-            url: url.clone(),
-            status: UrlStatus::Pending,
-        }],
-    ));
+    app.session = Some(
+        SessionState::new(
+            LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![UrlEntry {
+                url: url.clone(),
+                status: UrlStatus::Pending,
+            }],
+        )
+        .to_v3(),
+    );
 
     app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
     assert!(app.overlay_files.contains_key(&url));
@@ -364,14 +371,15 @@ fn url_resolved_updates_session_status_and_clears_overlay() {
 
     assert!(!app.overlay_files.contains_key(&url));
     let session = app.session.as_ref().expect("session should remain");
-    assert_eq!(session.urls[0].status, UrlStatus::Fetched);
+    assert_eq!(session.packages[0].source_url, url);
+    assert!(session.packages[0].error.is_none());
 }
 
 #[test]
 fn mark_visible_file_error_updates_session_file_status() {
     let mut app = test_app();
     let mut session = SessionState::new(
-        SavedCredentials::encrypt("test@example.com", "hunter2", None),
+        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
         DownloadConfig::default(),
         vec![UrlEntry {
             url: "https://mega.nz/file/root".to_string(),
@@ -385,21 +393,22 @@ fn mark_visible_file_error_updates_session_file_status() {
         size: 128,
         status: FileEntryStatus::Pending,
     });
-    app.session = Some(session);
+    app.session = Some(session.to_v3());
 
     app.mark_visible_file_error("file-id", "file-id", "network failure");
 
     let session = app.session.as_ref().expect("session should remain");
     assert!(matches!(
-        session.files[0].status,
-        FileEntryStatus::Error(ref msg) if msg == "network failure"
+        session.files[0].lifecycle,
+        crate::core::FileLifecycle::Failed
     ));
+    assert_eq!(session.files[0].message.as_deref(), Some("network failure"));
 }
 
 #[test]
 fn session_adapter_merge_state_updates_matching_files_and_preserves_unmatched_entries() {
     let mut session = SessionState::new(
-        SavedCredentials::encrypt("old@example.com", "hunter2", None),
+        LegacySavedCredentials::encrypt("old@example.com", "hunter2", None),
         DownloadConfig::default(),
         vec![UrlEntry {
             url: "https://mega.nz/file/a".to_string(),
@@ -424,7 +433,7 @@ fn session_adapter_merge_state_updates_matching_files_and_preserves_unmatched_en
     ];
 
     let mut next = SessionState::new(
-        SavedCredentials::encrypt("new@example.com", "hunter2", None),
+        LegacySavedCredentials::encrypt("new@example.com", "hunter2", None),
         DownloadConfig::default(),
         vec![
             UrlEntry {
@@ -455,21 +464,22 @@ fn session_adapter_merge_state_updates_matching_files_and_preserves_unmatched_en
         },
     ];
 
-    SessionAdapter::merge_state(&mut session, next);
+    let mut session = session.to_v3();
+    SessionAdapter::merge_state(&mut session, next.to_v3());
 
-    assert_eq!(session.status, SessionStatus::Paused);
-    assert_eq!(session.urls.len(), 2);
+    assert_eq!(session.status, crate::core::SessionRunStatus::Paused);
+    assert_eq!(session.packages.len(), 2);
     assert!(
         session
-            .urls
+            .packages
             .iter()
-            .any(|entry| entry.url == "https://mega.nz/file/b"),
+            .any(|entry| entry.source_url == "https://mega.nz/file/b"),
         "new URLs should be appended during merge"
     );
     assert_eq!(session.files.len(), 3);
     assert!(
         session.files.iter().any(|file| file.path == "keep.bin"
-            && matches!(file.status, FileEntryStatus::Completed)
+            && matches!(file.lifecycle, crate::core::FileLifecycle::Complete)
             && file.size == 5),
         "matching files should be replaced by the newer snapshot"
     );

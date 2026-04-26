@@ -11,11 +11,14 @@ use futures::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::{
-    DlcKeyCache, DownloadConfig, DownloadItem, DownloadProgress, FileEntry, FileEntryStatus,
-    FileStats, NoProgress, SavedCredentials, SessionState, SessionStats, SessionStatsBuilder,
-    SessionStatus, UrlEntry, UrlStatus,
-    core::{ProgressDelta, RestartSnapshot, reconcile_restart, scan_filesystem},
-    file_key, format_bytes, format_duration, is_dlc_path,
+    DlcKeyCache, DownloadConfig, DownloadItem, DownloadProgress, FileStats, NoProgress,
+    SessionStats, SessionStatsBuilder,
+    core::{
+        DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageSnapshot,
+        ProgressDelta, RestartSnapshot, RuntimeState, SavedCredentials, SessionRunStatus,
+        SessionSnapshotV3, reconcile_restart, scan_filesystem,
+    },
+    format_bytes, format_duration, is_dlc_path,
 };
 
 const DEFAULT_CONCURRENT_FILES: usize = 4;
@@ -262,25 +265,29 @@ fn print_summary(stats: &SessionStats) {
     println!("{SEPARATOR}");
 }
 
-fn build_restart_snapshot(session: &SessionState) -> RestartSnapshot {
+fn build_restart_snapshot(session: &SessionSnapshotV3) -> RestartSnapshot {
     reconcile_restart(
-        Some(session.to_v3()),
+        Some(session.clone()),
         scan_filesystem(session.files.iter().map(|file| file.path.clone())),
-        session.urls.iter().map(|entry| entry.url.clone()).collect(),
+        session
+            .packages
+            .iter()
+            .map(|entry| entry.source_url.clone())
+            .collect(),
     )
 }
 
 #[cfg(test)]
-fn resumable_urls(session: &SessionState) -> Vec<(usize, String)> {
+fn resumable_urls(session: &SessionSnapshotV3) -> Vec<(usize, String)> {
     let restart = build_restart_snapshot(session);
     restart
         .resumable_urls()
         .into_iter()
         .filter_map(|url| {
             session
-                .urls
+                .packages
                 .iter()
-                .position(|entry| entry.url == url)
+                .position(|entry| entry.source_url == url)
                 .map(|idx| (idx, url))
         })
         .collect()
@@ -292,7 +299,7 @@ async fn download_all(
     files: &[DownloadItem<'_>],
     progress: &Arc<CliDownloadProgress>,
     builder: &mut SessionStatsBuilder,
-    mut session_state: Option<&mut SessionState>,
+    mut session_state: Option<&mut SessionSnapshotV3>,
 ) -> crate::Result<()> {
     if files.is_empty() {
         return Ok(());
@@ -452,7 +459,7 @@ pub async fn run() -> crate::Result<()> {
 
     // Check for resumable session
     if config.resume {
-        if let Some(session) = SessionState::latest() {
+        if let Some(session) = SessionSnapshotV3::latest() {
             println!(
                 "Resuming session {} ({} files, {} completed)",
                 session.id,
@@ -464,7 +471,7 @@ pub async fn run() -> crate::Result<()> {
         println!("No resumable session found, starting fresh.");
     } else if config.urls.is_empty() && config.dlc_files.is_empty() {
         // Check if there's a session to resume
-        if let Some(session) = SessionState::latest() {
+        if let Some(session) = SessionSnapshotV3::latest() {
             println!(
                 "Found incomplete session: {} ({} remaining files)",
                 session.id,
@@ -524,21 +531,21 @@ pub async fn run() -> crate::Result<()> {
     let downloader = crate::Downloader::new(client, config.download_config.clone());
     let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
-    // Create session state for persistence
-    let url_entries: Vec<UrlEntry> = config
+    let mut session_state = SessionSnapshotV3::new(
+        config.download_config.clone(),
+        SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
+    );
+    session_state.packages = config
         .urls
         .iter()
-        .map(|url| UrlEntry {
-            url: url.clone(),
-            status: UrlStatus::Pending,
+        .map(|url| PackageSnapshot {
+            id: url.clone(),
+            source_url: url.clone(),
+            display_name: url.clone(),
+            file_ids: Vec::new(),
+            error: None,
         })
         .collect();
-
-    let mut session_state = SessionState::new(
-        SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
-        config.download_config.clone(),
-        url_entries,
-    );
 
     // Phase 1: Fetch all URLs and collect files
     println!("Fetching file lists from {} URL(s)...\n", config.urls.len());
@@ -550,12 +557,16 @@ pub async fn run() -> crate::Result<()> {
                 let collected_tmp = downloader.collect_files(&nodes, &no_progress).await;
                 let file_count = collected_tmp.to_download.len() + collected_tmp.skipped;
                 println!("{file_count} file(s)");
-                session_state.urls[idx].status = UrlStatus::Fetched;
+                if let Some(package) = session_state.packages.get_mut(idx) {
+                    package.error = None;
+                }
                 all_nodes.push((idx, url.clone(), nodes));
             }
             Err(e) => {
                 println!("ERROR: {e:?}");
-                session_state.urls[idx].status = UrlStatus::Error(e.to_string());
+                if let Some(package) = session_state.packages.get_mut(idx) {
+                    package.error = Some(e.to_string());
+                }
             }
         }
     }
@@ -566,18 +577,31 @@ pub async fn run() -> crate::Result<()> {
         let collected = downloader.collect_files(nodes, &no_progress).await;
 
         let mut files = Vec::new();
-        // Record files in session state
-        for item in &collected.to_download {
-            session_state.files.push(FileEntry {
-                key: Some(file_key(*url_idx, &item.path)),
-                url_index: *url_idx,
-                path: item.path.clone(),
-                size: item.node.size(),
-                status: FileEntryStatus::Pending,
-            });
+        if let Some(package) = session_state.packages.get_mut(*url_idx) {
+            for item in &collected.to_download {
+                if !package.file_ids.contains(&item.path) {
+                    package.file_ids.push(item.path.clone());
+                }
+                session_state.files.push(FileSnapshot {
+                    id: item.path.clone(),
+                    package_id: package.id.clone(),
+                    path: item.path.clone(),
+                    size: item.node.size(),
+                    lifecycle: FileLifecycle::Queued,
+                    progress: FileProgressState::default(),
+                    desired: DesiredState::Present,
+                    runtime: RuntimeState {
+                        counts_in_run_totals: true,
+                        active: false,
+                        preexisting_complete: false,
+                        reused_chunks: 0,
+                    },
+                    message: None,
+                });
+            }
         }
         for mut item in collected.to_download {
-            item.key = Some(file_key(*url_idx, &item.path));
+            item.key = Some(item.path.clone());
             files.push(item);
         }
 
@@ -643,7 +667,7 @@ pub async fn run() -> crate::Result<()> {
 }
 
 /// Resume a previous incomplete session.
-async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate::Result<()> {
+async fn resume_session(mut session: SessionSnapshotV3, config: &CliConfig) -> crate::Result<()> {
     let restart = build_restart_snapshot(&session);
     // Decrypt credentials
     let (email, password, mfa) = session
@@ -668,9 +692,9 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
         .into_iter()
         .filter_map(|url| {
             session
-                .urls
+                .packages
                 .iter()
-                .position(|entry| entry.url == url)
+                .position(|entry| entry.source_url == url)
                 .map(|idx| (idx, url))
         })
         .collect::<Vec<_>>();
@@ -687,8 +711,8 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
                 let collected_tmp = downloader.collect_files(&nodes, &no_progress).await;
                 let file_count = collected_tmp.to_download.len() + collected_tmp.skipped;
                 println!("{file_count} file(s)");
-                if let Some(entry) = session.urls.get_mut(*url_idx) {
-                    entry.status = UrlStatus::Fetched;
+                if let Some(package) = session.packages.get_mut(*url_idx) {
+                    package.error = None;
                 }
                 all_nodes.push((*url_idx, url.clone(), nodes));
             }
@@ -714,10 +738,10 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
         let mut files = Vec::new();
         let mut skipped = collected.skipped;
         for mut item in collected.to_download {
-            let key = file_key(*url_idx, &item.path);
+            let key = item.path.clone();
             if !resumable_file_ids.is_empty()
                 && !resumable_file_ids.contains(&item.path)
-                && (ignored_paths.contains(&key) || ignored_paths.contains(&item.path))
+                && ignored_paths.contains(&item.path)
             {
                 skipped += 1;
             } else {
@@ -728,9 +752,9 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
 
         package_files.push(CliPackageFiles {
             source_url: session
-                .urls
+                .packages
                 .get(*url_idx)
-                .map(|entry| entry.url.clone())
+                .map(|entry| entry.source_url.clone())
                 .unwrap_or_else(|| format!("url:{url_idx}")),
             files,
             skipped,
@@ -752,7 +776,7 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
         return Ok(());
     }
 
-    session.status = SessionStatus::InProgress;
+    session.status = SessionRunStatus::InProgress;
     let _ = session.save();
 
     let progress = MultiProgress::new();
@@ -793,6 +817,8 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::SavedCredentials as LegacySavedCredentials;
+    use crate::{FileEntry, FileEntryStatus, SessionState, UrlEntry, UrlStatus};
 
     #[test]
     fn progress_bar_creation() {
@@ -803,7 +829,7 @@ mod tests {
     #[test]
     fn resume_url_selection_includes_pending_and_fetched() {
         let session = SessionState::new(
-            SavedCredentials::encrypt("test@example.com", "password", None),
+            LegacySavedCredentials::encrypt("test@example.com", "password", None),
             DownloadConfig::default(),
             vec![
                 UrlEntry {
@@ -821,7 +847,7 @@ mod tests {
             ],
         );
 
-        let urls = resumable_urls(&session);
+        let urls = resumable_urls(&session.to_v3());
         assert_eq!(
             urls,
             vec![
@@ -834,7 +860,7 @@ mod tests {
     #[test]
     fn resume_url_selection_excludes_fetched_urls_with_only_terminal_files() {
         let mut session = SessionState::new(
-            SavedCredentials::encrypt("test@example.com", "password", None),
+            LegacySavedCredentials::encrypt("test@example.com", "password", None),
             DownloadConfig::default(),
             vec![UrlEntry {
                 url: "https://mega.nz/file/skipped".to_string(),
@@ -849,7 +875,7 @@ mod tests {
             status: FileEntryStatus::Skipped,
         }];
 
-        let urls = resumable_urls(&session);
+        let urls = resumable_urls(&session.to_v3());
         assert!(urls.is_empty());
     }
 }

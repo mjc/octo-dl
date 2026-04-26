@@ -43,12 +43,14 @@ pub mod error;
 pub mod format;
 pub mod fs;
 pub(crate) mod progress;
-pub mod state;
+#[cfg(test)]
+mod state;
 pub mod stats;
 pub mod url;
 
 // Re-export main types for convenience
 pub use config::{ApiConfig, DownloadConfig, ServiceConfig, ServiceCredentials};
+pub use core::{FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3};
 pub use dlc::{DlcKeyCache, parse_dlc_data, parse_dlc_file};
 pub use download::{
     CollectedFiles, DownloadItem, DownloadProgress, Downloader, FileStatus, NoProgress,
@@ -58,12 +60,13 @@ pub use download::{
 pub use error::{Error, Result};
 pub use format::{format_bytes, format_duration};
 pub use fs::{FileSystem, TokioFileSystem};
-pub use state::{
-    FileEntry, FileEntryStatus, SavedCredentials, SessionState, SessionStatus, UrlEntry, UrlStatus,
-    file_key,
-};
 pub use stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBuilder};
 pub use url::{extract_urls, is_dlc_path, normalize_mega_url};
+
+#[cfg(test)]
+pub use state::{
+    FileEntry, FileEntryStatus, SessionState, SessionStatus, UrlEntry, UrlStatus, file_key,
+};
 
 // Re-export mega types used in the public API
 pub use mega::{Client as MegaClient, Node, Nodes};
