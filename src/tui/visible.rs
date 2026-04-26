@@ -6,7 +6,7 @@ use ratatui::widgets::ListState;
 
 use crate::core::{DownloadState, FileLifecycle, FileState, PackageState};
 
-use super::app::{FileEntry, FileStatus, FileUiState};
+use super::app::{FileEntry, FileStatus, FileUiState, OverlayFile};
 
 fn package_sort_key_for(core_state: &DownloadState, file: &FileEntry) -> (usize, String) {
     if let Some(core_file) = core_state.files.get(&file.id) {
@@ -48,14 +48,11 @@ fn project_core_file(
         _ => file.progress.visible_completed_bytes.min(file.size),
     };
     let source_url = package.map(|package| package.source_url.clone());
-    let counts_toward_progress =
-        file.runtime.counts_in_run_totals && !file.runtime.preexisting_complete;
     if let Some(mut existing) = existing {
         existing.name = file.path.clone();
         existing.size = file.size;
         existing.downloaded = downloaded;
         existing.source_url = source_url;
-        existing.counts_toward_progress = counts_toward_progress;
         existing.status = status;
         return Some(existing);
     }
@@ -66,7 +63,6 @@ fn project_core_file(
         size: file.size,
         downloaded,
         source_url,
-        counts_toward_progress,
         status,
     })
 }
@@ -119,20 +115,23 @@ pub(super) fn seed_overlay_from_visible(
     files: &[FileEntry],
     core_state: &DownloadState,
     deleted_files: &HashSet<String>,
-    overlay_files: &mut IndexMap<String, FileEntry>,
+    overlay_files: &mut IndexMap<String, OverlayFile>,
 ) {
     for file in files {
         if !core_state.files.contains_key(&file.id) && !deleted_files.contains(&file.id) {
             overlay_files
                 .entry(file.id.clone())
-                .or_insert_with(|| file.clone());
+                .or_insert_with(|| OverlayFile {
+                    file: file.clone(),
+                    counts_toward_progress: true,
+                });
         }
     }
 }
 
 pub(super) fn sync_visible_files(
     files: &mut Vec<FileEntry>,
-    overlay_files: &mut IndexMap<String, FileEntry>,
+    overlay_files: &mut IndexMap<String, OverlayFile>,
     file_ui: &mut HashMap<String, FileUiState>,
     file_list_state: &mut ListState,
     core_state: &DownloadState,
@@ -152,7 +151,10 @@ pub(super) fn sync_visible_files(
         if !core_file_ids.contains(id) && !deleted_files.contains(id) {
             overlay_files
                 .entry(id.clone())
-                .or_insert_with(|| file.clone());
+                .or_insert_with(|| OverlayFile {
+                    file: file.clone(),
+                    counts_toward_progress: true,
+                });
         }
     }
     let mut next_files = Vec::new();
@@ -166,7 +168,7 @@ pub(super) fn sync_visible_files(
 
     for (id, entry) in overlay_files.iter() {
         if !core_file_ids.contains(id) && !deleted_files.contains(id) {
-            next_files.push(entry.clone());
+            next_files.push(entry.file.clone());
         }
     }
 

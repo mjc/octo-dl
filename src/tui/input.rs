@@ -404,7 +404,6 @@ mod tests {
             size: 1000,
             downloaded: 500,
             source_url: None,
-            counts_toward_progress: true,
             status: FileStatus::Downloading,
         });
         app.cancellation_tokens
@@ -428,7 +427,6 @@ mod tests {
                 size: 10,
                 downloaded: 0,
                 source_url: Some("https://mega.nz/file/first".to_string()),
-                counts_toward_progress: true,
                 status: FileStatus::Queued,
             },
             FileEntry {
@@ -437,7 +435,6 @@ mod tests {
                 size: 20,
                 downloaded: 0,
                 source_url: Some("https://mega.nz/file/second".to_string()),
-                counts_toward_progress: true,
                 status: FileStatus::Queued,
             },
         ];
@@ -505,7 +502,6 @@ mod tests {
                 size: 10,
                 downloaded: 10,
                 source_url: None,
-                counts_toward_progress: true,
                 status: FileStatus::Complete,
             },
             FileEntry {
@@ -514,7 +510,6 @@ mod tests {
                 size: 20,
                 downloaded: 5,
                 source_url: None,
-                counts_toward_progress: true,
                 status: FileStatus::Downloading,
             },
         ];
@@ -548,7 +543,6 @@ mod tests {
             size: 100,
             downloaded: 80,
             source_url: Some("https://mega.nz/file/reset".to_string()),
-            counts_toward_progress: true,
             status: FileStatus::Downloading,
         });
         app.cancellation_tokens
@@ -582,15 +576,17 @@ mod tests {
         std::fs::write(&sidecar_path, b"metadata").unwrap();
 
         let mut app = test_app();
-        app.files.push(FileEntry {
-            id: "complete.bin".to_string(),
-            name: final_path.to_string_lossy().into_owned(),
-            size: 100,
-            downloaded: 100,
-            source_url: Some("https://mega.nz/file/complete".to_string()),
-            counts_toward_progress: false,
-            status: FileStatus::Complete,
-        });
+        app.upsert_overlay_file(
+            FileEntry {
+                id: "complete.bin".to_string(),
+                name: final_path.to_string_lossy().into_owned(),
+                size: 100,
+                downloaded: 100,
+                source_url: Some("https://mega.nz/file/complete".to_string()),
+                status: FileStatus::Complete,
+            },
+            false,
+        );
         app.file_list_state.select(Some(0));
 
         handle_input(&mut app, key(KeyCode::Char('d')));
@@ -671,7 +667,6 @@ mod tests {
             size: 100,
             downloaded: 42,
             source_url: Some("https://mega.nz/file/error".to_string()),
-            counts_toward_progress: true,
             status: FileStatus::Error("boom".to_string()),
         });
         app.recompute_totals();

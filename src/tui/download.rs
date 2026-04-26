@@ -589,7 +589,6 @@ mod tests {
             size: 64,
             downloaded: 16,
             source_url: Some("https://mega.nz/file/first".to_string()),
-            counts_toward_progress: true,
             status: FileStatus::Downloading,
         });
         app.recompute_totals();
@@ -625,7 +624,6 @@ mod tests {
             size: 64,
             downloaded: 17,
             source_url: Some("https://mega.nz/file/old".to_string()),
-            counts_toward_progress: true,
             status: FileStatus::Error("stale error".to_string()),
         });
 
@@ -727,7 +725,7 @@ mod tests {
             .overlay_files
             .get(&url)
             .expect("url-level errors should remain in overlay");
-        assert!(matches!(overlay.status, FileStatus::Error(ref msg) if msg == "bad folder"));
+        assert!(matches!(overlay.file.status, FileStatus::Error(ref msg) if msg == "bad folder"));
         let session = app.session.as_ref().expect("session should remain");
         assert!(matches!(
             session.urls[0].status,
@@ -744,7 +742,6 @@ mod tests {
             size: 128,
             downloaded: 128,
             source_url: Some("https://mega.nz/file/root".to_string()),
-            counts_toward_progress: true,
             status: FileStatus::Complete,
         });
         app.recompute_totals();
@@ -761,15 +758,17 @@ mod tests {
     #[test]
     fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
         let mut app = test_app();
-        app.files.push(FileEntry {
-            id: "episode.mkv".to_string(),
-            name: "episode.mkv".to_string(),
-            size: 128,
-            downloaded: 128,
-            source_url: Some("https://mega.nz/file/root".to_string()),
-            counts_toward_progress: false,
-            status: FileStatus::Complete,
-        });
+        app.upsert_overlay_file(
+            FileEntry {
+                id: "episode.mkv".to_string(),
+                name: "episode.mkv".to_string(),
+                size: 128,
+                downloaded: 128,
+                source_url: Some("https://mega.nz/file/root".to_string()),
+                status: FileStatus::Complete,
+            },
+            false,
+        );
         app.recompute_totals();
 
         app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {

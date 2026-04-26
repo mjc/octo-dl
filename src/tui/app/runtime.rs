@@ -102,15 +102,17 @@ impl App {
 
     pub(crate) fn queue_url_placeholder(&mut self, url: String) {
         if !self.overlay_files.contains_key(&url) {
-            self.upsert_overlay_file(FileEntry {
-                id: url.clone(),
-                name: url,
-                size: 0,
-                downloaded: 0,
-                source_url: None,
-                counts_toward_progress: false,
-                status: FileStatus::Queued,
-            });
+            self.upsert_overlay_file(
+                FileEntry {
+                    id: url.clone(),
+                    name: url,
+                    size: 0,
+                    downloaded: 0,
+                    source_url: None,
+                    status: FileStatus::Queued,
+                },
+                false,
+            );
         }
         self.recompute_totals();
     }

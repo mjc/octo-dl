@@ -193,7 +193,9 @@ impl App {
         self.total_network_downloaded = self.core_state.totals.displayed_network_bytes;
 
         for file in &self.files {
-            if self.core_state.files.contains_key(&file.id) || !file.counts_toward_progress {
+            if self.core_state.files.contains_key(&file.id)
+                || !self.overlay_counts_toward_progress(&file.id)
+            {
                 continue;
             }
             self.total_size = self.total_size.saturating_add(file.size);
