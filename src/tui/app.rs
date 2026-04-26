@@ -21,7 +21,7 @@ use crate::{
     core::{
         CoreEffect, CoreEvent, DownloadState, FileLifecycle, FileState, PackageState,
         ProgressDelta, ResolvedFile, ResolvedPackage, RestartSnapshot, SessionMeta,
-        reconcile_restart, reduce, scan_filesystem,
+        SessionSnapshotV3, reconcile_restart, reduce, scan_filesystem,
     },
     file_key, format_bytes,
 };
@@ -984,30 +984,7 @@ impl App {
         for effect in effects {
             match effect {
                 CoreEffect::PersistSession(snapshot) => {
-                    if let Some(ref mut session) = self.session {
-                        let next = SessionState::from_v3(snapshot);
-                        session.id = next.id;
-                        session.created = next.created;
-                        session.status = next.status;
-                        session.config = next.config;
-                        session.credentials = next.credentials;
-                        let mut merged_files = session.files.clone();
-                        for next_file in next.files {
-                            if let Some(existing) = merged_files.iter_mut().find(|file| {
-                                file.path == next_file.path || file.key == next_file.key
-                            }) {
-                                *existing = next_file;
-                            } else {
-                                merged_files.push(next_file);
-                            }
-                        }
-                        session.files = merged_files;
-                        for url in next.urls {
-                            if !session.urls.iter().any(|entry| entry.url == url.url) {
-                                session.urls.push(url);
-                            }
-                        }
-                    }
+                    self.persist_core_session_snapshot(snapshot);
                 }
                 CoreEffect::PublishStatusMessage(message) => {
                     self.status = message;
@@ -1017,6 +994,40 @@ impl App {
                 | CoreEffect::DeleteOutputArtifacts { .. }
                 | CoreEffect::DeleteResumeArtifacts { .. }
                 | CoreEffect::PublishViewSnapshot => {}
+            }
+        }
+    }
+
+    fn persist_core_session_snapshot(&mut self, snapshot: SessionSnapshotV3) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        Self::merge_session_state(session, SessionState::from_v3(snapshot));
+    }
+
+    fn merge_session_state(session: &mut SessionState, next: SessionState) {
+        session.id = next.id;
+        session.created = next.created;
+        session.status = next.status;
+        session.config = next.config;
+        session.credentials = next.credentials;
+
+        let mut merged_files = session.files.clone();
+        for next_file in next.files {
+            if let Some(existing) = merged_files
+                .iter_mut()
+                .find(|file| file.path == next_file.path || file.key == next_file.key)
+            {
+                *existing = next_file;
+            } else {
+                merged_files.push(next_file);
+            }
+        }
+        session.files = merged_files;
+
+        for url in next.urls {
+            if !session.urls.iter().any(|entry| entry.url == url.url) {
+                session.urls.push(url);
             }
         }
     }
@@ -1300,6 +1311,11 @@ impl App {
             .unwrap_or(0)
     }
 
+    fn install_session(&mut self, session: SessionState) {
+        self.session = Some(session);
+        self.seed_core_session_from_session();
+    }
+
     pub(crate) fn restore_restart_snapshot(&mut self, snapshot: &RestartSnapshot) {
         self.core_state = snapshot.state.clone();
         self.sync_visible_files();
@@ -1338,6 +1354,19 @@ impl App {
     ) {
         self.restore_restart_snapshot(restart);
 
+        let resumed_urls = Self::update_session_for_restart(&mut session, restart);
+        let _ = session.save();
+        self.urls.clone_from(&resumed_urls);
+        for url in resumed_urls {
+            let _ = self.url_tx.send(url);
+        }
+        self.install_session(session);
+    }
+
+    fn update_session_for_restart(
+        session: &mut SessionState,
+        restart: &RestartSnapshot,
+    ) -> Vec<String> {
         let resumed_urls = restart.resumable_urls();
         let resumed_url_set: HashSet<_> = resumed_urls.iter().cloned().collect();
         for entry in &mut session.urls {
@@ -1353,53 +1382,56 @@ impl App {
             .state
             .files
             .values()
-            .map(|file| {
-                let url_index = session
-                    .urls
-                    .iter()
-                    .position(|entry| {
-                        restart
-                            .state
-                            .packages
-                            .get(&file.package_id)
-                            .is_some_and(|package| package.source_url == entry.url)
-                    })
-                    .unwrap_or(0);
-                SessionFileEntry {
-                    key: Some(file.id.clone()),
-                    url_index,
-                    path: file.path.clone(),
-                    size: file.size,
-                    status: match file.lifecycle {
-                        FileLifecycle::Planned | FileLifecycle::Queued => FileEntryStatus::Pending,
-                        FileLifecycle::Downloading => FileEntryStatus::Downloading,
-                        FileLifecycle::Complete => FileEntryStatus::Completed,
-                        FileLifecycle::Skipped | FileLifecycle::Deleted => FileEntryStatus::Skipped,
-                        FileLifecycle::Failed => FileEntryStatus::Error(
-                            file.message.clone().unwrap_or_else(|| "failed".to_string()),
-                        ),
-                    },
-                }
-            })
+            .map(|file| Self::restart_session_file_entry(session, restart, file))
             .collect();
-        let _ = session.save();
-        self.urls.clone_from(&resumed_urls);
-        for url in resumed_urls {
-            let _ = self.url_tx.send(url);
+        resumed_urls
+    }
+
+    fn restart_session_file_entry(
+        session: &SessionState,
+        restart: &RestartSnapshot,
+        file: &FileState,
+    ) -> SessionFileEntry {
+        let url_index = session
+            .urls
+            .iter()
+            .position(|entry| {
+                restart
+                    .state
+                    .packages
+                    .get(&file.package_id)
+                    .is_some_and(|package| package.source_url == entry.url)
+            })
+            .unwrap_or(0);
+        SessionFileEntry {
+            key: Some(file.id.clone()),
+            url_index,
+            path: file.path.clone(),
+            size: file.size,
+            status: match file.lifecycle {
+                FileLifecycle::Planned | FileLifecycle::Queued => FileEntryStatus::Pending,
+                FileLifecycle::Downloading => FileEntryStatus::Downloading,
+                FileLifecycle::Complete => FileEntryStatus::Completed,
+                FileLifecycle::Skipped | FileLifecycle::Deleted => FileEntryStatus::Skipped,
+                FileLifecycle::Failed => FileEntryStatus::Error(
+                    file.message.clone().unwrap_or_else(|| "failed".to_string()),
+                ),
+            },
         }
-        self.session = Some(session);
-        self.seed_core_session_from_session();
     }
 
     pub(crate) fn sync_session_for_shutdown(&mut self) {
-        let Some(ref mut session) = self.session else {
+        let visible: HashSet<&str> = self.files.iter().map(|file| file.id.as_str()).collect();
+        let Some(session) = self.session.as_mut() else {
             return;
         };
+        Self::sync_session_status_for_shutdown(session, &visible);
+    }
+
+    fn sync_session_status_for_shutdown(session: &mut SessionState, visible: &HashSet<&str>) {
         if session.status == SessionStatus::Completed {
             return;
         }
-
-        let visible: HashSet<&str> = self.files.iter().map(|file| file.id.as_str()).collect();
 
         session.files.retain(|file| {
             matches!(file.status, FileEntryStatus::Skipped)
@@ -1831,28 +1863,7 @@ impl App {
             .take()
             .expect("start_download_task called twice");
 
-        if self.session.is_none() {
-            let email = self.login.email().to_owned();
-            let password = self.login.password().to_owned();
-            let mfa = self.login.mfa_option().map(str::to_owned);
-            let url_entries: Vec<UrlEntry> = self
-                .urls
-                .iter()
-                .map(|url| UrlEntry {
-                    url: url.clone(),
-                    status: UrlStatus::Pending,
-                })
-                .collect();
-
-            let session = SessionState::new(
-                SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
-                config.clone(),
-                url_entries,
-            );
-            let _ = session.save();
-            self.session = Some(session);
-            self.seed_core_session_from_session();
-        }
+        self.ensure_download_session(&config);
 
         let channels = super::event::DownloadChannels {
             client_rx: self.client_rx.take(),
@@ -1866,6 +1877,32 @@ impl App {
         tokio::spawn(async move {
             download::run_download(channels, config).await;
         });
+    }
+
+    fn ensure_download_session(&mut self, config: &DownloadConfig) {
+        if self.session.is_some() {
+            return;
+        }
+
+        let email = self.login.email().to_owned();
+        let password = self.login.password().to_owned();
+        let mfa = self.login.mfa_option().map(str::to_owned);
+        let url_entries: Vec<UrlEntry> = self
+            .urls
+            .iter()
+            .map(|url| UrlEntry {
+                url: url.clone(),
+                status: UrlStatus::Pending,
+            })
+            .collect();
+
+        let session = SessionState::new(
+            SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
+            config.clone(),
+            url_entries,
+        );
+        let _ = session.save();
+        self.install_session(session);
     }
 
     pub(crate) fn set_collection_status(
@@ -2678,6 +2715,90 @@ mod tests {
         assert_eq!(session.files.len(), 1);
         assert!(matches!(session.files[0].status, FileEntryStatus::Skipped));
         assert_eq!(session.files[0].key.as_deref(), Some("0:skip-a.bin"));
+    }
+
+    #[test]
+    fn merge_session_state_updates_matching_files_and_preserves_unmatched_entries() {
+        let mut session = SessionState::new(
+            SavedCredentials::encrypt("old@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![UrlEntry {
+                url: "https://mega.nz/file/a".to_string(),
+                status: UrlStatus::Pending,
+            }],
+        );
+        session.files = vec![
+            SessionFileEntry {
+                key: Some("0:keep.bin".to_string()),
+                url_index: 0,
+                path: "keep.bin".to_string(),
+                size: 1,
+                status: FileEntryStatus::Pending,
+            },
+            SessionFileEntry {
+                key: Some("0:stale.bin".to_string()),
+                url_index: 0,
+                path: "stale.bin".to_string(),
+                size: 1,
+                status: FileEntryStatus::Pending,
+            },
+        ];
+
+        let mut next = SessionState::new(
+            SavedCredentials::encrypt("new@example.com", "hunter2", None),
+            DownloadConfig::default(),
+            vec![
+                UrlEntry {
+                    url: "https://mega.nz/file/a".to_string(),
+                    status: UrlStatus::Fetched,
+                },
+                UrlEntry {
+                    url: "https://mega.nz/file/b".to_string(),
+                    status: UrlStatus::Pending,
+                },
+            ],
+        );
+        next.status = SessionStatus::Paused;
+        next.files = vec![
+            SessionFileEntry {
+                key: Some("0:keep.bin".to_string()),
+                url_index: 0,
+                path: "keep.bin".to_string(),
+                size: 5,
+                status: FileEntryStatus::Completed,
+            },
+            SessionFileEntry {
+                key: Some("1:new.bin".to_string()),
+                url_index: 1,
+                path: "new.bin".to_string(),
+                size: 2,
+                status: FileEntryStatus::Pending,
+            },
+        ];
+
+        App::merge_session_state(&mut session, next);
+
+        assert_eq!(session.status, SessionStatus::Paused);
+        assert_eq!(session.urls.len(), 2);
+        assert!(
+            session
+                .urls
+                .iter()
+                .any(|entry| entry.url == "https://mega.nz/file/b"),
+            "new URLs should be appended during merge"
+        );
+        assert_eq!(session.files.len(), 3);
+        assert!(
+            session.files.iter().any(|file| file.path == "keep.bin"
+                && matches!(file.status, FileEntryStatus::Completed)
+                && file.size == 5),
+            "matching files should be replaced by the newer snapshot"
+        );
+        assert!(
+            session.files.iter().any(|file| file.path == "stale.bin"),
+            "existing unmatched files should be retained during partial migration"
+        );
+        assert!(session.files.iter().any(|file| file.path == "new.bin"));
     }
 
     #[test]
