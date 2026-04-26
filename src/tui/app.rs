@@ -331,6 +331,12 @@ enum SessionUrlUpdate<'a> {
     Error(&'a str),
 }
 
+#[derive(Clone, Copy)]
+enum SessionRunUpdate {
+    Completed,
+    Paused,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuitPolicy {
     Enabled,
@@ -1259,10 +1265,6 @@ impl App {
         });
     }
 
-    pub(crate) fn session_mark_completed(&mut self) {
-        let _ = self.mutate_session(SessionState::mark_completed);
-    }
-
     fn register_session_queued_file(&mut self, submitted_url: &str, path: &str, size: u64) -> bool {
         self.mutate_session_and_save(|session| {
             let url_index = Self::session_url_index(session, submitted_url);
@@ -1317,9 +1319,29 @@ impl App {
             .unwrap_or(0)
     }
 
+    fn update_session_run_status(&mut self, update: SessionRunUpdate) {
+        let _ = self.mutate_session(|session| Self::apply_session_run_update(session, update));
+    }
+
+    fn apply_session_run_update(session: &mut SessionState, update: SessionRunUpdate) {
+        match update {
+            SessionRunUpdate::Completed => {
+                let _ = session.mark_completed();
+            }
+            SessionRunUpdate::Paused => {
+                let _ = session.mark_paused();
+            }
+        }
+    }
+
     fn install_session(&mut self, session: SessionState) {
         self.session = Some(session);
         self.seed_core_session_from_session();
+    }
+
+    fn save_and_install_session(&mut self, session: SessionState) {
+        let _ = session.save();
+        self.install_session(session);
     }
 
     pub(crate) fn restore_restart_snapshot(&mut self, snapshot: &RestartSnapshot) {
@@ -1361,12 +1383,11 @@ impl App {
         self.restore_restart_snapshot(restart);
 
         let resumed_urls = Self::update_session_for_restart(&mut session, restart);
-        let _ = session.save();
         self.urls.clone_from(&resumed_urls);
         for url in resumed_urls {
             let _ = self.url_tx.send(url);
         }
-        self.install_session(session);
+        self.save_and_install_session(session);
     }
 
     fn update_session_for_restart(
@@ -1446,10 +1467,10 @@ impl App {
         });
 
         if session.files.is_empty() {
-            let _ = session.mark_completed();
+            Self::apply_session_run_update(session, SessionRunUpdate::Completed);
         } else {
             log::info!("Marking session as paused for later resume");
-            let _ = session.mark_paused();
+            Self::apply_session_run_update(session, SessionRunUpdate::Paused);
         }
     }
 
@@ -1490,7 +1511,7 @@ impl App {
     fn sync_session_after_file_complete(&mut self, id: &str) {
         self.update_session_file(id, SessionFileUpdate::Complete);
         if self.files_completed == self.files_total && self.files_total > 0 {
-            self.session_mark_completed();
+            self.update_session_run_status(SessionRunUpdate::Completed);
         }
     }
 
@@ -1940,8 +1961,7 @@ impl App {
             config.clone(),
             url_entries,
         );
-        let _ = session.save();
-        self.install_session(session);
+        self.save_and_install_session(session);
     }
 
     pub(crate) fn set_collection_status(
