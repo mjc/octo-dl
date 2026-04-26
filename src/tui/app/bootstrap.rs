@@ -5,10 +5,10 @@ use std::path::Path;
 use tokio::sync::{mpsc, watch};
 
 use crate::ServiceConfig;
+use crate::tui::WebOptions;
 
 use super::{
-    App, DownloadEvent, NoCredentialsFallback, Popup, SharedAppState, SharedStateChannels,
-    UiAction, WebOptions,
+    App, DownloadEvent, NoCredentialsFallback, Popup, SharedAppState, SharedStateChannels, UiAction,
 };
 
 impl App {
