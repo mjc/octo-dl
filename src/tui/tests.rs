@@ -1,8 +1,7 @@
 use super::*;
-use crate::state::SavedCredentials as LegacySavedCredentials;
 use crate::{
-    DownloadConfig, FileEntry, FileEntryStatus, SessionState, UrlEntry, UrlStatus,
     core::{FileLifecycle, SessionRunStatus},
+    test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot},
 };
 use std::env;
 use std::path::Path;
@@ -17,7 +16,7 @@ struct StateDirectoryGuard {
 
 impl StateDirectoryGuard {
     fn set(path: &Path) -> Self {
-        let lock = crate::state::STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
+        let lock = crate::core::session::STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
         let previous = env::var_os("STATE_DIRECTORY");
         unsafe { env::set_var("STATE_DIRECTORY", path) };
         Self {
@@ -42,21 +41,10 @@ fn resume_session_requeues_urls() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
 
-    let urls = vec![
-        UrlEntry {
-            url: "https://mega.nz/file/first".to_string(),
-            status: UrlStatus::Pending,
-        },
-        UrlEntry {
-            url: "https://mega.nz/file/second".to_string(),
-            status: UrlStatus::Fetched,
-        },
-    ];
-    let session = SessionState::new(
-        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-        DownloadConfig::default(),
-        urls,
-    );
+    let session = session_snapshot(vec![
+        ("https://mega.nz/file/first", UrlFixtureStatus::Pending),
+        ("https://mega.nz/file/second", UrlFixtureStatus::Fetched),
+    ]);
     session.save().unwrap();
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -89,36 +77,24 @@ fn resume_session_restores_files_and_only_requeues_remaining_urls() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
 
-    let mut session = SessionState::new(
-        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-        DownloadConfig::default(),
-        vec![
-            UrlEntry {
-                url: "https://mega.nz/file/completed".to_string(),
-                status: UrlStatus::Fetched,
-            },
-            UrlEntry {
-                url: "https://mega.nz/file/pending".to_string(),
-                status: UrlStatus::Fetched,
-            },
-        ],
+    let mut session = session_snapshot(vec![
+        ("https://mega.nz/file/completed", UrlFixtureStatus::Fetched),
+        ("https://mega.nz/file/pending", UrlFixtureStatus::Fetched),
+    ]);
+    push_file(
+        &mut session,
+        0,
+        "completed.mkv",
+        128,
+        FileFixtureStatus::Completed,
     );
-    session.files = vec![
-        FileEntry {
-            key: Some("completed-id".to_string()),
-            url_index: 0,
-            path: "completed.mkv".to_string(),
-            size: 128,
-            status: FileEntryStatus::Completed,
-        },
-        FileEntry {
-            key: Some("pending-id".to_string()),
-            url_index: 1,
-            path: "pending.mkv".to_string(),
-            size: 256,
-            status: FileEntryStatus::Pending,
-        },
-    ];
+    push_file(
+        &mut session,
+        1,
+        "pending.mkv",
+        256,
+        FileFixtureStatus::Pending,
+    );
     session.save().unwrap();
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -164,21 +140,17 @@ fn resume_session_restores_retryable_errors_as_queued() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
 
-    let mut session = SessionState::new(
-        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-        DownloadConfig::default(),
-        vec![UrlEntry {
-            url: "https://mega.nz/file/retry".to_string(),
-            status: UrlStatus::Fetched,
-        }],
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/retry",
+        UrlFixtureStatus::Fetched,
+    )]);
+    push_file(
+        &mut session,
+        0,
+        "retry.mkv",
+        256,
+        FileFixtureStatus::Error("network failure".to_string()),
     );
-    session.files = vec![FileEntry {
-        key: Some("retry-id".to_string()),
-        url_index: 0,
-        path: "retry.mkv".to_string(),
-        size: 256,
-        status: FileEntryStatus::Error("network failure".to_string()),
-    }];
     session.save().unwrap();
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -202,21 +174,17 @@ fn resume_session_does_not_restore_or_requeue_skipped_files() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
 
-    let mut session = SessionState::new(
-        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-        DownloadConfig::default(),
-        vec![UrlEntry {
-            url: "https://mega.nz/file/skipped".to_string(),
-            status: UrlStatus::Fetched,
-        }],
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/skipped",
+        UrlFixtureStatus::Fetched,
+    )]);
+    push_file(
+        &mut session,
+        0,
+        "skipped.mkv",
+        256,
+        FileFixtureStatus::Skipped,
     );
-    session.files = vec![FileEntry {
-        key: Some("skipped-id".to_string()),
-        url_index: 0,
-        path: "skipped.mkv".to_string(),
-        size: 256,
-        status: FileEntryStatus::Skipped,
-    }];
     session.save().unwrap();
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -240,30 +208,24 @@ fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
 
-    let mut session = SessionState::new(
-        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-        DownloadConfig::default(),
-        vec![UrlEntry {
-            url: "https://mega.nz/file/root".to_string(),
-            status: UrlStatus::Fetched,
-        }],
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/root",
+        UrlFixtureStatus::Fetched,
+    )]);
+    push_file(
+        &mut session,
+        0,
+        "completed.mkv",
+        128,
+        FileFixtureStatus::Completed,
     );
-    session.files = vec![
-        FileEntry {
-            key: Some("completed-id".to_string()),
-            url_index: 0,
-            path: "completed.mkv".to_string(),
-            size: 128,
-            status: FileEntryStatus::Completed,
-        },
-        FileEntry {
-            key: Some("pending-id".to_string()),
-            url_index: 0,
-            path: "pending.mkv".to_string(),
-            size: 256,
-            status: FileEntryStatus::Pending,
-        },
-    ];
+    push_file(
+        &mut session,
+        0,
+        "pending.mkv",
+        256,
+        FileFixtureStatus::Pending,
+    );
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
@@ -283,7 +245,7 @@ fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
             status: FileStatus::Queued,
         },
     ];
-    app.session = Some(session.to_v3());
+    app.session = Some(session);
 
     app.sync_session_for_shutdown();
 
@@ -429,30 +391,24 @@ fn resume_session_deduplicates_duplicate_file_entries_by_path() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
 
-    let mut session = SessionState::new(
-        LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-        DownloadConfig::default(),
-        vec![UrlEntry {
-            url: "https://mega.nz/file/root".to_string(),
-            status: UrlStatus::Fetched,
-        }],
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/root",
+        UrlFixtureStatus::Fetched,
+    )]);
+    push_file(
+        &mut session,
+        0,
+        "duplicate.mkv",
+        128,
+        FileFixtureStatus::Pending,
     );
-    session.files = vec![
-        FileEntry {
-            key: Some("legacy-key".to_string()),
-            url_index: 0,
-            path: "duplicate.mkv".to_string(),
-            size: 128,
-            status: FileEntryStatus::Pending,
-        },
-        FileEntry {
-            key: Some("new-key".to_string()),
-            url_index: 0,
-            path: "duplicate.mkv".to_string(),
-            size: 128,
-            status: FileEntryStatus::Completed,
-        },
-    ];
+    push_file(
+        &mut session,
+        0,
+        "duplicate.mkv",
+        128,
+        FileFixtureStatus::Completed,
+    );
     session.save().unwrap();
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();

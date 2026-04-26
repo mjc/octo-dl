@@ -268,11 +268,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
 mod tests {
     use super::super::app::{App, FileEntry, FileStatus, Popup, QuitPolicy};
     use super::*;
-    use crate::state::SavedCredentials as LegacySavedCredentials;
-    use crate::{
-        DownloadConfig, FileEntry as SessionFileEntry, FileEntryStatus, SessionState, UrlEntry,
-        UrlStatus,
-    };
+    use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use std::env;
     use std::path::Path;
@@ -286,7 +282,7 @@ mod tests {
 
     impl StateDirectoryGuard {
         fn set(path: &Path) -> Self {
-            let lock = crate::state::STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
+            let lock = crate::core::session::STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
             let previous = env::var_os("STATE_DIRECTORY");
             unsafe { env::set_var("STATE_DIRECTORY", path) };
             Self {
@@ -439,32 +435,14 @@ mod tests {
         app.recompute_totals();
         app.file_list_state.select(Some(0));
 
-        let mut session = SessionState::new(
-            LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-            DownloadConfig::default(),
-            vec![UrlEntry {
-                url: "https://mega.nz/folder/root".to_string(),
-                status: UrlStatus::Fetched,
-            }],
-        );
-        session.files = vec![
-            SessionFileEntry {
-                key: None,
-                url_index: 0,
-                path: "first.bin".to_string(),
-                size: 10,
-                status: FileEntryStatus::Pending,
-            },
-            SessionFileEntry {
-                key: None,
-                url_index: 0,
-                path: "second.bin".to_string(),
-                size: 20,
-                status: FileEntryStatus::Pending,
-            },
-        ];
+        let mut session = session_snapshot(vec![(
+            "https://mega.nz/folder/root",
+            UrlFixtureStatus::Fetched,
+        )]);
+        push_file(&mut session, 0, "first.bin", 10, FileFixtureStatus::Pending);
+        push_file(&mut session, 0, "second.bin", 20, FileFixtureStatus::Pending);
         let session_path = session.state_path();
-        app.session = Some(session.to_v3());
+        app.session = Some(session);
 
         handle_input(&mut app, key(KeyCode::Delete));
 

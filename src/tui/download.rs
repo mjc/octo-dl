@@ -8,11 +8,9 @@ use futures_util::FutureExt;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(test)]
-use crate::state::SavedCredentials as LegacySavedCredentials;
 use crate::{DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, is_dlc_path};
 #[cfg(test)]
-use crate::{SessionState, UrlEntry, UrlStatus};
+use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
 use dirs;
 
 #[cfg(test)]
@@ -513,7 +511,6 @@ mod tests {
     use super::super::event::DownloadEvent;
     use super::*;
     use crate::core::{FileLifecycle, SessionRunStatus};
-    use crate::{FileEntry as SessionFileEntry, FileEntryStatus};
     use std::env;
     use std::path::Path;
     use tempfile::tempdir;
@@ -526,7 +523,7 @@ mod tests {
 
     impl StateDirectoryGuard {
         fn set(path: &Path) -> Self {
-            let lock = crate::state::STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
+            let lock = crate::core::session::STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
             let previous = env::var_os("STATE_DIRECTORY");
             unsafe { env::set_var("STATE_DIRECTORY", path) };
             Self {
@@ -551,22 +548,12 @@ mod tests {
         App::new(9723, tx, true)
     }
 
-    fn session_with_file(path: &str, size: u64) -> SessionState {
-        let mut session = SessionState::new(
-            LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-            DownloadConfig::default(),
-            vec![UrlEntry {
-                url: "https://mega.nz/folder/root".to_string(),
-                status: UrlStatus::Fetched,
-            }],
-        );
-        session.files.push(SessionFileEntry {
-            key: None,
-            url_index: 0,
-            path: path.to_string(),
-            size,
-            status: FileEntryStatus::Pending,
-        });
+    fn session_with_file(path: &str, size: u64) -> crate::SessionSnapshotV3 {
+        let mut session = session_snapshot(vec![(
+            "https://mega.nz/folder/root",
+            UrlFixtureStatus::Fetched,
+        )]);
+        push_file(&mut session, 0, path, size, FileFixtureStatus::Pending);
         session
     }
 
@@ -596,7 +583,7 @@ mod tests {
         app.recompute_totals();
         let session = session_with_file("first.bin", 64);
         let session_path = session.state_path();
-        app.session = Some(session.to_v3());
+        app.session = Some(session);
 
         app.mark_visible_file_complete("first.bin", "renamed.bin");
 
@@ -656,22 +643,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
         let mut app = test_app();
-        let mut session = SessionState::new(
-            LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-            DownloadConfig::default(),
-            vec![UrlEntry {
-                url: "https://mega.nz/file/root".to_string(),
-                status: UrlStatus::Fetched,
-            }],
+        let mut session = session_snapshot(vec![(
+            "https://mega.nz/file/root",
+            UrlFixtureStatus::Fetched,
+        )]);
+        push_file(
+            &mut session,
+            0,
+            "episode.mkv",
+            128,
+            FileFixtureStatus::Skipped,
         );
-        session.files.push(SessionFileEntry {
-            key: Some("0:episode.mkv".to_string()),
-            url_index: 0,
-            path: "episode.mkv".to_string(),
-            size: 128,
-            status: FileEntryStatus::Skipped,
-        });
-        app.session = Some(session.to_v3());
+        app.session = Some(session);
 
         app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
             id: "episode.mkv".to_string(),
@@ -709,15 +692,8 @@ mod tests {
         let _guard = StateDirectoryGuard::set(dir.path());
         let mut app = test_app();
         let url = "https://mega.nz/folder/root".to_string();
-        let session = SessionState::new(
-            LegacySavedCredentials::encrypt("test@example.com", "hunter2", None),
-            DownloadConfig::default(),
-            vec![UrlEntry {
-                url: url.clone(),
-                status: UrlStatus::Pending,
-            }],
-        );
-        app.session = Some(session.to_v3());
+        let session = session_snapshot(vec![(url.as_str(), UrlFixtureStatus::Pending)]);
+        app.session = Some(session);
 
         app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
         app.handle_download_event(DownloadEvent::Error {

@@ -44,7 +44,7 @@ pub mod format;
 pub mod fs;
 pub(crate) mod progress;
 #[cfg(test)]
-mod state;
+mod test_support;
 pub mod stats;
 pub mod url;
 
@@ -62,11 +62,6 @@ pub use format::{format_bytes, format_duration};
 pub use fs::{FileSystem, TokioFileSystem};
 pub use stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBuilder};
 pub use url::{extract_urls, is_dlc_path, normalize_mega_url};
-
-#[cfg(test)]
-pub use state::{
-    FileEntry, FileEntryStatus, SessionState, SessionStatus, UrlEntry, UrlStatus, file_key,
-};
 
 // Re-export mega types used in the public API
 pub use mega::{Client as MegaClient, Node, Nodes};
