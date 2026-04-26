@@ -87,10 +87,22 @@ struct ResolvedUrl {
     origin: FileOrigin,
 }
 
+struct FetchedNodeSet {
+    resolved: ResolvedUrl,
+    nodes: mega::Nodes,
+}
+
 struct QueuedDownload {
-    id: String,
     origin: FileOrigin,
     item: crate::OwnedDownloadItem,
+}
+
+struct CollectedBatch {
+    queued_items: Vec<QueuedDownload>,
+    completed_items: Vec<QueuedDownload>,
+    skipped_count: usize,
+    partial_count: usize,
+    successful_submitted_urls: Vec<String>,
 }
 
 struct BatchContext<'a> {
@@ -102,17 +114,21 @@ struct BatchContext<'a> {
     token_tx: &'a mpsc::UnboundedSender<TokenMessage>,
 }
 
+struct DownloadTaskResult {
+    id: String,
+    result: crate::Result<crate::FileStats>,
+}
+
 struct FileProgress {
     tx: mpsc::UnboundedSender<DownloadEvent>,
     id: String,
-    name: String,
 }
 
 impl DownloadProgress for FileProgress {
     fn on_file_start(&self, _name: &str, size: u64) {
         let _ = self.tx.send(DownloadEvent::FileStart {
             id: self.id.clone(),
-            name: self.name.clone(),
+            name: self.id.clone(),
             size,
         });
     }
@@ -135,14 +151,14 @@ impl DownloadProgress for FileProgress {
     fn on_file_complete(&self, _name: &str, _stats: &crate::FileStats) {
         let _ = self.tx.send(DownloadEvent::FileComplete {
             id: self.id.clone(),
-            name: self.name.clone(),
+            name: self.id.clone(),
         });
     }
 
     fn on_error(&self, _name: &str, error: &str) {
         let _ = self.tx.send(DownloadEvent::Error {
             id: Some(self.id.clone()),
-            name: self.name.clone(),
+            name: self.id.clone(),
             error: error.to_string(),
         });
     }
@@ -739,31 +755,21 @@ async fn download_batch(
     ctx: BatchContext<'_>,
 ) {
     let node_sets = fetch_node_sets(urls, ctx.http, ctx.event_tx).await;
-    let successful_submitted_urls =
-        successful_submitted_urls(node_sets.iter().map(|(resolved, _)| resolved));
-    let (all_queued_items, all_completed_items, actual_skipped, actual_partial) =
-        collect_queued_items(
-            &node_sets,
-            ctx.downloader,
-            ctx.progress,
-            skipped_session_paths,
-        )
-        .await;
+    let collected = collect_batch(
+        &node_sets,
+        ctx.downloader,
+        ctx.progress,
+        skipped_session_paths,
+    )
+    .await;
 
-    send_collection_events(
-        &all_queued_items,
-        &all_completed_items,
-        actual_skipped,
-        actual_partial,
-        &successful_submitted_urls,
-        ctx.event_tx,
-    );
+    send_collection_events(&collected, ctx.event_tx);
 
     let mut join_set = tokio::task::JoinSet::new();
-    for item in all_queued_items {
+    for item in collected.queued_items {
         let cancel_token = CancellationToken::new();
         let _ = ctx.token_tx.send(TokenMessage {
-            file_id: item.id.clone(),
+            file_id: item.item.path.clone(),
             token: cancel_token.clone(),
         });
 
@@ -783,19 +789,21 @@ async fn download_batch(
             let _permit = permit;
             let prog: Arc<dyn DownloadProgress> = Arc::new(FileProgress {
                 tx: event_tx.clone(),
-                id: item.id.clone(),
-                name: item.id.clone(),
+                id: item.item.path.clone(),
             });
             let result = dl
                 .download_file(&item.item.node, &item.item.path, &prog, Some(cancel_token))
                 .await;
             if matches!(result, Err(crate::Error::Cancelled)) && *pause_rx_for_task.borrow() {
                 let _ = event_tx.send(DownloadEvent::FileCancelled {
-                    id: item.id.clone(),
-                    name: item.id.clone(),
+                    id: item.item.path.clone(),
+                    name: item.item.path.clone(),
                 });
             }
-            (item.id.clone(), item.id, result)
+            DownloadTaskResult {
+                id: item.item.path,
+                result,
+            }
         });
     }
 
@@ -806,7 +814,7 @@ async fn fetch_node_sets(
     urls: &[ResolvedUrl],
     http: &Arc<reqwest::Client>,
     event_tx: &mpsc::UnboundedSender<DownloadEvent>,
-) -> Vec<(ResolvedUrl, mega::Nodes)> {
+) -> Vec<FetchedNodeSet> {
     let mut node_sets = Vec::new();
     for resolved in urls {
         let _ = event_tx.send(DownloadEvent::StatusMessage(format!(
@@ -822,7 +830,10 @@ async fn fetch_node_sets(
 
         match fetch_result {
             Ok(Ok(nodes)) => {
-                node_sets.push((resolved.clone(), nodes));
+                node_sets.push(FetchedNodeSet {
+                    resolved: resolved.clone(),
+                    nodes,
+                });
             }
             Ok(Err(e)) => {
                 let _ = event_tx.send(DownloadEvent::Error {
@@ -843,52 +854,46 @@ async fn fetch_node_sets(
     node_sets
 }
 
-async fn collect_queued_items(
-    node_sets: &[(ResolvedUrl, mega::Nodes)],
+async fn collect_batch(
+    node_sets: &[FetchedNodeSet],
     downloader: &Arc<crate::Downloader>,
     progress: &Arc<dyn DownloadProgress>,
     skipped_paths: &HashMap<String, HashSet<String>>,
-) -> (Vec<QueuedDownload>, Vec<QueuedDownload>, usize, usize) {
-    let mut all_queued_items = Vec::new();
-    let mut all_completed_items = Vec::new();
-    let mut actual_skipped = 0;
-    let mut actual_partial = 0;
+) -> CollectedBatch {
+    let mut queued_items = Vec::new();
+    let mut completed_items = Vec::new();
+    let mut skipped_count = 0;
+    let mut partial_count = 0;
+    let successful_submitted_urls =
+        successful_submitted_urls(node_sets.iter().map(|node_set| &node_set.resolved));
 
-    for (resolved, nodes) in node_sets {
+    for node_set in node_sets {
+        let resolved = &node_set.resolved;
         let skipped_for_url = skipped_paths.get(&resolved.origin.submitted_url);
-        let collected = downloader.collect_files(nodes, progress).await;
-        actual_skipped += collected.skipped;
-        actual_partial += collected.partial;
+        let collected = downloader.collect_files(&node_set.nodes, progress).await;
+        skipped_count += collected.skipped;
+        partial_count += collected.partial;
         let (to_download, completed) = collected.into_owned_parts();
-        all_queued_items.extend(to_download.into_iter().filter_map(|item| {
-            if skipped_for_url.is_some_and(|paths| paths.contains(&item.path)) {
-                actual_skipped += 1;
-                return None;
-            }
-            Some(QueuedDownload {
-                id: item.path.clone(),
-                origin: resolved.origin.clone(),
-                item,
-            })
-        }));
-        all_completed_items.extend(completed.into_iter().filter_map(|item| {
-            if skipped_for_url.is_some_and(|paths| paths.contains(&item.path)) {
-                actual_skipped += 1;
-                return None;
-            }
-            Some(QueuedDownload {
-                id: item.path.clone(),
-                origin: resolved.origin.clone(),
-                item,
-            })
-        }));
+        queued_items.extend(visible_downloads(
+            to_download,
+            &resolved.origin,
+            skipped_for_url,
+            &mut skipped_count,
+        ));
+        completed_items.extend(visible_downloads(
+            completed,
+            &resolved.origin,
+            skipped_for_url,
+            &mut skipped_count,
+        ));
     }
-    (
-        all_queued_items,
-        all_completed_items,
-        actual_skipped,
-        actual_partial,
-    )
+    CollectedBatch {
+        queued_items,
+        completed_items,
+        skipped_count,
+        partial_count,
+        successful_submitted_urls,
+    }
 }
 
 fn successful_submitted_urls<'a>(
@@ -906,53 +911,71 @@ fn successful_submitted_urls<'a>(
     urls
 }
 
+fn visible_downloads(
+    items: Vec<crate::OwnedDownloadItem>,
+    origin: &FileOrigin,
+    skipped_paths: Option<&HashSet<String>>,
+    skipped_count: &mut usize,
+) -> Vec<QueuedDownload> {
+    items
+        .into_iter()
+        .filter_map(|item| {
+            if skipped_paths.is_some_and(|paths| paths.contains(&item.path)) {
+                *skipped_count += 1;
+                return None;
+            }
+            Some(QueuedDownload {
+                origin: origin.clone(),
+                item,
+            })
+        })
+        .collect()
+}
+
 fn send_collection_events(
-    all_queued_items: &[QueuedDownload],
-    all_completed_items: &[QueuedDownload],
-    actual_skipped: usize,
-    actual_partial: usize,
-    successful_submitted_urls: &[String],
+    collected: &CollectedBatch,
     event_tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) {
-    let total_bytes: u64 = all_queued_items
+    let total_bytes: u64 = collected
+        .queued_items
         .iter()
-        .chain(all_completed_items.iter())
+        .chain(collected.completed_items.iter())
         .map(|i| i.item.node.size())
         .sum();
-    let total_files = all_queued_items.len() + all_completed_items.len();
+    let total_files = collected.queued_items.len() + collected.completed_items.len();
 
     let _ = event_tx.send(DownloadEvent::FilesCollected {
         total: total_files,
-        skipped: actual_skipped,
-        partial: actual_partial,
+        skipped: collected.skipped_count,
+        partial: collected.partial_count,
         total_bytes,
     });
 
     // Queue all files so they appear in the list immediately
-    for item in all_queued_items {
+    for item in &collected.queued_items {
         let _ = event_tx.send(DownloadEvent::FileQueued(QueuedFile {
-            id: item.id.clone(),
+            id: item.item.path.clone(),
             size: item.item.node.size(),
             count_toward_progress: true,
             origin: item.origin.clone(),
         }));
     }
 
-    for item in all_completed_items {
+    for item in &collected.completed_items {
         let _ = event_tx.send(DownloadEvent::FileQueued(QueuedFile {
-            id: item.id.clone(),
+            id: item.item.path.clone(),
             size: item.item.node.size(),
             count_toward_progress: false,
             origin: item.origin.clone(),
         }));
         let _ = event_tx.send(DownloadEvent::FileComplete {
-            id: item.id.clone(),
-            name: item.id.clone(),
+            id: item.item.path.clone(),
+            name: item.item.path.clone(),
         });
     }
 
     // Remove URL placeholders now that real file entries exist
-    for source_url in successful_submitted_urls {
+    for source_url in &collected.successful_submitted_urls {
         let _ = event_tx.send(DownloadEvent::UrlResolved {
             url: source_url.clone(),
         });
@@ -960,17 +983,22 @@ fn send_collection_events(
 }
 
 async fn drain_download_join_set(
-    mut join_set: tokio::task::JoinSet<(String, String, crate::Result<crate::FileStats>)>,
+    mut join_set: tokio::task::JoinSet<DownloadTaskResult>,
     event_tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) {
     while let Some(result) = join_set.join_next().await {
         match result {
-            Ok((_id, _name, Ok(_stats))) => {}
-            Ok((_id, _name, Err(crate::Error::Cancelled))) => {} // user cancelled
-            Ok((id, name, Err(e))) => {
+            Ok(DownloadTaskResult {
+                result: Ok(_stats), ..
+            }) => {}
+            Ok(DownloadTaskResult {
+                result: Err(crate::Error::Cancelled),
+                ..
+            }) => {} // user cancelled
+            Ok(DownloadTaskResult { id, result: Err(e) }) => {
                 let _ = event_tx.send(DownloadEvent::Error {
-                    id: Some(id),
-                    name,
+                    id: Some(id.clone()),
+                    name: id.clone(),
                     error: format!("Download failed: {e}"),
                 });
             }
