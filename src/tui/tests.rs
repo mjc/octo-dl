@@ -270,7 +270,6 @@ fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
             name: "completed.mkv".to_string(),
             size: 128,
             downloaded: 128,
-            source_url: Some("https://mega.nz/file/root".to_string()),
             status: FileStatus::Complete,
         },
         app::FileEntry {
@@ -278,7 +277,6 @@ fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
             name: "pending.mkv".to_string(),
             size: 256,
             downloaded: 0,
-            source_url: Some("https://mega.nz/file/root".to_string()),
             status: FileStatus::Queued,
         },
     ];
@@ -328,14 +326,17 @@ fn ui_retry_file_recomputes_totals() {
     let mut app = App::new(0, event_tx, true);
     let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel();
     app.url_tx = url_tx;
-    app.files.push(app::FileEntry {
-        id: "error.bin".to_string(),
-        name: "error.bin".to_string(),
-        size: 100,
-        downloaded: 20,
-        source_url: Some("https://mega.nz/file/error".to_string()),
-        status: FileStatus::Error("boom".to_string()),
-    });
+    app.upsert_overlay_file(
+        app::FileEntry {
+            id: "error.bin".to_string(),
+            name: "error.bin".to_string(),
+            size: 100,
+            downloaded: 20,
+            status: FileStatus::Error("boom".to_string()),
+        },
+        Some("https://mega.nz/file/error".to_string()),
+        true,
+    );
     app.recompute_totals();
 
     assert_eq!(app.files_total, 0);
@@ -367,9 +368,9 @@ fn ui_delete_file_removes_completed_artifact_from_disk() {
             name: file_path.to_string_lossy().into_owned(),
             size: 4,
             downloaded: 4,
-            source_url: Some("https://mega.nz/file/completed".to_string()),
             status: FileStatus::Complete,
         },
+        Some("https://mega.nz/file/completed".to_string()),
         false,
     );
 
@@ -395,14 +396,17 @@ fn ui_reset_file_resets_progress_and_requeues_url() {
     let mut app = App::new(0, event_tx, true);
     let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel();
     app.url_tx = url_tx;
-    app.files.push(app::FileEntry {
-        id: "active.bin".to_string(),
-        name: file_path.to_string_lossy().into_owned(),
-        size: 100,
-        downloaded: 80,
-        source_url: Some("https://mega.nz/file/reset".to_string()),
-        status: FileStatus::Downloading,
-    });
+    app.upsert_overlay_file(
+        app::FileEntry {
+            id: "active.bin".to_string(),
+            name: file_path.to_string_lossy().into_owned(),
+            size: 100,
+            downloaded: 80,
+            status: FileStatus::Downloading,
+        },
+        Some("https://mega.nz/file/reset".to_string()),
+        true,
+    );
 
     app.handle_ui_action(UiAction::ResetFile("active.bin".to_string()));
 

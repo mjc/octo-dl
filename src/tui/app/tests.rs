@@ -131,14 +131,17 @@ fn quit_policy_converts_from_bool() {
 #[test]
 fn to_json_contains_visible_file_state_without_internal_fields() {
     let mut app = test_app();
-    app.files.push(FileEntry {
-        id: "stable/file.bin".to_string(),
-        name: "file.bin".to_string(),
-        size: 128,
-        downloaded: 64,
-        source_url: Some("https://mega.nz/file/abc".to_string()),
-        status: FileStatus::Downloading,
-    });
+    app.upsert_overlay_file(
+        FileEntry {
+            id: "stable/file.bin".to_string(),
+            name: "file.bin".to_string(),
+            size: 128,
+            downloaded: 64,
+            status: FileStatus::Downloading,
+        },
+        Some("https://mega.nz/file/abc".to_string()),
+        true,
+    );
     app.file_ui.insert(
         "stable/file.bin".to_string(),
         FileUiState {
@@ -200,7 +203,6 @@ fn aggregate_rate_uses_progress_since_current_baseline() {
         name: "file.bin".to_string(),
         size: 2_000,
         downloaded: 1_000,
-        source_url: None,
         status: FileStatus::Downloading,
     });
     app.total_downloaded = 1_000;
@@ -223,7 +225,6 @@ fn aggregate_rate_ignores_reused_bytes() {
         name: "file.bin".to_string(),
         size: 2_000,
         downloaded: 1_000,
-        source_url: None,
         status: FileStatus::Downloading,
     });
     app.total_downloaded = 1_000;
@@ -244,7 +245,6 @@ fn record_progress_caps_downloaded_at_file_size() {
         name: "file.bin".to_string(),
         size: 100,
         downloaded: 90,
-        source_url: None,
         status: FileStatus::Downloading,
     };
     let now = Instant::now();

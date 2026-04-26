@@ -190,10 +190,8 @@ impl App {
             return;
         }
         let source_url = self
-            .files
-            .iter()
-            .find(|entry| entry.id == id)
-            .and_then(|entry| entry.source_url.clone())
+            .visible_file_context(&id)
+            .and_then(|context| context.source_url)
             .unwrap_or_else(|| id.clone());
         self.ensure_core_file(&id, &source_url, &name, size, true);
         self.apply_core_event(CoreEvent::FileStarted {
