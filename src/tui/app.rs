@@ -340,6 +340,10 @@ enum SessionRunUpdate {
 struct SessionAdapter;
 
 impl SessionAdapter {
+    fn contains_url(session: &SessionState, url: &str) -> bool {
+        session.urls.iter().any(|entry| entry.url == url)
+    }
+
     fn merge_state(session: &mut SessionState, next: SessionState) {
         session.id = next.id;
         session.created = next.created;
@@ -373,6 +377,43 @@ impl SessionAdapter {
             .iter()
             .position(|entry| entry.url == submitted_url)
             .unwrap_or(0)
+    }
+
+    fn update_url(session: &mut SessionState, url: &str, update: SessionUrlUpdate<'_>) {
+        match update {
+            SessionUrlUpdate::Pending => {
+                if !Self::contains_url(session, url) {
+                    session.urls.push(UrlEntry {
+                        url: url.to_string(),
+                        status: UrlStatus::Pending,
+                    });
+                }
+            }
+            SessionUrlUpdate::Fetched => {
+                if let Some(entry) = session.urls.iter_mut().find(|entry| entry.url == url) {
+                    entry.status = UrlStatus::Fetched;
+                }
+            }
+            SessionUrlUpdate::Error(error) => {
+                if let Some(entry) = session.urls.iter_mut().find(|entry| entry.url == url) {
+                    entry.status = UrlStatus::Error(error.to_string());
+                }
+            }
+        }
+    }
+
+    fn update_file(session: &mut SessionState, file_id: &str, update: SessionFileUpdate<'_>) {
+        match update {
+            SessionFileUpdate::Complete => {
+                let _ = session.mark_file_complete(file_id);
+            }
+            SessionFileUpdate::Error(error) => {
+                let _ = session.mark_file_error(file_id, error);
+            }
+            SessionFileUpdate::Skipped => {
+                let _ = session.mark_file_skipped(file_id);
+            }
+        }
     }
 
     fn meta(session: &SessionState) -> SessionMeta {
@@ -493,6 +534,42 @@ impl SessionAdapter {
             log::info!("Marking session as paused for later resume");
             Self::apply_run_update(session, SessionRunUpdate::Paused);
         }
+    }
+
+    fn register_queued_file(
+        session: &mut SessionState,
+        submitted_url: &str,
+        path: &str,
+        size: u64,
+    ) -> bool {
+        let url_index = Self::url_index(session, submitted_url);
+        let stable_key = file_key(url_index, path);
+
+        if let Some(file) = session
+            .files
+            .iter_mut()
+            .find(|file| file.url_index == url_index && file.path == path)
+        {
+            if matches!(file.status, FileEntryStatus::Skipped) {
+                if file.key.is_none() {
+                    file.key = Some(stable_key);
+                }
+                return false;
+            }
+            if file.key.is_none() {
+                file.key = Some(stable_key);
+            }
+            return true;
+        }
+
+        session.files.push(SessionFileEntry {
+            key: Some(stable_key),
+            url_index,
+            path: path.to_string(),
+            size,
+            status: FileEntryStatus::Pending,
+        });
+        true
     }
 }
 
@@ -1332,67 +1409,18 @@ impl App {
     }
 
     fn update_session_url(&mut self, url: &str, update: SessionUrlUpdate<'_>) {
-        let url = url.to_string();
-        let _ = self.mutate_session_and_save(|session| match update {
-            SessionUrlUpdate::Pending => {
-                if !session.urls.iter().any(|entry| entry.url == url) {
-                    session.urls.push(UrlEntry {
-                        url,
-                        status: UrlStatus::Pending,
-                    });
-                }
-            }
-            SessionUrlUpdate::Fetched => {
-                if let Some(entry) = session.urls.iter_mut().find(|entry| entry.url == url) {
-                    entry.status = UrlStatus::Fetched;
-                }
-            }
-            SessionUrlUpdate::Error(error) => {
-                if let Some(entry) = session.urls.iter_mut().find(|entry| entry.url == url) {
-                    entry.status = UrlStatus::Error(error.to_string());
-                }
-            }
-        });
+        let _ = self
+            .mutate_session_and_save(|session| SessionAdapter::update_url(session, url, update));
     }
 
     fn update_session_file(&mut self, file_id: &str, update: SessionFileUpdate<'_>) {
-        let _ = self.mutate_session(|session| match update {
-            SessionFileUpdate::Complete => session.mark_file_complete(file_id),
-            SessionFileUpdate::Error(error) => session.mark_file_error(file_id, error),
-            SessionFileUpdate::Skipped => session.mark_file_skipped(file_id),
-        });
+        let _ =
+            self.mutate_session(|session| SessionAdapter::update_file(session, file_id, update));
     }
 
     fn register_session_queued_file(&mut self, submitted_url: &str, path: &str, size: u64) -> bool {
         self.mutate_session_and_save(|session| {
-            let url_index = SessionAdapter::url_index(session, submitted_url);
-            let stable_key = file_key(url_index, path);
-
-            if let Some(file) = session
-                .files
-                .iter_mut()
-                .find(|file| file.url_index == url_index && file.path == path)
-            {
-                if matches!(file.status, FileEntryStatus::Skipped) {
-                    if file.key.is_none() {
-                        file.key = Some(stable_key);
-                    }
-                    return false;
-                }
-                if file.key.is_none() {
-                    file.key = Some(stable_key);
-                }
-                return true;
-            }
-
-            session.files.push(SessionFileEntry {
-                key: Some(stable_key),
-                url_index,
-                path: path.to_string(),
-                size,
-                status: FileEntryStatus::Pending,
-            });
-            true
+            SessionAdapter::register_queued_file(session, submitted_url, path, size)
         })
         .unwrap_or(true)
     }
@@ -1604,7 +1632,7 @@ impl App {
     }
 
     fn is_session_url(&self, url: &str) -> bool {
-        self.read_session(|session| session.urls.iter().any(|entry| entry.url == url))
+        self.read_session(|session| SessionAdapter::contains_url(session, url))
             .unwrap_or(false)
     }
 
