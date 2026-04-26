@@ -15,7 +15,9 @@ use dirs;
 
 #[cfg(test)]
 use super::app::{FileEntry, FileStatus};
-use super::event::{DownloadChannels, DownloadEvent, QueuedFile, TokenMessage, TuiProgress};
+use super::event::{
+    DownloadChannels, DownloadEvent, FileOrigin, QueuedFile, TokenMessage, TuiProgress,
+};
 
 pub(crate) fn schedule_resume_artifact_delete(path: String) {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -82,14 +84,12 @@ fn describe_panic(panic: &(dyn std::any::Any + Send)) -> String {
 
 #[derive(Clone)]
 struct ResolvedUrl {
-    url: String,
-    session_url: String,
+    origin: FileOrigin,
 }
 
 struct QueuedDownload {
     id: String,
-    source_url: String,
-    session_url: String,
+    origin: FileOrigin,
     item: crate::OwnedDownloadItem,
 }
 
@@ -301,8 +301,10 @@ async fn resolve_urls(
                         dlc_urls.len()
                     )));
                     resolved.extend(dlc_urls.into_iter().map(|resolved_url| ResolvedUrl {
-                        url: resolved_url,
-                        session_url: url.clone(),
+                        origin: FileOrigin {
+                            source_url: resolved_url,
+                            submitted_url: url.clone(),
+                        },
                     }));
                 }
                 Err(e) => {
@@ -315,8 +317,10 @@ async fn resolve_urls(
             }
         } else {
             resolved.push(ResolvedUrl {
-                url: url.clone(),
-                session_url: url.clone(),
+                origin: FileOrigin {
+                    source_url: url.clone(),
+                    submitted_url: url.clone(),
+                },
             });
         }
     }
@@ -456,8 +460,10 @@ mod tests {
             id: "file-id".to_string(),
             size: 128,
             count_toward_progress: true,
-            source_url: "https://mega.nz/file/new".to_string(),
-            session_url: "https://mega.nz/folder/root".to_string(),
+            origin: FileOrigin {
+                source_url: "https://mega.nz/file/new".to_string(),
+                submitted_url: "https://mega.nz/folder/root".to_string(),
+            },
         }));
 
         let file = app.files.iter().find(|file| file.id == "file-id").unwrap();
@@ -495,8 +501,10 @@ mod tests {
             id: "episode.mkv".to_string(),
             size: 128,
             count_toward_progress: true,
-            source_url: "https://mega.nz/file/root".to_string(),
-            session_url: "https://mega.nz/file/root".to_string(),
+            origin: FileOrigin {
+                source_url: "https://mega.nz/file/root".to_string(),
+                submitted_url: "https://mega.nz/file/root".to_string(),
+            },
         }));
 
         assert!(app.files.is_empty());
@@ -595,8 +603,10 @@ mod tests {
             id: "episode.mkv".to_string(),
             size: 128,
             count_toward_progress: false,
-            source_url: "https://mega.nz/file/root".to_string(),
-            session_url: "https://mega.nz/file/root".to_string(),
+            origin: FileOrigin {
+                source_url: "https://mega.nz/file/root".to_string(),
+                submitted_url: "https://mega.nz/file/root".to_string(),
+            },
         }));
         app.handle_download_event(DownloadEvent::FileComplete {
             id: "episode.mkv".to_string(),
@@ -616,23 +626,29 @@ mod tests {
     }
 
     #[test]
-    fn successful_session_urls_deduplicates_only_fetched_submissions() {
+    fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
         let resolved = vec![
             ResolvedUrl {
-                url: "https://mega.nz/file/one".to_string(),
-                session_url: "bundle.dlc".to_string(),
+                origin: FileOrigin {
+                    source_url: "https://mega.nz/file/one".to_string(),
+                    submitted_url: "bundle.dlc".to_string(),
+                },
             },
             ResolvedUrl {
-                url: "https://mega.nz/file/two".to_string(),
-                session_url: "bundle.dlc".to_string(),
+                origin: FileOrigin {
+                    source_url: "https://mega.nz/file/two".to_string(),
+                    submitted_url: "bundle.dlc".to_string(),
+                },
             },
             ResolvedUrl {
-                url: "https://mega.nz/file/three".to_string(),
-                session_url: "https://mega.nz/folder/direct".to_string(),
+                origin: FileOrigin {
+                    source_url: "https://mega.nz/file/three".to_string(),
+                    submitted_url: "https://mega.nz/folder/direct".to_string(),
+                },
             },
         ];
 
-        let urls = successful_session_urls(resolved.iter());
+        let urls = successful_submitted_urls(resolved.iter());
 
         assert_eq!(
             urls,
@@ -723,8 +739,8 @@ async fn download_batch(
     ctx: BatchContext<'_>,
 ) {
     let node_sets = fetch_node_sets(urls, ctx.http, ctx.event_tx).await;
-    let successful_session_urls =
-        successful_session_urls(node_sets.iter().map(|(resolved, _)| resolved));
+    let successful_submitted_urls =
+        successful_submitted_urls(node_sets.iter().map(|(resolved, _)| resolved));
     let (all_queued_items, all_completed_items, actual_skipped, actual_partial) =
         collect_queued_items(
             &node_sets,
@@ -739,7 +755,7 @@ async fn download_batch(
         &all_completed_items,
         actual_skipped,
         actual_partial,
-        &successful_session_urls,
+        &successful_submitted_urls,
         ctx.event_tx,
     );
 
@@ -795,12 +811,14 @@ async fn fetch_node_sets(
     for resolved in urls {
         let _ = event_tx.send(DownloadEvent::StatusMessage(format!(
             "Fetching: {}",
-            resolved.url
+            resolved.origin.source_url
         )));
-        let fetch_result =
-            std::panic::AssertUnwindSafe(crate::fetch_public_nodes(http, &resolved.url))
-                .catch_unwind()
-                .await;
+        let fetch_result = std::panic::AssertUnwindSafe(crate::fetch_public_nodes(
+            http,
+            &resolved.origin.source_url,
+        ))
+        .catch_unwind()
+        .await;
 
         match fetch_result {
             Ok(Ok(nodes)) => {
@@ -809,14 +827,14 @@ async fn fetch_node_sets(
             Ok(Err(e)) => {
                 let _ = event_tx.send(DownloadEvent::Error {
                     id: None,
-                    name: resolved.url.clone(),
+                    name: resolved.origin.source_url.clone(),
                     error: format!("Fetch failed: {e}"),
                 });
             }
             Err(panic) => {
                 let _ = event_tx.send(DownloadEvent::Error {
                     id: None,
-                    name: resolved.url.clone(),
+                    name: resolved.origin.source_url.clone(),
                     error: format!("Fetch panicked: {}", describe_panic(&*panic)),
                 });
             }
@@ -837,7 +855,7 @@ async fn collect_queued_items(
     let mut actual_partial = 0;
 
     for (resolved, nodes) in node_sets {
-        let skipped_for_url = skipped_paths.get(&resolved.session_url);
+        let skipped_for_url = skipped_paths.get(&resolved.origin.submitted_url);
         let collected = downloader.collect_files(nodes, progress).await;
         actual_skipped += collected.skipped;
         actual_partial += collected.partial;
@@ -849,8 +867,7 @@ async fn collect_queued_items(
             }
             Some(QueuedDownload {
                 id: item.path.clone(),
-                source_url: resolved.url.clone(),
-                session_url: resolved.session_url.clone(),
+                origin: resolved.origin.clone(),
                 item,
             })
         }));
@@ -861,8 +878,7 @@ async fn collect_queued_items(
             }
             Some(QueuedDownload {
                 id: item.path.clone(),
-                source_url: resolved.url.clone(),
-                session_url: resolved.session_url.clone(),
+                origin: resolved.origin.clone(),
                 item,
             })
         }));
@@ -875,15 +891,15 @@ async fn collect_queued_items(
     )
 }
 
-fn successful_session_urls<'a>(
+fn successful_submitted_urls<'a>(
     resolved_urls: impl IntoIterator<Item = &'a ResolvedUrl>,
 ) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut urls = Vec::new();
 
     for resolved in resolved_urls {
-        if seen.insert(resolved.session_url.clone()) {
-            urls.push(resolved.session_url.clone());
+        if seen.insert(resolved.origin.submitted_url.clone()) {
+            urls.push(resolved.origin.submitted_url.clone());
         }
     }
 
@@ -895,7 +911,7 @@ fn send_collection_events(
     all_completed_items: &[QueuedDownload],
     actual_skipped: usize,
     actual_partial: usize,
-    successful_session_urls: &[String],
+    successful_submitted_urls: &[String],
     event_tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) {
     let total_bytes: u64 = all_queued_items
@@ -918,8 +934,7 @@ fn send_collection_events(
             id: item.id.clone(),
             size: item.item.node.size(),
             count_toward_progress: true,
-            source_url: item.source_url.clone(),
-            session_url: item.session_url.clone(),
+            origin: item.origin.clone(),
         }));
     }
 
@@ -928,8 +943,7 @@ fn send_collection_events(
             id: item.id.clone(),
             size: item.item.node.size(),
             count_toward_progress: false,
-            source_url: item.source_url.clone(),
-            session_url: item.session_url.clone(),
+            origin: item.origin.clone(),
         }));
         let _ = event_tx.send(DownloadEvent::FileComplete {
             id: item.id.clone(),
@@ -938,7 +952,7 @@ fn send_collection_events(
     }
 
     // Remove URL placeholders now that real file entries exist
-    for source_url in successful_session_urls {
+    for source_url in successful_submitted_urls {
         let _ = event_tx.send(DownloadEvent::UrlResolved {
             url: source_url.clone(),
         });
