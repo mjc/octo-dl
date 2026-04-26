@@ -1,0 +1,336 @@
+use std::sync::Arc;
+use std::time::Instant;
+
+use crate::{core::CoreEvent, format_bytes};
+
+use super::{
+    App, ProgressDelta, QueuedFile, SessionAdapter, SessionFileUpdate, SessionUrlUpdate, UiAction,
+    VisibleFileContext,
+};
+
+impl App {
+    fn ensure_core_file_from_context(&mut self, context: &VisibleFileContext) -> Option<String> {
+        let source_url = context.source_url.clone();
+        if let Some(source_url) = source_url.as_ref() {
+            self.ensure_core_file(
+                &context.id,
+                source_url,
+                &context.artifact_path,
+                context.size,
+                context.counts_toward_progress,
+            );
+        }
+        source_url
+    }
+
+    fn cancel_file_token(&mut self, id: &str) {
+        if let Some(token) = self.cancellation_tokens.remove(id) {
+            token.cancel();
+        }
+    }
+
+    pub(crate) fn note_file_error(&mut self, id: &str, error: &str) {
+        self.update_session_file(id, SessionFileUpdate::Error(error));
+    }
+
+    fn mark_file_skipped(&mut self, id: &str) {
+        self.update_session_file(id, SessionFileUpdate::Skipped);
+    }
+
+    fn handle_deleted_download_artifact(&mut self, id: &str, artifact_path: &str) -> bool {
+        if !self.deleted_files.remove(id) {
+            return false;
+        }
+
+        self.cancellation_tokens.remove(id);
+        super::super::download::schedule_resume_artifact_delete(artifact_path.to_string());
+        self.mark_file_skipped(id);
+        true
+    }
+
+    fn is_session_url(&self, url: &str) -> bool {
+        self.read_session(|session| SessionAdapter::contains_url(session, url))
+            .unwrap_or(false)
+    }
+
+    fn handle_session_url_error(&mut self, url: &str, error: &str) {
+        self.update_session_url(url, SessionUrlUpdate::Error(error));
+        let _ = self.remove_overlay_file(url);
+        self.show_ui_error_only(url, error);
+    }
+
+    pub(crate) fn handle_download_error_event(
+        &mut self,
+        id: Option<String>,
+        name: String,
+        error: String,
+    ) {
+        log::error!("Download error: {name}: {error}");
+        if let Some(id) = id.as_ref()
+            && self.handle_deleted_download_artifact(id, &name)
+        {
+            return;
+        }
+
+        if self.is_session_url(&name) {
+            self.handle_session_url_error(&name, &error);
+        } else if let Some(id) = id {
+            self.apply_core_event(CoreEvent::FileFailed {
+                file_id: id.clone(),
+                message: error.clone(),
+            });
+            self.mark_visible_file_error(&id, &name, &error);
+        } else {
+            self.show_ui_error_only(&name, &error);
+        }
+
+        self.recompute_totals();
+    }
+
+    fn register_queued_file(&mut self, file: &QueuedFile) -> bool {
+        if !self.register_session_queued_file(&file.origin.submitted_url, &file.id, file.size) {
+            return false;
+        }
+        self.ensure_core_file(
+            &file.id,
+            &file.origin.source_url,
+            &file.id,
+            file.size,
+            file.count_toward_progress,
+        );
+        true
+    }
+
+    pub(crate) fn handle_file_queued_event(&mut self, file: QueuedFile) {
+        if self.deleted_files.contains(&file.id) {
+            return;
+        }
+        if !self.register_queued_file(&file) {
+            return;
+        }
+    }
+
+    fn handle_session_url_fetched(&mut self, url: &str) {
+        let _ = self.drop_overlay_file(url);
+        self.update_session_url(url, SessionUrlUpdate::Fetched);
+        self.recompute_totals();
+    }
+
+    pub(crate) fn handle_url_resolved_event(&mut self, url: String) {
+        self.handle_session_url_fetched(&url);
+    }
+
+    pub(crate) fn handle_file_start_event(&mut self, id: String, name: String, size: u64) {
+        log::info!("Download started: {name} ({})", format_bytes(size));
+        if self.deleted_files.contains(&id) {
+            return;
+        }
+        let source_url = self
+            .files
+            .iter()
+            .find(|entry| entry.id == id)
+            .and_then(|entry| entry.source_url.clone())
+            .unwrap_or_else(|| id.clone());
+        self.ensure_core_file(&id, &source_url, &name, size, true);
+        self.apply_core_event(CoreEvent::FileStarted {
+            file_id: id.clone(),
+            size,
+        });
+        self.reset_file_ui_rate(&id);
+    }
+
+    pub(crate) fn handle_file_progress_event(&mut self, id: Arc<str>, delta: ProgressDelta) {
+        if self.deleted_files.contains(id.as_ref()) {
+            return;
+        }
+        let previous_downloaded = self
+            .files
+            .iter()
+            .find(|file| file.id == id.as_ref())
+            .map_or(0, |file| file.downloaded);
+        self.apply_core_event(CoreEvent::FileProgress {
+            file_id: id.to_string(),
+            total_bytes_delta: delta.total_bytes_delta,
+            network_bytes_delta: delta.network_bytes_delta,
+        });
+        let now = Instant::now();
+        let _ = self.update_file_ui_progress(id.as_ref(), previous_downloaded, now);
+    }
+
+    pub(crate) fn handle_resume_reused_event(&mut self, id: String, chunks: usize, bytes: u64) {
+        if self.deleted_files.contains(&id) {
+            return;
+        }
+        self.apply_core_event(CoreEvent::FileReuseDetected {
+            file_id: id.clone(),
+            reused_bytes: bytes,
+            reused_chunks: chunks,
+        });
+        log::info!(
+            "Reusing {chunks} verified chunk(s) for {id} ({})",
+            format_bytes(bytes)
+        );
+        self.set_resume_reuse_status(&id, chunks, bytes);
+    }
+
+    pub(crate) fn handle_file_complete_event(&mut self, id: String, name: String) {
+        log::info!("Download complete: {name}");
+        if self.handle_deleted_download_artifact(&id, &name) {
+            return;
+        }
+        self.apply_core_event(CoreEvent::FileCompleted {
+            file_id: id.clone(),
+        });
+        self.recompute_totals();
+        self.mark_visible_file_complete(&id, &name);
+    }
+
+    pub(crate) fn handle_file_cancelled_event(&mut self, id: String, name: String) {
+        log::info!("Download cancelled: {name}");
+        if self.handle_deleted_download_artifact(&id, &name) {
+            return;
+        }
+        self.cancellation_tokens.remove(&id);
+        self.apply_core_event(CoreEvent::FileCancelled {
+            file_id: id.clone(),
+        });
+        self.reset_file_ui_rate(&id);
+        if self.paused {
+            self.status = "Paused".to_string();
+        }
+    }
+
+    pub(crate) fn perform_delete_file_action(&mut self, id: &str) {
+        let context = self.visible_file_context(id);
+        let is_core_backed = context
+            .as_ref()
+            .is_some_and(|context| context.is_core_backed);
+        let artifact_path = context
+            .as_ref()
+            .map_or_else(|| id.to_string(), |context| context.artifact_path.clone());
+        if let Some(context) = context.as_ref() {
+            let _ = self.ensure_core_file_from_context(context);
+        }
+        self.cancel_file_token(id);
+        self.deleted_files.insert(id.to_string());
+        if is_core_backed {
+            self.apply_core_event(CoreEvent::FileDeleted {
+                file_id: id.to_string(),
+            });
+        } else {
+            let _ = self.remove_overlay_file(id);
+        }
+        super::super::download::schedule_download_artifact_delete(artifact_path);
+        self.mark_file_skipped(id);
+        if !is_core_backed {
+            self.recompute_totals();
+        }
+    }
+
+    pub(crate) fn perform_retry_file_action(&mut self, id: &str) {
+        let context = self.visible_file_context(id);
+        let source_url = context
+            .as_ref()
+            .and_then(|context| self.ensure_core_file_from_context(context));
+        self.apply_core_event(CoreEvent::FileRetryRequested {
+            file_id: id.to_string(),
+        });
+        if let Some(url) = source_url {
+            self.reset_file_ui_rate(id);
+            let _ = self.url_tx.send(url);
+        } else {
+            self.status = format!("Retry unavailable for {id}");
+            if !self.core_state.files.contains_key(id) {
+                self.show_overlay_error(id, id, "Retry unavailable for this file", true);
+            }
+        }
+    }
+
+    pub(crate) fn perform_reset_file_action(&mut self, id: &str) {
+        let Some(context) = self.visible_file_context(id) else {
+            return;
+        };
+        let Some(source_url) = self.ensure_core_file_from_context(&context) else {
+            if !self.core_state.files.contains_key(id) {
+                self.show_overlay_error(id, id, "Reset unavailable for this file", true);
+            }
+            self.status = "Reset unavailable for selected file".to_string();
+            self.recompute_totals();
+            return;
+        };
+
+        self.cancel_file_token(id);
+
+        self.apply_core_event(CoreEvent::FileResetRequested {
+            file_id: id.to_string(),
+        });
+        self.reset_file_ui_rate(id);
+
+        super::super::download::schedule_download_artifact_delete(context.artifact_path);
+
+        let _ = self.url_tx.send(source_url);
+    }
+
+    pub(crate) fn apply_config_update(
+        &mut self,
+        chunks_per_file: Option<usize>,
+        concurrent_files: Option<usize>,
+        force_overwrite: Option<bool>,
+        cleanup_on_error: Option<bool>,
+    ) {
+        if let Some(value) = chunks_per_file {
+            self.config.config.chunks_per_file = value.max(1);
+        }
+        if let Some(value) = concurrent_files {
+            self.config.config.concurrent_files = value.max(1);
+        }
+        if let Some(value) = force_overwrite {
+            self.config.config.force_overwrite = value;
+        }
+        if let Some(value) = cleanup_on_error {
+            self.config.config.cleanup_on_error = value;
+        }
+    }
+
+    pub(crate) fn handle_ui_action(&mut self, action: UiAction) {
+        match action {
+            UiAction::AddUrls(urls) => {
+                let count = urls.len();
+                for url in urls {
+                    self.submit_url(url);
+                }
+                self.status = format!("Received {count} URL(s) from bookmarklet");
+            }
+            UiAction::Login {
+                email,
+                password,
+                mfa,
+            } => {
+                if self.login.set_credentials(email, password, mfa) {
+                    self.begin_login();
+                }
+            }
+            UiAction::TogglePause => {
+                if self.paused {
+                    self.resume_downloads();
+                } else {
+                    self.pause_downloads();
+                }
+            }
+            UiAction::DeleteFile(id) => self.perform_delete_file_action(&id),
+            UiAction::RetryFile(id) => self.perform_retry_file_action(&id),
+            UiAction::ResetFile(id) => self.perform_reset_file_action(&id),
+            UiAction::UpdateConfig {
+                chunks_per_file,
+                concurrent_files,
+                force_overwrite,
+                cleanup_on_error,
+            } => self.apply_config_update(
+                chunks_per_file,
+                concurrent_files,
+                force_overwrite,
+                cleanup_on_error,
+            ),
+        }
+    }
+}
