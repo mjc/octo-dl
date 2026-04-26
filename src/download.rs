@@ -83,8 +83,6 @@ impl DownloadProgress for NoProgress {}
 
 /// A file to be downloaded with its destination path.
 pub struct DownloadItem<'a> {
-    /// Stable bookkeeping key, when the caller has one.
-    pub key: Option<String>,
     /// Local file path where the file will be saved.
     pub path: String,
     /// Reference to the MEGA node to download.
@@ -125,7 +123,6 @@ impl CollectedFiles<'_> {
         self.to_download
             .into_iter()
             .map(|item| OwnedDownloadItem {
-                key: item.key,
                 path: item.path,
                 node: item.node.clone(),
             })
@@ -139,7 +136,6 @@ impl CollectedFiles<'_> {
             .to_download
             .into_iter()
             .map(|item| OwnedDownloadItem {
-                key: item.key,
                 path: item.path,
                 node: item.node.clone(),
             })
@@ -148,7 +144,6 @@ impl CollectedFiles<'_> {
             .completed
             .into_iter()
             .map(|item| OwnedDownloadItem {
-                key: item.key,
                 path: item.path,
                 node: item.node.clone(),
             })
@@ -162,8 +157,6 @@ impl CollectedFiles<'_> {
 /// Use this instead of [`DownloadItem`] when the items need to cross
 /// `tokio::spawn` boundaries (which require `'static` data).
 pub struct OwnedDownloadItem {
-    /// Stable bookkeeping key, when the caller has one.
-    pub key: Option<String>,
     /// Local file path where the file will be saved.
     pub path: String,
     /// Owned copy of the MEGA node to download.
@@ -514,7 +507,6 @@ impl<F: FileSystem> Downloader<F> {
                     collect_files_recursive(nodes, root)
                 } else {
                     vec![DownloadItem {
-                        key: None,
                         path: root.name().to_string(),
                         node: root,
                     }]
@@ -1116,7 +1108,6 @@ fn collect_files_recursive<'a>(
         .partition(|n| n.kind().is_folder());
 
     let current_files = files.into_iter().map(|file| DownloadItem {
-        key: None,
         path: build_path(nodes, file),
         node: file,
     });
