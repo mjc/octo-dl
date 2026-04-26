@@ -58,9 +58,12 @@ pub enum DownloadEvent {
     FileCancelled {
         id: String,
     },
-    Error {
-        id: Option<String>,
-        name: String,
+    FileError {
+        id: String,
+        error: String,
+    },
+    ScopeError {
+        scope: String,
         error: String,
     },
     LoginResult {
@@ -140,9 +143,8 @@ impl DownloadProgress for TuiProgress {
     }
 
     fn on_error(&self, name: &str, error: &str) {
-        let _ = self.tx.send(DownloadEvent::Error {
-            id: Some(name.to_string()),
-            name: name.to_string(),
+        let _ = self.tx.send(DownloadEvent::FileError {
+            id: name.to_string(),
             error: error.to_string(),
         });
     }

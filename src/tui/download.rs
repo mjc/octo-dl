@@ -256,9 +256,8 @@ impl DownloadProgress for FileProgress {
     }
 
     fn on_error(&self, _name: &str, error: &str) {
-        let _ = self.tx.send(DownloadEvent::Error {
-            id: Some(self.id.clone()),
-            name: self.id.clone(),
+        let _ = self.tx.send(DownloadEvent::FileError {
+            id: self.id.clone(),
             error: error.to_string(),
         });
     }
@@ -279,17 +278,15 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
 
     // Receive the pre-authenticated client from the login task
     let Some(rx) = client_rx else {
-        let _ = tx.send(DownloadEvent::Error {
-            id: None,
-            name: "setup".to_string(),
+        let _ = tx.send(DownloadEvent::ScopeError {
+            scope: "setup".to_string(),
             error: "No client channel available".to_string(),
         });
         return;
     };
     let Ok((mega_client, http)) = rx.await else {
-        let _ = tx.send(DownloadEvent::Error {
-            id: None,
-            name: "setup".to_string(),
+        let _ = tx.send(DownloadEvent::ScopeError {
+            scope: "setup".to_string(),
             error: "Login task dropped before sending client".to_string(),
         });
         return;
@@ -437,9 +434,8 @@ async fn resolve_dlc_urls(
     let dlc_path = match expand_dlc_path(url) {
         Ok(path) => path,
         Err(error) => {
-            let _ = tx.send(DownloadEvent::Error {
-                id: None,
-                name: url.to_string(),
+            let _ = tx.send(DownloadEvent::ScopeError {
+                scope: url.to_string(),
                 error,
             });
             return Vec::new();
@@ -458,9 +454,8 @@ async fn resolve_dlc_urls(
                 .collect()
         }
         Err(e) => {
-            let _ = tx.send(DownloadEvent::Error {
-                id: None,
-                name: url.to_string(),
+            let _ = tx.send(DownloadEvent::ScopeError {
+                scope: url.to_string(),
                 error: format!("DLC parse error: {e}"),
             });
             Vec::new()
@@ -489,9 +484,8 @@ fn handle_batch_join_result(
     tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) {
     if let Err(e) = result {
-        let _ = tx.send(DownloadEvent::Error {
-            id: None,
-            name: "download".to_string(),
+        let _ = tx.send(DownloadEvent::ScopeError {
+            scope: "download".to_string(),
             error: format!("Batch task panicked: {e}"),
         });
     }
@@ -693,9 +687,8 @@ mod tests {
         app.session = Some(session);
 
         app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
-        app.handle_download_event(DownloadEvent::Error {
-            id: None,
-            name: url.clone(),
+        app.handle_download_event(DownloadEvent::ScopeError {
+            scope: url.clone(),
             error: "bad folder".to_string(),
         });
 
@@ -1029,9 +1022,8 @@ async fn fetch_node_sets(
                 });
             }
             Err(error) => {
-                let _ = event_tx.send(DownloadEvent::Error {
-                    id: None,
-                    name: resolved.source_url.clone(),
+                let _ = event_tx.send(DownloadEvent::ScopeError {
+                    scope: resolved.source_url.clone(),
                     error,
                 });
             }
@@ -1176,16 +1168,14 @@ fn handle_download_join_result(
             ..
         }) => {} // user cancelled
         Ok(DownloadTaskResult { id, result: Err(e) }) => {
-            let _ = event_tx.send(DownloadEvent::Error {
-                id: Some(id.clone()),
-                name: id.clone(),
+            let _ = event_tx.send(DownloadEvent::FileError {
+                id: id.clone(),
                 error: format!("Download failed: {e}"),
             });
         }
         Err(e) => {
-            let _ = event_tx.send(DownloadEvent::Error {
-                id: None,
-                name: "download".to_string(),
+            let _ = event_tx.send(DownloadEvent::ScopeError {
+                scope: "download".to_string(),
                 error: format!("Task panicked: {e}"),
             });
         }
