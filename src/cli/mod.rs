@@ -314,10 +314,7 @@ async fn download_all(
                 let result = downloader
                     .download_file(item.node, &item.path, &progress, None)
                     .await;
-                (
-                    item.key.clone().unwrap_or_else(|| item.path.clone()),
-                    result,
-                )
+                (item.path.clone(), result)
             }
         })
         .buffer_unordered(downloader.config().concurrent_files)
@@ -600,8 +597,7 @@ pub async fn run() -> crate::Result<()> {
                 });
             }
         }
-        for mut item in collected.to_download {
-            item.key = Some(item.path.clone());
+        for item in collected.to_download {
             files.push(item);
         }
 
@@ -737,15 +733,13 @@ async fn resume_session(mut session: SessionSnapshotV3, config: &CliConfig) -> c
         let collected = downloader.collect_files(nodes, &no_progress).await;
         let mut files = Vec::new();
         let mut skipped = collected.skipped;
-        for mut item in collected.to_download {
-            let key = item.path.clone();
+        for item in collected.to_download {
             if !resumable_file_ids.is_empty()
                 && !resumable_file_ids.contains(&item.path)
                 && ignored_paths.contains(&item.path)
             {
                 skipped += 1;
             } else {
-                item.key = Some(key);
                 files.push(item);
             }
         }
