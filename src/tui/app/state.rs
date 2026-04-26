@@ -35,6 +35,9 @@ impl App {
                 CoreEffect::PersistSession(snapshot) => {
                     self.persist_core_session_snapshot(snapshot);
                 }
+                CoreEffect::EnqueueUrlResolution { url } => {
+                    let _ = self.url_tx.send(url);
+                }
                 CoreEffect::DeleteOutputArtifacts { path, .. } => {
                     super::super::download::schedule_output_artifact_delete(path);
                 }
@@ -44,9 +47,7 @@ impl App {
                 CoreEffect::PublishStatusMessage(message) => {
                     self.status = message;
                 }
-                CoreEffect::EnqueueUrlResolution { .. }
-                | CoreEffect::EnqueueFileDownload { .. }
-                | CoreEffect::PublishViewSnapshot => {}
+                CoreEffect::EnqueueFileDownload { .. } | CoreEffect::PublishViewSnapshot => {}
             }
         }
     }
