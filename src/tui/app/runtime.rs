@@ -163,8 +163,11 @@ impl App {
             DownloadEvent::FileCancelled { id } => {
                 self.handle_file_cancelled_event(id);
             }
-            DownloadEvent::Error { id, name, error } => {
-                self.handle_download_error_event(id, name, error);
+            DownloadEvent::FileError { id, error } => {
+                self.handle_file_error_event(id, error);
+            }
+            DownloadEvent::ScopeError { scope, error } => {
+                self.handle_scope_error_event(scope, error);
             }
             DownloadEvent::UrlQueued { url } => {
                 if self.deleted_files.contains(&url) {

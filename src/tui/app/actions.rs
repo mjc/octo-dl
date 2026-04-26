@@ -123,31 +123,27 @@ impl App {
         self.show_ui_error_only(url, error);
     }
 
-    pub(crate) fn handle_download_error_event(
-        &mut self,
-        id: Option<String>,
-        name: String,
-        error: String,
-    ) {
-        log::error!("Download error: {name}: {error}");
-        if let Some(id) = id.as_ref()
-            && self.handle_deleted_download_artifact(id, &name)
-        {
+    pub(crate) fn handle_file_error_event(&mut self, id: String, error: String) {
+        log::error!("Download error: {id}: {error}");
+        if self.handle_deleted_download_artifact(&id, &id) {
             return;
         }
 
-        if self.is_session_url(&name) {
-            self.handle_session_url_error(&name, &error);
-        } else if let Some(id) = id {
-            self.apply_core_event(CoreEvent::FileFailed {
-                file_id: id.clone(),
-                message: error.clone(),
-            });
-            self.mark_visible_file_error(&id, &name, &error);
-        } else {
-            self.show_ui_error_only(&name, &error);
-        }
+        self.apply_core_event(CoreEvent::FileFailed {
+            file_id: id.clone(),
+            message: error.clone(),
+        });
+        self.mark_visible_file_error(&id, &id, &error);
+        self.recompute_totals();
+    }
 
+    pub(crate) fn handle_scope_error_event(&mut self, scope: String, error: String) {
+        log::error!("Download error: {scope}: {error}");
+        if self.is_session_url(&scope) {
+            self.handle_session_url_error(&scope, &error);
+        } else {
+            self.show_ui_error_only(&scope, &error);
+        }
         self.recompute_totals();
     }
 
