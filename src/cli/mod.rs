@@ -278,43 +278,21 @@ fn build_restart_snapshot(session: &SessionSnapshotV3) -> RestartSnapshot {
 }
 
 fn mark_session_file_complete(session: &mut SessionSnapshotV3, file_id: &str) {
-    if let Some(file) = session.files.iter_mut().find(|file| file.id == file_id) {
-        file.lifecycle = FileLifecycle::Complete;
-        file.progress.visible_completed_bytes = file.size;
-        file.runtime.active = false;
-        file.runtime.counts_in_run_totals = false;
-    }
+    session.mark_file_complete(file_id);
 }
 
 fn mark_session_file_error(session: &mut SessionSnapshotV3, file_id: &str, error: &str) {
-    if let Some(file) = session.files.iter_mut().find(|file| file.id == file_id) {
-        file.lifecycle = FileLifecycle::Failed;
-        file.message = Some(error.to_string());
-        file.runtime.active = false;
-    }
+    session.mark_file_error(file_id, error);
 }
 
 #[must_use]
 fn session_completed_count(session: &SessionSnapshotV3) -> usize {
-    session
-        .files
-        .iter()
-        .filter(|file| matches!(file.lifecycle, FileLifecycle::Complete))
-        .count()
+    session.completed_count()
 }
 
 #[must_use]
 fn session_remaining_count(session: &SessionSnapshotV3) -> usize {
-    session
-        .files
-        .iter()
-        .filter(|file| {
-            !matches!(
-                file.lifecycle,
-                FileLifecycle::Complete | FileLifecycle::Skipped | FileLifecycle::Deleted
-            )
-        })
-        .count()
+    session.remaining_count()
 }
 
 #[cfg(test)]
