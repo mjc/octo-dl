@@ -260,6 +260,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::{CoreEvent, ResolvedFile, ResolvedPackage};
     use super::super::app::{App, FileEntry, FileStatus, Popup, QuitPolicy};
     use super::*;
     use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
@@ -404,6 +405,32 @@ mod tests {
 
         handle_input(&mut app, key(KeyCode::Char('d')));
         assert!(token.is_cancelled());
+        assert!(app.files.is_empty());
+    }
+
+    #[test]
+    fn handle_main_input_delete_core_backed_entry() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "https://mega.nz/file/core".to_string(),
+                source_url: "https://mega.nz/file/core".to_string(),
+                display_name: "Core".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "core.bin".to_string(),
+                    path: "core.bin".to_string(),
+                    size: 10,
+                }],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileCompleted {
+            file_id: "core.bin".to_string(),
+        });
+        app.file_list_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Delete));
+
         assert!(app.files.is_empty());
     }
 
