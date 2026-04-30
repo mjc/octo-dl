@@ -128,8 +128,9 @@ impl App {
     }
 
     pub(crate) fn update_session_file(&mut self, file_id: &str, update: SessionFileUpdate<'_>) {
-        let _ =
-            self.mutate_session(|session| SessionAdapter::update_file(session, file_id, update));
+        let _ = self.mutate_session_and_save(|session| {
+            SessionAdapter::update_file(session, file_id, update)
+        });
     }
 
     pub(crate) fn register_session_queued_file(
@@ -167,7 +168,8 @@ impl App {
     }
 
     pub(crate) fn update_session_run_status(&mut self, update: SessionRunUpdate) {
-        let _ = self.mutate_session(|session| SessionAdapter::apply_run_update(session, update));
+        let _ = self
+            .mutate_session_and_save(|session| SessionAdapter::apply_run_update(session, update));
     }
 
     pub(crate) fn install_session(&mut self, session: SessionSnapshotV3) {
@@ -233,17 +235,19 @@ impl App {
             else {
                 continue;
             };
-                if !package.file_ids.is_empty() {
-                    continue;
-                }
-                let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
+            if !package.file_ids.is_empty() {
+                continue;
             }
+            let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
+        }
         self.save_and_install_session(session);
     }
 
     pub(crate) fn sync_session_for_shutdown(&mut self) {
         let visible: HashSet<String> = self.files.iter().map(|file| file.id.clone()).collect();
-        let _ = self.mutate_session(|session| SessionAdapter::sync_for_shutdown(session, &visible));
+        let _ = self.mutate_session_and_save(|session| {
+            SessionAdapter::sync_for_shutdown(session, &visible)
+        });
     }
 
     pub(crate) fn sync_session_after_file_complete(&mut self, id: &str) {

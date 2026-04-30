@@ -277,6 +277,46 @@ fn build_restart_snapshot(session: &SessionSnapshotV3) -> RestartSnapshot {
     )
 }
 
+fn mark_session_file_complete(session: &mut SessionSnapshotV3, file_id: &str) {
+    if let Some(file) = session.files.iter_mut().find(|file| file.id == file_id) {
+        file.lifecycle = FileLifecycle::Complete;
+        file.progress.visible_completed_bytes = file.size;
+        file.runtime.active = false;
+        file.runtime.counts_in_run_totals = false;
+    }
+}
+
+fn mark_session_file_error(session: &mut SessionSnapshotV3, file_id: &str, error: &str) {
+    if let Some(file) = session.files.iter_mut().find(|file| file.id == file_id) {
+        file.lifecycle = FileLifecycle::Failed;
+        file.message = Some(error.to_string());
+        file.runtime.active = false;
+    }
+}
+
+#[must_use]
+fn session_completed_count(session: &SessionSnapshotV3) -> usize {
+    session
+        .files
+        .iter()
+        .filter(|file| matches!(file.lifecycle, FileLifecycle::Complete))
+        .count()
+}
+
+#[must_use]
+fn session_remaining_count(session: &SessionSnapshotV3) -> usize {
+    session
+        .files
+        .iter()
+        .filter(|file| {
+            !matches!(
+                file.lifecycle,
+                FileLifecycle::Complete | FileLifecycle::Skipped | FileLifecycle::Deleted
+            )
+        })
+        .count()
+}
+
 #[cfg(test)]
 fn resumable_urls(session: &SessionSnapshotV3) -> Vec<(usize, String)> {
     let restart = build_restart_snapshot(session);
@@ -329,13 +369,13 @@ async fn download_all(
             Ok(file_stats) => {
                 builder.add_download(&file_stats);
                 if let Some(ref mut state) = session_state.as_deref_mut() {
-                    let _ = state.mark_file_complete(&path);
+                    mark_session_file_complete(state, &path);
                 }
             }
             Err(e) => {
                 let _ = progress.progress.println(format!("Download error: {e:?}"));
                 if let Some(ref mut state) = session_state.as_deref_mut() {
-                    let _ = state.mark_file_error(&path, &e.to_string());
+                    mark_session_file_error(state, &path, &e.to_string());
                 }
             }
         }
@@ -461,7 +501,7 @@ pub async fn run() -> crate::Result<()> {
                 "Resuming session {} ({} files, {} completed)",
                 session.id,
                 session.files.len(),
-                session.completed_count()
+                session_completed_count(&session)
             );
             return resume_session(session, &config).await;
         }
@@ -472,7 +512,7 @@ pub async fn run() -> crate::Result<()> {
             println!(
                 "Found incomplete session: {} ({} remaining files)",
                 session.id,
-                session.remaining_count()
+                session_remaining_count(&session)
             );
             println!("Use --resume to continue, or provide URLs to start a new session.");
             std::process::exit(0);
@@ -625,7 +665,8 @@ pub async fn run() -> crate::Result<()> {
         if total_skipped > 0 {
             println!("All files already downloaded.");
         }
-        let _ = session_state.mark_completed();
+        session_state.status = SessionRunStatus::Completed;
+        let _ = session_state.save();
         return Ok(());
     }
 
@@ -657,7 +698,8 @@ pub async fn run() -> crate::Result<()> {
     print_summary(&session_stats);
 
     // Mark session as completed
-    let _ = session_state.mark_completed();
+    session_state.status = SessionRunStatus::Completed;
+    let _ = session_state.save();
 
     Ok(())
 }
@@ -766,7 +808,8 @@ async fn resume_session(mut session: SessionSnapshotV3, config: &CliConfig) -> c
 
     if all_files.is_empty() {
         println!("All files already downloaded.");
-        let _ = session.mark_completed();
+        session.status = SessionRunStatus::Completed;
+        let _ = session.save();
         return Ok(());
     }
 
@@ -799,7 +842,8 @@ async fn resume_session(mut session: SessionSnapshotV3, config: &CliConfig) -> c
     let session_stats = builder.build();
     print_summary(&session_stats);
 
-    let _ = session.mark_completed();
+    session.status = SessionRunStatus::Completed;
+    let _ = session.save();
 
     Ok(())
 }

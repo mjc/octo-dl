@@ -89,13 +89,27 @@ impl SessionAdapter {
     ) {
         match update {
             SessionFileUpdate::Complete => {
-                let _ = session.mark_file_complete(file_id);
+                if let Some(file) = session.files.iter_mut().find(|file| file.id == file_id) {
+                    file.lifecycle = FileLifecycle::Complete;
+                    file.progress.visible_completed_bytes = file.size;
+                    file.runtime.active = false;
+                    file.runtime.counts_in_run_totals = false;
+                }
             }
             SessionFileUpdate::Error(error) => {
-                let _ = session.mark_file_error(file_id, error);
+                if let Some(file) = session.files.iter_mut().find(|file| file.id == file_id) {
+                    file.lifecycle = FileLifecycle::Failed;
+                    file.message = Some(error.to_string());
+                    file.runtime.active = false;
+                }
             }
             SessionFileUpdate::Skipped => {
-                let _ = session.mark_file_skipped(file_id);
+                if let Some(file) = session.files.iter_mut().find(|file| file.id == file_id) {
+                    file.lifecycle = FileLifecycle::Skipped;
+                    file.desired = DesiredState::Suppressed;
+                    file.runtime.active = false;
+                    file.runtime.counts_in_run_totals = false;
+                }
             }
         }
     }
@@ -137,10 +151,10 @@ impl SessionAdapter {
     pub(super) fn apply_run_update(session: &mut SessionSnapshotV3, update: SessionRunUpdate) {
         match update {
             SessionRunUpdate::Completed => {
-                let _ = session.mark_completed();
+                session.status = SessionRunStatus::Completed;
             }
             SessionRunUpdate::Paused => {
-                let _ = session.mark_paused();
+                session.status = SessionRunStatus::Paused;
             }
         }
     }
