@@ -95,7 +95,6 @@ impl App {
                 artifact_path: file.name.clone(),
                 size: file.size,
                 counts_toward_progress,
-                is_core_backed: self.core_state.files.contains_key(id) || source_url.is_some(),
                 source_url,
             }
         })

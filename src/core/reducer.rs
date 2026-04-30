@@ -329,12 +329,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             for file_id in snapshot.resume_file_ids {
                 effects.push(CoreEffect::EnqueueFileDownload { file_id });
             }
-            if !snapshot.legacy_backups.is_empty() {
-                effects.push(CoreEffect::PublishStatusMessage(format!(
-                    "Legacy sessions were backed up: {}",
-                    snapshot.legacy_backups.join(", ")
-                )));
-            }
         }
         CoreEvent::Tick { now } => {
             let _ = now;

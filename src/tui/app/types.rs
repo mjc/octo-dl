@@ -173,7 +173,6 @@ pub(crate) struct VisibleFileContext {
     pub artifact_path: String,
     pub size: u64,
     pub counts_toward_progress: bool,
-    pub is_core_backed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
