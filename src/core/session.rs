@@ -138,6 +138,23 @@ impl SessionSnapshotV3 {
         Self::latest_with_backups().0
     }
 
+    pub fn mark_file_complete(&mut self, file_id: &str) {
+        if let Some(file) = self.files.iter_mut().find(|file| file.id == file_id) {
+            file.lifecycle = FileLifecycle::Complete;
+            file.progress.visible_completed_bytes = file.size;
+            file.runtime.active = false;
+            file.runtime.counts_in_run_totals = false;
+        }
+    }
+
+    pub fn mark_file_error(&mut self, file_id: &str, error: &str) {
+        if let Some(file) = self.files.iter_mut().find(|file| file.id == file_id) {
+            file.lifecycle = FileLifecycle::Failed;
+            file.message = Some(error.to_string());
+            file.runtime.active = false;
+        }
+    }
+
     #[must_use]
     pub fn latest_with_backups() -> (Option<Self>, Vec<String>) {
         let dir = Self::state_dir();
