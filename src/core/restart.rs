@@ -215,19 +215,30 @@ pub fn reconcile_restart(
                 continue;
             }
             if let Some(size) = complete_map.get(&file.id) {
-                file.size = *size;
-                file.lifecycle = FileLifecycle::Complete;
-                file.progress.visible_completed_bytes = *size;
-                file.runtime.preexisting_complete = true;
-                file.runtime.counts_in_run_totals = false;
-                preexisting_complete_file_ids.push(file.id.clone());
+                if *size == file.size {
+                    file.size = *size;
+                    file.lifecycle = FileLifecycle::Complete;
+                    file.progress.visible_completed_bytes = *size;
+                    file.runtime.preexisting_complete = true;
+                    file.runtime.counts_in_run_totals = false;
+                    preexisting_complete_file_ids.push(file.id.clone());
+                    files.insert(file.id.clone(), file);
+                    continue;
+                }
+                file.lifecycle = FileLifecycle::Queued;
+                file.runtime.counts_in_run_totals = true;
+                file.runtime.preexisting_complete = false;
+                file.progress.visible_completed_bytes = 0;
+                file.message = None;
+                if !resume_file_ids.contains(&file.id) {
+                    resume_file_ids.push(file.id.clone());
+                }
                 files.insert(file.id.clone(), file);
                 continue;
             }
             if let Some(partial) = partial_map.get(&file.id) {
                 file.lifecycle = FileLifecycle::Queued;
-                file.progress.visible_completed_bytes =
-                    partial.bytes.min(file.size.max(partial.bytes));
+                file.progress.visible_completed_bytes = partial.bytes.min(file.size.max(partial.bytes));
                 file.runtime.counts_in_run_totals = true;
                 file.runtime.preexisting_complete = false;
                 resume_file_ids.push(file.id.clone());
@@ -461,6 +472,28 @@ mod tests {
         let file = &restart.state.files["a.bin"];
         assert!(file.runtime.preexisting_complete);
         assert!(!file.runtime.counts_in_run_totals);
+    }
+
+    #[test]
+    fn restart_treats_mismatched_complete_files_as_partial_queue() {
+        let snapshot = sample_snapshot();
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot {
+                complete_files: vec![FilesystemFile {
+                    file_id: "a.bin".to_string(),
+                    size: 1000,
+                }],
+                partial_files: Vec::new(),
+            },
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+        let file = &restart.state.files["a.bin"];
+        assert_eq!(file.lifecycle, FileLifecycle::Queued);
+        assert!(!file.runtime.preexisting_complete);
+        assert!(file.runtime.counts_in_run_totals);
+        assert_eq!(file.progress.visible_completed_bytes, 0);
+        assert_eq!(restart.resume_file_ids, vec!["a.bin".to_string()]);
     }
 
     #[test]
