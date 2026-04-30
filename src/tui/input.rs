@@ -240,14 +240,6 @@ fn delete_selected(app: &mut App) {
         return;
     };
     let file = &app.files[selected_file];
-    let file_status = file.status.clone();
-    let can_remove = matches!(
-        file_status,
-        FileStatus::Queued | FileStatus::Error(_) | FileStatus::Downloading | FileStatus::Complete
-    );
-    if !can_remove {
-        return;
-    }
     app.handle_ui_action(UiAction::DeleteFile(file.id.clone()));
 }
 

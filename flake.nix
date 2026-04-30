@@ -48,7 +48,8 @@
 
         cargoTargetEnvPrefix = pkgs.lib.toUpper (builtins.replaceStrings ["-"] ["_"] pkgs.stdenv.hostPlatform.config);
         cargoTargetLinkerEnv = "CARGO_TARGET_${cargoTargetEnvPrefix}_LINKER";
-        linuxLinker = "${pkgs.stdenv.cc}/bin/cc";
+        linuxCcLinker = "${pkgs.stdenv.cc}/bin/cc";
+        linuxMoldRustFlags = "-C link-arg=-fuse-ld=${pkgs.mold}/bin/mold";
 
         # Crane setup with nightly rust
         rustNightly = pkgs.rust-bin.nightly.latest.default.override {
@@ -88,7 +89,8 @@
           '';
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
-          "${cargoTargetLinkerEnv}" = linuxLinker;
+          "${cargoTargetLinkerEnv}" = linuxCcLinker;
+          CARGO_TARGET_${cargoTargetEnvPrefix}_RUSTFLAGS = linuxMoldRustFlags;
         };
 
         # Build only the cargo dependencies — cached when Cargo.lock is unchanged
@@ -150,8 +152,8 @@
             ''
               export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
               export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
-              export "CARGO_TARGET_${cargoTargetEnvPrefix}_LINKER"="${pkgs.lib.optionalString pkgs.stdenv.isLinux linuxLinker}${pkgs.lib.optionalString (!pkgs.stdenv.isLinux) "${pkgs.stdenv.cc}/bin/cc"}"
-              export "CARGO_TARGET_${cargoTargetEnvPrefix}_RUSTFLAGS"="-C target-cpu=native"
+              export "CARGO_TARGET_${cargoTargetEnvPrefix}_LINKER"="${pkgs.lib.optionalString pkgs.stdenv.isLinux linuxCcLinker}${pkgs.lib.optionalString (!pkgs.stdenv.isLinux) "${pkgs.stdenv.cc}/bin/cc"}"
+              export "CARGO_TARGET_${cargoTargetEnvPrefix}_RUSTFLAGS"="-C target-cpu=native${pkgs.lib.optionalString pkgs.stdenv.isLinux " ${linuxMoldRustFlags}"}"
             ''
             + (
               if pkgs.stdenv.isLinux
