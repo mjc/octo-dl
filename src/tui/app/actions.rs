@@ -262,15 +262,13 @@ impl App {
 
     pub(crate) fn perform_delete_file_action(&mut self, id: &str) {
         let context = self.visible_file_context(id);
-        let is_core_backed = context
-            .as_ref()
-            .is_some_and(|context| context.is_core_backed);
         let artifact_path = context
             .as_ref()
             .map_or_else(|| id.to_string(), |context| context.artifact_path.clone());
         if let Some(context) = context.as_ref() {
             let _ = self.ensure_core_file_from_context(context);
         }
+        let is_core_backed = self.core_state.files.contains_key(id);
         self.cancel_file_token(id);
         self.deleted_files.insert(id.to_string());
         if is_core_backed {

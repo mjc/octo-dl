@@ -35,7 +35,6 @@ pub struct RestartSnapshot {
     pub resume_file_ids: Vec<FileId>,
     pub preexisting_complete_file_ids: Vec<FileId>,
     pub suppressed_file_ids: Vec<FileId>,
-    pub legacy_backups: Vec<String>,
 }
 
 impl RestartSnapshot {
@@ -380,7 +379,6 @@ pub fn reconcile_restart(
         resume_file_ids,
         preexisting_complete_file_ids,
         suppressed_file_ids,
-        legacy_backups: Vec::new(),
     }
 }
 
