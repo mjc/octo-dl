@@ -172,7 +172,7 @@ in {
 
           [ -f "$file" ] || return 1
 
-          awk -v section="$section" -v key="$key" '
+          ${pkgs.gawk}/bin/awk -v section="$section" -v key="$key" '
             /^\[/ {
               in_section = ($0 == "[" section "]")
               next
@@ -195,9 +195,21 @@ in {
         api_key="$(read_toml_value api api_key "$OCTO_CONFIG_PATH" || true)"
 
         encrypted=''${encrypted:-false}
+        if { [ -z "$email" ] || [ "$email" = '""' ]; } && [ -n "''${MEGA_EMAIL:-}" ]; then
+          email="$(toml_quote "$MEGA_EMAIL")"
+          encrypted=false
+        fi
+        if { [ -z "$password" ] || [ "$password" = '""' ]; } && [ -n "''${MEGA_PASSWORD:-}" ]; then
+          password="$(toml_quote "$MEGA_PASSWORD")"
+          encrypted=false
+        fi
+        mfa=''${mfa:-\"\"}
+        if { [ -z "$mfa" ] || [ "$mfa" = '""' ]; } && [ -n "''${MEGA_MFA:-}" ]; then
+          mfa="$(toml_quote "$MEGA_MFA")"
+        fi
+
         email=''${email:-\"\"}
         password=''${password:-\"\"}
-        mfa=''${mfa:-\"\"}
 
         if [ -n "$OCTO_API_KEY_FILE" ] && [ -f "$OCTO_API_KEY_FILE" ]; then
           api_key="$(toml_quote "$(tr -d '\n' < "$OCTO_API_KEY_FILE")")"
