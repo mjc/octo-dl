@@ -48,8 +48,9 @@
 
         cargoTargetEnvPrefix = pkgs.lib.toUpper (builtins.replaceStrings ["-"] ["_"] pkgs.stdenv.hostPlatform.config);
         cargoTargetLinkerEnv = "CARGO_TARGET_${cargoTargetEnvPrefix}_LINKER";
+        cargoTargetRustflagsEnv = "CARGO_TARGET_${cargoTargetEnvPrefix}_RUSTFLAGS";
         linuxCcLinker = "${pkgs.stdenv.cc}/bin/cc";
-        linuxMoldRustFlags = "-C link-arg=-fuse-ld=${pkgs.mold}/bin/mold";
+        linuxMoldRustFlags = "-C link-arg=-fuse-ld=mold";
 
         # Crane setup with nightly rust
         rustNightly = pkgs.rust-bin.nightly.latest.default.override {
@@ -79,7 +80,7 @@
           version = "0.1.0";
           strictDeps = true;
 
-          nativeBuildInputs = [pkgs.pkg-config];
+          nativeBuildInputs = [pkgs.pkg-config pkgs.mold];
           buildInputs = [pkgs.openssl];
 
           # Place mega-rs next to octo-dl so `path = "../mega-rs"` resolves
@@ -90,7 +91,7 @@
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           "${cargoTargetLinkerEnv}" = linuxCcLinker;
-          CARGO_TARGET_${cargoTargetEnvPrefix}_RUSTFLAGS = linuxMoldRustFlags;
+          "${cargoTargetRustflagsEnv}" = linuxMoldRustFlags;
         };
 
         # Build only the cargo dependencies — cached when Cargo.lock is unchanged
