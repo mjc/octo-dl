@@ -778,6 +778,8 @@ impl<F: FileSystem> Downloader<F> {
         }
 
         self.ensure_parent_dir(path).await?;
+        let name = path.to_string();
+        progress.on_file_start(&name, node.size());
 
         let pp = part_path(path);
         let sp = sidecar_path(path);
@@ -818,9 +820,7 @@ impl<F: FileSystem> Downloader<F> {
         let stats = Arc::new(DownloadStatsTracker::new(
             node.size().saturating_sub(trusted_bytes),
         ));
-        let name = path.to_string();
 
-        progress.on_file_start(&name, node.size());
         if trusted_bytes > 0 {
             progress.on_resume_reused(&name, resume_validation.trusted_count, trusted_bytes);
             if matches!(
