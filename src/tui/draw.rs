@@ -108,13 +108,7 @@ fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
         clippy::cast_precision_loss
     )]
     let pct = (ratio * 100.0) as u16;
-    let gauge_label = format!(
-        "{}%  {}/{} files  {}/s",
-        pct,
-        app.files_completed,
-        app.files_total,
-        format_bytes(app.current_speed),
-    );
+    let gauge_label = aggregate_progress_label(app, pct, chunks[1].width);
     let gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL))
         .gauge_style(Style::default().fg(Color::Green))
@@ -189,6 +183,7 @@ fn build_status_line(app: &App) -> Vec<Span<'_>> {
 
 fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let sorted_indices = app.sorted_file_indices();
+    let content_width = usize::from(area.width.saturating_sub(4));
 
     let items: Vec<ListItem> = sorted_indices
         .iter()
@@ -243,15 +238,28 @@ fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
             let mut lines = Vec::new();
             if show_package_label && let Some(package_label) = package_label {
                 lines.push(Line::from(vec![Span::styled(
-                    format!(" Package: {package_label}"),
+                    format!(
+                        " Package: {}",
+                        truncate_end(&package_label, content_width.saturating_sub(10))
+                    ),
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 )]));
             }
             lines.push(Line::from(vec![Span::styled(
-                format!(" {icon} {:<30}  {detail}", f.name),
+                format!(
+                    " {icon} {}",
+                    truncate_end(&f.name, content_width.saturating_sub(3))
+                ),
                 style,
+            )]));
+            lines.push(Line::from(vec![Span::styled(
+                format!(
+                    "   {}",
+                    truncate_end(&detail, content_width.saturating_sub(3))
+                ),
+                Style::default().fg(Color::DarkGray),
             )]));
             ListItem::new(lines)
         })
@@ -259,6 +267,49 @@ fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
     let file_list = List::new(items).block(Block::default().borders(Borders::ALL));
     frame.render_stateful_widget(file_list, area, &mut app.file_list_state);
+}
+
+fn aggregate_progress_label(app: &App, pct: u16, width: u16) -> String {
+    let bytes = format!(
+        "{} / {}",
+        format_bytes(app.total_downloaded),
+        format_bytes(app.total_size)
+    );
+    let full = format!(
+        "{pct}%  {}/{} files  {bytes}  {}/s",
+        app.files_completed,
+        app.files_total,
+        format_bytes(app.current_speed),
+    );
+    if full.chars().count() <= usize::from(width.saturating_sub(2)) {
+        return full;
+    }
+
+    let compact = format!(
+        "{pct}%  {}/{}  {}/s",
+        app.files_completed,
+        app.files_total,
+        format_bytes(app.current_speed),
+    );
+    truncate_end(&compact, usize::from(width.saturating_sub(2)))
+}
+
+fn truncate_end(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let mut truncated = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('\u{2026}');
+    truncated
 }
 
 fn progress_bar(downloaded: u64, total: u64, width: usize) -> String {

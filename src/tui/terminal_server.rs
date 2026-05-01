@@ -5,8 +5,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, OriginalUri, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
@@ -52,6 +53,7 @@ mod tests {
             session,
             http_client: Arc::new(build_http_client().expect("failed to build HTTP client")),
             dlc_cache: Arc::new(DlcKeyCache::new()),
+            upstream_api_base: None,
         };
         let _slave = pair.slave; // keep slave alive so the PTY stays usable
         (state, std::io::BufReader::new(reader))
@@ -153,6 +155,7 @@ struct TerminalApiState {
     session: Arc<TerminalSession>,
     http_client: Arc<reqwest::Client>,
     dlc_cache: Arc<DlcKeyCache>,
+    upstream_api_base: Option<String>,
 }
 
 struct TerminalSession {
@@ -267,6 +270,13 @@ struct DlcRequest {
     filename: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum ClientMessage {
+    #[serde(rename = "resize")]
+    Resize { cols: u16, rows: u16 },
+}
+
 #[derive(Serialize)]
 struct UrlResponse {
     added: Vec<String>,
@@ -283,6 +293,7 @@ pub async fn run_terminal_server(
     port: u16,
     bridge: Arc<TerminalBridge>,
     shutdown: oneshot::Receiver<()>,
+    upstream_api_port: Option<u16>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let cors = CorsLayer::new()
@@ -315,6 +326,7 @@ pub async fn run_terminal_server(
         session,
         http_client,
         dlc_cache,
+        upstream_api_base: upstream_api_port.map(|port| format!("http://127.0.0.1:{port}")),
     };
 
     let app = Router::new()
@@ -326,6 +338,13 @@ pub async fn run_terminal_server(
         .route("/icon-192.svg", get(icon))
         .route("/icon-512.svg", get(icon))
         .route("/api/health", get(api_health))
+        .route("/api/state", get(proxy_api_get))
+        .route("/api/events", get(proxy_api_get))
+        .route("/api/login", post(proxy_api_post))
+        .route("/api/pause", post(proxy_api_post))
+        .route("/api/delete", post(proxy_api_post))
+        .route("/api/retry", post(proxy_api_post))
+        .route("/api/config", post(proxy_api_post))
         .route(
             "/api/urls",
             post(api_post_urls).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
@@ -420,6 +439,67 @@ async fn icon() -> impl IntoResponse {
 
 async fn api_health(State(_state): State<TerminalApiState>) -> impl IntoResponse {
     axum::Json(HealthResponse { status: "ok" })
+}
+
+async fn proxy_api_get(
+    State(state): State<TerminalApiState>,
+    OriginalUri(uri): OriginalUri,
+) -> impl IntoResponse {
+    proxy_api_request(&state, reqwest::Method::GET, &uri, Bytes::new()).await
+}
+
+async fn proxy_api_post(
+    State(state): State<TerminalApiState>,
+    OriginalUri(uri): OriginalUri,
+    body: Bytes,
+) -> impl IntoResponse {
+    proxy_api_request(&state, reqwest::Method::POST, &uri, body).await
+}
+
+async fn proxy_api_request(
+    state: &TerminalApiState,
+    method: reqwest::Method,
+    uri: &axum::http::Uri,
+    body: Bytes,
+) -> axum::response::Response {
+    let Some(base) = &state.upstream_api_base else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "API server not available").into_response();
+    };
+    let url = format!("{base}{uri}");
+    let response = match state
+        .http_client
+        .request(method, url)
+        .body(body)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("API proxy request failed: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .cloned();
+    let mut proxied = axum::response::Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        proxied = proxied.header(axum::http::header::CONTENT_TYPE, content_type);
+    }
+    proxied
+        .body(Body::from_stream(response.bytes_stream()))
+        .unwrap_or_else(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("API proxy response failed: {error}"),
+            )
+                .into_response()
+        })
 }
 
 async fn api_post_urls(
@@ -535,9 +615,16 @@ async fn handle_ws(state: TerminalApiState, ws: WebSocket) {
 
     while let Some(msg) = stream.next().await {
         match msg {
-            Ok(Message::Text(text)) => {
-                let _ = bridge.write(text.as_bytes());
-            }
+            Ok(Message::Text(text)) => match serde_json::from_str::<ClientMessage>(&text) {
+                Ok(ClientMessage::Resize { cols, rows }) => {
+                    if let Err(error) = bridge.resize(cols, rows) {
+                        log::warn!("Failed to resize PTY: {error}");
+                    }
+                }
+                Err(_) => {
+                    let _ = bridge.write(text.as_bytes());
+                }
+            },
             Ok(Message::Binary(data)) => {
                 let _ = bridge.write(&data);
             }

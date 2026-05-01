@@ -61,6 +61,18 @@ impl TerminalBridge {
         self.write(b"\r")?;
         Ok(())
     }
+
+    pub(crate) fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        self.master
+            .lock()
+            .resize(PtySize {
+                rows: rows.max(1),
+                cols: cols.max(1),
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(io::Error::other)
+    }
 }
 
 /// RAII guard that ensures terminal cleanup on drop.
@@ -94,6 +106,7 @@ impl Drop for TerminalGuard {
 pub fn spawn_tui_process(
     config_path: Option<&Path>,
     log_addr: Option<String>,
+    api_port: Option<u16>,
 ) -> io::Result<(TerminalBridge, Box<dyn portable_pty::Child + Send + Sync>)> {
     fn map_err<E: std::fmt::Display>(err: E) -> io::Error {
         io::Error::other(err.to_string())
@@ -112,6 +125,13 @@ pub fn spawn_tui_process(
     let current_exe = env::current_exe()?;
     let mut cmd = CommandBuilder::new(current_exe);
     cmd.arg("--tui");
+    if let Some(port) = api_port {
+        cmd.arg("--api");
+        cmd.arg("--web");
+        cmd.arg("--host");
+        cmd.arg("127.0.0.1");
+        cmd.env("OCTO_API_PORT", port.to_string());
+    }
     if let Some(config) = config_path {
         cmd.arg("--config");
         cmd.arg(config);
@@ -133,6 +153,7 @@ pub async fn run_terminal_web_bridge(
     host: &str,
     port: u16,
     config_path: Option<&Path>,
+    api_port: Option<u16>,
 ) -> io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let log_addr = listener.local_addr()?;
@@ -156,7 +177,7 @@ pub async fn run_terminal_web_bridge(
         Ok(())
     });
 
-    let (bridge, child) = spawn_tui_process(config_path, Some(log_addr_string))?;
+    let (bridge, child) = spawn_tui_process(config_path, Some(log_addr_string), api_port)?;
     let bridge = Arc::new(bridge);
 
     log::debug!("Starting terminal web UI on {host}:{port}");
@@ -167,7 +188,8 @@ pub async fn run_terminal_web_bridge(
         let bridge = bridge.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                terminal_server::run_terminal_server(&host, port, bridge, shutdown_rx).await
+                terminal_server::run_terminal_server(&host, port, bridge, shutdown_rx, api_port)
+                    .await
             {
                 log::error!("Terminal server error: {e}");
             }
@@ -203,18 +225,40 @@ pub async fn run_terminal_web_mode(
     config_path: Option<&Path>,
     default_api_port: u16,
 ) -> io::Result<()> {
-    let (host, port) = if let Some(path) = config_path {
-        let config = ServiceConfig::load_or_create(path)?;
-        (config.api.host.clone(), config.api.port)
+    let (host, port, child_config, api_port) = if let Some(path) = config_path {
+        let mut config = ServiceConfig::load_or_create(path)?;
+        let host = config.api.host.clone();
+        let port = config.api.port;
+        let api_port = local_free_port()?;
+        config.api.host = "127.0.0.1".to_string();
+        config.api.port = api_port;
+        let child_config = std::env::temp_dir().join(format!(
+            "octo-dl-terminal-web-api-{}-{api_port}.toml",
+            std::process::id()
+        ));
+        config.save(&child_config)?;
+        (host, port, Some(child_config), Some(api_port))
     } else {
         let port = env::var("OCTO_API_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(default_api_port);
-        (api_host.to_string(), port)
+        let api_port = local_free_port()?;
+        (api_host.to_string(), port, None, Some(api_port))
     };
 
-    run_terminal_web_bridge(&host, port, config_path).await
+    let result = run_terminal_web_bridge(&host, port, child_config.as_deref(), api_port).await;
+    if let Some(path) = child_config {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+fn local_free_port() -> io::Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
 }
 
 pub async fn wait_for_shutdown_signal() {

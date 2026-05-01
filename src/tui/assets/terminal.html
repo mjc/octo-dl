@@ -35,13 +35,24 @@
     term.loadAddon(fitAddon);
     term.open(document.getElementById("terminal"));
     term.focus();
-    fitAddon.fit();
 
     let socket;
     const notice = document.getElementById("notice");
+    const encoder = new TextEncoder();
     notice.style.transition = "opacity 0.25s ease";
     let hideAfterMessage = false;
     let reconnectAttempt = 0;
+
+    const fitAndNotify = () => {
+      fitAddon.fit();
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: "resize",
+          cols: term.cols,
+          rows: term.rows,
+        }));
+      }
+    };
 
     const showNotice = (text) => {
       notice.textContent = text;
@@ -57,6 +68,7 @@
       socket.binaryType = "arraybuffer";
       socket.addEventListener("open", () => {
         reconnectAttempt = 0;
+        fitAndNotify();
         showNotice("Connected");
         hideAfterMessage = true;
       });
@@ -80,11 +92,12 @@
 
     term.onData((data) => {
       if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(data);
+        socket.send(encoder.encode(data));
       }
     });
 
-    window.addEventListener("resize", () => fitAddon.fit());
+    requestAnimationFrame(fitAndNotify);
+    window.addEventListener("resize", fitAndNotify);
 
     const sendText = (text) => {
       fetch("/api/urls", {

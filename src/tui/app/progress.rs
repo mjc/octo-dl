@@ -210,10 +210,6 @@ impl App {
                 self.files_total = self.files_total.saturating_add(1);
             }
         }
-
-        self.current_speed = 0;
-        self.aggregate_rate
-            .reset(self.total_network_downloaded, Instant::now());
     }
 
     pub(crate) fn reset_aggregate_rate(&mut self) {

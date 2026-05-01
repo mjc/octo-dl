@@ -12,16 +12,25 @@ impl App {
 
     pub(crate) fn package_label_for_file(&self, file_id: &str) -> Option<String> {
         if let Some(core_file) = self.core_state.files.get(file_id) {
-            return self
+            let configured = self
                 .core_state
                 .packages
                 .get(&core_file.package_id)
                 .map(|package| package.display_name.clone());
+            if configured.as_deref().is_some_and(|label| {
+                !label.starts_with("http://") && !label.starts_with("https://")
+            }) {
+                return configured;
+            }
+            return Some(folder_label_from_path(&core_file.path));
         }
 
-        self.overlay_files
-            .get(file_id)
-            .and_then(|file| file.source_url.clone())
+        self.overlay_files.get(file_id).map(|file| {
+            file.source_url
+                .as_deref()
+                .filter(|label| !label.starts_with("http://") && !label.starts_with("https://"))
+                .map_or_else(|| folder_label_from_path(&file.file.name), str::to_string)
+        })
     }
 
     pub(crate) fn upsert_overlay_file(
@@ -162,4 +171,11 @@ impl App {
             .map(|overlay| overlay.counts_toward_progress)
             .unwrap_or(true)
     }
+}
+
+fn folder_label_from_path(path: &str) -> String {
+    path.split('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(path)
+        .to_string()
 }
