@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, 
 
 use crate::format_bytes;
 
-use super::app::{App, ConfigField, FileStatus, Popup};
+use super::app::{App, ConfigField, ConfirmAction, FileStatus, Popup};
 
 pub fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     draw_main(frame, app);
@@ -15,6 +15,7 @@ pub fn draw(frame: &mut ratatui::Frame, app: &mut App) {
         Popup::None => {}
         Popup::Login => draw_login_popup(frame, app),
         Popup::Config => draw_config_popup(frame, app),
+        Popup::Confirm => draw_confirm_popup(frame, app),
     }
 }
 
@@ -78,15 +79,20 @@ fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
         .split(inner);
 
     // --- URL input bar ---
-    let url_style = if app.popup == Popup::None {
+    let url_style = if app.popup == Popup::None && app.url_input_active {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::DarkGray)
     };
+    let url_title = if app.url_input_active {
+        " Add URL(s): editing "
+    } else {
+        " Add URL(s): press a "
+    };
     let url_input = Paragraph::new(app.url_input.as_str())
         .block(
             Block::default()
-                .title(" Add URL(s): ")
+                .title(url_title)
                 .borders(Borders::ALL)
                 .border_style(url_style),
         )
@@ -126,10 +132,12 @@ fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
     frame.render_widget(status_line, chunks[3]);
 
     // --- Controls bar ---
-    let controls = if app.paused {
-        "p:resume  d:delete  r:retry  R:reset  c:config  q:quit"
+    let controls = if app.url_input_active {
+        "enter:add URLs  esc:cancel  paste:supported"
+    } else if app.paused {
+        "a:add URLs  up/down:select  p:resume  d:delete  r:retry  R:reset  c:config  q:quit"
     } else {
-        "p:pause  d:delete  r:retry  R:reset  c:config  q:quit"
+        "a:add URLs  up/down:select  p:pause  d:delete  r:retry  R:reset  c:config  q:quit"
     };
     let controls_bar = Paragraph::new(controls)
         .style(Style::default().fg(Color::DarkGray))
@@ -461,9 +469,138 @@ fn draw_config_popup(frame: &mut ratatui::Frame, app: &App) {
     frame.render_widget(help, chunks[1]);
 }
 
+fn draw_confirm_popup(frame: &mut ratatui::Frame, app: &App) {
+    let area = centered_rect(58, 7, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Confirm ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let (action, file_id) = match app.pending_confirmation.as_ref() {
+        Some(ConfirmAction::DeleteFile(id)) => ("Delete", id.as_str()),
+        Some(ConfirmAction::ResetFile(id)) => ("Reset", id.as_str()),
+        None => ("Confirm", ""),
+    };
+    let file_name = app
+        .files
+        .iter()
+        .find(|file| file.id == file_id)
+        .map_or(file_id, |file| file.name.as_str());
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("{action} {}", truncate_end(file_name, 44)),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "y/Enter: confirm   n/Esc: cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+}
+
 /// Returns a centered rectangle of the given size within `area`.
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::tui::app::{App, FileEntry, FileStatus};
+    use crate::tui::event::DownloadEvent;
+
+    fn test_app() -> App {
+        let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
+        App::new(9723, tx, true)
+    }
+
+    fn render_text(app: &mut App) -> String {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        terminal
+            .draw(|frame| draw(frame, app))
+            .expect("draw should succeed");
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area;
+        let mut output = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = buffer.cell((x, y)).expect("cell should exist");
+                output.push_str(cell.symbol());
+            }
+            output.push('\n');
+        }
+        output
+    }
+
+    #[test]
+    fn draw_main_shows_command_mode_navigation() {
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "queued.bin".to_string(),
+            name: "queued.bin".to_string(),
+            size: 10,
+            downloaded: 0,
+            status: FileStatus::Queued,
+        });
+
+        let rendered = render_text(&mut app);
+
+        assert!(rendered.contains("Add URL(s): press a"));
+        assert!(rendered.contains("a:add URLs"));
+        assert!(rendered.contains("up/down:select"));
+        assert!(rendered.contains("queued.bin"));
+        assert!(!rendered.contains("enter:add URLs"));
+    }
+
+    #[test]
+    fn draw_main_shows_url_editing_mode() {
+        let mut app = test_app();
+        app.url_input_active = true;
+        app.url_input = "https://mega.nz/file/test".to_string();
+
+        let rendered = render_text(&mut app);
+
+        assert!(rendered.contains("Add URL(s): editing"));
+        assert!(rendered.contains("https://mega.nz/file/test"));
+        assert!(rendered.contains("enter:add URLs"));
+        assert!(rendered.contains("esc:cancel"));
+        assert!(!rendered.contains("q:quit"));
+    }
+
+    #[test]
+    fn draw_confirm_popup_shows_destructive_action_prompt() {
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "danger.bin".to_string(),
+            name: "danger.bin".to_string(),
+            size: 10,
+            downloaded: 0,
+            status: FileStatus::Queued,
+        });
+        app.popup = Popup::Confirm;
+        app.pending_confirmation = Some(ConfirmAction::DeleteFile("danger.bin".to_string()));
+
+        let rendered = render_text(&mut app);
+
+        assert!(rendered.contains("Confirm"));
+        assert!(rendered.contains("Delete danger.bin"));
+        assert!(rendered.contains("y/Enter: confirm"));
+        assert!(rendered.contains("n/Esc: cancel"));
+    }
 }

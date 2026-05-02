@@ -1,7 +1,6 @@
-//! Web assets for the xterm.js terminal UI and bookmarklet helpers.
+//! Web assets for the xterm.js terminal UI and bookmarklet helper.
 
 const INDEX_HTML_TEMPLATE: &str = include_str!("assets/terminal.html");
-const DASHBOARD_HTML: &str = include_str!("assets/dashboard.html");
 const SERVICE_WORKER_JS: &str = include_str!("assets/sw.js");
 const ICON_SVG: &str = include_str!("assets/icon.svg");
 
@@ -11,12 +10,6 @@ pub fn index_html(host: &str, scheme: &str) -> String {
     INDEX_HTML_TEMPLATE
         .replace("${WS_SCHEME}", scheme)
         .replace("${WS_HOST}", host)
-}
-
-/// Returns the browser dashboard HTML.
-#[must_use]
-pub const fn dashboard_html() -> &'static str {
-    DASHBOARD_HTML
 }
 
 /// Returns the bookmarklet helper page.
@@ -151,20 +144,20 @@ mod tests {
     }
 
     #[test]
+    fn index_html_supports_dlc_file_drop() {
+        let html = index_html("example.com:9723", "wss");
+        assert!(html.contains("handleDrop"));
+        assert!(html.contains("file.text()"));
+        assert!(html.contains("\"/api/dlc\""));
+    }
+
+    #[test]
     fn bookmarklet_mentions_fallback_host() {
         let html = bookmarklet_html("proxy.host");
         assert!(html.contains("proxy.host"));
         assert!(html.contains("bookmarklet"));
         assert!(!html.contains("__FALLBACK_HOST__"));
         assert!(html.contains("proto+'//proxy.host'"));
-    }
-
-    #[test]
-    fn dashboard_html_uses_state_and_id_controls() {
-        let html = dashboard_html();
-        assert!(html.contains("/api/events"));
-        assert!(html.contains("data-id"));
-        assert!(html.contains("/api/${action}"));
     }
 
     #[test]
@@ -185,7 +178,6 @@ mod tests {
 
     #[test]
     fn static_assets_are_nonempty_and_well_known() {
-        assert!(dashboard_html().contains("<main>"));
         assert!(service_worker_js().contains("CACHE_NAME"));
         assert!(icon_svg().starts_with("<svg "));
     }

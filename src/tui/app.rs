@@ -33,18 +33,19 @@ use crate::core::{DownloadState, ProgressDelta, SessionSnapshotV3};
 pub(crate) use self::progress::FileUiState;
 use self::progress::TransferRate;
 pub use self::types::{
-    ConfigField, ConfigState, FileEntry, FileStatus, LoginState, NoCredentialsFallback, Popup,
-    QuitPolicy, SharedAppState, UiAction,
+    ConfigField, ConfigState, ConfirmAction, FileEntry, FileStatus, LoginState,
+    NoCredentialsFallback, Popup, QuitPolicy, SharedAppState, UiAction,
 };
 pub(crate) use self::types::{OverlayFile, SharedStateChannels, VisibleFileContext};
 
-use super::event::{DownloadEvent, QueuedFile, TokenMessage};
 use super::event::DownloadRequest;
+use super::event::{DownloadEvent, QueuedFile, TokenMessage};
 use super::session::{SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate};
 use super::visible;
 
 pub struct App {
     pub popup: Popup,
+    pub pending_confirmation: Option<ConfirmAction>,
     pub should_quit: bool,
     pub quit_policy: QuitPolicy,
     // Auth
@@ -52,6 +53,7 @@ pub struct App {
     pub authenticated: bool,
     // URL input (top bar)
     pub url_input: String,
+    pub url_input_active: bool,
     // Tracked URLs for session persistence
     pub urls: Vec<String>,
     // File queue (main content)

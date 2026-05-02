@@ -9,6 +9,13 @@ pub enum Popup {
     None,
     Login,
     Config,
+    Confirm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmAction {
+    DeleteFile(String),
+    ResetFile(String),
 }
 
 /// What to do when `auto_login` finds no credentials.

@@ -30,11 +30,13 @@ impl App {
         let (token_tx, token_rx) = mpsc::unbounded_channel::<super::TokenMessage>();
         Self {
             popup: super::Popup::None,
+            pending_confirmation: None,
             should_quit: false,
             quit_policy: super::QuitPolicy::from_bool(quit_enabled),
             login: super::LoginState::new(),
             authenticated: false,
             url_input: String::new(),
+            url_input_active: false,
             urls: Vec::new(),
             files: Vec::new(),
             overlay_files: IndexMap::new(),
