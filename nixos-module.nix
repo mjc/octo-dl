@@ -155,7 +155,6 @@ in {
 
     systemd.services.octo-dl = let
       mode = if cfg.web.enable then "--web" else "--api";
-      webHostFlag = lib.optionalString (cfg.web.enable && cfg.web.publicHost != null) " --web-host ${cfg.web.publicHost}";
       apiHostFlag = " --host ${cfg.web.host}";
       manageConfigScript = ''
         toml_quote() {
@@ -274,7 +273,7 @@ in {
         StateDirectory = "octo-dl";
         PermissionsStartOnly = managedConfig;
         WorkingDirectory = cfg.downloadDir;
-        ExecStart = "${cfg.package}/bin/octo ${mode}${apiHostFlag}${webHostFlag} --config ${cfg.configFile}";
+        ExecStart = "${cfg.package}/bin/octo ${mode}${apiHostFlag} --config ${cfg.configFile}";
         EnvironmentFile = environmentFile;
         Restart = "on-failure";
         RestartSec = 10;

@@ -39,6 +39,10 @@
     let socket;
     const notice = document.getElementById("notice");
     const encoder = new TextEncoder();
+    const apiKey = window.localStorage.getItem("octoApiKey") || "";
+    const jsonHeaders = apiKey
+      ? { "Content-Type": "application/json", "x-api-key": apiKey }
+      : { "Content-Type": "application/json" };
     notice.style.transition = "opacity 0.25s ease";
     let hideAfterMessage = false;
     let reconnectAttempt = 0;
@@ -102,7 +106,7 @@
     const sendText = (text) => {
       fetch("/api/urls", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: jsonHeaders,
         body: JSON.stringify({ text }),
       }).catch((err) => console.error("Failed to send URLs:", err));
     };
@@ -110,7 +114,7 @@
     const sendDlcFile = (content, filename) => {
       fetch("/api/dlc", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: jsonHeaders,
         body: JSON.stringify({ content, filename }),
       }).catch((err) => console.error("Failed to parse DLC file:", err));
     };

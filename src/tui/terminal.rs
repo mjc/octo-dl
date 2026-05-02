@@ -154,6 +154,7 @@ pub async fn run_terminal_web_bridge(
     port: u16,
     config_path: Option<&Path>,
     api_port: Option<u16>,
+    api_key: Option<String>,
 ) -> io::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let log_addr = listener.local_addr()?;
@@ -187,9 +188,15 @@ pub async fn run_terminal_web_bridge(
         let host = host.to_string();
         let bridge = bridge.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                terminal_server::run_terminal_server(&host, port, bridge, shutdown_rx, api_port)
-                    .await
+            if let Err(e) = terminal_server::run_terminal_server(
+                &host,
+                port,
+                bridge,
+                shutdown_rx,
+                api_port,
+                api_key,
+            )
+            .await
             {
                 log::error!("Terminal server error: {e}");
             }
@@ -225,10 +232,11 @@ pub async fn run_terminal_web_mode(
     config_path: Option<&Path>,
     default_api_port: u16,
 ) -> io::Result<()> {
-    let (host, port, child_config, api_port) = if let Some(path) = config_path {
+    let (host, port, child_config, api_port, api_key) = if let Some(path) = config_path {
         let mut config = ServiceConfig::load_or_create(path)?;
         let host = config.api.host.clone();
         let port = config.api.port;
+        let api_key = config.api.api_key.clone();
         let api_port = local_free_port()?;
         config.api.host = "127.0.0.1".to_string();
         config.api.port = api_port;
@@ -237,17 +245,18 @@ pub async fn run_terminal_web_mode(
             std::process::id()
         ));
         config.save(&child_config)?;
-        (host, port, Some(child_config), Some(api_port))
+        (host, port, Some(child_config), Some(api_port), api_key)
     } else {
         let port = env::var("OCTO_API_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(default_api_port);
         let api_port = local_free_port()?;
-        (api_host.to_string(), port, None, Some(api_port))
+        (api_host.to_string(), port, None, Some(api_port), None)
     };
 
-    let result = run_terminal_web_bridge(&host, port, child_config.as_deref(), api_port).await;
+    let result =
+        run_terminal_web_bridge(&host, port, child_config.as_deref(), api_port, api_key).await;
     if let Some(path) = child_config {
         let _ = std::fs::remove_file(path);
     }
