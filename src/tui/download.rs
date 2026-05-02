@@ -8,9 +8,9 @@ use futures_util::FutureExt;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::download::part_path;
 #[cfg(test)]
 use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
-use crate::download::part_path;
 use crate::{DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, is_dlc_path};
 use dirs;
 
@@ -432,7 +432,9 @@ async fn resolve_download_requests(
                 file_ids,
             } => {
                 let file_ids = file_ids.iter().cloned().collect::<HashSet<_>>();
-                let entry = by_source.entry(source_url.clone()).or_insert_with(|| (None, false));
+                let entry = by_source
+                    .entry(source_url.clone())
+                    .or_insert_with(|| (None, false));
                 match entry.0.as_mut() {
                     Some(existing) => {
                         existing.extend(file_ids);
@@ -1175,10 +1177,7 @@ async fn collect_node_set(
         {
             continue;
         }
-        if tokio::fs::metadata(part_path(&item.path))
-            .await
-            .is_ok()
-        {
+        if tokio::fs::metadata(part_path(&item.path)).await.is_ok() {
             partial_count = partial_count.saturating_add(1);
         }
     }

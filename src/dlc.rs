@@ -38,7 +38,7 @@ impl DlcKeyCache {
         self.cache.lock().unwrap().get(key).cloned()
     }
 
-    fn set(&self, key: String, value: String) {
+    pub(crate) fn set(&self, key: String, value: String) {
         self.cache.lock().unwrap().insert(key, value);
     }
 }
