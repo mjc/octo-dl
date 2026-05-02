@@ -250,12 +250,12 @@ fn record_progress_caps_downloaded_at_file_size() {
 
     app.file_ui
         .insert("file.bin".to_string(), FileUiState::default());
-    app.files.push(file.clone());
+    app.files.push(file);
     app.files[0].downloaded = 100;
     let accepted = app.update_file_ui_progress("file.bin", 90, now);
 
     assert_eq!(accepted, 10);
-    assert!(app.file_speed("file.bin") <= u64::MAX);
+    assert_eq!(app.files[0].downloaded, 100);
 }
 
 #[test]
