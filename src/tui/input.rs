@@ -6,7 +6,7 @@ use crate::extract_urls;
 #[cfg(test)]
 use crate::tui::event::DownloadRequest;
 
-use super::app::{App, ConfigField, FileStatus, LoginState, Popup, UiAction};
+use super::app::{App, ConfigField, ConfirmAction, FileStatus, LoginState, Popup, UiAction};
 
 pub fn handle_input(app: &mut App, key: KeyEvent) {
     // Global quit
@@ -18,6 +18,7 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
     match app.popup {
         Popup::Login => handle_login_input(app, key),
         Popup::Config => handle_config_input(app, key),
+        Popup::Confirm => handle_confirm_input(app, key),
         Popup::None => handle_main_input(app, key),
     }
 }
@@ -162,26 +163,48 @@ fn handle_config_input(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn handle_main_input(app: &mut App, key: KeyEvent) {
+fn handle_confirm_input(app: &mut App, key: KeyEvent) {
     match key.code {
-        KeyCode::Enter => {
-            let extracted = extract_urls(&app.url_input);
-            if !extracted.is_empty() {
-                app.handle_ui_action(UiAction::AddUrls(extracted));
-                app.url_input.clear();
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            if let Some(action) = app.pending_confirmation.take() {
+                app.popup = Popup::None;
+                match action {
+                    ConfirmAction::DeleteFile(id) => {
+                        app.handle_ui_action(UiAction::DeleteFile(id));
+                    }
+                    ConfirmAction::ResetFile(id) => {
+                        app.handle_ui_action(UiAction::ResetFile(id));
+                    }
+                }
+            } else {
+                app.popup = Popup::None;
             }
         }
-        KeyCode::Char('p') if app.url_input.is_empty() => {
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.pending_confirmation = None;
+            app.popup = Popup::None;
+        }
+        _ => {}
+    }
+}
+
+fn handle_main_input(app: &mut App, key: KeyEvent) {
+    if app.url_input_active {
+        handle_url_input(app, key);
+        return;
+    }
+
+    match key.code {
+        KeyCode::Char('a' | 'i') => {
+            app.url_input_active = true;
+        }
+        KeyCode::Char('p') => {
             app.handle_ui_action(UiAction::TogglePause);
         }
-        KeyCode::Char('d') | KeyCode::Delete if app.url_input.is_empty() => delete_selected(app),
-        KeyCode::Char('R') if app.url_input.is_empty() => reset_selected(app),
-        KeyCode::Char('r')
-            if app.url_input.is_empty() && key.modifiers.contains(KeyModifiers::SHIFT) =>
-        {
-            reset_selected(app);
-        }
-        KeyCode::Char('r') if app.url_input.is_empty() => {
+        KeyCode::Char('d') | KeyCode::Delete => delete_selected(app),
+        KeyCode::Char('R') => reset_selected(app),
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::SHIFT) => reset_selected(app),
+        KeyCode::Char('r') => {
             // Retry selected errored file — re-queue it
             if let Some(selected) = app.selected_file_index()
                 && matches!(app.files[selected].status, FileStatus::Error(_))
@@ -190,33 +213,38 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
                 app.handle_ui_action(UiAction::RetryFile(file_id));
             }
         }
-        KeyCode::Char('c') if app.url_input.is_empty() => {
+        KeyCode::Char('c') => {
             app.popup = Popup::Config;
         }
-        KeyCode::Up if app.url_input.is_empty() => {
-            let len = app.files.len();
-            if len > 0 {
-                let i = app.file_list_state.selected().unwrap_or(0);
-                app.file_list_state
-                    .select(Some(if i == 0 { len - 1 } else { i - 1 }));
-            }
-        }
-        KeyCode::Down if app.url_input.is_empty() => {
-            let len = app.files.len();
-            if len > 0 {
-                let i = app.file_list_state.selected().unwrap_or(0);
-                app.file_list_state.select(Some((i + 1) % len));
-            }
-        }
-        KeyCode::Char('q') if app.url_input.is_empty() => {
+        KeyCode::Up | KeyCode::Char('k') => select_previous_file(app),
+        KeyCode::Down | KeyCode::Char('j') => select_next_file(app),
+        KeyCode::PageUp => move_file_selection(app, -10),
+        KeyCode::PageDown => move_file_selection(app, 10),
+        KeyCode::Home | KeyCode::Char('g') => select_first_file(app),
+        KeyCode::End | KeyCode::Char('G') => select_last_file(app),
+        KeyCode::Char('q') => {
             request_quit(app);
         }
         KeyCode::Esc => {
-            if app.url_input.is_empty() {
-                request_quit(app);
-            } else {
+            request_quit(app);
+        }
+        _ => {}
+    }
+}
+
+fn handle_url_input(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Enter => {
+            let extracted = extract_urls(&app.url_input);
+            if !extracted.is_empty() {
+                app.handle_ui_action(UiAction::AddUrls(extracted));
                 app.url_input.clear();
+                app.url_input_active = false;
             }
+        }
+        KeyCode::Esc => {
+            app.url_input.clear();
+            app.url_input_active = false;
         }
         KeyCode::Char(c) => {
             app.url_input.push(c);
@@ -228,11 +256,53 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn select_previous_file(app: &mut App) {
+    let len = app.files.len();
+    if len > 0 {
+        let i = app.file_list_state.selected().unwrap_or(0);
+        app.file_list_state
+            .select(Some(if i == 0 { len - 1 } else { i - 1 }));
+    }
+}
+
+fn select_next_file(app: &mut App) {
+    let len = app.files.len();
+    if len > 0 {
+        let i = app.file_list_state.selected().unwrap_or(0);
+        app.file_list_state.select(Some((i + 1) % len));
+    }
+}
+
+fn move_file_selection(app: &mut App, delta: isize) {
+    let len = app.files.len();
+    if len == 0 {
+        return;
+    }
+    let current = app.file_list_state.selected().unwrap_or(0);
+    let next = current
+        .saturating_add_signed(delta)
+        .min(len.saturating_sub(1));
+    app.file_list_state.select(Some(next));
+}
+
+fn select_first_file(app: &mut App) {
+    if !app.files.is_empty() {
+        app.file_list_state.select(Some(0));
+    }
+}
+
+fn select_last_file(app: &mut App) {
+    if !app.files.is_empty() {
+        app.file_list_state.select(Some(app.files.len() - 1));
+    }
+}
+
 fn reset_selected(app: &mut App) {
     let Some(selected) = app.selected_file_index() else {
         return;
     };
-    app.handle_ui_action(UiAction::ResetFile(app.files[selected].id.clone()));
+    app.pending_confirmation = Some(ConfirmAction::ResetFile(app.files[selected].id.clone()));
+    app.popup = Popup::Confirm;
 }
 
 fn delete_selected(app: &mut App) {
@@ -240,7 +310,8 @@ fn delete_selected(app: &mut App) {
         return;
     };
     let file = &app.files[selected_file];
-    app.handle_ui_action(UiAction::DeleteFile(file.id.clone()));
+    app.pending_confirmation = Some(ConfirmAction::DeleteFile(file.id.clone()));
+    app.popup = Popup::Confirm;
 }
 
 pub fn handle_paste(app: &mut App, text: &str) {
@@ -250,9 +321,10 @@ pub fn handle_paste(app: &mut App, text: &str) {
                 app.login.active_value_mut().push_str(text.trim());
             }
         }
-        Popup::Config => {}
+        Popup::Config | Popup::Confirm => {}
         Popup::None => {
             // Append pasted text to URL input, replacing newlines with spaces
+            app.url_input_active = true;
             app.url_input.push_str(&text.replace(['\n', '\r'], " "));
         }
     }
@@ -260,9 +332,9 @@ pub fn handle_paste(app: &mut App, text: &str) {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::{CoreEvent, ResolvedFile, ResolvedPackage};
     use super::super::app::{App, FileEntry, FileStatus, Popup, QuitPolicy};
     use super::*;
+    use crate::core::{CoreEvent, ResolvedFile, ResolvedPackage};
     use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use std::env;
@@ -313,6 +385,13 @@ mod tests {
         }
     }
 
+    fn confirm(app: &mut App) {
+        assert_eq!(app.popup, Popup::Confirm);
+        handle_input(app, key(KeyCode::Char('y')));
+        assert_eq!(app.popup, Popup::None);
+        assert_eq!(app.pending_confirmation, None);
+    }
+
     #[test]
     fn handle_main_input_quit() {
         let mut app = test_app();
@@ -341,23 +420,35 @@ mod tests {
     fn handle_main_input_esc_clears_url_when_nonempty() {
         let mut app = test_app();
         app.url_input = "some text".to_string();
+        app.url_input_active = true;
         handle_input(&mut app, key(KeyCode::Esc));
         assert!(!app.should_quit);
         assert!(app.url_input.is_empty());
+        assert!(!app.url_input_active);
     }
 
     #[test]
     fn handle_main_input_typing() {
         let mut app = test_app();
+        handle_input(&mut app, key(KeyCode::Char('a')));
         handle_input(&mut app, key(KeyCode::Char('h')));
         handle_input(&mut app, key(KeyCode::Char('i')));
         assert_eq!(app.url_input, "hi");
     }
 
     #[test]
-    fn handle_main_input_typing_q_does_not_quit_while_editing() {
+    fn handle_main_input_ignores_unmapped_keys_in_command_mode() {
+        let mut app = test_app();
+        handle_input(&mut app, key(KeyCode::Char('h')));
+        assert!(app.url_input.is_empty());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn handle_main_input_typing_q_does_not_quit_in_url_mode() {
         let mut app = test_app();
         app.url_input = "https://example".to_string();
+        app.url_input_active = true;
         handle_input(&mut app, key(KeyCode::Char('q')));
         assert!(!app.should_quit);
         assert_eq!(app.url_input, "https://exampleq");
@@ -367,6 +458,7 @@ mod tests {
     fn handle_main_input_backspace() {
         let mut app = test_app();
         app.url_input = "abc".to_string();
+        app.url_input_active = true;
         handle_input(&mut app, key(KeyCode::Backspace));
         assert_eq!(app.url_input, "ab");
     }
@@ -389,6 +481,39 @@ mod tests {
     }
 
     #[test]
+    fn handle_main_input_navigation_keys_move_selection() {
+        let mut app = test_app();
+        for i in 0..12 {
+            app.files.push(FileEntry {
+                id: format!("file-{i}"),
+                name: format!("file-{i}"),
+                size: 1,
+                downloaded: 0,
+                status: FileStatus::Queued,
+            });
+        }
+        app.file_list_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.file_list_state.selected(), Some(1));
+
+        handle_input(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.file_list_state.selected(), Some(0));
+
+        handle_input(&mut app, key(KeyCode::PageDown));
+        assert_eq!(app.file_list_state.selected(), Some(10));
+
+        handle_input(&mut app, key(KeyCode::PageUp));
+        assert_eq!(app.file_list_state.selected(), Some(0));
+
+        handle_input(&mut app, key(KeyCode::End));
+        assert_eq!(app.file_list_state.selected(), Some(11));
+
+        handle_input(&mut app, key(KeyCode::Char('g')));
+        assert_eq!(app.file_list_state.selected(), Some(0));
+    }
+
+    #[test]
     fn handle_main_input_delete_cancels_downloading() {
         let mut app = test_app();
         let token = tokio_util::sync::CancellationToken::new();
@@ -404,8 +529,40 @@ mod tests {
         app.file_list_state.select(Some(0));
 
         handle_input(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(
+            app.pending_confirmation,
+            Some(ConfirmAction::DeleteFile("test.zip".to_string()))
+        );
+        assert!(!token.is_cancelled());
+        confirm(&mut app);
         assert!(token.is_cancelled());
         assert!(app.files.is_empty());
+    }
+
+    #[test]
+    fn handle_confirm_cancel_leaves_destructive_action_unapplied() {
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "keep.bin".to_string(),
+            name: "keep.bin".to_string(),
+            size: 10,
+            downloaded: 0,
+            status: FileStatus::Queued,
+        });
+        app.file_list_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(
+            app.pending_confirmation,
+            Some(ConfirmAction::DeleteFile("keep.bin".to_string()))
+        );
+
+        handle_input(&mut app, key(KeyCode::Esc));
+
+        assert_eq!(app.popup, Popup::None);
+        assert_eq!(app.pending_confirmation, None);
+        assert_eq!(app.files.len(), 1);
+        assert_eq!(app.files[0].id, "keep.bin");
     }
 
     #[test]
@@ -430,6 +587,11 @@ mod tests {
         app.file_list_state.select(Some(0));
 
         handle_input(&mut app, key(KeyCode::Delete));
+        assert_eq!(
+            app.pending_confirmation,
+            Some(ConfirmAction::DeleteFile("core.bin".to_string()))
+        );
+        confirm(&mut app);
 
         assert!(app.files.is_empty());
     }
@@ -474,6 +636,11 @@ mod tests {
         app.session = Some(session);
 
         handle_input(&mut app, key(KeyCode::Delete));
+        assert_eq!(
+            app.pending_confirmation,
+            Some(ConfirmAction::DeleteFile("first.bin".to_string()))
+        );
+        confirm(&mut app);
 
         assert_eq!(app.files.len(), 1);
         assert_eq!(app.files[0].id, "second.bin");
@@ -519,6 +686,11 @@ mod tests {
         app.file_list_state.select(Some(0));
 
         handle_input(&mut app, key(KeyCode::Delete));
+        assert_eq!(
+            app.pending_confirmation,
+            Some(ConfirmAction::DeleteFile("active.bin".to_string()))
+        );
+        confirm(&mut app);
 
         assert_eq!(app.files.len(), 1);
         assert_eq!(app.files[0].id, "complete.bin");
@@ -556,6 +728,12 @@ mod tests {
         app.file_list_state.select(Some(0));
 
         handle_input(&mut app, key(KeyCode::Char('R')));
+        assert_eq!(
+            app.pending_confirmation,
+            Some(ConfirmAction::ResetFile("active.bin".to_string()))
+        );
+        assert!(!token.is_cancelled());
+        confirm(&mut app);
 
         assert!(token.is_cancelled());
         assert_eq!(app.files[0].status, FileStatus::Queued);
@@ -599,6 +777,11 @@ mod tests {
         app.file_list_state.select(Some(0));
 
         handle_input(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(
+            app.pending_confirmation,
+            Some(ConfirmAction::DeleteFile("complete.bin".to_string()))
+        );
+        confirm(&mut app);
 
         assert!(app.files.is_empty());
         assert!(!final_path.exists());
@@ -636,6 +819,7 @@ mod tests {
         let mut app = test_app();
         handle_paste(&mut app, "https://mega.nz/file/abc");
         assert_eq!(app.url_input, "https://mega.nz/file/abc");
+        assert!(app.url_input_active);
     }
 
     #[test]
@@ -643,6 +827,7 @@ mod tests {
         let mut app = test_app();
         handle_paste(&mut app, "url1\nurl2\r\nurl3");
         assert_eq!(app.url_input, "url1 url2  url3");
+        assert!(app.url_input_active);
     }
 
     #[test]
@@ -657,18 +842,18 @@ mod tests {
     #[test]
     fn add_url_deduplicates() {
         let mut app = test_app();
-    let mut url_rx = app.url_rx.take().expect("url_rx should exist");
-    app.submit_url("https://mega.nz/file/abc".to_string());
-    app.submit_url("https://mega.nz/file/abc".to_string());
-    assert_eq!(app.urls.len(), 1);
-    assert_eq!(
-        url_rx.try_recv().unwrap(),
-        DownloadRequest::SubmitUrl {
-            url: "https://mega.nz/file/abc".to_string()
-        }
-    );
-    assert!(url_rx.try_recv().is_err());
-}
+        let mut url_rx = app.url_rx.take().expect("url_rx should exist");
+        app.submit_url("https://mega.nz/file/abc".to_string());
+        app.submit_url("https://mega.nz/file/abc".to_string());
+        assert_eq!(app.urls.len(), 1);
+        assert_eq!(
+            url_rx.try_recv().unwrap(),
+            DownloadRequest::SubmitUrl {
+                url: "https://mega.nz/file/abc".to_string()
+            }
+        );
+        assert!(url_rx.try_recv().is_err());
+    }
 
     #[test]
     fn retry_recomputes_totals_for_errored_file() {
@@ -714,10 +899,12 @@ mod tests {
         let (url_tx, mut url_rx) = mpsc::unbounded_channel();
         app.url_tx = url_tx;
         app.url_input = "https://mega.nz/file/test123".to_string();
+        app.url_input_active = true;
 
         handle_input(&mut app, key(KeyCode::Enter));
 
         assert!(app.url_input.is_empty());
+        assert!(!app.url_input_active);
         let received = url_rx.try_recv().unwrap();
         assert_eq!(
             received,

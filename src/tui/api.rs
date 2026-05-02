@@ -1,4 +1,4 @@
-//! HTTP API server for receiving URLs from the bookmarklet and serving the web UI.
+//! HTTP API server for receiving URLs and serving state to the xterm.js UI.
 //!
 //! # Security Notice
 //!
@@ -276,25 +276,6 @@ fn parse_forwarded_param(value: &str, key: &str) -> Option<String> {
     None
 }
 
-fn infer_scheme(headers: &HeaderMap, state: &ApiState) -> String {
-    if let Some(proto) = header_to_str(headers, "x-forwarded-proto") {
-        let proto = proto.split(',').next().unwrap_or(proto).trim();
-        if matches!(proto, "http" | "https") {
-            return proto.to_ascii_lowercase();
-        }
-    }
-    if let Some(forwarded) = header_to_str(headers, "forwarded")
-        && let Some(proto) = parse_forwarded_param(forwarded, "proto")
-        && matches!(proto.as_str(), "http" | "https")
-    {
-        return proto.to_ascii_lowercase();
-    }
-    match state.port {
-        443 => "https".to_string(),
-        _ => "http".to_string(),
-    }
-}
-
 fn infer_host(headers: &HeaderMap, state: &ApiState) -> String {
     if let Some(host) = header_to_str(headers, "x-forwarded-host") {
         return host.split(',').next().unwrap_or(host).trim().to_string();
@@ -403,7 +384,7 @@ async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> 
 }
 
 // ---------------------------------------------------------------------------
-// New web UI endpoints
+// xterm.js support endpoints
 // ---------------------------------------------------------------------------
 
 /// GET /api/state — returns the latest application snapshot as JSON.
@@ -527,15 +508,8 @@ async fn share_target_post(
 }
 
 // ---------------------------------------------------------------------------
-// Web UI pages (served inline)
+// xterm.js support assets
 // ---------------------------------------------------------------------------
-
-/// GET / — serves the main web UI SPA.
-async fn web_ui_index(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
-    let _host = infer_host(&headers, &state);
-    let _scheme = infer_scheme(&headers, &state);
-    Html(web::dashboard_html())
-}
 
 /// GET /manifest.json — PWA manifest.
 async fn web_ui_manifest(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
@@ -570,7 +544,7 @@ async fn web_ui_icon() -> impl IntoResponse {
 // Server setup
 // ---------------------------------------------------------------------------
 
-/// Starts the HTTP API server for receiving URLs from the bookmarklet.
+/// Starts the HTTP API server for receiving URLs and xterm.js state requests.
 ///
 /// # Security
 ///
@@ -608,10 +582,9 @@ pub async fn run_api_server(
         .route("/api/urls", post(api_post_urls))
         .route("/api/parse", post(api_parse_page));
 
-    // Web UI routes (only when --web is enabled)
+    // State/action routes are exposed only when the xterm.js bridge is enabled.
     if web_opts.is_some() {
         app = app
-            .route("/", get(web_ui_index))
             .route("/manifest.json", get(web_ui_manifest))
             .route("/sw.js", get(web_ui_sw))
             .route("/icon-192.svg", get(web_ui_icon))
@@ -783,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn forwarded_headers_drive_public_scheme_and_host() {
+    fn forwarded_header_drives_public_host() {
         let (state, _rx) = state_without_shared();
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -791,15 +764,13 @@ mod tests {
             HeaderValue::from_static(r#"for=192.0.2.10;proto=https;host="octo.example""#),
         );
 
-        assert_eq!(infer_scheme(&headers, &state), "https");
         assert_eq!(infer_host(&headers, &state), "octo.example");
     }
 
     #[test]
-    fn forwarded_header_precedence_matches_proxy_conventions() {
+    fn forwarded_host_precedence_matches_proxy_conventions() {
         let (state, _rx) = state_without_shared();
         let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-proto", HeaderValue::from_static("https, http"));
         headers.insert(
             "x-forwarded-host",
             HeaderValue::from_static("public.example, internal.example"),
@@ -809,7 +780,6 @@ mod tests {
             HeaderValue::from_static("proto=http;host=ignored.example"),
         );
 
-        assert_eq!(infer_scheme(&headers, &state), "https");
         assert_eq!(infer_host(&headers, &state), "public.example");
     }
 }

@@ -75,7 +75,9 @@ mod tests {
         let n = std::io::Read::read(&mut reader, &mut buf).expect("failed to read PTY output");
         let received = String::from_utf8_lossy(&buf[..n]).into_owned();
 
-        // Verify all URLs are present in order
+        // The bridge enters URL-entry mode before each injected URL.
+        assert!(received.contains("ahttps://mega.nz/folder/abc123"));
+        assert!(received.contains("ahttps://mega.nz/file/xyz789"));
         for url in urls {
             assert!(received.contains(&url));
         }
@@ -422,6 +424,7 @@ fn dispatch_urls(state: &TerminalApiState, urls: Vec<String>) {
         return;
     }
     for url in urls {
+        let _ = state.session.bridge.write(b"a");
         let _ = state.session.bridge.write_line(&url);
     }
 }

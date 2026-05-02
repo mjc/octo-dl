@@ -49,9 +49,11 @@ fn config_field_toggle_bool() {
 fn app_initial_state() {
     let app = test_app();
     assert_eq!(app.popup, Popup::None);
+    assert_eq!(app.pending_confirmation, None);
     assert!(!app.should_quit);
     assert!(!app.authenticated);
     assert!(app.url_input.is_empty());
+    assert!(!app.url_input_active);
     assert!(app.files.is_empty());
     assert_eq!(app.files_completed, 0);
     assert_eq!(app.files_total, 0);
