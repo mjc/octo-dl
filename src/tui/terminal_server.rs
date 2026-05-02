@@ -26,7 +26,11 @@ use super::web;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aes::Aes128;
+    use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
     use axum::http::HeaderValue;
+    use base64::Engine;
+    use cbc::Encryptor;
     use portable_pty::{PtySize, native_pty_system};
     use std::io::Read;
 
@@ -81,6 +85,47 @@ mod tests {
         for url in urls {
             assert!(received.contains(&url));
         }
+    }
+
+    #[tokio::test]
+    async fn api_post_dlc_dispatches_dropped_dlc_urls_to_terminal() {
+        let (state, mut reader) = build_test_state();
+        let dlc_key = "A".repeat(88);
+        let decrypt_key = "0123456789abcdef";
+        state
+            .dlc_cache
+            .set(dlc_key.clone(), decrypt_key.to_string());
+        let mega_url = "https://mega.nz/file/drop123#key456";
+        let payload = DlcRequest {
+            filename: Some("links.dlc".to_string()),
+            content: build_dlc_content(&dlc_key, decrypt_key, mega_url),
+        };
+
+        let response = api_post_dlc(State(state), HeaderMap::new(), axum::Json(payload)).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut buf = [0u8; 4096];
+        let n = std::io::Read::read(&mut reader, &mut buf).expect("failed to read PTY output");
+        let received = String::from_utf8_lossy(&buf[..n]).into_owned();
+        assert!(received.contains(mega_url));
+    }
+
+    fn build_dlc_content(dlc_key: &str, decrypt_key: &str, mega_url: &str) -> String {
+        let encoded_url = base64::engine::general_purpose::STANDARD.encode(mega_url);
+        let xml = format!("<dlc><url>{encoded_url}</url></dlc>");
+        let plaintext = base64::engine::general_purpose::STANDARD.encode(xml);
+        let mut plaintext = plaintext.into_bytes();
+        let plaintext_len = plaintext.len();
+        plaintext.resize(plaintext_len + 16, 0);
+        let encrypted =
+            Encryptor::<Aes128>::new(decrypt_key.as_bytes().into(), decrypt_key.as_bytes().into())
+                .encrypt_padded_mut::<Pkcs7>(&mut plaintext, plaintext_len)
+                .expect("test DLC payload should encrypt");
+        format!(
+            "{}{dlc_key}",
+            base64::engine::general_purpose::STANDARD.encode(encrypted)
+        )
     }
 
     #[test]

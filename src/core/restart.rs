@@ -237,7 +237,8 @@ pub fn reconcile_restart(
             }
             if let Some(partial) = partial_map.get(&file.id) {
                 file.lifecycle = FileLifecycle::Queued;
-                file.progress.visible_completed_bytes = partial.bytes.min(file.size.max(partial.bytes));
+                file.progress.visible_completed_bytes =
+                    partial.bytes.min(file.size.max(partial.bytes));
                 file.runtime.counts_in_run_totals = true;
                 file.runtime.preexisting_complete = false;
                 resume_file_ids.push(file.id.clone());

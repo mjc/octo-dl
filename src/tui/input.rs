@@ -257,7 +257,7 @@ fn handle_url_input(app: &mut App, key: KeyEvent) {
 }
 
 fn select_previous_file(app: &mut App) {
-    let len = app.files.len();
+    let len = app.sorted_file_indices().len();
     if len > 0 {
         let i = app.file_list_state.selected().unwrap_or(0);
         app.file_list_state
@@ -266,7 +266,7 @@ fn select_previous_file(app: &mut App) {
 }
 
 fn select_next_file(app: &mut App) {
-    let len = app.files.len();
+    let len = app.sorted_file_indices().len();
     if len > 0 {
         let i = app.file_list_state.selected().unwrap_or(0);
         app.file_list_state.select(Some((i + 1) % len));
@@ -274,7 +274,7 @@ fn select_next_file(app: &mut App) {
 }
 
 fn move_file_selection(app: &mut App, delta: isize) {
-    let len = app.files.len();
+    let len = app.sorted_file_indices().len();
     if len == 0 {
         return;
     }
@@ -286,14 +286,15 @@ fn move_file_selection(app: &mut App, delta: isize) {
 }
 
 fn select_first_file(app: &mut App) {
-    if !app.files.is_empty() {
+    if !app.sorted_file_indices().is_empty() {
         app.file_list_state.select(Some(0));
     }
 }
 
 fn select_last_file(app: &mut App) {
-    if !app.files.is_empty() {
-        app.file_list_state.select(Some(app.files.len() - 1));
+    let len = app.sorted_file_indices().len();
+    if len > 0 {
+        app.file_list_state.select(Some(len - 1));
     }
 }
 

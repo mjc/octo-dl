@@ -165,12 +165,10 @@ fn build_status_line(app: &App) -> Vec<Span<'_>> {
         ));
     }
 
-    if !app.status.is_empty() {
+    let status = effective_status(app);
+    if !status.is_empty() {
         spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-        spans.push(Span::styled(
-            app.status.as_str(),
-            Style::default().fg(Color::Cyan),
-        ));
+        spans.push(Span::styled(status, Style::default().fg(Color::Cyan)));
     }
 
     let error_count = app
@@ -189,92 +187,152 @@ fn build_status_line(app: &App) -> Vec<Span<'_>> {
     spans
 }
 
+fn effective_status(app: &App) -> String {
+    if !is_processing_status(&app.status) || app.files.is_empty() {
+        return app.status.clone();
+    }
+
+    let downloading = app
+        .files
+        .iter()
+        .filter(|file| matches!(file.status, FileStatus::Downloading))
+        .count();
+    let queued = app
+        .files
+        .iter()
+        .filter(|file| matches!(file.status, FileStatus::Queued))
+        .count();
+
+    if downloading > 0 {
+        return format!("Downloading {downloading} file(s), {queued} queued");
+    }
+    if app.files_total > 0 {
+        return format!(
+            "Queued {} file(s), {}/{} complete",
+            queued, app.files_completed, app.files_total
+        );
+    }
+    format!("Queued {} file(s)", app.files.len())
+}
+
+fn is_processing_status(status: &str) -> bool {
+    status.starts_with("Processing ")
+}
+
+struct FileListRow {
+    icon: &'static str,
+    color: Color,
+    name: String,
+    detail: String,
+}
+
+impl FileListRow {
+    fn from_app(app: &App, file_index: usize) -> Self {
+        let file = &app.files[file_index];
+        let package_label = app.package_label_for_file(&file.id);
+        let (icon, color) = match &file.status {
+            FileStatus::Downloading => ("\u{25cf}", Color::Yellow),
+            FileStatus::Queued => ("\u{25cb}", Color::DarkGray),
+            FileStatus::Complete => ("\u{2713}", Color::Green),
+            FileStatus::Error(_) => ("\u{2717}", Color::Red),
+        };
+        let detail = file_detail(app, file);
+        let prefix = package_label
+            .as_deref()
+            .map(|label| format!("[{}] ", compact_label(label)))
+            .unwrap_or_default();
+
+        Self {
+            icon,
+            color,
+            name: format!("{prefix}{}", file.name),
+            detail,
+        }
+    }
+
+    fn into_item(self, selected: bool, content_width: usize) -> ListItem<'static> {
+        let name_width = content_width.saturating_sub(self.detail.chars().count() + 8);
+        let name = truncate_end(&self.name, name_width.max(12));
+        let filler_width = content_width
+            .saturating_sub(name.chars().count())
+            .saturating_sub(self.detail.chars().count())
+            .saturating_sub(4);
+        let filler = " ".repeat(filler_width);
+        let mut row_style = Style::default().fg(self.color);
+        if selected {
+            row_style = row_style.add_modifier(Modifier::BOLD);
+        }
+
+        ListItem::new(Line::from(vec![
+            Span::styled(format!(" {} {name}", self.icon), row_style),
+            Span::raw(filler),
+            Span::styled(
+                truncate_end(
+                    &self.detail,
+                    content_width.saturating_sub(name.chars().count() + 4),
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]))
+    }
+}
+
 fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let sorted_indices = app.sorted_file_indices();
     let content_width = usize::from(area.width.saturating_sub(4));
+    if app.file_list_state.selected().is_none() && !sorted_indices.is_empty() {
+        app.file_list_state.select(Some(0));
+    }
 
     let items: Vec<ListItem> = sorted_indices
         .iter()
         .enumerate()
         .map(|(display_index, file_index)| {
-            let f = &app.files[*file_index];
-            let selected = app.file_list_state.selected() == Some(display_index);
-            let package_label = app.package_label_for_file(&f.id);
-            let show_package_label = display_index == 0
-                || package_label
-                    != sorted_indices
-                        .get(display_index.saturating_sub(1))
-                        .and_then(|previous_index| {
-                            app.package_label_for_file(&app.files[*previous_index].id)
-                        });
-
-            let (icon, color) = match &f.status {
-                FileStatus::Downloading => ("\u{25cf}", Color::Yellow),
-                FileStatus::Queued => ("\u{25cb}", Color::DarkGray),
-                FileStatus::Complete => ("\u{2713}", Color::Green),
-                FileStatus::Error(_) => ("\u{2717}", Color::Red),
-            };
-
-            let detail = match &f.status {
-                FileStatus::Downloading => {
-                    #[allow(
-                        clippy::cast_precision_loss,
-                        clippy::cast_possible_truncation,
-                        clippy::cast_sign_loss
-                    )]
-                    let pct = if f.size > 0 {
-                        ((f.downloaded as f64 / f.size as f64 * 100.0) as u64).min(100)
-                    } else {
-                        0
-                    };
-                    let bar = progress_bar(f.downloaded, f.size, 10);
-                    format!("[{bar}] {pct}%  {}/s", format_bytes(app.file_speed(&f.id)))
-                }
-                FileStatus::Queued => "queued".to_string(),
-                FileStatus::Complete => {
-                    format!("{}  done", format_bytes(f.size))
-                }
-                FileStatus::Error(msg) => msg.clone(),
-            };
-
-            let style = if selected {
-                Style::default().fg(color).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(color)
-            };
-
-            let mut lines = Vec::new();
-            if show_package_label && let Some(package_label) = package_label {
-                lines.push(Line::from(vec![Span::styled(
-                    format!(
-                        " Package: {}",
-                        truncate_end(&package_label, content_width.saturating_sub(10))
-                    ),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )]));
-            }
-            lines.push(Line::from(vec![Span::styled(
-                format!(
-                    " {icon} {}",
-                    truncate_end(&f.name, content_width.saturating_sub(3))
-                ),
-                style,
-            )]));
-            lines.push(Line::from(vec![Span::styled(
-                format!(
-                    "   {}",
-                    truncate_end(&detail, content_width.saturating_sub(3))
-                ),
-                Style::default().fg(Color::DarkGray),
-            )]));
-            ListItem::new(lines)
+            FileListRow::from_app(app, *file_index).into_item(
+                app.file_list_state.selected() == Some(display_index),
+                content_width,
+            )
         })
         .collect();
 
-    let file_list = List::new(items).block(Block::default().borders(Borders::ALL));
+    let file_list = List::new(items)
+        .block(Block::default().borders(Borders::ALL))
+        .highlight_symbol(">> ")
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
     frame.render_stateful_widget(file_list, area, &mut app.file_list_state);
+}
+
+fn file_detail(app: &App, file: &super::app::FileEntry) -> String {
+    match &file.status {
+        FileStatus::Downloading => {
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
+            let pct = if file.size > 0 {
+                ((file.downloaded as f64 / file.size as f64 * 100.0) as u64).min(100)
+            } else {
+                0
+            };
+            let bar = progress_bar(file.downloaded, file.size, 10);
+            let speed = app.file_speed(&file.id);
+            if speed > 0 {
+                format!("[{bar}] {pct}%  {}/s", format_bytes(speed))
+            } else {
+                format!("[{bar}] {pct}%  active")
+            }
+        }
+        FileStatus::Queued => "queued".to_string(),
+        FileStatus::Complete => {
+            format!("{}  done", format_bytes(file.size))
+        }
+        FileStatus::Error(msg) => msg.clone(),
+    }
 }
 
 fn aggregate_progress_label(app: &App, pct: u16, width: u16) -> String {
@@ -283,23 +341,53 @@ fn aggregate_progress_label(app: &App, pct: u16, width: u16) -> String {
         format_bytes(app.total_downloaded),
         format_bytes(app.total_size)
     );
+    let activity = aggregate_activity_label(app);
     let full = format!(
-        "{pct}%  {}/{} files  {bytes}  {}/s",
-        app.files_completed,
-        app.files_total,
-        format_bytes(app.current_speed),
+        "{pct}%  {}/{} files  {bytes}  {activity}",
+        app.files_completed, app.files_total
     );
     if full.chars().count() <= usize::from(width.saturating_sub(2)) {
         return full;
     }
 
     let compact = format!(
-        "{pct}%  {}/{}  {}/s",
-        app.files_completed,
-        app.files_total,
-        format_bytes(app.current_speed),
+        "{pct}%  {}/{}  {activity}",
+        app.files_completed, app.files_total
     );
     truncate_end(&compact, usize::from(width.saturating_sub(2)))
+}
+
+fn aggregate_activity_label(app: &App) -> String {
+    if app.current_speed > 0 {
+        return format!("{}/s", format_bytes(app.current_speed));
+    }
+
+    if app
+        .files
+        .iter()
+        .any(|file| matches!(file.status, FileStatus::Downloading))
+    {
+        return "active".to_string();
+    }
+
+    let queued = app
+        .files
+        .iter()
+        .filter(|file| matches!(file.status, FileStatus::Queued))
+        .count();
+    if queued > 0 {
+        return format!("{queued} queued");
+    }
+
+    "idle".to_string()
+}
+
+fn compact_label(value: &str) -> String {
+    value
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(value)
+        .to_string()
 }
 
 fn truncate_end(value: &str, max_chars: usize) -> String {
@@ -521,6 +609,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::core::{CoreEvent, ResolvedFile, ResolvedPackage};
     use crate::tui::app::{App, FileEntry, FileStatus};
     use crate::tui::event::DownloadEvent;
 
@@ -602,5 +691,102 @@ mod tests {
         assert!(rendered.contains("Delete danger.bin"));
         assert!(rendered.contains("y/Enter: confirm"));
         assert!(rendered.contains("n/Esc: cancel"));
+    }
+
+    #[test]
+    fn draw_main_renders_one_selectable_row_per_file() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "pkg-1".to_string(),
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                display_name: "Mega Package".to_string(),
+                files: vec![
+                    ResolvedFile {
+                        file_id: "first.bin".to_string(),
+                        path: "first.bin".to_string(),
+                        size: 10,
+                    },
+                    ResolvedFile {
+                        file_id: "second.bin".to_string(),
+                        path: "second.bin".to_string(),
+                        size: 20,
+                    },
+                ],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileQueued {
+            file_id: "first.bin".to_string(),
+        });
+        app.apply_core_event(CoreEvent::FileQueued {
+            file_id: "second.bin".to_string(),
+        });
+
+        let rendered = render_text(&mut app);
+
+        assert!(!rendered.contains("Package:"));
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.contains("first.bin"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.contains("second.bin"))
+                .count(),
+            1
+        );
+        assert_eq!(app.file_list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn draw_main_replaces_stale_processing_status_when_files_exist() {
+        let mut app = test_app();
+        app.status = "Processing 13 URL(s)...".to_string();
+        app.files_total = 2;
+        app.files.push(FileEntry {
+            id: "active.bin".to_string(),
+            name: "active.bin".to_string(),
+            size: 100,
+            downloaded: 20,
+            status: FileStatus::Downloading,
+        });
+        app.files.push(FileEntry {
+            id: "queued.bin".to_string(),
+            name: "queued.bin".to_string(),
+            size: 100,
+            downloaded: 0,
+            status: FileStatus::Queued,
+        });
+
+        let rendered = render_text(&mut app);
+
+        assert!(!rendered.contains("Processing 13 URL"));
+        assert!(rendered.contains("Downloading 1 file(s), 1 queued"));
+    }
+
+    #[test]
+    fn draw_main_does_not_show_zero_byte_rate_for_active_work() {
+        let mut app = test_app();
+        app.files_total = 1;
+        app.total_size = 100;
+        app.total_downloaded = 20;
+        app.current_speed = 0;
+        app.files.push(FileEntry {
+            id: "active.bin".to_string(),
+            name: "active.bin".to_string(),
+            size: 100,
+            downloaded: 20,
+            status: FileStatus::Downloading,
+        });
+
+        let rendered = render_text(&mut app);
+
+        assert!(!rendered.contains("0 B/s"));
+        assert!(rendered.contains("active"));
     }
 }

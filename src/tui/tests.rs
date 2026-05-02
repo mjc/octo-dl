@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
     core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus},
-    tui::event::DownloadRequest,
     test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot},
+    tui::event::DownloadRequest,
 };
 use std::env;
 use std::path::Path;
