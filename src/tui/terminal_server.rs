@@ -54,6 +54,7 @@ mod tests {
             http_client: Arc::new(build_http_client().expect("failed to build HTTP client")),
             dlc_cache: Arc::new(DlcKeyCache::new()),
             upstream_api_base: None,
+            api_key: None,
         };
         let _slave = pair.slave; // keep slave alive so the PTY stays usable
         (state, std::io::BufReader::new(reader))
@@ -146,6 +147,38 @@ mod tests {
         );
         assert_eq!(infer_host(&headers, &state, "http"), "public.example");
     }
+
+    #[test]
+    fn require_api_key_accepts_header_and_bearer_token() {
+        let (mut state, _reader) = build_test_state();
+        state.api_key = Some("secret".to_string());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+        assert!(require_api_key(&state, &headers).is_none());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer secret"),
+        );
+        assert!(require_api_key(&state, &headers).is_none());
+    }
+
+    #[test]
+    fn require_api_key_rejects_missing_or_wrong_key() {
+        let (mut state, _reader) = build_test_state();
+        state.api_key = Some("secret".to_string());
+
+        let headers = HeaderMap::new();
+        let missing = require_api_key(&state, &headers).expect("missing key should reject");
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("wrong"));
+        let wrong = require_api_key(&state, &headers).expect("wrong key should reject");
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    }
 }
 
 #[derive(Clone)]
@@ -156,6 +189,7 @@ struct TerminalApiState {
     http_client: Arc<reqwest::Client>,
     dlc_cache: Arc<DlcKeyCache>,
     upstream_api_base: Option<String>,
+    api_key: Option<String>,
 }
 
 struct TerminalSession {
@@ -294,6 +328,7 @@ pub async fn run_terminal_server(
     bridge: Arc<TerminalBridge>,
     shutdown: oneshot::Receiver<()>,
     upstream_api_port: Option<u16>,
+    api_key: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let cors = CorsLayer::new()
@@ -327,6 +362,7 @@ pub async fn run_terminal_server(
         http_client,
         dlc_cache,
         upstream_api_base: upstream_api_port.map(|port| format!("http://127.0.0.1:{port}")),
+        api_key,
     };
 
     let app = Router::new()
@@ -388,6 +424,40 @@ fn dispatch_urls(state: &TerminalApiState, urls: Vec<String>) {
     for url in urls {
         let _ = state.session.bridge.write_line(&url);
     }
+}
+
+fn provided_api_key(headers: &HeaderMap) -> Option<&str> {
+    if let Some(key) = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some(key);
+    }
+
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn require_api_key(
+    state: &TerminalApiState,
+    headers: &HeaderMap,
+) -> Option<axum::response::Response> {
+    let expected_key = state.api_key.as_ref()?;
+    if provided_api_key(headers).is_some_and(|provided| provided == expected_key) {
+        return None;
+    }
+
+    Some(
+        (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "invalid api key"})),
+        )
+            .into_response(),
+    )
 }
 
 async fn root(State(state): State<TerminalApiState>, headers: HeaderMap) -> impl IntoResponse {
@@ -504,18 +574,28 @@ async fn proxy_api_request(
 
 async fn api_post_urls(
     State(state): State<TerminalApiState>,
+    headers: HeaderMap,
     axum::Json(payload): axum::Json<UrlRequest>,
 ) -> impl IntoResponse {
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
+
     let urls = extract_urls(&payload.text);
     let count = urls.len();
     dispatch_urls(&state, urls.clone());
-    axum::Json(UrlResponse { added: urls, count })
+    axum::Json(UrlResponse { added: urls, count }).into_response()
 }
 
 async fn api_post_dlc(
     State(state): State<TerminalApiState>,
+    headers: HeaderMap,
     axum::Json(payload): axum::Json<DlcRequest>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> axum::response::Response {
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
+
     match parse_dlc_data(&payload.content, &state.http_client, &state.dlc_cache).await {
         Ok(urls) => {
             let count = urls.len();
@@ -525,23 +605,28 @@ async fn api_post_dlc(
                 log::info!("DLC upload received ({count} link(s))");
             }
             dispatch_urls(&state, urls.clone());
-            Ok(axum::Json(UrlResponse { added: urls, count }))
+            axum::Json(UrlResponse { added: urls, count }).into_response()
         }
-        Err(err) => Err((StatusCode::BAD_REQUEST, err.to_string())),
+        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
 }
 
 async fn api_parse_page(
     State(state): State<TerminalApiState>,
+    headers: HeaderMap,
     axum::Json(payload): axum::Json<ParseRequest>,
 ) -> impl IntoResponse {
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
+
     let mut urls = extract_urls(&payload.page);
     if urls.is_empty() && !payload.fallback.is_empty() {
         urls = extract_urls(&payload.fallback);
     }
     let count = urls.len();
     dispatch_urls(&state, urls.clone());
-    axum::Json(UrlResponse { added: urls, count })
+    axum::Json(UrlResponse { added: urls, count }).into_response()
 }
 
 async fn share_get(
