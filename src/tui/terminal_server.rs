@@ -263,6 +263,10 @@ impl TerminalSession {
         self.parser.lock().screen().state_formatted()
     }
 
+    fn resize(&self, rows: u16, cols: u16) {
+        self.parser.lock().set_size(rows.max(1), cols.max(1));
+    }
+
     fn initial_frame(&self) -> Vec<u8> {
         let mut frame = b"\x1bc".to_vec();
         frame.extend_from_slice(&self.snapshot());
@@ -721,7 +725,7 @@ async fn handle_ws(state: TerminalApiState, ws: WebSocket) {
     let mut output_rx = state.session.subscribe();
     let (mut sink, mut stream) = ws.split();
     let (write_tx, mut write_rx) = mpsc::unbounded_channel::<Message>();
-    let _ = write_tx.send(Message::Binary(state.session.initial_frame().into()));
+    let mut sent_initial_frame = false;
 
     let writer = tokio::spawn(async move {
         while let Some(msg) = write_rx.recv().await {
@@ -752,6 +756,12 @@ async fn handle_ws(state: TerminalApiState, ws: WebSocket) {
                 Ok(ClientMessage::Resize { cols, rows }) => {
                     if let Err(error) = bridge.resize(cols, rows) {
                         log::warn!("Failed to resize PTY: {error}");
+                    }
+                    state.session.resize(rows, cols);
+                    if !sent_initial_frame {
+                        let _ =
+                            write_tx.send(Message::Binary(state.session.initial_frame().into()));
+                        sent_initial_frame = true;
                     }
                 }
                 Err(_) => {
