@@ -6,7 +6,10 @@ use crate::extract_urls;
 #[cfg(test)]
 use crate::tui::event::DownloadRequest;
 
-use super::app::{App, ConfigField, ConfirmAction, FileStatus, LoginState, Popup, UiAction};
+use super::app::{
+    App, ConfigField, ConfirmAction, FileStatus, LoginState, Popup, SortKey, UiAction,
+};
+use super::visible::TuiRow;
 
 pub fn handle_input(app: &mut App, key: KeyEvent) {
     // Global quit
@@ -19,6 +22,7 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
         Popup::Login => handle_login_input(app, key),
         Popup::Config => handle_config_input(app, key),
         Popup::Confirm => handle_confirm_input(app, key),
+        Popup::Sort => handle_sort_input(app, key),
         Popup::None => handle_main_input(app, key),
     }
 }
@@ -172,8 +176,14 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
                     ConfirmAction::DeleteFile(id) => {
                         app.handle_ui_action(UiAction::DeleteFile(id));
                     }
+                    ConfirmAction::DeletePackage(id) => {
+                        app.handle_ui_action(UiAction::DeletePackage(id));
+                    }
                     ConfirmAction::ResetFile(id) => {
                         app.handle_ui_action(UiAction::ResetFile(id));
+                    }
+                    ConfirmAction::ResetPackage(id) => {
+                        app.handle_ui_action(UiAction::ResetPackage(id));
                     }
                 }
             } else {
@@ -182,6 +192,38 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             app.pending_confirmation = None;
+            app.popup = Popup::None;
+        }
+        _ => {}
+    }
+}
+
+fn handle_sort_input(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Up | KeyCode::BackTab => {
+            app.sort.active_field = if app.sort.active_field == 0 {
+                SortKey::ALL.len()
+            } else {
+                app.sort.active_field - 1
+            };
+        }
+        KeyCode::Down | KeyCode::Tab => {
+            app.sort.active_field = (app.sort.active_field + 1) % (SortKey::ALL.len() + 1);
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
+            if app.sort.active_field == SortKey::ALL.len() {
+                app.sort.direction = app.sort.direction.toggled();
+            } else {
+                app.sort.key = SortKey::ALL[app.sort.active_field];
+            }
+        }
+        KeyCode::Enter => {
+            if app.sort.active_field < SortKey::ALL.len() {
+                app.sort.key = SortKey::ALL[app.sort.active_field];
+            }
+            app.popup = Popup::None;
+        }
+        KeyCode::Esc | KeyCode::Char('s') => {
             app.popup = Popup::None;
         }
         _ => {}
@@ -204,18 +246,29 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('d') | KeyCode::Delete => delete_selected(app),
         KeyCode::Char('R') => reset_selected(app),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::SHIFT) => reset_selected(app),
-        KeyCode::Char('r') => {
-            // Retry selected errored file — re-queue it
-            if let Some(selected) = app.selected_file_index()
-                && matches!(app.files[selected].status, FileStatus::Error(_))
-            {
-                let file_id = app.files[selected].id.clone();
-                app.handle_ui_action(UiAction::RetryFile(file_id));
+        KeyCode::Char('r') => match app.selected_row() {
+            Some(TuiRow::Package(package_id)) => {
+                app.handle_ui_action(UiAction::RetryPackage(package_id));
             }
-        }
+            Some(TuiRow::File { file_id, .. }) => {
+                if app
+                    .files
+                    .iter()
+                    .find(|file| file.id == file_id)
+                    .is_some_and(|file| matches!(file.status, FileStatus::Error(_)))
+                {
+                    app.handle_ui_action(UiAction::RetryFile(file_id));
+                }
+            }
+            None => {}
+        },
         KeyCode::Char('c') => {
             app.popup = Popup::Config;
         }
+        KeyCode::Char('s') => {
+            app.popup = Popup::Sort;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => toggle_selected_package(app),
         KeyCode::Up | KeyCode::Char('k') => select_previous_file(app),
         KeyCode::Down | KeyCode::Char('j') => select_next_file(app),
         KeyCode::PageUp => move_file_selection(app, -10),
@@ -257,7 +310,7 @@ fn handle_url_input(app: &mut App, key: KeyEvent) {
 }
 
 fn select_previous_file(app: &mut App) {
-    let len = app.sorted_file_indices().len();
+    let len = app.visible_rows().len();
     if len > 0 {
         let i = app.file_list_state.selected().unwrap_or(0);
         app.file_list_state
@@ -266,7 +319,7 @@ fn select_previous_file(app: &mut App) {
 }
 
 fn select_next_file(app: &mut App) {
-    let len = app.sorted_file_indices().len();
+    let len = app.visible_rows().len();
     if len > 0 {
         let i = app.file_list_state.selected().unwrap_or(0);
         app.file_list_state.select(Some((i + 1) % len));
@@ -274,7 +327,7 @@ fn select_next_file(app: &mut App) {
 }
 
 fn move_file_selection(app: &mut App, delta: isize) {
-    let len = app.sorted_file_indices().len();
+    let len = app.visible_rows().len();
     if len == 0 {
         return;
     }
@@ -286,33 +339,52 @@ fn move_file_selection(app: &mut App, delta: isize) {
 }
 
 fn select_first_file(app: &mut App) {
-    if !app.sorted_file_indices().is_empty() {
+    if !app.visible_rows().is_empty() {
         app.file_list_state.select(Some(0));
     }
 }
 
 fn select_last_file(app: &mut App) {
-    let len = app.sorted_file_indices().len();
+    let len = app.visible_rows().len();
     if len > 0 {
         app.file_list_state.select(Some(len - 1));
     }
 }
 
 fn reset_selected(app: &mut App) {
-    let Some(selected) = app.selected_file_index() else {
-        return;
-    };
-    app.pending_confirmation = Some(ConfirmAction::ResetFile(app.files[selected].id.clone()));
-    app.popup = Popup::Confirm;
+    match app.selected_row() {
+        Some(TuiRow::Package(package_id)) => {
+            app.pending_confirmation = Some(ConfirmAction::ResetPackage(package_id));
+            app.popup = Popup::Confirm;
+        }
+        Some(TuiRow::File { file_id, .. }) => {
+            app.pending_confirmation = Some(ConfirmAction::ResetFile(file_id));
+            app.popup = Popup::Confirm;
+        }
+        None => {}
+    }
 }
 
 fn delete_selected(app: &mut App) {
-    let Some(selected_file) = app.selected_file_index() else {
-        return;
-    };
-    let file = &app.files[selected_file];
-    app.pending_confirmation = Some(ConfirmAction::DeleteFile(file.id.clone()));
-    app.popup = Popup::Confirm;
+    match app.selected_row() {
+        Some(TuiRow::Package(package_id)) => {
+            app.pending_confirmation = Some(ConfirmAction::DeletePackage(package_id));
+            app.popup = Popup::Confirm;
+        }
+        Some(TuiRow::File { file_id, .. }) => {
+            app.pending_confirmation = Some(ConfirmAction::DeleteFile(file_id));
+            app.popup = Popup::Confirm;
+        }
+        None => {}
+    }
+}
+
+fn toggle_selected_package(app: &mut App) {
+    if let Some(TuiRow::Package(package_id)) = app.selected_row() {
+        if !app.expanded_packages.insert(package_id.clone()) {
+            app.expanded_packages.remove(&package_id);
+        }
+    }
 }
 
 pub fn handle_paste(app: &mut App, text: &str) {
@@ -322,7 +394,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
                 app.login.active_value_mut().push_str(text.trim());
             }
         }
-        Popup::Config | Popup::Confirm => {}
+        Popup::Config | Popup::Confirm | Popup::Sort => {}
         Popup::None => {
             // Append pasted text to URL input, replacing newlines with spaces
             app.url_input_active = true;
@@ -590,11 +662,96 @@ mod tests {
         handle_input(&mut app, key(KeyCode::Delete));
         assert_eq!(
             app.pending_confirmation,
-            Some(ConfirmAction::DeleteFile("core.bin".to_string()))
+            Some(ConfirmAction::DeletePackage(
+                "https://mega.nz/file/core".to_string()
+            ))
         );
         confirm(&mut app);
 
         assert!(app.files.is_empty());
+    }
+
+    #[test]
+    fn handle_main_input_expands_package_and_file_action_targets_child() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "pkg".to_string(),
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                display_name: "Package".to_string(),
+                files: vec![
+                    ResolvedFile {
+                        file_id: "first.bin".to_string(),
+                        path: "first.bin".to_string(),
+                        size: 10,
+                    },
+                    ResolvedFile {
+                        file_id: "second.bin".to_string(),
+                        path: "second.bin".to_string(),
+                        size: 20,
+                    },
+                ],
+                collision: None,
+            },
+        });
+        app.file_list_state.select(Some(0));
+        assert_eq!(app.visible_rows().len(), 1);
+
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.visible_rows().len(), 3);
+
+        handle_input(&mut app, key(KeyCode::Down));
+        handle_input(&mut app, key(KeyCode::Delete));
+        assert_eq!(
+            app.pending_confirmation,
+            Some(ConfirmAction::DeleteFile("first.bin".to_string()))
+        );
+    }
+
+    #[test]
+    fn handle_main_input_reset_package_targets_package_row() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "pkg".to_string(),
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "file.bin".to_string(),
+                    path: "file.bin".to_string(),
+                    size: 10,
+                }],
+                collision: None,
+            },
+        });
+        app.file_list_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('R')));
+
+        assert_eq!(
+            app.pending_confirmation,
+            Some(ConfirmAction::ResetPackage("pkg".to_string()))
+        );
+    }
+
+    #[test]
+    fn handle_sort_popup_selects_key_and_direction() {
+        let mut app = test_app();
+
+        handle_input(&mut app, key(KeyCode::Char('s')));
+        assert_eq!(app.popup, Popup::Sort);
+
+        handle_input(&mut app, key(KeyCode::Down));
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.sort.key, SortKey::Status);
+        assert_eq!(app.popup, Popup::None);
+
+        handle_input(&mut app, key(KeyCode::Char('s')));
+        for _ in 0..(SortKey::ALL.len() - 1) {
+            handle_input(&mut app, key(KeyCode::Down));
+        }
+        handle_input(&mut app, key(KeyCode::Char(' ')));
+        assert_eq!(app.sort.direction, super::super::app::SortDirection::Desc);
     }
 
     #[test]

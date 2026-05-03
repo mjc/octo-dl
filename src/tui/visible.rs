@@ -4,9 +4,15 @@ use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 
-use crate::core::{DownloadState, FileLifecycle, FileState, PackageState};
+use crate::core::{DownloadState, FileLifecycle, FileState, PackageState, PackageStatus};
 
-use super::app::{FileEntry, FileStatus, FileUiState, OverlayFile};
+use super::app::{App, FileEntry, FileStatus, FileUiState, OverlayFile, SortDirection, SortKey};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TuiRow {
+    Package(String),
+    File { package_id: String, file_id: String },
+}
 
 fn package_sort_key_for(
     core_state: &DownloadState,
@@ -106,6 +112,199 @@ pub(super) fn sorted_file_indices(
             .then_with(|| left_file.id.cmp(&right_file.id))
     });
     indices
+}
+
+fn file_name_for_sort(core_state: &DownloadState, file_id: &str) -> String {
+    core_state
+        .files
+        .get(file_id)
+        .map(|file| file.path.clone())
+        .unwrap_or_else(|| file_id.to_string())
+}
+
+fn package_percent(core_state: &DownloadState, package_id: &str) -> u64 {
+    let Some(package) = core_state.packages.get(package_id) else {
+        return 0;
+    };
+    let (downloaded, size) = package
+        .file_ids
+        .iter()
+        .filter_map(|file_id| core_state.files.get(file_id))
+        .fold((0_u64, 0_u64), |(downloaded, size), file| {
+            let visible = if matches!(file.lifecycle, FileLifecycle::Complete) {
+                file.size
+            } else {
+                file.progress.visible_completed_bytes.min(file.size)
+            };
+            (
+                downloaded.saturating_add(visible),
+                size.saturating_add(file.size),
+            )
+        });
+    if size == 0 {
+        0
+    } else {
+        downloaded.saturating_mul(100).saturating_div(size).min(100)
+    }
+}
+
+fn package_status_rank(status: PackageStatus) -> u8 {
+    match status {
+        PackageStatus::Downloading => 0,
+        PackageStatus::Failed => 1,
+        PackageStatus::Queued | PackageStatus::Pending => 2,
+        PackageStatus::Partial => 3,
+        PackageStatus::Complete => 4,
+        PackageStatus::Skipped | PackageStatus::Deleted => 5,
+    }
+}
+
+fn package_is_auto_expanded(app: &App, package_id: &str) -> bool {
+    app.expanded_packages.contains(package_id)
+        || app
+            .core_state
+            .packages
+            .get(package_id)
+            .is_some_and(|package| {
+                matches!(
+                    package.status,
+                    PackageStatus::Downloading | PackageStatus::Failed
+                )
+            })
+}
+
+pub(super) fn visible_rows(app: &App) -> Vec<TuiRow> {
+    if app.core_state.packages.is_empty() {
+        return sorted_file_indices(&app.files, &app.core_state, &app.overlay_files)
+            .into_iter()
+            .map(|index| TuiRow::File {
+                package_id: String::new(),
+                file_id: app.files[index].id.clone(),
+            })
+            .collect();
+    }
+
+    let mut package_ids: Vec<_> = app.core_state.packages.keys().cloned().collect();
+    package_ids.sort_by(|left, right| {
+        let left_package = &app.core_state.packages[left];
+        let right_package = &app.core_state.packages[right];
+        let ordering = match app.sort.key {
+            SortKey::Queue => app
+                .core_state
+                .packages
+                .get_index_of(left)
+                .cmp(&app.core_state.packages.get_index_of(right)),
+            SortKey::Status => package_status_rank(left_package.status)
+                .cmp(&package_status_rank(right_package.status)),
+            SortKey::Name => left_package.display_name.cmp(&right_package.display_name),
+            SortKey::Percent => {
+                package_percent(&app.core_state, left).cmp(&package_percent(&app.core_state, right))
+            }
+        }
+        .then_with(|| left_package.display_name.cmp(&right_package.display_name))
+        .then_with(|| left.cmp(right));
+
+        match app.sort.direction {
+            SortDirection::Asc => ordering,
+            SortDirection::Desc => ordering.reverse(),
+        }
+    });
+
+    let mut rows = Vec::new();
+    for package_id in package_ids {
+        rows.push(TuiRow::Package(package_id.clone()));
+        if package_is_auto_expanded(app, &package_id) {
+            let mut file_ids = app
+                .core_state
+                .packages
+                .get(&package_id)
+                .map(|package| package.file_ids.clone())
+                .unwrap_or_default();
+            file_ids.sort_by(|left, right| {
+                natural_cmp(
+                    &file_name_for_sort(&app.core_state, left),
+                    &file_name_for_sort(&app.core_state, right),
+                )
+                .then_with(|| left.cmp(right))
+            });
+            rows.extend(
+                file_ids
+                    .into_iter()
+                    .filter(|file_id| app.core_state.files.contains_key(file_id))
+                    .map(|file_id| TuiRow::File {
+                        package_id: package_id.clone(),
+                        file_id,
+                    }),
+            );
+        }
+    }
+    rows
+}
+
+fn natural_cmp(left: &str, right: &str) -> Ordering {
+    let mut left = left.chars().peekable();
+    let mut right = right.chars().peekable();
+
+    loop {
+        match (left.peek(), right.peek()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(left_char), Some(right_char))
+                if left_char.is_ascii_digit() && right_char.is_ascii_digit() =>
+            {
+                let left_number = take_digits(&mut left);
+                let right_number = take_digits(&mut right);
+                let number_order = compare_digit_runs(&left_number, &right_number);
+                if number_order != Ordering::Equal {
+                    return number_order;
+                }
+            }
+            (Some(_), Some(_)) => {
+                let left_char = left.next().expect("peeked char should exist");
+                let right_char = right.next().expect("peeked char should exist");
+                match left_char
+                    .to_ascii_lowercase()
+                    .cmp(&right_char.to_ascii_lowercase())
+                {
+                    Ordering::Equal => {}
+                    other => return other,
+                }
+            }
+        }
+    }
+}
+
+fn take_digits<I>(chars: &mut std::iter::Peekable<I>) -> String
+where
+    I: Iterator<Item = char>,
+{
+    let mut digits = String::new();
+    while chars.peek().is_some_and(char::is_ascii_digit) {
+        digits.push(chars.next().expect("peeked digit should exist"));
+    }
+    digits
+}
+
+fn compare_digit_runs(left: &str, right: &str) -> Ordering {
+    let left_trimmed = left.trim_start_matches('0');
+    let right_trimmed = right.trim_start_matches('0');
+    let left_normalized = if left_trimmed.is_empty() {
+        "0"
+    } else {
+        left_trimmed
+    };
+    let right_normalized = if right_trimmed.is_empty() {
+        "0"
+    } else {
+        right_trimmed
+    };
+
+    left_normalized
+        .len()
+        .cmp(&right_normalized.len())
+        .then_with(|| left_normalized.cmp(right_normalized))
+        .then_with(|| left.len().cmp(&right.len()))
 }
 
 pub(super) fn selected_file_index(

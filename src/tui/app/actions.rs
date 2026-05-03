@@ -285,6 +285,12 @@ impl App {
         }
     }
 
+    pub(crate) fn perform_delete_package_action(&mut self, package_id: &str) {
+        for file_id in self.package_file_ids(package_id) {
+            self.perform_delete_file_action(&file_id);
+        }
+    }
+
     pub(crate) fn perform_retry_file_action(&mut self, id: &str) {
         let had_core_file = self.core_state.files.contains_key(id);
         let context = self.visible_file_context(id);
@@ -314,6 +320,20 @@ impl App {
         }
     }
 
+    pub(crate) fn perform_retry_package_action(&mut self, package_id: &str) {
+        for file_id in self.package_file_ids(package_id) {
+            let retryable =
+                self.core_state.files.get(&file_id).is_some_and(|file| {
+                    matches!(file.lifecycle, crate::core::FileLifecycle::Failed)
+                }) || self
+                    .visible_file_context(&file_id)
+                    .is_some_and(|context| matches!(context.status, super::FileStatus::Error(_)));
+            if retryable {
+                self.perform_retry_file_action(&file_id);
+            }
+        }
+    }
+
     pub(crate) fn perform_reset_file_action(&mut self, id: &str) {
         let Some(context) = self.visible_file_context(id) else {
             return;
@@ -333,6 +353,12 @@ impl App {
             file_id: id.to_string(),
         });
         self.reset_file_ui_rate(id);
+    }
+
+    pub(crate) fn perform_reset_package_action(&mut self, package_id: &str) {
+        for file_id in self.package_file_ids(package_id) {
+            self.perform_reset_file_action(&file_id);
+        }
     }
 
     pub(crate) fn apply_config_update(
@@ -382,8 +408,11 @@ impl App {
                 }
             }
             UiAction::DeleteFile(id) => self.perform_delete_file_action(&id),
+            UiAction::DeletePackage(id) => self.perform_delete_package_action(&id),
             UiAction::RetryFile(id) => self.perform_retry_file_action(&id),
+            UiAction::RetryPackage(id) => self.perform_retry_package_action(&id),
             UiAction::ResetFile(id) => self.perform_reset_file_action(&id),
+            UiAction::ResetPackage(id) => self.perform_reset_package_action(&id),
             UiAction::UpdateConfig {
                 chunks_per_file,
                 concurrent_files,
