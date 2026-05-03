@@ -10,12 +10,15 @@ pub enum Popup {
     Login,
     Config,
     Confirm,
+    Sort,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmAction {
     DeleteFile(String),
+    DeletePackage(String),
     ResetFile(String),
+    ResetPackage(String),
 }
 
 /// What to do when `auto_login` finds no credentials.
@@ -138,6 +141,65 @@ pub struct ConfigState {
     pub active_field: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    Queue,
+    Status,
+    Name,
+    Percent,
+}
+
+impl SortKey {
+    pub const ALL: [Self; 4] = [Self::Queue, Self::Status, Self::Name, Self::Percent];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Queue => "Queue order",
+            Self::Status => "Status priority",
+            Self::Name => "Name",
+            Self::Percent => "Percent downloaded",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Asc,
+    Desc,
+}
+
+impl SortDirection {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Asc => "Ascending",
+            Self::Desc => "Descending",
+        }
+    }
+
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Asc => Self::Desc,
+            Self::Desc => Self::Asc,
+        }
+    }
+}
+
+pub struct SortState {
+    pub key: SortKey,
+    pub direction: SortDirection,
+    pub active_field: usize,
+}
+
+impl SortState {
+    pub const fn new() -> Self {
+        Self {
+            key: SortKey::Queue,
+            direction: SortDirection::Asc,
+            active_field: 0,
+        }
+    }
+}
+
 impl ConfigState {
     pub fn new() -> Self {
         Self {
@@ -213,8 +275,11 @@ pub enum UiAction {
     },
     TogglePause,
     DeleteFile(String),
+    DeletePackage(String),
     RetryFile(String),
+    RetryPackage(String),
     ResetFile(String),
+    ResetPackage(String),
     UpdateConfig {
         chunks_per_file: Option<usize>,
         concurrent_files: Option<usize>,

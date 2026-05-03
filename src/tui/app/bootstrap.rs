@@ -42,6 +42,8 @@ impl App {
             overlay_files: IndexMap::new(),
             file_ui: HashMap::new(),
             file_list_state: ListState::default(),
+            expanded_packages: HashSet::new(),
+            sort: super::SortState::new(),
             total_downloaded: 0,
             total_size: 0,
             files_completed: 0,

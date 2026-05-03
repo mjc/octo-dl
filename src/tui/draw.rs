@@ -5,9 +5,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table};
 
+use crate::core::{FileLifecycle, PackageStatus};
 use crate::format_bytes;
 
-use super::app::{App, ConfigField, ConfirmAction, FileStatus, Popup};
+use super::app::{App, ConfigField, ConfirmAction, FileStatus, Popup, SortKey};
+use super::visible::TuiRow;
 
 pub fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     draw_main(frame, app);
@@ -16,6 +18,7 @@ pub fn draw(frame: &mut ratatui::Frame, app: &mut App) {
         Popup::Login => draw_login_popup(frame, app),
         Popup::Config => draw_config_popup(frame, app),
         Popup::Confirm => draw_confirm_popup(frame, app),
+        Popup::Sort => draw_sort_popup(frame, app),
     }
 }
 
@@ -135,9 +138,9 @@ fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
     let controls = if app.url_input_active {
         "enter:add URLs  esc:cancel  paste:supported"
     } else if app.paused {
-        "a:add URLs  up/down:select  p:resume  d:delete  r:retry  R:reset  c:config  q:quit"
+        "a:add URLs  up/down:select  enter:expand  s:sort  d:delete  r:retry  R:reset  c:config  q:quit"
     } else {
-        "a:add URLs  up/down:select  p:pause  d:delete  r:retry  R:reset  c:config  q:quit"
+        "a:add URLs  up/down:select  enter:expand  s:sort  d:delete  r:retry  R:reset  c:config  q:quit"
     };
     let controls_bar = Paragraph::new(controls)
         .style(Style::default().fg(Color::DarkGray))
@@ -227,8 +230,7 @@ struct FileListRow {
 }
 
 impl FileListRow {
-    fn from_app(app: &App, file_index: usize) -> Self {
-        let file = &app.files[file_index];
+    fn from_file(app: &App, file: &super::app::FileEntry, include_package: bool) -> Self {
         let package_label = app.package_label_for_file(&file.id);
         let (icon, color) = match &file.status {
             FileStatus::Downloading => ("\u{25cf}", Color::Yellow),
@@ -237,10 +239,14 @@ impl FileListRow {
             FileStatus::Error(_) => ("\u{2717}", Color::Red),
         };
         let detail = file_detail(app, file);
-        let prefix = package_label
-            .as_deref()
-            .map(|label| format!("[{}] ", compact_label(label)))
-            .unwrap_or_default();
+        let prefix = if include_package {
+            package_label
+                .as_deref()
+                .map(|label| format!("[{}] ", compact_label(label)))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
 
         Self {
             icon,
@@ -250,13 +256,13 @@ impl FileListRow {
         }
     }
 
-    fn into_item(self, selected: bool, content_width: usize) -> ListItem<'static> {
-        let name_width = content_width.saturating_sub(self.detail.chars().count() + 8);
-        let name = truncate_end(&self.name, name_width.max(12));
+    fn into_child_item(self, selected: bool, content_width: usize) -> ListItem<'static> {
+        let name_width = content_width.saturating_sub(self.detail.chars().count() + 10);
+        let name = truncate_end(&self.name, name_width.max(10));
         let filler_width = content_width
             .saturating_sub(name.chars().count())
             .saturating_sub(self.detail.chars().count())
-            .saturating_sub(4);
+            .saturating_sub(6);
         let filler = " ".repeat(filler_width);
         let mut row_style = Style::default().fg(self.color);
         if selected {
@@ -264,12 +270,12 @@ impl FileListRow {
         }
 
         ListItem::new(Line::from(vec![
-            Span::styled(format!(" {} {name}", self.icon), row_style),
+            Span::styled(format!("   {} {name}", self.icon), row_style),
             Span::raw(filler),
             Span::styled(
                 truncate_end(
                     &self.detail,
-                    content_width.saturating_sub(name.chars().count() + 4),
+                    content_width.saturating_sub(name.chars().count() + 6),
                 ),
                 Style::default().fg(Color::DarkGray),
             ),
@@ -278,32 +284,169 @@ impl FileListRow {
 }
 
 fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let sorted_indices = app.sorted_file_indices();
+    let rows = app.visible_rows();
     let content_width = usize::from(area.width.saturating_sub(4));
-    if app.file_list_state.selected().is_none() && !sorted_indices.is_empty() {
+    if app.file_list_state.selected().is_none() && !rows.is_empty() {
         app.file_list_state.select(Some(0));
+    } else if let Some(selected) = app.file_list_state.selected()
+        && selected >= rows.len()
+    {
+        app.file_list_state.select(rows.len().checked_sub(1));
     }
 
-    let items: Vec<ListItem> = sorted_indices
+    let selected = app.file_list_state.selected();
+    let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
-        .map(|(display_index, file_index)| {
-            FileListRow::from_app(app, *file_index).into_item(
-                app.file_list_state.selected() == Some(display_index),
-                content_width,
-            )
+        .map(|(display_index, row)| {
+            row_item(app, row, selected == Some(display_index), content_width)
         })
         .collect();
 
     let file_list = List::new(items)
         .block(Block::default().borders(Borders::ALL))
-        .highlight_symbol(">> ")
+        .highlight_symbol("")
         .highlight_style(
             Style::default()
                 .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         );
     frame.render_stateful_widget(file_list, area, &mut app.file_list_state);
+}
+
+fn row_item(app: &App, row: &TuiRow, selected: bool, content_width: usize) -> ListItem<'static> {
+    match row {
+        TuiRow::Package(package_id) => package_row_item(app, package_id, selected, content_width),
+        TuiRow::File { file_id, .. } => app
+            .files
+            .iter()
+            .find(|file| file.id == *file_id)
+            .map(|file| {
+                FileListRow::from_file(app, file, false).into_child_item(selected, content_width)
+            })
+            .unwrap_or_else(|| ListItem::new(Line::from(""))),
+    }
+}
+
+#[derive(Default)]
+struct PackageCounts {
+    present: usize,
+    complete: usize,
+    downloaded: u64,
+    size: u64,
+}
+
+fn package_counts(app: &App, package_id: &str) -> PackageCounts {
+    let mut counts = PackageCounts::default();
+    let Some(package) = app.core_state.packages.get(package_id) else {
+        return counts;
+    };
+    for file_id in &package.file_ids {
+        let Some(file) = app.core_state.files.get(file_id) else {
+            continue;
+        };
+        if matches!(
+            file.lifecycle,
+            FileLifecycle::Skipped | FileLifecycle::Deleted
+        ) {
+            continue;
+        }
+        counts.present += 1;
+        if matches!(file.lifecycle, FileLifecycle::Complete) {
+            counts.complete += 1;
+            counts.downloaded = counts.downloaded.saturating_add(file.size);
+        } else {
+            counts.downloaded = counts
+                .downloaded
+                .saturating_add(file.progress.visible_completed_bytes.min(file.size));
+        }
+        counts.size = counts.size.saturating_add(file.size);
+    }
+    counts
+}
+
+fn package_speed(app: &App, package_id: &str) -> u64 {
+    app.core_state
+        .packages
+        .get(package_id)
+        .map(|package| {
+            package
+                .file_ids
+                .iter()
+                .map(|file_id| app.file_speed(file_id))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn package_status_style(status: PackageStatus) -> (&'static str, Color) {
+    match status {
+        PackageStatus::Downloading => ("\u{25cf}", Color::Yellow),
+        PackageStatus::Failed => ("\u{2717}", Color::Red),
+        PackageStatus::Complete => ("\u{2713}", Color::Green),
+        PackageStatus::Partial => ("\u{25d0}", Color::Yellow),
+        PackageStatus::Queued | PackageStatus::Pending => ("\u{25cb}", Color::DarkGray),
+        PackageStatus::Skipped | PackageStatus::Deleted => ("\u{2715}", Color::DarkGray),
+    }
+}
+
+fn package_row_item(
+    app: &App,
+    package_id: &str,
+    selected: bool,
+    content_width: usize,
+) -> ListItem<'static> {
+    let Some(package) = app.core_state.packages.get(package_id) else {
+        return ListItem::new(Line::from(""));
+    };
+    let expanded = app
+        .visible_rows()
+        .iter()
+        .any(|row| matches!(row, TuiRow::File { package_id: id, .. } if id == package_id));
+    let counts = package_counts(app, package_id);
+    let percent = if counts.size == 0 {
+        0
+    } else {
+        counts
+            .downloaded
+            .saturating_mul(100)
+            .saturating_div(counts.size)
+            .min(100)
+    };
+    let speed = package_speed(app, package_id);
+    let speed_label = if speed > 0 {
+        format!("{}/s", format_bytes(speed))
+    } else if matches!(package.status, PackageStatus::Downloading) {
+        "active".to_string()
+    } else {
+        String::new()
+    };
+    let detail = format!(
+        "{}/{} files  {} / {}  {percent:>3}%  {speed_label}",
+        counts.complete,
+        counts.present,
+        format_bytes(counts.downloaded),
+        format_bytes(counts.size)
+    );
+    let (icon, color) = package_status_style(package.status);
+    let marker = if expanded { "-" } else { "+" };
+    let name_width = content_width.saturating_sub(detail.chars().count() + 9);
+    let name = truncate_end(&package.display_name, name_width.max(12));
+    let filler = " ".repeat(
+        content_width
+            .saturating_sub(name.chars().count())
+            .saturating_sub(detail.chars().count())
+            .saturating_sub(7),
+    );
+    let mut row_style = Style::default().fg(color);
+    if selected {
+        row_style = row_style.add_modifier(Modifier::BOLD);
+    }
+    ListItem::new(Line::from(vec![
+        Span::styled(format!(" {marker} {icon} {name}"), row_style),
+        Span::raw(filler),
+        Span::styled(detail, Style::default().fg(Color::DarkGray)),
+    ]))
 }
 
 fn file_detail(app: &App, file: &super::app::FileEntry) -> String {
@@ -557,6 +700,74 @@ fn draw_config_popup(frame: &mut ratatui::Frame, app: &App) {
     frame.render_widget(help, chunks[1]);
 }
 
+fn draw_sort_popup(frame: &mut ratatui::Frame, app: &App) {
+    let area = centered_rect(46, 10, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Sort ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(1)])
+        .split(inner);
+
+    let mut rows: Vec<Row> = SortKey::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            let active = app.sort.active_field == index;
+            let selected = app.sort.key == *key;
+            let style = if active {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Row::new(vec![
+                if active { ">" } else { " " }.to_string(),
+                if selected { "*" } else { " " }.to_string(),
+                key.label().to_string(),
+            ])
+            .style(style)
+        })
+        .collect();
+    let direction_active = app.sort.active_field == SortKey::ALL.len();
+    rows.push(
+        Row::new(vec![
+            if direction_active { ">" } else { " " }.to_string(),
+            " ".to_string(),
+            format!("Direction: {}", app.sort.direction.label()),
+        ])
+        .style(if direction_active {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        }),
+    );
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Min(20),
+        ],
+    );
+    frame.render_widget(table, chunks[0]);
+
+    let help = Paragraph::new(" Enter to apply | Space/Left/Right to change")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(help, chunks[1]);
+}
+
 fn draw_confirm_popup(frame: &mut ratatui::Frame, app: &App) {
     let area = centered_rect(58, 7, frame.area());
     frame.render_widget(Clear, area);
@@ -568,20 +779,25 @@ fn draw_confirm_popup(frame: &mut ratatui::Frame, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let (action, file_id) = match app.pending_confirmation.as_ref() {
-        Some(ConfirmAction::DeleteFile(id)) => ("Delete", id.as_str()),
-        Some(ConfirmAction::ResetFile(id)) => ("Reset", id.as_str()),
-        None => ("Confirm", ""),
+    let (action, target, id) = match app.pending_confirmation.as_ref() {
+        Some(ConfirmAction::DeleteFile(id)) => ("Delete", "file", id.as_str()),
+        Some(ConfirmAction::DeletePackage(id)) => ("Delete", "package", id.as_str()),
+        Some(ConfirmAction::ResetFile(id)) => ("Reset", "file", id.as_str()),
+        Some(ConfirmAction::ResetPackage(id)) => ("Reset", "package", id.as_str()),
+        None => ("Confirm", "item", ""),
     };
-    let file_name = app
-        .files
-        .iter()
-        .find(|file| file.id == file_id)
-        .map_or(file_id, |file| file.name.as_str());
+    let name = if target == "package" {
+        app.package_display_name(id)
+    } else {
+        app.files
+            .iter()
+            .find(|file| file.id == id)
+            .map_or_else(|| id.to_string(), |file| file.name.clone())
+    };
 
     let lines = vec![
         Line::from(Span::styled(
-            format!("{action} {}", truncate_end(file_name, 44)),
+            format!("{action} {target}: {}", truncate_end(&name, 36)),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
@@ -688,13 +904,13 @@ mod tests {
         let rendered = render_text(&mut app);
 
         assert!(rendered.contains("Confirm"));
-        assert!(rendered.contains("Delete danger.bin"));
+        assert!(rendered.contains("Delete file: danger.bin"));
         assert!(rendered.contains("y/Enter: confirm"));
         assert!(rendered.contains("n/Esc: cancel"));
     }
 
     #[test]
-    fn draw_main_renders_one_selectable_row_per_file() {
+    fn draw_main_renders_package_rows_as_primary_rows() {
         let mut app = test_app();
         app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
@@ -725,22 +941,75 @@ mod tests {
 
         let rendered = render_text(&mut app);
 
-        assert!(!rendered.contains("Package:"));
-        assert_eq!(
-            rendered
-                .lines()
-                .filter(|line| line.contains("first.bin"))
-                .count(),
-            1
-        );
-        assert_eq!(
-            rendered
-                .lines()
-                .filter(|line| line.contains("second.bin"))
-                .count(),
-            1
-        );
+        assert!(rendered.contains("Mega Package"));
+        assert!(rendered.contains("0/2 files"));
+        assert!(!rendered.contains("first.bin"));
+        assert!(!rendered.contains("second.bin"));
+        assert!(!rendered.contains(">>"));
         assert_eq!(app.file_list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn draw_main_expanding_package_shows_file_children() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "pkg-1".to_string(),
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                display_name: "Mega Package".to_string(),
+                files: vec![
+                    ResolvedFile {
+                        file_id: "b.bin".to_string(),
+                        path: "b.bin".to_string(),
+                        size: 20,
+                    },
+                    ResolvedFile {
+                        file_id: "a.bin".to_string(),
+                        path: "a.bin".to_string(),
+                        size: 10,
+                    },
+                ],
+                collision: None,
+            },
+        });
+        app.expanded_packages.insert("pkg-1".to_string());
+
+        let rendered = render_text(&mut app);
+
+        assert!(rendered.contains("Mega Package"));
+        assert!(rendered.contains("a.bin"));
+        assert!(rendered.contains("b.bin"));
+        assert!(
+            rendered.find("a.bin").expect("a.bin should render")
+                < rendered.find("b.bin").expect("b.bin should render")
+        );
+    }
+
+    #[test]
+    fn draw_main_active_and_error_packages_expand_by_default() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "pkg-1".to_string(),
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                display_name: "Mega Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "active.bin".to_string(),
+                    path: "active.bin".to_string(),
+                    size: 20,
+                }],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: "active.bin".to_string(),
+            size: 20,
+        });
+
+        let rendered = render_text(&mut app);
+
+        assert!(rendered.contains("Mega Package"));
+        assert!(rendered.contains("active.bin"));
     }
 
     #[test]

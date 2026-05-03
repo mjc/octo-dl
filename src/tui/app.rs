@@ -34,7 +34,8 @@ pub(crate) use self::progress::FileUiState;
 use self::progress::TransferRate;
 pub use self::types::{
     ConfigField, ConfigState, ConfirmAction, FileEntry, FileStatus, LoginState,
-    NoCredentialsFallback, Popup, QuitPolicy, SharedAppState, UiAction,
+    NoCredentialsFallback, Popup, QuitPolicy, SharedAppState, SortDirection, SortKey, SortState,
+    UiAction,
 };
 pub(crate) use self::types::{OverlayFile, SharedStateChannels, VisibleFileContext};
 
@@ -61,6 +62,8 @@ pub struct App {
     pub(crate) overlay_files: IndexMap<String, OverlayFile>,
     pub(crate) file_ui: HashMap<String, FileUiState>,
     pub file_list_state: ListState,
+    pub expanded_packages: HashSet<String>,
+    pub sort: SortState,
     // Aggregate stats
     pub total_downloaded: u64,
     pub total_size: u64,
@@ -109,10 +112,12 @@ pub struct App {
 }
 
 impl App {
+    #[allow(dead_code)]
     pub fn sorted_file_indices(&self) -> Vec<usize> {
         visible::sorted_file_indices(&self.files, &self.core_state, &self.overlay_files)
     }
 
+    #[allow(dead_code)]
     pub fn selected_file_index(&self) -> Option<usize> {
         visible::selected_file_index(
             &self.file_list_state,
@@ -120,6 +125,31 @@ impl App {
             &self.core_state,
             &self.overlay_files,
         )
+    }
+
+    pub fn visible_rows(&self) -> Vec<visible::TuiRow> {
+        visible::visible_rows(self)
+    }
+
+    pub fn selected_row(&self) -> Option<visible::TuiRow> {
+        let selected = self.file_list_state.selected()?;
+        self.visible_rows().get(selected).cloned()
+    }
+
+    pub fn package_file_ids(&self, package_id: &str) -> Vec<String> {
+        self.core_state
+            .packages
+            .get(package_id)
+            .map(|package| package.file_ids.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn package_display_name(&self, package_id: &str) -> String {
+        self.core_state
+            .packages
+            .get(package_id)
+            .map(|package| package.display_name.clone())
+            .unwrap_or_else(|| package_id.to_string())
     }
 
     pub(crate) fn sync_visible_files(&mut self) {
