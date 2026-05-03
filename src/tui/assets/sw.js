@@ -1,5 +1,5 @@
 // octo-dl Service Worker
-const CACHE_NAME = 'octo-dl-v2';
+const CACHE_NAME = 'octo-dl-v3';
 const PRECACHE = ['/', '/manifest.json', '/icon-192.svg', '/icon-512.svg'];
 
 self.addEventListener('install', function(event) {
