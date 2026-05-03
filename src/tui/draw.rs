@@ -264,28 +264,30 @@ impl FileListRow {
     }
 
     fn into_child_item(self, selected: bool, content_width: usize) -> ListItem<'static> {
-        let name_width = content_width.saturating_sub(self.detail.chars().count() + 10);
-        let name = truncate_end(&self.name, name_width.max(10));
-        let filler_width = content_width
-            .saturating_sub(name.chars().count())
-            .saturating_sub(self.detail.chars().count())
-            .saturating_sub(6);
-        let filler = " ".repeat(filler_width);
+        let prefix = format!("   {} ", self.icon);
+        let prefix_width = prefix.chars().count();
+        let detail_width = self.detail.chars().count().min(content_width / 2);
+        let detail = truncate_end(&self.detail, detail_width);
+        let name_width = content_width
+            .saturating_sub(prefix_width)
+            .saturating_sub(detail.chars().count())
+            .saturating_sub(1);
+        let name = truncate_end(&self.name, name_width);
+        let filler = " ".repeat(
+            content_width
+                .saturating_sub(prefix_width)
+                .saturating_sub(name.chars().count())
+                .saturating_sub(detail.chars().count()),
+        );
         let mut row_style = Style::default().fg(self.color);
         if selected {
             row_style = row_style.add_modifier(Modifier::BOLD);
         }
 
         ListItem::new(Line::from(vec![
-            Span::styled(format!("   {} {name}", self.icon), row_style),
+            Span::styled(format!("{prefix}{name}"), row_style),
             Span::raw(filler),
-            Span::styled(
-                truncate_end(
-                    &self.detail,
-                    content_width.saturating_sub(name.chars().count() + 6),
-                ),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(detail, Style::default().fg(Color::DarkGray)),
         ]))
     }
 }
@@ -372,20 +374,6 @@ fn package_counts(app: &App, package_id: &str) -> PackageCounts {
     counts
 }
 
-fn package_speed(app: &App, package_id: &str) -> u64 {
-    app.core_state
-        .packages
-        .get(package_id)
-        .map(|package| {
-            package
-                .file_ids
-                .iter()
-                .map(|file_id| app.file_speed(file_id))
-                .sum()
-        })
-        .unwrap_or(0)
-}
-
 fn package_status_style(status: PackageStatus) -> (&'static str, Color) {
     match status {
         PackageStatus::Downloading => ("\u{25cf}", Color::Yellow),
@@ -420,10 +408,7 @@ fn package_row_item(
             .saturating_div(counts.size)
             .min(100)
     };
-    let speed = package_speed(app, package_id);
-    let speed_label = if speed > 0 {
-        format!("{}/s", format_bytes(speed))
-    } else if matches!(package.status, PackageStatus::Downloading) {
+    let speed_label = if matches!(package.status, PackageStatus::Downloading) {
         "active".to_string()
     } else {
         String::new()
@@ -435,23 +420,30 @@ fn package_row_item(
     } else {
         " "
     };
-    let name_width = content_width.saturating_sub(detail.chars().count() + 7);
+    let prefix = format!(" {marker} {icon} ");
+    let prefix_width = prefix.chars().count();
+    let detail_width = detail.chars().count().min(content_width / 2);
+    let detail = truncate_end(&detail, detail_width);
+    let name_width = content_width
+        .saturating_sub(prefix_width)
+        .saturating_sub(detail.chars().count())
+        .saturating_sub(1);
     let name = truncate_end(
         &display_package_name(app, package_id, &package.display_name),
-        name_width.max(8),
+        name_width,
     );
     let filler = " ".repeat(
         content_width
+            .saturating_sub(prefix_width)
             .saturating_sub(name.chars().count())
-            .saturating_sub(detail.chars().count())
-            .saturating_sub(7),
+            .saturating_sub(detail.chars().count()),
     );
     let mut row_style = Style::default().fg(color);
     if selected {
         row_style = row_style.add_modifier(Modifier::BOLD);
     }
     ListItem::new(Line::from(vec![
-        Span::styled(format!(" {marker} {icon} {name}"), row_style),
+        Span::styled(format!("{prefix}{name}"), row_style),
         Span::raw(filler),
         Span::styled(detail, Style::default().fg(Color::DarkGray)),
     ]))
@@ -529,7 +521,7 @@ fn mega_url_label(value: &str) -> Option<String> {
     }
 }
 
-fn file_detail(app: &App, file: &super::app::FileEntry) -> String {
+fn file_detail(_app: &App, file: &super::app::FileEntry) -> String {
     match &file.status {
         FileStatus::Downloading => {
             #[allow(
@@ -543,12 +535,7 @@ fn file_detail(app: &App, file: &super::app::FileEntry) -> String {
                 0
             };
             let bar = progress_bar(file.downloaded, file.size, 10);
-            let speed = app.file_speed(&file.id);
-            if speed > 0 {
-                format!("[{bar}] {pct}%  {}/s", format_bytes(speed))
-            } else {
-                format!("[{bar}] {pct}%  active")
-            }
+            format!("[{bar}] {pct}%  active")
         }
         FileStatus::Queued => "queued".to_string(),
         FileStatus::Complete => {
@@ -582,7 +569,7 @@ fn aggregate_progress_label(app: &App, pct: u16, width: u16) -> String {
 
 fn aggregate_activity_label(app: &App) -> String {
     if app.current_speed > 0 {
-        return format!("{}/s", format_bytes(app.current_speed));
+        return "active".to_string();
     }
 
     if app
