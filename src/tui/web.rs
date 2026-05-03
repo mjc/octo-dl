@@ -144,6 +144,14 @@ mod tests {
     }
 
     #[test]
+    fn index_html_has_local_xterm_row_layout_fallback() {
+        let html = index_html("example.com:9723", "wss");
+        assert!(html.contains("#terminal .xterm-rows > div"));
+        assert!(html.contains("white-space: pre"));
+        assert!(html.contains("display: block"));
+    }
+
+    #[test]
     fn index_html_supports_dlc_file_drop() {
         let html = index_html("example.com:9723", "wss");
         assert!(html.contains("handleDrop"));
