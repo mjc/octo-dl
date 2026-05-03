@@ -10,6 +10,17 @@
   <style>
     html, body { height: 100%; margin: 0; background: #05060a; }
     #terminal { width: 100%; height: 100%; }
+    /*
+      Keep the terminal rectangular even if the CDN stylesheet is blocked or
+      loads after the first frame. Without these basics xterm rows collapse
+      into inline spans, which turns the whole TUI into one long line.
+    */
+    #terminal .xterm { position: relative; width: 100%; height: 100%; overflow: hidden; }
+    #terminal .xterm-screen { position: relative; }
+    #terminal .xterm-rows { position: absolute; left: 0; top: 0; }
+    #terminal .xterm-rows > div { display: block; white-space: pre; }
+    #terminal .xterm-viewport { position: absolute; inset: 0; overflow-y: hidden; }
+    #terminal .xterm-helper-textarea { position: absolute; opacity: 0; left: -9999px; top: 0; }
     #notice {
       position: absolute;
       left: 16px;

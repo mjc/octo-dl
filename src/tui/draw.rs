@@ -135,13 +135,7 @@ fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
     frame.render_widget(status_line, chunks[3]);
 
     // --- Controls bar ---
-    let controls = if app.url_input_active {
-        "enter:add URLs  esc:cancel  paste:supported"
-    } else if app.paused {
-        "a:add URLs  up/down:select  enter:expand  s:sort  d:delete  r:retry  R:reset  c:config  q:quit"
-    } else {
-        "a:add URLs  up/down:select  enter:expand  s:sort  d:delete  r:retry  R:reset  c:config  q:quit"
-    };
+    let controls = controls_label(app, chunks[4].width);
     let controls_bar = Paragraph::new(controls)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
@@ -169,7 +163,7 @@ fn build_status_line(app: &App) -> Vec<Span<'_>> {
     }
 
     let status = effective_status(app);
-    if !status.is_empty() {
+    if !status.is_empty() && !is_stale_login_status(app, &status) {
         spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
         spans.push(Span::styled(status, Style::default().fg(Color::Cyan)));
     }
@@ -188,6 +182,10 @@ fn build_status_line(app: &App) -> Vec<Span<'_>> {
     }
 
     spans
+}
+
+fn is_stale_login_status(app: &App, status: &str) -> bool {
+    status == "Logging in..." && (app.authenticated || app.login.logging_in)
 }
 
 fn effective_status(app: &App) -> String {
@@ -216,6 +214,15 @@ fn effective_status(app: &App) -> String {
         );
     }
     format!("Queued {} file(s)", app.files.len())
+}
+
+fn controls_label(app: &App, width: u16) -> String {
+    let text = if app.url_input_active {
+        "enter:add  esc:cancel  paste:ok"
+    } else {
+        "a:add  up/down:select  enter:open  s:sort  d:del  r:retry  R:reset  c:cfg  q:quit"
+    };
+    truncate_end(text, usize::from(width))
 }
 
 fn is_processing_status(status: &str) -> bool {
@@ -421,17 +428,18 @@ fn package_row_item(
     } else {
         String::new()
     };
-    let detail = format!(
-        "{}/{} files  {} / {}  {percent:>3}%  {speed_label}",
-        counts.complete,
-        counts.present,
-        format_bytes(counts.downloaded),
-        format_bytes(counts.size)
-    );
+    let detail = package_detail(&counts, percent, &speed_label, content_width);
     let (icon, color) = package_status_style(package.status);
-    let marker = if expanded { "-" } else { "+" };
-    let name_width = content_width.saturating_sub(detail.chars().count() + 9);
-    let name = truncate_end(&package.display_name, name_width.max(12));
+    let marker = if counts.present > 1 {
+        if expanded { "-" } else { "+" }
+    } else {
+        " "
+    };
+    let name_width = content_width.saturating_sub(detail.chars().count() + 7);
+    let name = truncate_end(
+        &display_package_name(app, package_id, &package.display_name),
+        name_width.max(8),
+    );
     let filler = " ".repeat(
         content_width
             .saturating_sub(name.chars().count())
@@ -447,6 +455,78 @@ fn package_row_item(
         Span::raw(filler),
         Span::styled(detail, Style::default().fg(Color::DarkGray)),
     ]))
+}
+
+fn package_detail(
+    counts: &PackageCounts,
+    percent: u64,
+    speed_label: &str,
+    content_width: usize,
+) -> String {
+    let full = format!(
+        "{}/{} files  {} / {}  {percent:>3}%  {speed_label}",
+        counts.complete,
+        counts.present,
+        format_bytes(counts.downloaded),
+        format_bytes(counts.size)
+    );
+    if full.chars().count() <= content_width / 2 {
+        return full;
+    }
+
+    let compact = format!(
+        "{}/{}  {}  {percent:>3}%  {speed_label}",
+        counts.complete,
+        counts.present,
+        format_bytes(counts.size)
+    );
+    truncate_end(&compact, content_width / 2)
+}
+
+fn display_package_name(app: &App, package_id: &str, value: &str) -> String {
+    if !value.starts_with("http://") && !value.starts_with("https://") {
+        return compact_label(value);
+    }
+
+    if let Some(label) = folder_name_from_package_files(app, package_id) {
+        return label;
+    }
+
+    if let Some(label) = mega_url_label(value) {
+        return label;
+    }
+    compact_label(value.split('#').next().unwrap_or(value))
+}
+
+fn folder_name_from_package_files(app: &App, package_id: &str) -> Option<String> {
+    let package = app.core_state.packages.get(package_id)?;
+    let mut common: Option<&str> = None;
+    for file_id in &package.file_ids {
+        let file = app.core_state.files.get(file_id)?;
+        let folder = file
+            .path
+            .split('/')
+            .next()
+            .filter(|part| !part.is_empty())?;
+        match common {
+            None => common = Some(folder),
+            Some(existing) if existing == folder => {}
+            Some(_) => return None,
+        }
+    }
+    common.map(str::to_string)
+}
+
+fn mega_url_label(value: &str) -> Option<String> {
+    let marker = "mega.nz/";
+    let start = value.find(marker)? + marker.len();
+    let path = &value[start..];
+    let mut parts = path.split(['/', '#']);
+    match (parts.next(), parts.next()) {
+        (Some("folder"), Some(id)) if !id.is_empty() => Some(format!("Folder {id}")),
+        (Some("file"), Some(id)) if !id.is_empty() => Some(format!("File {id}")),
+        _ => None,
+    }
 }
 
 fn file_detail(app: &App, file: &super::app::FileEntry) -> String {
@@ -867,10 +947,10 @@ mod tests {
         let rendered = render_text(&mut app);
 
         assert!(rendered.contains("Add URL(s): press a"));
-        assert!(rendered.contains("a:add URLs"));
+        assert!(rendered.contains("a:add"));
         assert!(rendered.contains("up/down:select"));
         assert!(rendered.contains("queued.bin"));
-        assert!(!rendered.contains("enter:add URLs"));
+        assert!(!rendered.contains("enter:add"));
     }
 
     #[test]
@@ -883,7 +963,7 @@ mod tests {
 
         assert!(rendered.contains("Add URL(s): editing"));
         assert!(rendered.contains("https://mega.nz/file/test"));
-        assert!(rendered.contains("enter:add URLs"));
+        assert!(rendered.contains("enter:add"));
         assert!(rendered.contains("esc:cancel"));
         assert!(!rendered.contains("q:quit"));
     }
@@ -983,6 +1063,30 @@ mod tests {
             rendered.find("a.bin").expect("a.bin should render")
                 < rendered.find("b.bin").expect("b.bin should render")
         );
+    }
+
+    #[test]
+    fn draw_main_uses_folder_name_for_url_package_row() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "https://mega.nz/folder/abc#secret".to_string(),
+                source_url: "https://mega.nz/folder/abc#secret".to_string(),
+                display_name: "https://mega.nz/folder/abc#secret".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "file.bin".to_string(),
+                    path: "Folder Name/file.bin".to_string(),
+                    size: 10,
+                }],
+                collision: None,
+            },
+        });
+
+        let rendered = render_text(&mut app);
+
+        assert!(rendered.contains("Folder Name"));
+        assert!(!rendered.contains("https://mega.nz"));
+        assert!(!rendered.contains("secret"));
     }
 
     #[test]
