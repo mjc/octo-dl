@@ -15,12 +15,8 @@
       loads after the first frame. Without these basics xterm rows collapse
       into inline spans, which turns the whole TUI into one long line.
     */
-    #terminal .xterm { position: relative; width: 100%; height: 100%; overflow: hidden; }
-    #terminal .xterm-screen { position: relative; }
-    #terminal .xterm-rows { position: absolute; left: 0; top: 0; }
+    #terminal .xterm-rows { line-height: normal; }
     #terminal .xterm-rows > div { display: block; white-space: pre; }
-    #terminal .xterm-viewport { position: absolute; inset: 0; overflow-y: hidden; }
-    #terminal .xterm-helper-textarea { position: absolute; opacity: 0; left: -9999px; top: 0; }
     #notice {
       position: absolute;
       left: 16px;
@@ -32,6 +28,7 @@
       font-family: system-ui, sans-serif;
       font-size: 0.8rem;
       z-index: 5;
+      pointer-events: none;
     }
   </style>
 </head>
@@ -44,8 +41,13 @@
     const term = new Terminal({ cursorBlink: true, fontFamily: "JetBrains Mono, ui-monospace, monospace" });
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
-    term.open(document.getElementById("terminal"));
-    term.focus();
+    const terminalElement = document.getElementById("terminal");
+    term.open(terminalElement);
+    const focusTerminal = () => {
+      terminalElement.focus();
+      term.focus();
+    };
+    focusTerminal();
 
     let socket;
     const notice = document.getElementById("notice");
@@ -60,6 +62,7 @@
 
     const fitAndNotify = () => {
       fitAddon.fit();
+      focusTerminal();
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
           type: "resize",
@@ -84,6 +87,7 @@
       socket.addEventListener("open", () => {
         reconnectAttempt = 0;
         fitAndNotify();
+        focusTerminal();
         showNotice("Connected");
         hideAfterMessage = true;
       });
@@ -97,6 +101,7 @@
       });
       socket.addEventListener("message", (event) => {
         term.write(new Uint8Array(event.data));
+        focusTerminal();
         if (hideAfterMessage) {
           hideAfterMessage = false;
           setTimeout(hideNotice, 250);
@@ -104,6 +109,11 @@
       });
     };
     connect();
+
+    terminalElement.tabIndex = 0;
+    terminalElement.addEventListener("pointerdown", focusTerminal);
+    terminalElement.addEventListener("click", focusTerminal);
+    window.addEventListener("focus", focusTerminal);
 
     term.onData((data) => {
       if (socket && socket.readyState === WebSocket.OPEN) {

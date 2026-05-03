@@ -8,7 +8,7 @@ use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, OriginalUri, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use futures_util::{SinkExt, StreamExt};
@@ -520,7 +520,10 @@ async fn root(State(state): State<TerminalApiState>, headers: HeaderMap) -> impl
         "ws".to_string()
     };
     let host = infer_host(&headers, &state, &scheme);
-    Html(web::index_html(&host, &ws_scheme))
+    (
+        [(header::CACHE_CONTROL, "no-store, max-age=0")],
+        Html(web::index_html(&host, &ws_scheme)),
+    )
 }
 
 async fn bookmarklet(
