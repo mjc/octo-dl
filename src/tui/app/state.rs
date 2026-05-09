@@ -139,6 +139,11 @@ impl App {
             .mutate_session_and_save(|session| SessionAdapter::update_url(session, url, update));
     }
 
+    pub(crate) fn remove_session_url(&mut self, url: &str) {
+        let _ = self
+            .mutate_session_and_save(|session| SessionAdapter::remove_url(session, url));
+    }
+
     pub(crate) fn update_session_file(&mut self, file_id: &str, update: SessionFileUpdate<'_>) {
         let _ = self.mutate_session_and_save(|session| {
             SessionAdapter::update_file(session, file_id, update)

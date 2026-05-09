@@ -419,6 +419,48 @@ fn url_level_overlay_error_does_not_also_render_empty_package_row() {
 }
 
 #[test]
+fn deleting_url_level_error_removes_session_url_and_ignores_late_events() {
+    let mut app = test_app();
+    let url = "https://mega.nz/folder/bad".to_string();
+    app.session = Some(session_snapshot(vec![(url.as_str(), UrlFixtureStatus::Pending)]));
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::ScopeError {
+        scope: url.clone(),
+        error: "bad folder".to_string(),
+    });
+    app.handle_ui_action(UiAction::DeleteFile(url.clone()));
+
+    assert!(app.visible_rows().is_empty());
+    assert!(!app.urls.contains(&url));
+    let session = app.session.as_ref().expect("session should remain");
+    assert!(session.packages.iter().all(|package| package.source_url != url));
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::UrlResolved {
+        url: url.clone(),
+    });
+    app.handle_download_event(crate::tui::event::DownloadEvent::ScopeError {
+        scope: url.clone(),
+        error: "late folder error".to_string(),
+    });
+
+    assert!(app.visible_rows().is_empty());
+    let session = app.session.as_ref().expect("session should remain");
+    assert!(session.packages.iter().all(|package| package.source_url != url));
+}
+
+#[test]
+fn resubmitting_deleted_url_clears_late_event_fence() {
+    let mut app = test_app();
+    let url = "https://mega.nz/folder/bad".to_string();
+    app.deleted_files.insert(url.clone());
+
+    app.submit_url(url.clone());
+
+    assert!(app.urls.contains(&url));
+    assert!(!app.deleted_files.contains(&url));
+}
+
+#[test]
 fn mark_visible_file_error_updates_session_file_status() {
     let mut app = test_app();
     let mut session = session_snapshot(vec![(

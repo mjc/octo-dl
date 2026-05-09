@@ -16,6 +16,7 @@ impl App {
         if self.urls.contains(&url) {
             return;
         }
+        self.deleted_files.remove(&url);
         self.urls.push(url.clone());
         self.apply_core_command(CoreCommand::SubmitUrl { url: url.clone() });
         self.update_session_url(&url, SessionUrlUpdate::Pending);
@@ -169,6 +170,10 @@ impl App {
 
     pub(crate) fn handle_scope_error_event(&mut self, scope: String, error: String) {
         log::error!("Download error: {scope}: {error}");
+        if self.deleted_files.contains(&scope) {
+            log::info!("Ignoring stale URL-level error after delete: {scope}");
+            return;
+        }
         if self.is_session_url(&scope) {
             self.handle_session_url_error(&scope, &error);
         } else {
@@ -207,6 +212,10 @@ impl App {
     }
 
     pub(crate) fn handle_url_resolved_event(&mut self, url: String) {
+        if self.deleted_files.contains(&url) {
+            log::info!("Ignoring stale URL resolution after delete: {url}");
+            return;
+        }
         self.handle_session_url_fetched(&url);
     }
 
@@ -343,6 +352,10 @@ impl App {
         self.file_attempt_ids.remove(id);
         self.reset_pending_files.remove(id);
         self.deleted_files.insert(id.to_string());
+        if !is_core_backed && self.is_session_url(id) {
+            self.remove_session_url(id);
+            self.urls.retain(|url| url != id);
+        }
         if is_core_backed {
             self.apply_core_command(CoreCommand::DeleteFile {
                 file_id: id.to_string(),
