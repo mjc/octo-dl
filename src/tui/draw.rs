@@ -143,7 +143,7 @@ fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
     draw_file_list(frame, app, chunks[2]);
 
     // --- Status line ---
-    let status_spans = build_status_line(app);
+    let status_spans = build_status_line(app, chunks[3].width);
     let status_line =
         Paragraph::new(Line::from(status_spans)).style(Style::default().fg(Color::White));
     frame.render_widget(status_line, chunks[3]);
@@ -156,30 +156,116 @@ fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
     frame.render_widget(controls_bar, chunks[4]);
 }
 
-fn build_status_line(app: &App) -> Vec<Span<'_>> {
-    let mut spans = Vec::new();
+fn build_status_line(app: &App, width: u16) -> Vec<Span<'static>> {
+    #[derive(Clone)]
+    struct StatusPart {
+        variants: Vec<String>,
+        style: Style,
+        weight: usize,
+    }
 
+    fn parts_length(parts: &[StatusPart], chosen: &[usize]) -> usize {
+        let labels = parts
+            .iter()
+            .zip(chosen.iter())
+            .filter_map(|(part, index)| {
+                let label = &part.variants[*index];
+                (!label.is_empty()).then_some(label)
+            })
+            .collect::<Vec<_>>();
+        if labels.is_empty() {
+            0
+        } else {
+            labels
+                .iter()
+                .map(|label| label.chars().count())
+                .sum::<usize>()
+                + 3 * labels.len().saturating_sub(1)
+        }
+    }
+
+    fn variant_score(part: &StatusPart, variant_index: usize) -> usize {
+        let label = &part.variants[variant_index];
+        if label.is_empty() {
+            return 0;
+        }
+        part.weight * (part.variants.len().saturating_sub(variant_index))
+    }
+
+    fn choose_variants(
+        parts: &[StatusPart],
+        width: usize,
+        chosen: &mut Vec<usize>,
+        best: &mut Option<(usize, Vec<usize>)>,
+    ) {
+        let index = chosen.len();
+        if index == parts.len() {
+            if parts_length(parts, chosen) <= width {
+                let score = parts
+                    .iter()
+                    .zip(chosen.iter())
+                    .map(|(part, variant_index)| variant_score(part, *variant_index))
+                    .sum::<usize>();
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_score, _)| score > *best_score)
+                {
+                    *best = Some((score, chosen.clone()));
+                }
+            }
+            return;
+        }
+
+        for variant_index in 0..parts[index].variants.len() {
+            chosen.push(variant_index);
+            if parts_length(parts, chosen) <= width {
+                choose_variants(parts, width, chosen, best);
+            }
+            chosen.pop();
+        }
+    }
+
+    let mut parts = Vec::new();
     if app.authenticated {
-        spans.push(Span::styled(
-            " Logged in \u{2713}",
-            Style::default().fg(Color::Green),
-        ));
+        parts.push(StatusPart {
+            variants: vec![
+                "Logged in \u{2713}".to_string(),
+                "Auth\u{2713}".to_string(),
+                "\u{2713}".to_string(),
+                String::new(),
+            ],
+            style: Style::default().fg(Color::Green),
+            weight: 1,
+        });
     } else if app.login.logging_in {
-        spans.push(Span::styled(
-            " Logging in...",
-            Style::default().fg(Color::Yellow),
-        ));
+        parts.push(StatusPart {
+            variants: vec![
+                "Logging in...".to_string(),
+                "Login...".to_string(),
+                String::new(),
+            ],
+            style: Style::default().fg(Color::Yellow),
+            weight: 1,
+        });
     } else if app.popup == Popup::Login {
-        spans.push(Span::styled(
-            " Awaiting login",
-            Style::default().fg(Color::DarkGray),
-        ));
+        parts.push(StatusPart {
+            variants: vec![
+                "Awaiting login".to_string(),
+                "Login".to_string(),
+                String::new(),
+            ],
+            style: Style::default().fg(Color::DarkGray),
+            weight: 1,
+        });
     }
 
     let status = effective_status(app);
     if !status.is_empty() && !is_stale_login_status(app, &status) {
-        spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-        spans.push(Span::styled(status, Style::default().fg(Color::Cyan)));
+        parts.push(StatusPart {
+            variants: status_variants(app, &status),
+            style: Style::default().fg(Color::Cyan),
+            weight: 3,
+        });
     }
 
     let error_count = app
@@ -188,14 +274,60 @@ fn build_status_line(app: &App) -> Vec<Span<'_>> {
         .filter(|f| matches!(f.status, FileStatus::Error(_)))
         .count();
     if error_count > 0 {
-        spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-        spans.push(Span::styled(
-            format!("{error_count} failed"),
-            Style::default().fg(Color::Red),
-        ));
+        parts.push(StatusPart {
+            variants: vec![format!("{error_count} failed"), format!("!{error_count}")],
+            style: Style::default().fg(Color::Red),
+            weight: 4,
+        });
     }
 
+    let mut best = None;
+    choose_variants(&parts, usize::from(width), &mut Vec::new(), &mut best);
+    let chosen = best.map(|(_, chosen)| chosen).unwrap_or_default();
+    let mut spans = Vec::new();
+    for (index, (part, variant_index)) in parts.iter().zip(chosen.iter()).enumerate() {
+        let label = &part.variants[*variant_index];
+        if label.is_empty() {
+            continue;
+        }
+        if !spans.is_empty() && index > 0 {
+            spans.push(Span::styled(
+                " | ".to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        spans.push(Span::styled(label.clone(), part.style));
+    }
     spans
+}
+
+fn status_variants(app: &App, status: &str) -> Vec<String> {
+    let downloading = app
+        .files
+        .iter()
+        .filter(|file| matches!(file.status, FileStatus::Downloading))
+        .count();
+    let queued = app
+        .files
+        .iter()
+        .filter(|file| matches!(file.status, FileStatus::Queued))
+        .count();
+
+    let mut variants = vec![status.to_string()];
+    if downloading > 0 {
+        variants.push(format!("Dl {downloading}, {queued} q"));
+    } else if app.files_total > 0 {
+        variants.push(format!("{}/{} done", app.files_completed, app.files_total));
+        if queued > 0 {
+            variants.push(format!("Q {queued}"));
+        }
+    } else if queued > 0 {
+        variants.push(format!("Q {queued}"));
+    }
+    variants.push(truncate_end(status, 12));
+    variants.push(String::new());
+    variants.dedup();
+    variants
 }
 
 fn is_stale_login_status(app: &App, status: &str) -> bool {
@@ -993,7 +1125,11 @@ mod tests {
     }
 
     fn render_text(app: &mut App) -> String {
-        let backend = TestBackend::new(100, 24);
+        render_text_with_size(app, 100, 24)
+    }
+
+    fn render_text_with_size(app: &mut App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
         terminal
             .draw(|frame| draw(frame, app))
@@ -1079,6 +1215,73 @@ mod tests {
 
         assert!(rendered.contains("q:quit"));
         assert!(rendered.contains("a:add"));
+    }
+
+    #[test]
+    fn draw_main_narrow_status_prioritizes_activity_and_failures() {
+        let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
+        let mut app = App::new(9723, tx, true);
+        app.authenticated = true;
+        app.status = "Processing 3 URL(s)...".to_string();
+        app.files = vec![
+            FileEntry {
+                id: "active.bin".to_string(),
+                name: "active.bin".to_string(),
+                size: 10,
+                downloaded: 5,
+                status: FileStatus::Downloading,
+            },
+            FileEntry {
+                id: "queued.bin".to_string(),
+                name: "queued.bin".to_string(),
+                size: 10,
+                downloaded: 0,
+                status: FileStatus::Queued,
+            },
+            FileEntry {
+                id: "failed.bin".to_string(),
+                name: "failed.bin".to_string(),
+                size: 10,
+                downloaded: 0,
+                status: FileStatus::Error("boom".to_string()),
+            },
+        ];
+
+        let rendered = render_text_with_size(&mut app, 28, 16);
+
+        assert!(rendered.contains("Dl 1, 1 q"));
+        assert!(rendered.contains("1 failed"));
+        assert!(!rendered.contains("Logged in"));
+    }
+
+    #[test]
+    fn draw_main_tight_status_falls_back_to_failure_summary() {
+        let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
+        let mut app = App::new(9723, tx, true);
+        app.authenticated = true;
+        app.status = "Processing 2 URL(s)...".to_string();
+        app.files = vec![
+            FileEntry {
+                id: "active.bin".to_string(),
+                name: "active.bin".to_string(),
+                size: 10,
+                downloaded: 5,
+                status: FileStatus::Downloading,
+            },
+            FileEntry {
+                id: "failed.bin".to_string(),
+                name: "failed.bin".to_string(),
+                size: 10,
+                downloaded: 0,
+                status: FileStatus::Error("boom".to_string()),
+            },
+        ];
+
+        let rendered = render_text_with_size(&mut app, 14, 16);
+
+        assert!(rendered.contains("1 failed"));
+        assert!(!rendered.contains("Logged in"));
+        assert!(!rendered.contains("Downloading"));
     }
 
     #[test]

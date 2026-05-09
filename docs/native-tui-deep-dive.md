@@ -95,9 +95,12 @@
 ### 4. Layout and Rendering
 - Fixed: long add-mode input no longer hides the active insertion point.
 - Fixed: bottom controls now switch between explicit compact legends instead of relying on coarse end-truncation.
+- Fixed: status text now prefers compact activity/error summaries on narrow widths instead of letting the backend clip one long sentence.
 - Likely subsystem: [src/tui/draw.rs](/home/mjc/projects/octo-dl/src/tui/draw.rs:230)
 - Confidence: high
-- Missing regression: additional width-banded status-line snapshots beyond the current legend coverage.
+- Regression coverage:
+  - `draw_main_narrow_status_prioritizes_activity_and_failures` in [src/tui/draw.rs](/home/mjc/projects/octo-dl/src/tui/draw.rs:1090)
+  - `draw_main_tight_status_falls_back_to_failure_summary` in [src/tui/draw.rs](/home/mjc/projects/octo-dl/src/tui/draw.rs:1120)
 
 ### 5. Session and Late-Event Reconciliation
 - Covered by the selection fix above: completion-driven row collapse no longer retargets the user to a different package.
