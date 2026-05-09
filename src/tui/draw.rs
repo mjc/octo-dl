@@ -6,7 +6,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table};
 
 use crate::core::{FileLifecycle, PackageStatus};
-use crate::format_bytes;
+use crate::{format_bytes, format_duration};
+use std::time::Duration;
 
 use super::app::{App, ConfigField, ConfirmAction, FileStatus, Popup, SortKey};
 use super::visible::TuiRow;
@@ -585,9 +586,9 @@ fn aggregate_progress_label(app: &App, pct: u16, width: u16) -> String {
         format_bytes(app.total_downloaded),
         format_bytes(app.total_size)
     );
-    let activity = aggregate_activity_label(app);
+    let transfer = aggregate_transfer_label(app);
     let full = format!(
-        "{pct}%  {}/{} files  {bytes}  {activity}",
+        "{pct}%  {}/{} files  {bytes}  {transfer}",
         app.files_completed, app.files_total
     );
     if full.chars().count() <= usize::from(width.saturating_sub(2)) {
@@ -595,10 +596,15 @@ fn aggregate_progress_label(app: &App, pct: u16, width: u16) -> String {
     }
 
     let compact = format!(
-        "{pct}%  {}/{}  {activity}",
+        "{pct}%  {}/{}  {transfer}",
         app.files_completed, app.files_total
     );
-    truncate_end(&compact, usize::from(width.saturating_sub(2)))
+    if compact.chars().count() <= usize::from(width.saturating_sub(2)) {
+        return compact;
+    }
+
+    let minimal = format!("{pct}%  {transfer}");
+    truncate_end(&minimal, usize::from(width.saturating_sub(2)))
 }
 
 fn aggregate_activity_label(app: &App) -> String {
@@ -624,6 +630,24 @@ fn aggregate_activity_label(app: &App) -> String {
     }
 
     "idle".to_string()
+}
+
+fn aggregate_transfer_label(app: &App) -> String {
+    if app.current_speed == 0 {
+        return aggregate_activity_label(app);
+    }
+
+    let speed = format!("{}/s", format_bytes(app.current_speed));
+    let remaining = app.total_size.saturating_sub(app.total_downloaded);
+    if remaining == 0 {
+        return speed;
+    }
+
+    let eta_secs = remaining.div_ceil(app.current_speed).max(1);
+    format!(
+        "{speed}  eta {}",
+        format_duration(Duration::from_secs(eta_secs))
+    )
 }
 
 fn compact_label(value: &str) -> String {
@@ -1224,5 +1248,27 @@ mod tests {
 
         assert!(!rendered.contains("0 B/s"));
         assert!(rendered.contains("active"));
+    }
+
+    #[test]
+    fn draw_main_shows_bandwidth_and_eta_for_active_transfers() {
+        let mut app = test_app();
+        app.files_total = 2;
+        app.files_completed = 0;
+        app.total_size = 100;
+        app.total_downloaded = 20;
+        app.current_speed = 20;
+        app.files.push(FileEntry {
+            id: "active.bin".to_string(),
+            name: "active.bin".to_string(),
+            size: 100,
+            downloaded: 20,
+            status: FileStatus::Downloading,
+        });
+
+        let rendered = render_text(&mut app);
+
+        assert!(rendered.contains("20 B/s"));
+        assert!(rendered.contains("eta 4.0s"));
     }
 }
