@@ -93,8 +93,16 @@ pub enum CoreEffect {
     PublishViewSnapshot,
 }
 
+fn should_persist_session(event: &CoreEvent) -> bool {
+    !matches!(
+        event,
+        CoreEvent::FileProgress { .. } | CoreEvent::FileReuseDetected { .. } | CoreEvent::Tick { .. }
+    )
+}
+
 pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
     let mut effects = Vec::new();
+    let persist_session = should_persist_session(&event);
     match event {
         CoreEvent::UrlSubmitted { url } => {
             if !state.url_order.iter().any(|existing| existing == &url) {
@@ -336,13 +344,15 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
     }
 
     recompute_derived(state);
-    effects.push(CoreEffect::PersistSession(snapshot_from_state(state)));
+    if persist_session {
+        effects.push(CoreEffect::PersistSession(snapshot_from_state(state)));
+    }
     effects.push(CoreEffect::PublishViewSnapshot);
     debug_assert_invariants(state);
     effects
 }
 
-fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
+pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
     SessionSnapshotV3 {
         version: 3,
         id: state.session_meta.session_id.clone(),
@@ -661,5 +671,42 @@ mod tests {
             effect,
             CoreEffect::EnqueueFileDownload { file_id } if file_id == "file.bin"
         )));
+    }
+
+    #[test]
+    fn progress_events_do_not_emit_session_persist_effect() {
+        let mut state = sample_state();
+        let effects = reduce(
+            &mut state,
+            CoreEvent::FileProgress {
+                file_id: "file.bin".to_string(),
+                total_bytes_delta: 10,
+                network_bytes_delta: 10,
+            },
+        );
+
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, CoreEffect::PersistSession(..))));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, CoreEffect::PublishViewSnapshot)));
+    }
+
+    #[test]
+    fn resume_reuse_events_do_not_emit_session_persist_effect() {
+        let mut state = sample_state();
+        let effects = reduce(
+            &mut state,
+            CoreEvent::FileReuseDetected {
+                file_id: "file.bin".to_string(),
+                reused_bytes: 10,
+                reused_chunks: 1,
+            },
+        );
+
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, CoreEffect::PersistSession(..))));
     }
 }

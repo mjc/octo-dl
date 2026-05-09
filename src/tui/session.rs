@@ -240,7 +240,9 @@ impl SessionAdapter {
                 .retain(|file_id| session.files.iter().any(|file| &file.id == file_id));
         }
 
-        if session.files.is_empty() {
+        let has_pending_package_urls = !session.packages.is_empty();
+
+        if session.files.is_empty() && !has_pending_package_urls {
             Self::apply_run_update(session, SessionRunUpdate::Completed);
         } else {
             log::info!("Marking session as paused for later resume");

@@ -461,6 +461,45 @@ fn resubmitting_deleted_url_clears_late_event_fence() {
 }
 
 #[test]
+fn shutdown_sync_refreshes_session_progress_skipped_during_hot_events() {
+    let mut app = test_app();
+    let url = "https://mega.nz/file/root".to_string();
+    let mut session = session_snapshot(vec![(url.as_str(), UrlFixtureStatus::Fetched)]);
+    push_file(&mut session, 0, "file-id", 128, FileFixtureStatus::Pending);
+    app.session = Some(session);
+    app.ensure_core_file("file-id", &url, "file-id", 128, true);
+
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: "file-id".to_string(),
+        size: 128,
+    });
+    app.apply_core_event(CoreEvent::FileProgress {
+        file_id: "file-id".to_string(),
+        total_bytes_delta: 64,
+        network_bytes_delta: 64,
+    });
+
+    let session = app.session.as_ref().expect("session should remain");
+    let file = session
+        .files
+        .iter()
+        .find(|file| file.id == "file-id")
+        .expect("file should exist in session");
+    assert_eq!(file.progress.visible_completed_bytes, 0);
+
+    app.sync_session_for_shutdown();
+
+    let session = app.session.as_ref().expect("session should remain");
+    let file = session
+        .files
+        .iter()
+        .find(|file| file.id == "file-id")
+        .expect("file should exist in session");
+    assert_eq!(file.progress.visible_completed_bytes, 64);
+    assert_eq!(file.progress.downloaded_network_bytes, 64);
+}
+
+#[test]
 fn mark_visible_file_error_updates_session_file_status() {
     let mut app = test_app();
     let mut session = session_snapshot(vec![(

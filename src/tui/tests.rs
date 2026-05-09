@@ -427,6 +427,27 @@ fn ui_add_urls_enqueues_each_unique_url_once() {
 }
 
 #[test]
+fn submitted_url_bootstraps_session_for_shutdown_persistence() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+
+    app.submit_url("https://mega.nz/file/pending".to_string());
+    app.sync_session_for_shutdown();
+
+    let session = crate::core::SessionSnapshotV3::latest().expect("session should be saved");
+    assert_eq!(session.status, SessionRunStatus::Paused);
+    assert!(
+        session
+            .packages
+            .iter()
+            .any(|package| package.source_url == "https://mega.nz/file/pending")
+    );
+}
+
+#[test]
 fn ui_retry_file_recomputes_totals() {
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);

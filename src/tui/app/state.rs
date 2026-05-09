@@ -2,11 +2,19 @@ use std::collections::{HashMap, HashSet};
 
 use crate::core::{
     CoreCommand, CoreEffect, CoreEvent, ResolvedFile, ResolvedPackage, RestartSnapshot,
-    SessionSnapshotV3, reconcile_restart, reduce, scan_filesystem,
+    SavedCredentials, SessionSnapshotV3, reconcile_restart, reduce, scan_filesystem,
+    snapshot_from_state,
 };
 
-use super::{App, SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate};
+use super::{App, FileStatus, SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate};
 use crate::tui::event::DownloadRequest;
+
+fn core_event_requires_visible_sync(event: &CoreEvent) -> bool {
+    !matches!(
+        event,
+        CoreEvent::FileProgress { .. } | CoreEvent::FileReuseDetected { .. } | CoreEvent::Tick { .. }
+    )
+}
 
 impl App {
     pub(crate) fn seed_core_session_from_session(&mut self) {
@@ -98,6 +106,27 @@ impl App {
 
     fn persist_core_session_snapshot(&mut self, snapshot: SessionSnapshotV3) {
         let _ = self.mutate_session(|session| SessionAdapter::merge_state(session, snapshot));
+    }
+
+    pub(crate) fn ensure_session_for_pending_urls(&mut self) {
+        if self.session.is_some() {
+            return;
+        }
+
+        let credentials =
+            SavedCredentials::encrypt(self.login.email(), self.login.password(), None);
+        let session = SessionSnapshotV3::new(self.config.config.clone(), credentials);
+        self.save_and_install_session(session);
+    }
+
+    fn refresh_session_from_core_state(&mut self) {
+        if self.session.is_none() {
+            return;
+        }
+
+        self.seed_core_session_from_session();
+        let snapshot = snapshot_from_state(&self.core_state);
+        self.persist_core_session_snapshot(snapshot);
     }
 
     pub(crate) fn ensure_core_file(
@@ -261,6 +290,7 @@ impl App {
     }
 
     pub(crate) fn sync_session_for_shutdown(&mut self) {
+        self.refresh_session_from_core_state();
         let visible: HashSet<String> = self.files.iter().map(|file| file.id.clone()).collect();
         let _ = self.mutate_session_and_save(|session| {
             SessionAdapter::sync_for_shutdown(session, &visible)
