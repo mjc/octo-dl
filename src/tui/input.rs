@@ -199,6 +199,9 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_sort_input(app: &mut App, key: KeyEvent) {
+    let mut sort_changed = false;
+    let selected_row_identity = app.selected_row();
+
     match key.code {
         KeyCode::Up | KeyCode::BackTab => {
             app.sort.active_field = if app.sort.active_field == 0 {
@@ -213,13 +216,16 @@ fn handle_sort_input(app: &mut App, key: KeyEvent) {
         KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
             if app.sort.active_field == SortKey::ALL.len() {
                 app.sort.direction = app.sort.direction.toggled();
+                sort_changed = true;
             } else {
                 app.sort.key = SortKey::ALL[app.sort.active_field];
+                sort_changed = true;
             }
         }
         KeyCode::Enter => {
             if app.sort.active_field < SortKey::ALL.len() {
                 app.sort.key = SortKey::ALL[app.sort.active_field];
+                sort_changed = true;
             }
             app.popup = Popup::None;
         }
@@ -227,6 +233,10 @@ fn handle_sort_input(app: &mut App, key: KeyEvent) {
             app.popup = Popup::None;
         }
         _ => {}
+    }
+
+    if sort_changed {
+        app.sync_visible_files_preserving(selected_row_identity);
     }
 }
 
@@ -757,6 +767,38 @@ mod tests {
         }
         handle_input(&mut app, key(KeyCode::Char(' ')));
         assert_eq!(app.sort.direction, super::super::app::SortDirection::Desc);
+    }
+
+    #[test]
+    fn handle_sort_popup_keeps_selected_row_identity_when_order_changes() {
+        let mut app = test_app();
+        for (package_id, display_name) in [("pkg-z", "Zulu"), ("pkg-a", "Alpha")] {
+            app.apply_core_event(CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: package_id.to_string(),
+                    source_url: format!("https://mega.nz/folder/{package_id}"),
+                    display_name: display_name.to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: format!("{package_id}.bin"),
+                        path: format!("{package_id}.bin"),
+                        size: 10,
+                    }],
+                    collision: None,
+                },
+            });
+        }
+
+        app.file_list_state.select(Some(0));
+        assert_eq!(app.selected_row(), Some(TuiRow::Package("pkg-z".to_string())));
+
+        handle_input(&mut app, key(KeyCode::Char('s')));
+        handle_input(&mut app, key(KeyCode::Down));
+        handle_input(&mut app, key(KeyCode::Down));
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.sort.key, SortKey::Name);
+        assert_eq!(app.selected_row(), Some(TuiRow::Package("pkg-z".to_string())));
+        assert_eq!(app.file_list_state.selected(), Some(1));
     }
 
     #[test]
