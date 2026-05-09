@@ -108,10 +108,15 @@ impl App {
             return false;
         }
 
+        self.reset_pending_files.remove(id);
         self.cancellation_tokens.remove(id);
         super::super::download::schedule_download_artifact_delete(artifact_path.to_string());
         self.mark_file_skipped(id);
         true
+    }
+
+    fn reset_is_waiting_for_new_attempt(&self, id: &str) -> bool {
+        self.reset_pending_files.contains(id)
     }
 
     fn is_session_url(&self, url: &str) -> bool {
@@ -128,6 +133,10 @@ impl App {
     pub(crate) fn handle_file_error_event(&mut self, id: String, error: String) {
         log::error!("Download error: {id}: {error}");
         if self.handle_deleted_download_artifact(&id, &id) {
+            return;
+        }
+        if self.reset_is_waiting_for_new_attempt(&id) {
+            log::info!("Ignoring stale download error after reset: {id}");
             return;
         }
 
@@ -187,6 +196,7 @@ impl App {
         if self.deleted_files.contains(&id) {
             return;
         }
+        self.reset_pending_files.remove(&id);
         let source_url = self
             .visible_file_context(&id)
             .and_then(|context| context.source_url)
@@ -203,6 +213,7 @@ impl App {
         if self.deleted_files.contains(id.as_ref()) {
             return;
         }
+        self.reset_pending_files.remove(id.as_ref());
         let previous_downloaded = self
             .files
             .iter()
@@ -221,6 +232,7 @@ impl App {
         if self.deleted_files.contains(&id) {
             return;
         }
+        self.reset_pending_files.remove(&id);
         self.apply_core_event(CoreEvent::FileReuseDetected {
             file_id: id.clone(),
             reused_bytes: bytes,
@@ -238,6 +250,10 @@ impl App {
         if self.handle_deleted_download_artifact(&id, &id) {
             return;
         }
+        if self.reset_is_waiting_for_new_attempt(&id) {
+            log::info!("Ignoring stale download completion after reset: {id}");
+            return;
+        }
         self.apply_core_event(CoreEvent::FileCompleted {
             file_id: id.clone(),
         });
@@ -248,6 +264,10 @@ impl App {
     pub(crate) fn handle_file_cancelled_event(&mut self, id: String) {
         log::info!("Download cancelled: {id}");
         if self.handle_deleted_download_artifact(&id, &id) {
+            return;
+        }
+        if self.reset_is_waiting_for_new_attempt(&id) {
+            log::info!("Ignoring stale download cancellation after reset: {id}");
             return;
         }
         self.cancellation_tokens.remove(&id);
@@ -270,6 +290,7 @@ impl App {
         }
         let is_core_backed = self.core_state.files.contains_key(id);
         self.cancel_file_token(id);
+        self.reset_pending_files.remove(id);
         self.deleted_files.insert(id.to_string());
         if is_core_backed {
             self.apply_core_command(CoreCommand::DeleteFile {
@@ -307,6 +328,7 @@ impl App {
                 message: message.clone(),
             });
         }
+        self.reset_pending_files.remove(id);
         self.apply_core_command(CoreCommand::RetryFile {
             file_id: id.to_string(),
         });
@@ -348,6 +370,7 @@ impl App {
         };
 
         self.cancel_file_token(id);
+        self.reset_pending_files.insert(id.to_string());
 
         self.apply_core_command(CoreCommand::ResetFile {
             file_id: id.to_string(),

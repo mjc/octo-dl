@@ -98,10 +98,11 @@
 
 ### 5. Session and Late-Event Reconciliation
 - Covered by the selection fix above: completion-driven row collapse no longer retargets the user to a different package.
-- Remaining coverage gap: delete/retry/reset with late `FileComplete` or `FileError` after the row has been suppressed still needs a scenario-level pass, even though `deleted_files` guards exist in [src/tui/app/actions.rs](/home/mjc/projects/octo-dl/src/tui/app/actions.rs:95).
+- Fixed: delete now re-suppresses late `FileError` the same way it already re-suppressed late `FileComplete`, so removed rows do not revive as error rows.
+- Fixed: reset now holds a short suppression window for terminal events from the old attempt until the restarted attempt emits `FileStart`, `Progress`, or `ResumeReused`.
 - Likely subsystem: [src/tui/app/actions.rs](/home/mjc/projects/octo-dl/src/tui/app/actions.rs:95)
-- Confidence: medium
-- Fix direction: add explicit late-event scenarios before changing behavior.
+- Confidence: medium-high
+- Residual risk: there is still no per-attempt generation ID in `DownloadEvent`, so a stale terminal event that races in after the restarted attempt has already emitted `FileStart` is still structurally hard to distinguish from a real current-attempt event.
 
 ## Regression Test Plan by Layer
 - `app`: state projection and late-event suppression rules.

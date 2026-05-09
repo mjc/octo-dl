@@ -513,6 +513,53 @@ fn deleted_file_completion_event_redeletes_output_artifacts() {
 }
 
 #[test]
+fn deleted_file_error_event_redeletes_output_artifacts() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("late-error.bin");
+    let part_path = dir.path().join("late-error.bin.part");
+    let sidecar_path = dir.path().join("late-error.bin.part.meta.json");
+    std::fs::write(&file_path, b"done").unwrap();
+    std::fs::write(&part_path, b"partial").unwrap();
+    std::fs::write(&sidecar_path, b"{}").unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+    let file_id = file_path.to_string_lossy().into_owned();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: "https://mega.nz/file/late-error".to_string(),
+            source_url: "https://mega.nz/file/late-error".to_string(),
+            display_name: "Late Error".to_string(),
+            files: vec![ResolvedFile {
+                file_id: file_id.clone(),
+                path: file_id.clone(),
+                size: 4,
+            }],
+            collision: None,
+        },
+    });
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: file_id.clone(),
+        size: 4,
+    });
+
+    app.handle_ui_action(UiAction::DeleteFile(file_id.clone()));
+
+    std::fs::write(&file_path, b"done").unwrap();
+    std::fs::write(&part_path, b"partial").unwrap();
+    std::fs::write(&sidecar_path, b"{}").unwrap();
+    app.handle_download_event(DownloadEvent::FileError {
+        id: file_id,
+        error: "boom".to_string(),
+    });
+
+    assert!(app.files.is_empty());
+    assert!(!file_path.exists());
+    assert!(!part_path.exists());
+    assert!(!sidecar_path.exists());
+}
+
+#[test]
 fn ui_reset_file_resets_progress_and_requeues_url() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("active.bin");
@@ -552,6 +599,87 @@ fn ui_reset_file_resets_progress_and_requeues_url() {
     assert!(!file_path.exists());
     assert!(!part_path.exists());
     assert!(!sidecar_path.exists());
+}
+
+#[test]
+fn reset_file_ignores_late_completion_until_new_attempt_starts() {
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+    app.upsert_overlay_file(
+        app::FileEntry {
+            id: "active.bin".to_string(),
+            name: "active.bin".to_string(),
+            size: 100,
+            downloaded: 80,
+            status: FileStatus::Downloading,
+        },
+        Some("https://mega.nz/file/reset".to_string()),
+        true,
+    );
+
+    app.handle_ui_action(UiAction::ResetFile("active.bin".to_string()));
+    app.handle_download_event(DownloadEvent::FileComplete {
+        id: "active.bin".to_string(),
+    });
+
+    assert_eq!(app.files[0].status, FileStatus::Queued);
+    assert_eq!(app.files[0].downloaded, 0);
+}
+
+#[test]
+fn reset_file_ignores_late_error_until_new_attempt_starts() {
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+    app.upsert_overlay_file(
+        app::FileEntry {
+            id: "active.bin".to_string(),
+            name: "active.bin".to_string(),
+            size: 100,
+            downloaded: 80,
+            status: FileStatus::Downloading,
+        },
+        Some("https://mega.nz/file/reset".to_string()),
+        true,
+    );
+
+    app.handle_ui_action(UiAction::ResetFile("active.bin".to_string()));
+    app.handle_download_event(DownloadEvent::FileError {
+        id: "active.bin".to_string(),
+        error: "boom".to_string(),
+    });
+
+    assert_eq!(app.files[0].status, FileStatus::Queued);
+    assert_eq!(app.files[0].downloaded, 0);
+}
+
+#[test]
+fn reset_file_accepts_new_terminal_events_after_restart() {
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+    app.upsert_overlay_file(
+        app::FileEntry {
+            id: "active.bin".to_string(),
+            name: "active.bin".to_string(),
+            size: 100,
+            downloaded: 80,
+            status: FileStatus::Downloading,
+        },
+        Some("https://mega.nz/file/reset".to_string()),
+        true,
+    );
+
+    app.handle_ui_action(UiAction::ResetFile("active.bin".to_string()));
+    app.handle_download_event(DownloadEvent::FileStart {
+        id: "active.bin".to_string(),
+        size: 100,
+    });
+    app.handle_download_event(DownloadEvent::FileError {
+        id: "active.bin".to_string(),
+        error: "boom".to_string(),
+    });
+
+    assert_eq!(app.files[0].downloaded, 0);
+    assert_eq!(app.files[0].status, FileStatus::Error("boom".to_string()));
 }
 
 #[test]
@@ -795,4 +923,62 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
     );
     assert!(snapshot.text.contains("Package A"));
     assert!(snapshot.text.contains("Package B"));
+}
+
+#[test]
+fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() {
+    let mut harness = ScenarioHarness::new(80, 18);
+
+    harness.app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: "pkg-a".to_string(),
+            source_url: "https://mega.nz/file/reset".to_string(),
+            display_name: "Package A".to_string(),
+            files: vec![ResolvedFile {
+                file_id: "active.bin".to_string(),
+                path: "active.bin".to_string(),
+                size: 128,
+            }],
+            collision: None,
+        },
+    });
+    harness.app.apply_core_event(CoreEvent::FileStarted {
+        file_id: "active.bin".to_string(),
+        size: 128,
+    });
+
+    harness
+        .app
+        .handle_ui_action(UiAction::ResetFile("active.bin".to_string()));
+    harness.inject_download(DownloadEvent::FileComplete {
+        id: "active.bin".to_string(),
+    });
+    harness.tick();
+
+    let file = harness
+        .app
+        .files
+        .iter()
+        .find(|file| file.id == "active.bin")
+        .expect("reset file should remain visible");
+    assert_eq!(file.status, FileStatus::Queued);
+    assert_eq!(file.downloaded, 0);
+
+    harness.inject_download(DownloadEvent::FileStart {
+        id: "active.bin".to_string(),
+        size: 128,
+    });
+    harness.inject_download(DownloadEvent::FileComplete {
+        id: "active.bin".to_string(),
+    });
+    harness.tick();
+
+    let file = harness
+        .app
+        .files
+        .iter()
+        .find(|file| file.id == "active.bin")
+        .expect("restarted file should remain visible");
+    assert_eq!(file.status, FileStatus::Complete);
+    assert_eq!(file.downloaded, 128);
 }
