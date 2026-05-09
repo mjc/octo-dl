@@ -288,11 +288,16 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
 fn handle_url_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Enter => {
-            let extracted = extract_urls(&app.url_input);
+            let trimmed = app.url_input.trim();
+            let extracted = extract_urls(trimmed);
             if !extracted.is_empty() {
                 app.handle_ui_action(UiAction::AddUrls(extracted));
                 app.url_input.clear();
                 app.url_input_active = false;
+            } else if trimmed.is_empty() {
+                app.status = "Enter a URL or press Esc to cancel".to_string();
+            } else {
+                app.status = "No valid URLs found in input".to_string();
             }
         }
         KeyCode::Esc => {
@@ -1070,5 +1075,31 @@ mod tests {
                 url: "https://mega.nz/file/test123".to_string()
             }
         );
+    }
+
+    #[test]
+    fn handle_main_input_empty_url_submit_sets_guidance_status() {
+        let mut app = test_app();
+        app.url_input = "   ".to_string();
+        app.url_input_active = true;
+
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.status, "Enter a URL or press Esc to cancel");
+        assert_eq!(app.url_input, "   ");
+        assert!(app.url_input_active);
+    }
+
+    #[test]
+    fn handle_main_input_invalid_url_submit_sets_error_status() {
+        let mut app = test_app();
+        app.url_input = "not a mega url".to_string();
+        app.url_input_active = true;
+
+        handle_input(&mut app, key(KeyCode::Enter));
+
+        assert_eq!(app.status, "No valid URLs found in input");
+        assert_eq!(app.url_input, "not a mega url");
+        assert!(app.url_input_active);
     }
 }
