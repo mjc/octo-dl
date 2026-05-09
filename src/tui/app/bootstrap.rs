@@ -108,13 +108,24 @@ impl App {
             return Ok((app, host, port));
         }
 
-        let api_port = env::var("OCTO_API_PORT")
+        let env_api_port = env::var("OCTO_API_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(default_api_port);
-        let mut app = Self::new(api_port, event_tx, quit_enabled);
-        app.persist_config_path = Some(default_service_config_path());
-        Ok((app, "127.0.0.1".to_string(), api_port))
+        let config_path = default_service_config_path();
+        let mut app = Self::new(env_api_port, event_tx, quit_enabled);
+        app.persist_config_path = Some(config_path.clone());
+
+        if config_path.exists() {
+            let (host, mut port) = app.apply_service_config(&config_path)?;
+            if env::var_os("OCTO_API_PORT").is_some() {
+                port = env_api_port;
+            }
+            app.api_port = port;
+            return Ok((app, host, port));
+        }
+
+        Ok((app, "127.0.0.1".to_string(), env_api_port))
     }
 
     pub(crate) fn require_credentials(&self, config_path: &Path) -> io::Result<()> {
@@ -283,9 +294,9 @@ impl App {
 
         let mut credentials_from_config = false;
         if service_config.credentials.has_credentials() {
-            if let Some((email, password, mfa)) = service_config.credentials.decrypt_if_needed() {
+            if let Some((email, password, _mfa)) = service_config.credentials.decrypt_if_needed() {
                 log::info!("Loaded credentials from config file");
-                credentials_from_config = self.login.set_credentials(email, password, mfa);
+                credentials_from_config = self.login.set_credentials(email, password, String::new());
 
                 if !service_config.credentials.encrypted {
                     log::info!("Encrypting plaintext credentials in config file");
@@ -338,7 +349,7 @@ impl App {
             encrypted: false,
             email: self.login.email().to_string(),
             password: self.login.password().to_string(),
-            mfa: self.login.mfa().to_string(),
+            mfa: String::new(),
         };
         service_config.credentials.encrypt_in_place();
         service_config.api.port = self.api_port;
@@ -447,6 +458,32 @@ mod tests {
             .expect("saved credentials should decrypt");
         assert_eq!(email, "user@example.com");
         assert_eq!(password, "super-secret");
-        assert_eq!(mfa, "123456");
+        assert!(mfa.is_empty());
+    }
+
+    #[test]
+    fn new_without_explicit_config_loads_default_saved_credentials() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let config_path = dir.path().join("config.toml");
+        let mut config = ServiceConfig::load_or_create(&config_path).expect("config should exist");
+        config.credentials = crate::ServiceCredentials {
+            encrypted: false,
+            email: "saved@example.com".to_string(),
+            password: "saved-secret".to_string(),
+            mfa: "654321".to_string(),
+        };
+        config.credentials.encrypt_in_place();
+        config.save(&config_path).expect("config should save");
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (app, _host, _port) =
+            App::new_with_optional_service_config(tx, true, None, 9723)
+                .expect("app should initialize");
+
+        assert_eq!(app.login.email(), "saved@example.com");
+        assert_eq!(app.login.password(), "saved-secret");
+        assert!(app.login.mfa().is_empty());
+        assert_eq!(app.persist_config_path.as_deref(), Some(config_path.as_path()));
     }
 }

@@ -95,6 +95,63 @@ fn resume_session_requeues_urls() {
 }
 
 #[test]
+fn resume_session_restores_email_password_without_restoring_mfa() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/pending",
+        UrlFixtureStatus::Pending,
+    )]);
+    session.credentials = crate::core::SavedCredentials::encrypt(
+        "saved@example.com",
+        "saved-pass",
+        Some("654321"),
+    );
+    session.save().unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+
+    app.resume_latest_session();
+
+    assert_eq!(app.login.email(), "saved@example.com");
+    assert_eq!(app.login.password(), "saved-pass");
+    assert!(app.login.mfa().is_empty());
+}
+
+#[test]
+fn resume_session_does_not_override_existing_login_credentials() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/pending",
+        UrlFixtureStatus::Pending,
+    )]);
+    session.credentials = crate::core::SavedCredentials::encrypt(
+        "stale@example.com",
+        "stale-pass",
+        Some("654321"),
+    );
+    session.save().unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+    assert!(app.login.set_credentials(
+        "config@example.com".to_string(),
+        "config-pass".to_string(),
+        String::new()
+    ));
+
+    app.resume_latest_session();
+
+    assert_eq!(app.login.email(), "config@example.com");
+    assert_eq!(app.login.password(), "config-pass");
+    assert!(app.login.mfa().is_empty());
+}
+
+#[test]
 fn resume_session_restores_files_and_only_requeues_remaining_urls() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());

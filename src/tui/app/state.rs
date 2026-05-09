@@ -206,9 +206,9 @@ impl App {
         };
         log::info!("Resuming session {}", session.id);
 
-        if let Some((email, password, mfa)) = session.credentials.decrypt() {
+        if let Some((email, password, _mfa)) = session.credentials.decrypt() {
             self.login
-                .set_credentials(email, password, mfa.unwrap_or_default());
+                .set_credentials_if_missing(&email, &password, "");
         }
 
         let file_ids = session
