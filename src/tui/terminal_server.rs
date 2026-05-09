@@ -29,10 +29,19 @@ mod tests {
     use aes::Aes128;
     use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
     use axum::http::HeaderValue;
+    use axum::routing::get;
     use base64::Engine;
     use cbc::Encryptor;
+    use futures_util::{SinkExt, StreamExt};
     use portable_pty::{PtySize, native_pty_system};
     use std::io::Read;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio::task::JoinHandle;
+    use tokio::time::timeout;
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 
     fn build_test_state() -> (TerminalApiState, std::io::BufReader<Box<dyn Read + Send>>) {
         let pty_system = native_pty_system();
@@ -62,6 +71,100 @@ mod tests {
         };
         let _slave = pair.slave; // keep slave alive so the PTY stays usable
         (state, std::io::BufReader::new(reader))
+    }
+
+    async fn spawn_ws_test_server(
+        state: TerminalApiState,
+    ) -> (SocketAddr, oneshot::Sender<()>, JoinHandle<()>) {
+        let app = Router::new()
+            .route("/ws", get(ws_handler))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind test listener");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should have local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("test websocket server should run");
+        });
+        (addr, shutdown_tx, server)
+    }
+
+    async fn connect_ws(
+        addr: SocketAddr,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        let url = format!("ws://{addr}/ws");
+        let (socket, _response) = connect_async(url)
+            .await
+            .expect("websocket connection should succeed");
+        socket
+    }
+
+    async fn expect_no_binary_message(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) {
+        let result = timeout(Duration::from_millis(150), socket.next()).await;
+        assert!(
+            result.is_err(),
+            "expected websocket to stay quiet, received {:?}",
+            result.ok().flatten()
+        );
+    }
+
+    async fn recv_binary_message(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Vec<u8> {
+        loop {
+            let message = timeout(Duration::from_secs(1), socket.next())
+                .await
+                .expect("timed out waiting for websocket message")
+                .expect("websocket stream ended unexpectedly")
+                .expect("websocket should not error");
+            match message {
+                TungsteniteMessage::Binary(bytes) => return bytes.to_vec(),
+                TungsteniteMessage::Ping(payload) => {
+                    socket
+                        .send(TungsteniteMessage::Pong(payload))
+                        .await
+                        .expect("pong reply should succeed");
+                }
+                TungsteniteMessage::Pong(_) => {}
+                other => panic!("expected binary websocket message, got {other:?}"),
+            }
+        }
+    }
+
+    async fn send_resize(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        cols: u16,
+        rows: u16,
+    ) {
+        socket
+            .send(TungsteniteMessage::Text(
+                serde_json::json!({
+                    "type": "resize",
+                    "cols": cols,
+                    "rows": rows,
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("resize message should send");
     }
 
     #[test]
@@ -225,6 +328,91 @@ mod tests {
         headers.insert("x-api-key", HeaderValue::from_static("wrong"));
         let wrong = require_api_key(&state, &headers).expect("wrong key should reject");
         assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn websocket_waits_for_first_resize_before_replaying_snapshot() {
+        let (state, _reader) = build_test_state();
+        state.session.record(b"hello");
+        let (addr, shutdown_tx, server) = spawn_ws_test_server(state.clone()).await;
+
+        let mut socket = connect_ws(addr).await;
+        expect_no_binary_message(&mut socket).await;
+
+        send_resize(&mut socket, 100, 30).await;
+        let frame = recv_binary_message(&mut socket).await;
+        let rendered = String::from_utf8_lossy(&frame);
+        assert!(frame.starts_with(b"\x1bc"));
+        assert!(rendered.contains("hello"));
+
+        let _ = socket.close(None).await;
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn websocket_does_not_replay_full_snapshot_on_second_resize() {
+        let (state, _reader) = build_test_state();
+        state.session.record(b"hello");
+        let (addr, shutdown_tx, server) = spawn_ws_test_server(state.clone()).await;
+
+        let mut socket = connect_ws(addr).await;
+        send_resize(&mut socket, 100, 30).await;
+        let initial = recv_binary_message(&mut socket).await;
+        assert!(initial.starts_with(b"\x1bc"));
+
+        send_resize(&mut socket, 120, 40).await;
+        expect_no_binary_message(&mut socket).await;
+
+        let _ = socket.close(None).await;
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn websocket_streams_incremental_terminal_output_after_bootstrap() {
+        let (state, _reader) = build_test_state();
+        let (addr, shutdown_tx, server) = spawn_ws_test_server(state.clone()).await;
+
+        let mut socket = connect_ws(addr).await;
+        send_resize(&mut socket, 100, 30).await;
+        let _ = recv_binary_message(&mut socket).await;
+
+        state.session.record(b"abc");
+        let chunk = recv_binary_message(&mut socket).await;
+        assert_eq!(chunk, b"abc");
+
+        let _ = socket.close(None).await;
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn websocket_reconnect_replays_snapshot_for_each_new_client() {
+        let (state, _reader) = build_test_state();
+        state.session.record(b"hello");
+        let (addr, shutdown_tx, server) = spawn_ws_test_server(state.clone()).await;
+
+        let mut first = connect_ws(addr).await;
+        send_resize(&mut first, 100, 30).await;
+        let first_frame = recv_binary_message(&mut first).await;
+        assert!(first_frame.starts_with(b"\x1bc"));
+        assert!(String::from_utf8_lossy(&first_frame).contains("hello"));
+        let _ = first.close(None).await;
+
+        state.session.record(b" world");
+
+        let mut second = connect_ws(addr).await;
+        expect_no_binary_message(&mut second).await;
+        send_resize(&mut second, 100, 30).await;
+        let second_frame = recv_binary_message(&mut second).await;
+        let rendered = String::from_utf8_lossy(&second_frame);
+        assert!(second_frame.starts_with(b"\x1bc"));
+        assert!(rendered.contains("hello world"));
+
+        let _ = second.close(None).await;
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
     }
 }
 
@@ -762,6 +950,9 @@ async fn handle_ws(state: TerminalApiState, ws: WebSocket) {
                     }
                     state.session.resize(rows, cols);
                     if !sent_initial_frame {
+                        // Wait for the browser's fitted geometry before replaying the
+                        // snapshot; resetting xterm.js on every resize causes visible
+                        // corruption and focus churn in the web terminal.
                         let _ =
                             write_tx.send(Message::Binary(state.session.initial_frame().into()));
                         sent_initial_frame = true;
