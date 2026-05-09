@@ -13,6 +13,10 @@ use crate::{
 use super::{App, DownloadEvent, FileEntry, FileStatus, UiAction};
 
 impl App {
+    fn saved_login_credentials(&self) -> SavedCredentials {
+        SavedCredentials::encrypt(self.login.email(), self.login.password(), None)
+    }
+
     pub(crate) fn complete_login(&mut self, success: bool, error: Option<String>) {
         self.login.logging_in = false;
         if success {
@@ -64,17 +68,15 @@ impl App {
     }
 
     fn ensure_download_session(&mut self, config: &DownloadConfig) {
+        let credentials = self.saved_login_credentials();
         if self.session.is_some() {
+            let _ = self.mutate_session_and_save(|session| {
+                session.credentials = credentials;
+            });
             return;
         }
 
-        let email = self.login.email().to_owned();
-        let password = self.login.password().to_owned();
-        let mfa = self.login.mfa_option().map(str::to_owned);
-        let mut session = SessionSnapshotV3::new(
-            config.clone(),
-            SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
-        );
+        let mut session = SessionSnapshotV3::new(config.clone(), credentials);
         session.packages = self
             .urls
             .iter()
@@ -384,5 +386,72 @@ impl App {
                 dirty = false;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    struct StateDirectoryGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl StateDirectoryGuard {
+        fn set(path: &Path) -> Self {
+            let lock = crate::core::session::STATE_DIRECTORY_TEST_LOCK
+                .lock()
+                .unwrap();
+            let previous = env::var_os("STATE_DIRECTORY");
+            unsafe { env::set_var("STATE_DIRECTORY", path) };
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for StateDirectoryGuard {
+        fn drop(&mut self) {
+            if let Some(ref value) = self.previous {
+                unsafe { env::set_var("STATE_DIRECTORY", value) };
+            } else {
+                unsafe { env::remove_var("STATE_DIRECTORY") };
+            }
+        }
+    }
+
+    #[test]
+    fn ensure_download_session_refreshes_existing_session_credentials_without_mfa() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        app.session = Some(SessionSnapshotV3::new(
+            DownloadConfig::default(),
+            SavedCredentials::encrypt("stale@example.com", "stale-pass", Some("654321")),
+        ));
+        assert!(app.login.set_credentials(
+            "fresh@example.com".to_string(),
+            "fresh-pass".to_string(),
+            "123456".to_string()
+        ));
+
+        app.ensure_download_session(&DownloadConfig::default());
+
+        let (email, password, mfa) = app
+            .session
+            .as_ref()
+            .expect("session should remain installed")
+            .credentials
+            .decrypt()
+            .expect("saved credentials should decrypt");
+        assert_eq!(email, "fresh@example.com");
+        assert_eq!(password, "fresh-pass");
+        assert!(mfa.is_none());
     }
 }
