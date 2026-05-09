@@ -171,6 +171,56 @@ fn package_is_auto_expanded_for(
             .is_some_and(|package| matches!(package.status, PackageStatus::Failed))
 }
 
+fn file_is_visible_in_package(core_state: &DownloadState, file_id: &str) -> bool {
+    core_state.files.get(file_id).is_some_and(|file| {
+        !matches!(file.lifecycle, FileLifecycle::Skipped | FileLifecycle::Deleted)
+    })
+}
+
+fn overlay_row_is_hidden_placeholder(
+    file: &FileEntry,
+    overlay: Option<&OverlayFile>,
+) -> bool {
+    matches!(file.status, FileStatus::Queued)
+        && file.size == 0
+        && overlay.is_some_and(|overlay| {
+            overlay.source_url.is_none() && !overlay.counts_toward_progress
+        })
+}
+
+fn package_has_visible_content(
+    core_state: &DownloadState,
+    overlay_files: &IndexMap<String, OverlayFile>,
+    package_id: &str,
+) -> bool {
+    let Some(package) = core_state.packages.get(package_id) else {
+        return false;
+    };
+
+    package
+        .file_ids
+        .iter()
+        .any(|file_id| file_is_visible_in_package(core_state, file_id))
+        || (package.error.is_some()
+            && !overlay_files.contains_key(package_id))
+}
+
+fn package_has_visible_files(core_state: &DownloadState, package_id: &str) -> bool {
+    core_state
+        .packages
+        .get(package_id)
+        .is_some_and(|package| {
+            package
+                .file_ids
+                .iter()
+                .any(|file_id| file_is_visible_in_package(core_state, file_id))
+        })
+}
+
+fn package_has_visible_children(core_state: &DownloadState, package_id: &str) -> bool {
+    package_has_visible_files(core_state, package_id)
+}
+
 fn visible_rows_for(
     files: &[FileEntry],
     core_state: &DownloadState,
@@ -215,8 +265,13 @@ fn visible_rows_for(
 
     let mut rows = Vec::new();
     for package_id in package_ids {
+        if !package_has_visible_content(core_state, overlay_files, &package_id) {
+            continue;
+        }
         rows.push(TuiRow::Package(package_id.clone()));
-        if package_is_auto_expanded_for(expanded_packages, core_state, &package_id) {
+        if package_is_auto_expanded_for(expanded_packages, core_state, &package_id)
+            && package_has_visible_children(core_state, &package_id)
+        {
             let mut file_ids = core_state
                 .packages
                 .get(&package_id)
@@ -232,14 +287,32 @@ fn visible_rows_for(
             rows.extend(
                 file_ids
                     .into_iter()
-                    .filter(|file_id| core_state.files.contains_key(file_id))
-                    .map(|file_id| TuiRow::File {
-                        package_id: package_id.clone(),
-                        file_id,
-                    }),
+                    .filter(|file_id| file_is_visible_in_package(core_state, file_id))
+                .map(|file_id| TuiRow::File {
+                    package_id: package_id.clone(),
+                    file_id,
+                }),
             );
         }
     }
+
+    rows.extend(
+        sorted_file_indices(files, core_state, overlay_files)
+            .into_iter()
+            .filter_map(|index| {
+                let file = &files[index];
+                if core_state.files.contains_key(&file.id)
+                    || overlay_row_is_hidden_placeholder(file, overlay_files.get(&file.id))
+                {
+                    return None;
+                }
+
+                Some(TuiRow::File {
+                    package_id: String::new(),
+                    file_id: file.id.clone(),
+                })
+            }),
+    );
     rows
 }
 
@@ -414,7 +487,7 @@ pub(super) fn sync_visible_files(
         }
     }
 
-    if visible_ids.is_empty() {
+    if visible_rows.is_empty() {
         file_list_state.select(None);
     } else {
         file_list_state.select(Some(selected_row.min(visible_rows.len().saturating_sub(1))));
