@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
@@ -259,6 +260,45 @@ fn record_progress_caps_downloaded_at_file_size() {
 
     assert_eq!(accepted, 10);
     assert_eq!(app.files[0].downloaded, 100);
+}
+
+#[test]
+fn progress_event_updates_visible_file_without_full_visible_sync() {
+    let mut app = test_app();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: "pkg".to_string(),
+            source_url: "https://mega.nz/file/root".to_string(),
+            display_name: "Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: "file.bin".to_string(),
+                path: "file.bin".to_string(),
+                size: 100,
+            }],
+            collision: None,
+        },
+    });
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: "file.bin".to_string(),
+        size: 100,
+    });
+
+    app.handle_file_progress_event(
+        Arc::<str>::from("file.bin"),
+        crate::core::ProgressDelta {
+            total_bytes_delta: 40,
+            network_bytes_delta: 40,
+        },
+        0,
+    );
+
+    let file = app
+        .files
+        .iter()
+        .find(|file| file.id == "file.bin")
+        .expect("file should remain visible");
+    assert_eq!(file.downloaded, 40);
+    assert!(matches!(file.status, FileStatus::Downloading));
 }
 
 #[test]

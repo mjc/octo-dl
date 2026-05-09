@@ -266,6 +266,7 @@ impl App {
             total_bytes_delta: delta.total_bytes_delta,
             network_bytes_delta: delta.network_bytes_delta,
         });
+        self.refresh_visible_core_file(id.as_ref());
         let now = Instant::now();
         let _ = self.update_file_ui_progress(id.as_ref(), previous_downloaded, now);
     }
@@ -290,6 +291,7 @@ impl App {
             reused_bytes: bytes,
             reused_chunks: chunks,
         });
+        self.refresh_visible_core_file(&id);
         log::info!(
             "Reusing {chunks} verified chunk(s) for {id} ({})",
             format_bytes(bytes)
