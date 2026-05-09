@@ -23,10 +23,11 @@ impl App {
     }
 
     pub(crate) fn apply_core_event(&mut self, event: CoreEvent) {
+        let selected_row_identity = self.selected_row();
         self.seed_core_session_from_session();
         let effects = reduce(&mut self.core_state, event);
         self.apply_core_effects(effects);
-        self.sync_visible_files();
+        self.sync_visible_files_preserving(selected_row_identity);
         self.recompute_totals();
     }
 

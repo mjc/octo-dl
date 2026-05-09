@@ -1,6 +1,6 @@
 //! All drawing / rendering functions.
 
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table};
@@ -92,15 +92,28 @@ fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
     } else {
         " Add URL(s): press a "
     };
-    let url_input = Paragraph::new(app.url_input.as_str())
-        .block(
-            Block::default()
-                .title(url_title)
-                .borders(Borders::ALL)
-                .border_style(url_style),
+    let url_block = Block::default()
+        .title(url_title)
+        .borders(Borders::ALL)
+        .border_style(url_style);
+    let url_inner = url_block.inner(chunks[0]);
+    let (url_value, cursor_col) = if app.popup == Popup::None && app.url_input_active {
+        focused_url_input_view(&app.url_input, url_inner.width)
+    } else {
+        (
+            truncate_end(&app.url_input, usize::from(url_inner.width)),
+            None,
         )
+    };
+    let url_input = Paragraph::new(url_value)
+        .block(url_block)
         .style(Style::default().fg(Color::White));
     frame.render_widget(url_input, chunks[0]);
+    if let Some(cursor_col) = cursor_col
+        && url_inner.height > 0
+    {
+        frame.set_cursor_position(Position::new(url_inner.x + cursor_col, url_inner.y));
+    }
 
     // --- Aggregate progress ---
     let ratio = if app.total_size > 0 {
@@ -223,6 +236,27 @@ fn controls_label(app: &App, width: u16) -> String {
         "a:add  up/down:select  enter:open  s:sort  d:del  r:retry  R:reset  c:cfg  q:quit"
     };
     truncate_end(text, usize::from(width))
+}
+
+fn focused_url_input_view(value: &str, width: u16) -> (String, Option<u16>) {
+    if width == 0 {
+        return (String::new(), None);
+    }
+
+    let visible_width = usize::from(width.saturating_sub(1));
+    if visible_width == 0 {
+        return (String::new(), Some(0));
+    }
+
+    let char_count = value.chars().count();
+    if char_count <= visible_width {
+        return (value.to_string(), Some(char_count as u16));
+    }
+
+    (
+        take_last_chars(value, visible_width),
+        Some(width.saturating_sub(1)),
+    )
 }
 
 fn is_processing_status(status: &str) -> bool {
@@ -598,6 +632,21 @@ fn compact_label(value: &str) -> String {
         .find(|part| !part.is_empty())
         .unwrap_or(value)
         .to_string()
+}
+
+fn take_last_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    value
+        .chars()
+        .rev()
+        .take(max_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
 }
 
 fn truncate_end(value: &str, max_chars: usize) -> String {
@@ -1077,7 +1126,34 @@ mod tests {
     }
 
     #[test]
-    fn draw_main_active_and_error_packages_expand_by_default() {
+    fn draw_main_failed_packages_expand_by_default() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "pkg-1".to_string(),
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                display_name: "Mega Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "active.bin".to_string(),
+                    path: "active.bin".to_string(),
+                    size: 20,
+                }],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileFailed {
+            file_id: "active.bin".to_string(),
+            message: "boom".to_string(),
+        });
+
+        let rendered = render_text(&mut app);
+
+        assert!(rendered.contains("Mega Package"));
+        assert!(rendered.contains("active.bin"));
+    }
+
+    #[test]
+    fn draw_main_downloading_packages_do_not_auto_expand() {
         let mut app = test_app();
         app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
@@ -1100,7 +1176,7 @@ mod tests {
         let rendered = render_text(&mut app);
 
         assert!(rendered.contains("Mega Package"));
-        assert!(rendered.contains("active.bin"));
+        assert!(!rendered.contains("active.bin"));
     }
 
     #[test]

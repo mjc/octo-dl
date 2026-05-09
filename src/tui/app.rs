@@ -21,6 +21,7 @@ mod tests;
 mod types;
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use indexmap::IndexMap;
@@ -104,6 +105,7 @@ pub struct App {
     pub api_port: u16,
     // API key for authentication
     pub api_key: Option<String>,
+    pub(crate) persist_config_path: Option<PathBuf>,
     // Resource usage
     pub cpu_usage: f32,
     pub memory_rss: u64,
@@ -153,13 +155,24 @@ impl App {
     }
 
     pub(crate) fn sync_visible_files(&mut self) {
+        let selected_row_identity = self.selected_row();
+        self.sync_visible_files_preserving(selected_row_identity);
+    }
+
+    pub(crate) fn sync_visible_files_preserving(
+        &mut self,
+        selected_row_identity: Option<visible::TuiRow>,
+    ) {
         visible::sync_visible_files(
             &mut self.files,
             &mut self.overlay_files,
             &mut self.file_ui,
             &mut self.file_list_state,
             &self.core_state,
+            &self.expanded_packages,
+            &self.sort,
             &self.deleted_files,
+            selected_row_identity,
         );
     }
 
