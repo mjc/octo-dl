@@ -96,6 +96,8 @@ pub struct App {
     pub client_rx: Option<tokio::sync::oneshot::Receiver<(mega::Client, reqwest::Client)>>,
     // Cancellation tokens for active downloads (maps file path to token)
     pub cancellation_tokens: HashMap<String, CancellationToken>,
+    // Per-file download attempt IDs for retry/reset flows
+    pub file_attempt_ids: HashMap<String, u64>,
     // Files deleted from the UI — used to suppress stale download events
     pub deleted_files: HashSet<String>,
     // Files reset from the UI — used to suppress stale terminal events from the old attempt

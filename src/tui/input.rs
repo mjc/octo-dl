@@ -906,7 +906,8 @@ mod tests {
             url_rx.try_recv().unwrap(),
             DownloadRequest::ResumeFileIds {
                 source_url: "https://mega.nz/file/reset".to_string(),
-                file_ids: vec!["active.bin".to_string()]
+                file_ids: vec!["active.bin".to_string()],
+                attempt_ids: std::collections::HashMap::from([("active.bin".to_string(), 1)]),
             }
         );
         assert!(!final_path.exists());
@@ -1050,7 +1051,8 @@ mod tests {
             url_rx.try_recv().unwrap(),
             DownloadRequest::ResumeFileIds {
                 source_url: "https://mega.nz/file/error".to_string(),
-                file_ids: vec!["error.bin".to_string()]
+                file_ids: vec!["error.bin".to_string()],
+                attempt_ids: std::collections::HashMap::from([("error.bin".to_string(), 1)]),
             }
         );
     }

@@ -123,12 +123,14 @@ struct FetchedNodeSet {
     resolved: ResolvedUrl,
     nodes: Option<mega::Nodes>,
     requested_file_ids: Option<HashSet<String>>,
+    requested_attempt_ids: HashMap<String, u64>,
     emit_url_resolved: bool,
 }
 
 struct QueuedDownload {
     resolved: ResolvedUrl,
     item: crate::OwnedDownloadItem,
+    attempt_id: u64,
 }
 
 impl QueuedDownload {
@@ -144,6 +146,7 @@ impl QueuedDownload {
     fn complete_event(&self) -> DownloadEvent {
         DownloadEvent::FileComplete {
             id: self.item.path.clone(),
+            attempt_id: self.attempt_id,
         }
     }
 }
@@ -227,12 +230,14 @@ struct DownloadRuntime {
 
 struct DownloadTaskResult {
     id: String,
+    attempt_id: u64,
     result: crate::Result<crate::FileStats>,
 }
 
 struct FileProgress {
     tx: mpsc::UnboundedSender<DownloadEvent>,
     id: String,
+    attempt_id: u64,
 }
 
 impl DownloadProgress for FileProgress {
@@ -240,6 +245,7 @@ impl DownloadProgress for FileProgress {
         let _ = self.tx.send(DownloadEvent::FileStart {
             id: self.id.clone(),
             size,
+            attempt_id: self.attempt_id,
         });
     }
 
@@ -247,6 +253,7 @@ impl DownloadProgress for FileProgress {
         let _ = self.tx.send(DownloadEvent::Progress {
             id: Arc::<str>::from(self.id.as_str()),
             delta,
+            attempt_id: self.attempt_id,
         });
     }
 
@@ -255,12 +262,14 @@ impl DownloadProgress for FileProgress {
             id: self.id.clone(),
             chunks,
             bytes,
+            attempt_id: self.attempt_id,
         });
     }
 
     fn on_file_complete(&self, _name: &str, _stats: &crate::FileStats) {
         let _ = self.tx.send(DownloadEvent::FileComplete {
             id: self.id.clone(),
+            attempt_id: self.attempt_id,
         });
     }
 
@@ -268,6 +277,7 @@ impl DownloadProgress for FileProgress {
         let _ = self.tx.send(DownloadEvent::FileError {
             id: self.id.clone(),
             error: error.to_string(),
+            attempt_id: self.attempt_id,
         });
     }
 }
@@ -414,7 +424,8 @@ async fn resolve_download_requests(
     dlc_cache: &Arc<DlcKeyCache>,
     tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) -> Vec<FetchedNodeSet> {
-    let mut by_source: HashMap<String, (Option<HashSet<String>>, bool)> = HashMap::new();
+    let mut by_source: HashMap<String, (Option<HashSet<String>>, HashMap<String, u64>, bool)> =
+        HashMap::new();
 
     for request in requests {
         match request {
@@ -423,18 +434,20 @@ async fn resolve_download_requests(
                     .entry(url.clone())
                     .and_modify(|entry| {
                         entry.0 = None;
-                        entry.1 = true;
+                        entry.1.clear();
+                        entry.2 = true;
                     })
-                    .or_insert((None, true));
+                    .or_insert_with(|| (None, HashMap::new(), true));
             }
             DownloadRequest::ResumeFileIds {
                 source_url,
                 file_ids,
+                attempt_ids,
             } => {
                 let file_ids = file_ids.iter().cloned().collect::<HashSet<_>>();
                 let entry = by_source
                     .entry(source_url.clone())
-                    .or_insert_with(|| (None, false));
+                    .or_insert_with(|| (None, HashMap::new(), false));
                 match entry.0.as_mut() {
                     Some(existing) => {
                         existing.extend(file_ids);
@@ -444,15 +457,17 @@ async fn resolve_download_requests(
                         // files to be resolved.
                     }
                 }
+                entry.1.extend(attempt_ids.clone());
             }
         }
     }
 
     let mut resolved = Vec::new();
-    for (submitted_url, (file_ids, emit_url_resolved)) in by_source {
+    for (submitted_url, (file_ids, attempt_ids, emit_url_resolved)) in by_source {
         let sources = resolve_submitted_url(&submitted_url, http, dlc_cache, tx).await;
         for source in sources {
             let requested_file_ids = file_ids.clone();
+            let requested_attempt_ids = attempt_ids.clone();
             let nodes = match fetch_node_set(&source, http).await {
                 Ok(nodes) => Some(nodes),
                 Err(error) => {
@@ -467,6 +482,7 @@ async fn resolve_download_requests(
                 resolved: source,
                 nodes,
                 requested_file_ids,
+                requested_attempt_ids,
                 emit_url_resolved,
             });
         }
@@ -819,6 +835,7 @@ mod tests {
         }));
         app.handle_download_event(DownloadEvent::FileComplete {
             id: "episode.mkv".to_string(),
+            attempt_id: 0,
         });
 
         assert_eq!(app.files.len(), 1);
@@ -843,6 +860,7 @@ mod tests {
                 },
                 nodes: None,
                 requested_file_ids: None,
+                requested_attempt_ids: HashMap::new(),
                 emit_url_resolved: true,
             },
             FetchedNodeSet {
@@ -852,6 +870,7 @@ mod tests {
                 },
                 nodes: None,
                 requested_file_ids: None,
+                requested_attempt_ids: HashMap::new(),
                 emit_url_resolved: true,
             },
             FetchedNodeSet {
@@ -861,6 +880,7 @@ mod tests {
                 },
                 nodes: None,
                 requested_file_ids: None,
+                requested_attempt_ids: HashMap::new(),
                 emit_url_resolved: true,
             },
         ];
@@ -908,6 +928,7 @@ mod tests {
         app.handle_download_event(DownloadEvent::FileStart {
             id: "test.bin".to_string(),
             size: file_size,
+            attempt_id: 0,
         });
 
         // Simulate a sequence of correct *delta* progress events
@@ -920,6 +941,7 @@ mod tests {
                     total_bytes_delta: d,
                     network_bytes_delta: d,
                 },
+                attempt_id: 0,
             });
         }
 
@@ -947,6 +969,7 @@ mod tests {
         app.handle_download_event(DownloadEvent::FileStart {
             id: "test.bin".to_string(),
             size: file_size,
+            attempt_id: 0,
         });
 
         // Simulate the OLD bug: cumulative totals sent as bytes_delta
@@ -958,6 +981,7 @@ mod tests {
                     total_bytes_delta: c, // wrong! these are cumulative
                     network_bytes_delta: c,
                 },
+                attempt_id: 0,
             });
         }
 
@@ -1046,7 +1070,8 @@ fn spawn_file_download(
     join_set.spawn(async move {
         let _permit = permit;
         let file_id = item.item.path.clone();
-        let progress = file_progress(&file_id, &event_tx);
+        let attempt_id = item.attempt_id;
+        let progress = file_progress(&file_id, attempt_id, &event_tx);
         let result = downloader
             .download_file(
                 &item.item.node,
@@ -1055,9 +1080,10 @@ fn spawn_file_download(
                 Some(cancel_token),
             )
             .await;
-        emit_pause_cancellation_if_needed(&file_id, &result, &pause_rx, &event_tx);
+        emit_pause_cancellation_if_needed(&file_id, attempt_id, &result, &pause_rx, &event_tx);
         DownloadTaskResult {
             id: item.item.path,
+            attempt_id,
             result,
         }
     });
@@ -1065,16 +1091,19 @@ fn spawn_file_download(
 
 fn file_progress(
     file_id: &str,
+    attempt_id: u64,
     event_tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) -> Arc<dyn DownloadProgress> {
     Arc::new(FileProgress {
         tx: event_tx.clone(),
         id: file_id.to_string(),
+        attempt_id,
     })
 }
 
 fn emit_pause_cancellation_if_needed(
     file_id: &str,
+    attempt_id: u64,
     result: &crate::Result<crate::FileStats>,
     pause_rx: &watch::Receiver<bool>,
     event_tx: &mpsc::UnboundedSender<DownloadEvent>,
@@ -1082,6 +1111,7 @@ fn emit_pause_cancellation_if_needed(
     if matches!(result, Err(crate::Error::Cancelled)) && *pause_rx.borrow() {
         let _ = event_tx.send(DownloadEvent::FileCancelled {
             id: file_id.to_string(),
+            attempt_id,
         });
     }
 }
@@ -1203,12 +1233,14 @@ async fn collect_node_set(
         &node_set.resolved,
         skipped_for_url,
         &mut skipped_count,
+        &node_set.requested_attempt_ids,
     );
     let completed_items = visible_downloads(
         completed,
         &node_set.resolved,
         skipped_for_url,
         &mut skipped_count,
+        &node_set.requested_attempt_ids,
     );
 
     CollectedNodeSet {
@@ -1242,6 +1274,7 @@ fn visible_downloads(
     resolved: &ResolvedUrl,
     skipped_paths: Option<&HashSet<String>>,
     skipped_count: &mut usize,
+    requested_attempt_ids: &HashMap<String, u64>,
 ) -> Vec<QueuedDownload> {
     items
         .into_iter()
@@ -1252,6 +1285,7 @@ fn visible_downloads(
             }
             Some(QueuedDownload {
                 resolved: resolved.clone(),
+                attempt_id: requested_attempt_ids.get(&item.path).copied().unwrap_or(0),
                 item,
             })
         })
@@ -1279,10 +1313,15 @@ fn handle_download_join_result(
             result: Err(crate::Error::Cancelled),
             ..
         }) => {} // user cancelled
-        Ok(DownloadTaskResult { id, result: Err(e) }) => {
+        Ok(DownloadTaskResult {
+            id,
+            attempt_id,
+            result: Err(e),
+        }) => {
             let _ = event_tx.send(DownloadEvent::FileError {
                 id: id.clone(),
                 error: format!("Download failed: {e}"),
+                attempt_id,
             });
         }
         Err(e) => {
