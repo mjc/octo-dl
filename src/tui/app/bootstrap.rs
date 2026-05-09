@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use indexmap::IndexMap;
@@ -11,13 +11,27 @@ use tokio::sync::{mpsc, watch};
 use crate::tui::WebOptions;
 use crate::{
     DownloadConfig, ServiceConfig,
-    core::{DownloadState, SessionMeta},
+    core::{DownloadState, SessionMeta, SessionSnapshotV3},
 };
 
 use super::{
     App, DownloadEvent, NoCredentialsFallback, Popup, SharedAppState, SharedStateChannels, UiAction,
 };
 use crate::tui::event::DownloadRequest;
+
+fn path_io_error(action: &str, path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("{action} {}: {error}", path.display()),
+    )
+}
+
+fn default_service_config_path() -> PathBuf {
+    let mut path = SessionSnapshotV3::state_dir();
+    path.pop();
+    path.push("config.toml");
+    path
+}
 
 impl App {
     pub fn new(
@@ -71,6 +85,7 @@ impl App {
             }),
             api_port,
             api_key: None,
+            persist_config_path: None,
             cpu_usage: 0.0,
             last_tick: Instant::now(),
             memory_rss: 0,
@@ -85,6 +100,7 @@ impl App {
     ) -> io::Result<(Self, String, u16)> {
         if let Some(path) = config_path {
             let mut app = Self::new(0, event_tx, quit_enabled);
+            app.persist_config_path = Some(path.to_path_buf());
             let (host, port) = app.apply_service_config(path)?;
             app.api_port = port;
             return Ok((app, host, port));
@@ -94,11 +110,9 @@ impl App {
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(default_api_port);
-        Ok((
-            Self::new(api_port, event_tx, quit_enabled),
-            "127.0.0.1".to_string(),
-            api_port,
-        ))
+        let mut app = Self::new(api_port, event_tx, quit_enabled);
+        app.persist_config_path = Some(default_service_config_path());
+        Ok((app, "127.0.0.1".to_string(), api_port))
     }
 
     pub(crate) fn require_credentials(&self, config_path: &Path) -> io::Result<()> {
@@ -252,9 +266,13 @@ impl App {
         if let Some(ref dl_path) = service_config.download.path {
             let download_dir = Path::new(dl_path);
             if !download_dir.exists() {
-                std::fs::create_dir_all(download_dir)?;
+                std::fs::create_dir_all(download_dir).map_err(|error| {
+                    path_io_error("Failed to create download directory", download_dir, error)
+                })?;
             }
-            std::env::set_current_dir(download_dir)?;
+            std::env::set_current_dir(download_dir).map_err(|error| {
+                path_io_error("Failed to change directory to", download_dir, error)
+            })?;
             log::info!("Download directory: {dl_path}");
         }
 
@@ -306,5 +324,127 @@ impl App {
         }
 
         Ok((service_config.api.host, service_config.api.port))
+    }
+
+    pub(crate) fn persist_login_credentials_to_config(&self) -> io::Result<()> {
+        let Some(config_path) = self.persist_config_path.as_deref() else {
+            return Ok(());
+        };
+
+        let mut service_config = ServiceConfig::load_or_create(config_path)?;
+        service_config.credentials = crate::ServiceCredentials {
+            encrypted: false,
+            email: self.login.email().to_string(),
+            password: self.login.password().to_string(),
+            mfa: self.login.mfa().to_string(),
+        };
+        service_config.credentials.encrypt_in_place();
+        service_config.api.port = self.api_port;
+        service_config.api.api_key = self.api_key.clone();
+        service_config.download = self.config.config.clone();
+        service_config.save(config_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    struct StateDirectoryGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl StateDirectoryGuard {
+        fn set(path: &Path) -> Self {
+            let lock = crate::core::session::STATE_DIRECTORY_TEST_LOCK
+                .lock()
+                .unwrap();
+            let previous = env::var_os("STATE_DIRECTORY");
+            unsafe { env::set_var("STATE_DIRECTORY", path) };
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for StateDirectoryGuard {
+        fn drop(&mut self) {
+            if let Some(ref value) = self.previous {
+                unsafe { env::set_var("STATE_DIRECTORY", value) };
+            } else {
+                unsafe { env::remove_var("STATE_DIRECTORY") };
+            }
+        }
+    }
+
+    #[test]
+    fn apply_service_config_reports_download_directory_path() {
+        let dir = tempdir().expect("temp dir should exist");
+        let blocker = dir.path().join("not-a-directory");
+        fs::write(&blocker, "block").expect("blocker file should be writable");
+        let config_path = dir.path().join("config.toml");
+        let blocked_child = blocker.join("child");
+        let config = ServiceConfig {
+            credentials: crate::ServiceCredentials {
+                encrypted: false,
+                email: String::new(),
+                password: String::new(),
+                mfa: String::new(),
+            },
+            api: crate::ApiConfig::default(),
+            download: crate::DownloadConfig {
+                path: Some(blocked_child.display().to_string()),
+                ..crate::DownloadConfig::default()
+            },
+        };
+        config
+            .save(&config_path)
+            .expect("config should be writable");
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx, true);
+        let error = app
+            .apply_service_config(&config_path)
+            .expect_err("invalid download dir should fail");
+        let message = error.to_string();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+        assert!(message.contains("Failed to create download directory"));
+        assert!(message.contains(&blocked_child.display().to_string()));
+    }
+
+    #[test]
+    fn persist_login_credentials_creates_default_config_file() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut app, _host, _port) = App::new_with_optional_service_config(tx, true, None, 9723)
+            .expect("app should initialize");
+        assert!(app.login.set_credentials(
+            "user@example.com".to_string(),
+            "super-secret".to_string(),
+            "123456".to_string()
+        ));
+
+        app.persist_login_credentials_to_config()
+            .expect("credentials should persist");
+
+        let config_path = dir.path().join("config.toml");
+        assert!(config_path.exists());
+
+        let saved = ServiceConfig::load(&config_path).expect("config should load");
+        assert!(saved.credentials.encrypted);
+        let (email, password, mfa) = saved
+            .credentials
+            .decrypt_if_needed()
+            .expect("saved credentials should decrypt");
+        assert_eq!(email, "user@example.com");
+        assert_eq!(password, "super-secret");
+        assert_eq!(mfa, "123456");
     }
 }
