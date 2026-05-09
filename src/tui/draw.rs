@@ -1,5 +1,6 @@
 //! All drawing / rendering functions.
 
+use std::collections::HashSet;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -479,6 +480,13 @@ impl FileListRow {
 
 fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let rows = app.visible_rows();
+    let expanded_packages: HashSet<_> = rows
+        .iter()
+        .filter_map(|row| match row {
+            TuiRow::File { package_id, .. } if !package_id.is_empty() => Some(package_id.as_str()),
+            _ => None,
+        })
+        .collect();
     let content_width = usize::from(area.width.saturating_sub(4));
     if app.file_list_state.selected().is_none() && !rows.is_empty() {
         app.file_list_state.select(Some(0));
@@ -493,7 +501,13 @@ fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(display_index, row)| {
-            row_item(app, row, selected == Some(display_index), content_width)
+            row_item(
+                app,
+                row,
+                &expanded_packages,
+                selected == Some(display_index),
+                content_width,
+            )
         })
         .collect();
 
@@ -508,9 +522,21 @@ fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(file_list, area, &mut app.file_list_state);
 }
 
-fn row_item(app: &App, row: &TuiRow, selected: bool, content_width: usize) -> ListItem<'static> {
+fn row_item(
+    app: &App,
+    row: &TuiRow,
+    expanded_packages: &HashSet<&str>,
+    selected: bool,
+    content_width: usize,
+) -> ListItem<'static> {
     match row {
-        TuiRow::Package(package_id) => package_row_item(app, package_id, selected, content_width),
+        TuiRow::Package(package_id) => package_row_item(
+            app,
+            package_id,
+            expanded_packages.contains(package_id.as_str()),
+            selected,
+            content_width,
+        ),
         TuiRow::File {
             package_id,
             file_id,
@@ -579,16 +605,13 @@ fn package_status_style(status: PackageStatus) -> (&'static str, Color) {
 fn package_row_item(
     app: &App,
     package_id: &str,
+    expanded: bool,
     selected: bool,
     content_width: usize,
 ) -> ListItem<'static> {
     let Some(package) = app.core_state.packages.get(package_id) else {
         return ListItem::new(Line::from(""));
     };
-    let expanded = app
-        .visible_rows()
-        .iter()
-        .any(|row| matches!(row, TuiRow::File { package_id: id, .. } if id == package_id));
     let counts = package_counts(app, package_id);
     let percent = if counts.size == 0 {
         0

@@ -31,12 +31,47 @@ impl App {
     }
 
     pub(crate) fn apply_core_event(&mut self, event: CoreEvent) {
-        let selected_row_identity = self.selected_row();
+        let should_sync_visible = core_event_requires_visible_sync(&event);
+        let selected_row_identity = should_sync_visible.then(|| self.selected_row()).flatten();
         self.seed_core_session_from_session();
         let effects = reduce(&mut self.core_state, event);
         self.apply_core_effects(effects);
-        self.sync_visible_files_preserving(selected_row_identity);
+        if should_sync_visible {
+            self.sync_visible_files_preserving(selected_row_identity);
+        }
         self.recompute_totals();
+    }
+
+    pub(crate) fn refresh_visible_core_file(&mut self, file_id: &str) {
+        let Some(core_file) = self.core_state.files.get(file_id) else {
+            return;
+        };
+        let Some(visible_file) = self.files.iter_mut().find(|file| file.id == file_id) else {
+            return;
+        };
+
+        visible_file.name = core_file.path.clone();
+        visible_file.size = core_file.size;
+        visible_file.downloaded = match core_file.lifecycle {
+            crate::core::FileLifecycle::Complete => core_file.size,
+            _ => core_file.progress.visible_completed_bytes.min(core_file.size),
+        };
+        visible_file.status = match core_file.lifecycle {
+            crate::core::FileLifecycle::Planned | crate::core::FileLifecycle::Queued => {
+                FileStatus::Queued
+            }
+            crate::core::FileLifecycle::Downloading => FileStatus::Downloading,
+            crate::core::FileLifecycle::Complete => FileStatus::Complete,
+            crate::core::FileLifecycle::Failed => FileStatus::Error(
+                core_file
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "failed".to_string()),
+            ),
+            crate::core::FileLifecycle::Skipped | crate::core::FileLifecycle::Deleted => {
+                visible_file.status.clone()
+            }
+        };
     }
 
     pub(crate) fn apply_core_command(&mut self, command: CoreCommand) {
