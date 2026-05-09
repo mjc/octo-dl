@@ -1,7 +1,7 @@
 use env_logger::Target;
 use std::env;
 use std::fs::File;
-use std::io::Write;
+use std::io::{self, Write};
 use std::net::TcpStream;
 #[cfg(unix)]
 use std::os::unix::io::{FromRawFd, RawFd};
@@ -52,13 +52,18 @@ fn print_usage() {
     eprintln!("Run 'octo --tui --help' or 'octo --help' for mode-specific options.");
 }
 
-fn init_logger() {
+fn init_logger(args: &[String]) {
     let mut builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("octo_dl=info"));
-    if let Some(pipe_writer) = log_pipe_writer() {
+    if let Some(pipe_writer) = log_writer(args) {
         builder.target(Target::Pipe(pipe_writer));
     }
     builder.init();
+}
+
+fn log_writer(args: &[String]) -> Option<Box<dyn Write + Send>> {
+    log_pipe_writer()
+        .or_else(|| native_tui_log_detachment_required(args).then(native_tui_log_writer))
 }
 
 fn log_pipe_writer() -> Option<Box<dyn Write + Send>> {
@@ -76,6 +81,31 @@ fn log_pipe_writer_from_addr(addr: &str) -> Option<Box<dyn Write + Send>> {
     TcpStream::connect(addr)
         .ok()
         .map(|stream| Box::new(stream) as Box<dyn Write + Send>)
+}
+
+fn native_tui_log_detachment_required(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--tui")
+        && env::var_os("OCTO_TUI_LOG_ADDR").is_none()
+        && env::var_os("OCTO_TUI_LOG_FD").is_none()
+}
+
+fn native_tui_log_writer() -> Box<dyn Write + Send> {
+    let path = native_tui_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    match File::options().create(true).append(true).open(path) {
+        Ok(file) => Box::new(file),
+        Err(_) => Box::new(io::sink()),
+    }
+}
+
+fn native_tui_log_path() -> PathBuf {
+    let mut path = octo_dl::SessionSnapshotV3::state_dir();
+    path.pop();
+    path.push("native-tui.log");
+    path
 }
 
 #[cfg(unix)]
@@ -99,7 +129,9 @@ fn log_pipe_writer_from_raw(fd: usize) -> Option<Box<dyn Write + Send>> {
 
 #[tokio::main]
 async fn main() -> octo_dl::Result<()> {
-    init_logger();
+    // Scan for global flags without consuming — sub-modules re-parse for their own flags
+    let args: Vec<String> = env::args().skip(1).collect();
+    init_logger(&args);
 
     let mut tui = false;
     let mut api = false;
@@ -107,9 +139,6 @@ async fn main() -> octo_dl::Result<()> {
     let mut host = "127.0.0.1".to_string();
     let mut host_explicit = false;
     let mut config_path: Option<PathBuf> = None;
-
-    // Scan for global flags without consuming — sub-modules re-parse for their own flags
-    let args: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -247,5 +276,24 @@ mod tests {
             "https://mega.nz/file/test".to_string(),
         ];
         assert!(has_positional_args(&args));
+    }
+
+    #[test]
+    fn native_tui_log_detachment_only_applies_to_unforwarded_tui() {
+        unsafe {
+            env::remove_var("OCTO_TUI_LOG_ADDR");
+            env::remove_var("OCTO_TUI_LOG_FD");
+        }
+
+        assert!(native_tui_log_detachment_required(&["--tui".to_string()]));
+        assert!(!native_tui_log_detachment_required(&["--web".to_string()]));
+
+        unsafe { env::set_var("OCTO_TUI_LOG_ADDR", "127.0.0.1:1") };
+        assert!(!native_tui_log_detachment_required(&["--tui".to_string()]));
+        unsafe { env::remove_var("OCTO_TUI_LOG_ADDR") };
+
+        unsafe { env::set_var("OCTO_TUI_LOG_FD", "9") };
+        assert!(!native_tui_log_detachment_required(&["--tui".to_string()]));
+        unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
     }
 }
