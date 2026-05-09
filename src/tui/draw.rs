@@ -511,12 +511,18 @@ fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
 fn row_item(app: &App, row: &TuiRow, selected: bool, content_width: usize) -> ListItem<'static> {
     match row {
         TuiRow::Package(package_id) => package_row_item(app, package_id, selected, content_width),
-        TuiRow::File { file_id, .. } => app
+        TuiRow::File {
+            package_id,
+            file_id,
+        } => app
             .files
             .iter()
             .find(|file| file.id == *file_id)
             .map(|file| {
-                FileListRow::from_file(app, file, false).into_child_item(selected, content_width)
+                let include_package =
+                    package_id.is_empty() && !app.core_state.files.contains_key(file_id);
+                FileListRow::from_file(app, file, include_package)
+                    .into_child_item(selected, content_width)
             })
             .unwrap_or_else(|| ListItem::new(Line::from(""))),
     }

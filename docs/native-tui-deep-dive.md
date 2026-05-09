@@ -70,12 +70,16 @@
 ### 2. Mode Drift
 - Fixed: empty add-mode submit now gives guidance instead of dead-ending.
 - Fixed: narrow controls legends now switch to width-banded variants so `q:quit` and `esc` stay visible.
+- Fixed: unresolved empty folder/package placeholders are no longer rendered as fake top-level rows like `Folder root`.
+- Fixed: URL-level folder failures no longer render both an empty package row and a separate overlay error row; only the actionable error row remains.
 - Likely subsystem: [src/tui/input.rs](/home/mjc/projects/octo-dl/src/tui/input.rs:287) and [src/tui/draw.rs](/home/mjc/projects/octo-dl/src/tui/draw.rs:230)
 - Confidence: high
 - Regression coverage:
   - `handle_main_input_empty_url_submit_sets_guidance_status` in [src/tui/input.rs](/home/mjc/projects/octo-dl/src/tui/input.rs:787)
   - `draw_main_narrow_width_keeps_quit_visible` in [src/tui/draw.rs](/home/mjc/projects/octo-dl/src/tui/draw.rs:1140)
   - `draw_main_narrow_url_mode_keeps_escape_visible` in [src/tui/draw.rs](/home/mjc/projects/octo-dl/src/tui/draw.rs:1162)
+  - `pending_empty_package_placeholder_is_not_visible` in [src/tui/app/tests.rs](/home/mjc/projects/octo-dl/src/tui/app/tests.rs:335)
+  - `url_level_overlay_error_does_not_also_render_empty_package_row` in [src/tui/app/tests.rs](/home/mjc/projects/octo-dl/src/tui/app/tests.rs:375)
 
 ### 3. Selection and Targeting
 - Severity 1 fixed: when a selected child row disappeared because an auto-expanded package collapsed, selection could jump to the next visible package instead of staying with the original package.
@@ -96,11 +100,13 @@
 - Fixed: long add-mode input no longer hides the active insertion point.
 - Fixed: bottom controls now switch between explicit compact legends instead of relying on coarse end-truncation.
 - Fixed: status text now prefers compact activity/error summaries on narrow widths instead of letting the backend clip one long sentence.
+- Fixed: overlay-only URL/file errors remain visible even after core-backed packages appear; previously the presence of any real package could hide UI-only error rows from the list.
 - Likely subsystem: [src/tui/draw.rs](/home/mjc/projects/octo-dl/src/tui/draw.rs:230)
 - Confidence: high
 - Regression coverage:
   - `draw_main_narrow_status_prioritizes_activity_and_failures` in [src/tui/draw.rs](/home/mjc/projects/octo-dl/src/tui/draw.rs:1090)
   - `draw_main_tight_status_falls_back_to_failure_summary` in [src/tui/draw.rs](/home/mjc/projects/octo-dl/src/tui/draw.rs:1120)
+  - `overlay_error_remains_visible_alongside_core_package_rows` in [src/tui/app/tests.rs](/home/mjc/projects/octo-dl/src/tui/app/tests.rs:347)
 
 ### 5. Session and Late-Event Reconciliation
 - Covered by the selection fix above: completion-driven row collapse no longer retargets the user to a different package.

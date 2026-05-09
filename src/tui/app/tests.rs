@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::{
-    core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus},
+    core::{CoreCommand, CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus},
     test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot},
     tui::visible::TuiRow,
 };
@@ -330,6 +330,92 @@ fn url_resolved_updates_session_status_and_clears_overlay() {
     let session = app.session.as_ref().expect("session should remain");
     assert_eq!(session.packages[0].source_url, url);
     assert!(session.packages[0].error.is_none());
+}
+
+#[test]
+fn pending_empty_package_placeholder_is_not_visible() {
+    let mut app = test_app();
+
+    app.apply_core_command(CoreCommand::SubmitUrl {
+        url: "https://mega.nz/folder/root".to_string(),
+    });
+
+    assert!(app.visible_rows().is_empty());
+    assert!(app.file_list_state.selected().is_none());
+}
+
+#[test]
+fn deleted_package_with_no_remaining_visible_files_is_hidden() {
+    let mut app = test_app();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: "pkg".to_string(),
+            source_url: "https://mega.nz/folder/root".to_string(),
+            display_name: "https://mega.nz/folder/root".to_string(),
+            files: vec![ResolvedFile {
+                file_id: "ghost.bin".to_string(),
+                path: "ghost.bin".to_string(),
+                size: 1,
+            }],
+            collision: None,
+        },
+    });
+    app.apply_core_event(CoreEvent::FileDeleted {
+        file_id: "ghost.bin".to_string(),
+    });
+
+    assert!(app.visible_rows().is_empty());
+    assert!(app.file_list_state.selected().is_none());
+}
+
+#[test]
+fn overlay_error_remains_visible_alongside_core_package_rows() {
+    let mut app = test_app();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: "pkg".to_string(),
+            source_url: "https://mega.nz/folder/good".to_string(),
+            display_name: "Good Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: "good.bin".to_string(),
+                path: "good.bin".to_string(),
+                size: 1,
+            }],
+            collision: None,
+        },
+    });
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::ScopeError {
+        scope: "https://mega.nz/folder/bad".to_string(),
+        error: "bad folder".to_string(),
+    });
+
+    let rows = app.visible_rows();
+    assert!(rows.contains(&TuiRow::Package("pkg".to_string())));
+    assert!(rows.contains(&TuiRow::File {
+        package_id: String::new(),
+        file_id: "https://mega.nz/folder/bad".to_string(),
+    }));
+}
+
+#[test]
+fn url_level_overlay_error_does_not_also_render_empty_package_row() {
+    let mut app = test_app();
+    let url = "https://mega.nz/folder/bad".to_string();
+    app.session = Some(session_snapshot(vec![(url.as_str(), UrlFixtureStatus::Pending)]));
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::ScopeError {
+        scope: url.clone(),
+        error: "bad folder".to_string(),
+    });
+
+    assert_eq!(
+        app.visible_rows(),
+        vec![TuiRow::File {
+            package_id: String::new(),
+            file_id: url,
+        }]
+    );
 }
 
 #[test]
