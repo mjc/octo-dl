@@ -220,7 +220,8 @@ impl ServiceConfig {
     ///
     /// Returns an error if the file cannot be read or parsed.
     pub fn load(path: &Path) -> std::io::Result<Self> {
-        let contents = std::fs::read_to_string(path)?;
+        let contents = std::fs::read_to_string(path)
+            .map_err(|error| path_io_error("read config file", path, error))?;
         toml::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
@@ -237,7 +238,8 @@ impl ServiceConfig {
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| path_io_error("create config directory", parent, error))?;
         }
 
         let template = Self {
@@ -265,17 +267,26 @@ impl ServiceConfig {
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let toml_str = toml::to_string(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, &toml_str)?;
+        std::fs::write(path, &toml_str)
+            .map_err(|error| path_io_error("write config file", path, error))?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(path, perms)?;
+            std::fs::set_permissions(path, perms)
+                .map_err(|error| path_io_error("set config file permissions", path, error))?;
         }
 
         Ok(())
     }
+}
+
+fn path_io_error(action: &str, path: &Path, error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        error.kind(),
+        format!("{action} {}: {error}", path.display()),
+    )
 }
 
 #[cfg(test)]
@@ -361,5 +372,16 @@ password = "pw"
         assert_eq!(config.download.concurrent_files, 4);
         assert!(!config.credentials.encrypted);
         assert!(config.credentials.mfa.is_empty());
+    }
+
+    #[test]
+    fn service_config_load_reports_path_in_io_errors() {
+        let path = Path::new("/definitely/missing/octo-dl-config.toml");
+        let error = ServiceConfig::load(path).expect_err("missing config should fail");
+        let message = error.to_string();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(message.contains("read config file"));
+        assert!(message.contains(&path.display().to_string()));
     }
 }
