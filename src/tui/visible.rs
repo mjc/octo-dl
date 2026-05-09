@@ -159,52 +159,55 @@ fn package_status_rank(status: PackageStatus) -> u8 {
     }
 }
 
-fn package_is_auto_expanded(app: &App, package_id: &str) -> bool {
-    app.expanded_packages.contains(package_id)
-        || app
-            .core_state
+fn package_is_auto_expanded_for(
+    expanded_packages: &HashSet<String>,
+    core_state: &DownloadState,
+    package_id: &str,
+) -> bool {
+    expanded_packages.contains(package_id)
+        || core_state
             .packages
             .get(package_id)
-            .is_some_and(|package| {
-                matches!(
-                    package.status,
-                    PackageStatus::Downloading | PackageStatus::Failed
-                )
-            })
+            .is_some_and(|package| matches!(package.status, PackageStatus::Failed))
 }
 
-pub(super) fn visible_rows(app: &App) -> Vec<TuiRow> {
-    if app.core_state.packages.is_empty() {
-        return sorted_file_indices(&app.files, &app.core_state, &app.overlay_files)
+fn visible_rows_for(
+    files: &[FileEntry],
+    core_state: &DownloadState,
+    overlay_files: &IndexMap<String, OverlayFile>,
+    expanded_packages: &HashSet<String>,
+    sort: &super::app::SortState,
+) -> Vec<TuiRow> {
+    if core_state.packages.is_empty() {
+        return sorted_file_indices(files, core_state, overlay_files)
             .into_iter()
             .map(|index| TuiRow::File {
                 package_id: String::new(),
-                file_id: app.files[index].id.clone(),
+                file_id: files[index].id.clone(),
             })
             .collect();
     }
 
-    let mut package_ids: Vec<_> = app.core_state.packages.keys().cloned().collect();
+    let mut package_ids: Vec<_> = core_state.packages.keys().cloned().collect();
     package_ids.sort_by(|left, right| {
-        let left_package = &app.core_state.packages[left];
-        let right_package = &app.core_state.packages[right];
-        let ordering = match app.sort.key {
-            SortKey::Queue => app
-                .core_state
+        let left_package = &core_state.packages[left];
+        let right_package = &core_state.packages[right];
+        let ordering = match sort.key {
+            SortKey::Queue => core_state
                 .packages
                 .get_index_of(left)
-                .cmp(&app.core_state.packages.get_index_of(right)),
+                .cmp(&core_state.packages.get_index_of(right)),
             SortKey::Status => package_status_rank(left_package.status)
                 .cmp(&package_status_rank(right_package.status)),
             SortKey::Name => left_package.display_name.cmp(&right_package.display_name),
             SortKey::Percent => {
-                package_percent(&app.core_state, left).cmp(&package_percent(&app.core_state, right))
+                package_percent(core_state, left).cmp(&package_percent(core_state, right))
             }
         }
         .then_with(|| left_package.display_name.cmp(&right_package.display_name))
         .then_with(|| left.cmp(right));
 
-        match app.sort.direction {
+        match sort.direction {
             SortDirection::Asc => ordering,
             SortDirection::Desc => ordering.reverse(),
         }
@@ -213,24 +216,23 @@ pub(super) fn visible_rows(app: &App) -> Vec<TuiRow> {
     let mut rows = Vec::new();
     for package_id in package_ids {
         rows.push(TuiRow::Package(package_id.clone()));
-        if package_is_auto_expanded(app, &package_id) {
-            let mut file_ids = app
-                .core_state
+        if package_is_auto_expanded_for(expanded_packages, core_state, &package_id) {
+            let mut file_ids = core_state
                 .packages
                 .get(&package_id)
                 .map(|package| package.file_ids.clone())
                 .unwrap_or_default();
             file_ids.sort_by(|left, right| {
                 natural_cmp(
-                    &file_name_for_sort(&app.core_state, left),
-                    &file_name_for_sort(&app.core_state, right),
+                    &file_name_for_sort(core_state, left),
+                    &file_name_for_sort(core_state, right),
                 )
                 .then_with(|| left.cmp(right))
             });
             rows.extend(
                 file_ids
                     .into_iter()
-                    .filter(|file_id| app.core_state.files.contains_key(file_id))
+                    .filter(|file_id| core_state.files.contains_key(file_id))
                     .map(|file_id| TuiRow::File {
                         package_id: package_id.clone(),
                         file_id,
@@ -239,6 +241,16 @@ pub(super) fn visible_rows(app: &App) -> Vec<TuiRow> {
         }
     }
     rows
+}
+
+pub(super) fn visible_rows(app: &App) -> Vec<TuiRow> {
+    visible_rows_for(
+        &app.files,
+        &app.core_state,
+        &app.overlay_files,
+        &app.expanded_packages,
+        &app.sort,
+    )
 }
 
 fn natural_cmp(left: &str, right: &str) -> Ordering {
@@ -344,10 +356,11 @@ pub(super) fn sync_visible_files(
     file_ui: &mut HashMap<String, FileUiState>,
     file_list_state: &mut ListState,
     core_state: &DownloadState,
+    expanded_packages: &HashSet<String>,
+    sort: &super::app::SortState,
     deleted_files: &HashSet<String>,
+    selected_row_identity: Option<TuiRow>,
 ) {
-    let selected_id = selected_file_index(file_list_state, files, core_state, overlay_files)
-        .map(|index| files[index].id.clone());
     let selected_row = file_list_state.selected().unwrap_or(0);
     let core_file_ids: HashSet<_> = core_state.files.keys().cloned().collect();
     let existing: IndexMap<_, _> = std::mem::take(files)
@@ -385,19 +398,38 @@ pub(super) fn sync_visible_files(
     *files = next_files;
     let visible_ids: HashSet<_> = files.iter().map(|file| file.id.clone()).collect();
     file_ui.retain(|file_id, _| visible_ids.contains(file_id));
-    if let Some(selected_id) = selected_id {
-        if let Some(display_row) = sorted_file_indices(files, core_state, overlay_files)
-            .into_iter()
-            .position(|index| files[index].id == selected_id)
+    let visible_rows = visible_rows_for(files, core_state, overlay_files, expanded_packages, sort);
+    if let Some(selected_row_identity) = selected_row_identity {
+        if let Some(display_row) = visible_rows
+            .iter()
+            .position(|row| *row == selected_row_identity)
         {
+            file_list_state.select(Some(display_row));
+            return;
+        }
+
+        if let Some(display_row) = fallback_selection_row(&selected_row_identity, &visible_rows) {
             file_list_state.select(Some(display_row));
             return;
         }
     }
 
-    if files.is_empty() {
+    if visible_ids.is_empty() {
         file_list_state.select(None);
     } else {
-        file_list_state.select(Some(selected_row.min(files.len() - 1)));
+        file_list_state.select(Some(selected_row.min(visible_rows.len().saturating_sub(1))));
     }
+}
+
+fn fallback_selection_row(
+    selected_row_identity: &TuiRow,
+    visible_rows: &[TuiRow],
+) -> Option<usize> {
+    let TuiRow::File { package_id, .. } = selected_row_identity else {
+        return None;
+    };
+
+    visible_rows
+        .iter()
+        .position(|row| matches!(row, TuiRow::Package(id) if id == package_id))
 }

@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use crate::{
     core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus},
     test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot},
+    tui::visible::TuiRow,
 };
 
 fn test_app() -> App {
@@ -530,4 +531,40 @@ fn sync_visible_files_prunes_stale_file_ui_state() {
 
     assert!(app.file_ui.contains_key("kept.bin"));
     assert!(!app.file_ui.contains_key("stale.bin"));
+}
+
+#[test]
+fn sync_visible_files_keeps_package_row_selected_when_failed_package_auto_expands() {
+    let mut app = test_app();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: "pkg".to_string(),
+            source_url: "https://mega.nz/folder/test".to_string(),
+            display_name: "Package".to_string(),
+            files: vec![
+                ResolvedFile {
+                    file_id: "episode-1.bin".to_string(),
+                    path: "episode-1.bin".to_string(),
+                    size: 128,
+                },
+                ResolvedFile {
+                    file_id: "episode-2.bin".to_string(),
+                    path: "episode-2.bin".to_string(),
+                    size: 256,
+                },
+            ],
+            collision: None,
+        },
+    });
+    app.file_list_state.select(Some(0));
+    assert_eq!(app.selected_row(), Some(TuiRow::Package("pkg".to_string())));
+
+    app.apply_core_event(CoreEvent::FileFailed {
+        file_id: "episode-1.bin".to_string(),
+        message: "boom".to_string(),
+    });
+
+    assert_eq!(app.file_list_state.selected(), Some(0));
+    assert_eq!(app.selected_row(), Some(TuiRow::Package("pkg".to_string())));
+    assert_eq!(app.visible_rows().len(), 3);
 }

@@ -2,13 +2,22 @@ use super::*;
 use crate::{
     core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus},
     test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot},
-    tui::event::DownloadRequest,
+    tui::{
+        draw::draw,
+        event::{DownloadEvent, DownloadRequest, QueuedFile},
+        input::{handle_input, handle_paste},
+        visible::TuiRow,
+    },
 };
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use ratatui::{Terminal, backend::TestBackend, layout::Position};
 use std::env;
 use std::path::Path;
+use sysinfo::System;
 use tempfile::tempdir;
+use tokio::sync::{mpsc, watch};
 
-use super::app::{FileStatus, UiAction};
+use super::app::{FileStatus, Popup, UiAction};
 
 struct StateDirectoryGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
@@ -588,4 +597,202 @@ fn resume_session_deduplicates_duplicate_file_entries_by_path() {
     assert_eq!(session.files.len(), 1);
     assert_eq!(session.files[0].path, "duplicate.mkv");
     assert_eq!(session.files[0].lifecycle, FileLifecycle::Complete);
+}
+
+struct ScenarioHarness {
+    app: App,
+    download_tx: mpsc::UnboundedSender<DownloadEvent>,
+    download_rx: mpsc::UnboundedReceiver<DownloadEvent>,
+    _action_tx: mpsc::UnboundedSender<UiAction>,
+    action_rx: mpsc::UnboundedReceiver<UiAction>,
+    _state_tx: watch::Sender<String>,
+    sys: System,
+    pid: Option<sysinfo::Pid>,
+    tick_count: u32,
+    width: u16,
+    height: u16,
+}
+
+struct ScenarioSnapshot {
+    text: String,
+    cursor: Position,
+    selected_row: Option<TuiRow>,
+    url_input_active: bool,
+    popup: Popup,
+    status: String,
+}
+
+impl ScenarioHarness {
+    fn new(width: u16, height: u16) -> Self {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let app = App::new(9723, event_tx, true);
+        let (download_tx, download_rx) = mpsc::unbounded_channel();
+        let (action_tx, action_rx) = mpsc::unbounded_channel();
+        let (state_tx, _state_rx) = watch::channel(String::new());
+
+        Self {
+            app,
+            download_tx,
+            download_rx,
+            _action_tx: action_tx,
+            action_rx,
+            _state_tx: state_tx,
+            sys: System::new(),
+            pid: sysinfo::get_current_pid().ok(),
+            tick_count: 0,
+            width,
+            height,
+        }
+    }
+
+    fn key(&mut self, code: KeyCode) {
+        handle_input(&mut self.app, key(code));
+    }
+
+    fn paste(&mut self, text: &str) {
+        handle_paste(&mut self.app, text);
+    }
+
+    fn inject_download(&self, event: DownloadEvent) {
+        self.download_tx
+            .send(event)
+            .expect("download event should send");
+    }
+
+    fn tick(&mut self) {
+        self.tick_count += 1;
+        self.app.handle_terminal_tick(
+            &mut self.download_rx,
+            &mut self.action_rx,
+            self.tick_count,
+            &mut self.sys,
+            self.pid,
+        );
+    }
+
+    fn render(&mut self) -> ScenarioSnapshot {
+        let backend = TestBackend::new(self.width, self.height);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        terminal
+            .draw(|frame| draw(frame, &mut self.app))
+            .expect("draw should succeed");
+
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area;
+        let mut text = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = buffer.cell((x, y)).expect("cell should exist");
+                text.push_str(cell.symbol());
+            }
+            text.push('\n');
+        }
+
+        ScenarioSnapshot {
+            text,
+            cursor: terminal
+                .get_cursor_position()
+                .expect("cursor position should be readable"),
+            selected_row: self.app.selected_row(),
+            url_input_active: self.app.url_input_active,
+            popup: self.app.popup,
+            status: self.app.status.clone(),
+        }
+    }
+}
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
+}
+
+#[test]
+fn scenario_add_mode_keeps_cursor_visible_during_live_updates() {
+    let mut harness = ScenarioHarness::new(42, 14);
+
+    harness.key(KeyCode::Char('a'));
+    harness.paste("https://mega.nz/file/alpha/beta/gamma/tail-marker");
+    harness.inject_download(DownloadEvent::StatusMessage(
+        "background refresh".to_string(),
+    ));
+    harness.tick();
+
+    let snapshot = harness.render();
+
+    assert!(snapshot.url_input_active);
+    assert_eq!(snapshot.popup, Popup::None);
+    assert_eq!(snapshot.status, "background refresh");
+    assert!(snapshot.text.contains("tail-marker"));
+    assert!(
+        !snapshot
+            .text
+            .contains("https://mega.nz/file/alpha/beta/gamma/tail-marker")
+    );
+    assert_eq!(snapshot.cursor.y, 2);
+    assert!(snapshot.cursor.x > 1);
+}
+
+#[test]
+fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers() {
+    let mut harness = ScenarioHarness::new(80, 18);
+
+    for (package_id, file_id, name) in [
+        ("pkg-a", "a.bin", "Package A"),
+        ("pkg-b", "b.bin", "Package B"),
+    ] {
+        harness.app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id.to_string(),
+                source_url: format!("https://mega.nz/folder/{package_id}"),
+                display_name: name.to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.to_string(),
+                    path: file_id.to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+    }
+
+    let _ = harness.render();
+
+    harness.inject_download(DownloadEvent::FileError {
+        id: "a.bin".to_string(),
+        error: "boom".to_string(),
+    });
+    harness.tick();
+    let _ = harness.render();
+
+    harness.key(KeyCode::Down);
+    assert_eq!(
+        harness.render().selected_row,
+        Some(TuiRow::File {
+            package_id: "pkg-a".to_string(),
+            file_id: "a.bin".to_string(),
+        })
+    );
+
+    harness.inject_download(DownloadEvent::FileQueued(QueuedFile {
+        id: "a.bin".to_string(),
+        size: 128,
+        count_toward_progress: true,
+        origin: crate::tui::event::FileOrigin {
+            source_url: "https://mega.nz/folder/pkg-a".to_string(),
+            submitted_url: "https://mega.nz/folder/pkg-a".to_string(),
+        },
+    }));
+    harness.tick();
+
+    let snapshot = harness.render();
+    assert_eq!(
+        snapshot.selected_row,
+        Some(TuiRow::Package("pkg-a".to_string()))
+    );
+    assert!(snapshot.text.contains("Package A"));
+    assert!(snapshot.text.contains("Package B"));
 }
