@@ -232,9 +232,27 @@ fn effective_status(app: &App) -> String {
 
 fn controls_label(app: &App, width: u16) -> String {
     let text = if app.url_input_active {
-        "enter:add  esc:cancel  paste:ok"
+        if width >= 34 {
+            "enter:add  esc:cancel  paste:ok"
+        } else if width >= 24 {
+            "enter:add  esc:cancel"
+        } else if width >= 14 {
+            "enter:add  esc"
+        } else {
+            "esc"
+        }
     } else {
-        "a:add  up/down:select  enter:open  s:sort  d:del  r:retry  R:reset  c:cfg  q:quit"
+        if width >= 86 {
+            "a:add  up/down:select  enter:open  s:sort  d:del  r:retry  R:reset  c:cfg  q:quit"
+        } else if width >= 58 {
+            "a:add  enter:open  s:sort  d:del  r:retry  q:quit"
+        } else if width >= 40 {
+            "a:add  enter:open  d:del  q:quit"
+        } else if width >= 18 {
+            "a:add  q:quit"
+        } else {
+            "q:quit"
+        }
     };
     truncate_end(text, usize::from(width))
 }
@@ -1026,6 +1044,70 @@ mod tests {
         assert!(rendered.contains("enter:add"));
         assert!(rendered.contains("esc:cancel"));
         assert!(!rendered.contains("q:quit"));
+    }
+
+    #[test]
+    fn draw_main_narrow_width_keeps_quit_visible() {
+        let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
+        let mut app = App::new(9723, tx, true);
+        app.files.push(FileEntry {
+            id: "queued.bin".to_string(),
+            name: "queued.bin".to_string(),
+            size: 10,
+            downloaded: 0,
+            status: FileStatus::Queued,
+        });
+
+        let backend = TestBackend::new(20, 16);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw should succeed");
+        let rendered = {
+            let buffer = terminal.backend().buffer();
+            let area = buffer.area;
+            let mut output = String::new();
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    let cell = buffer.cell((x, y)).expect("cell should exist");
+                    output.push_str(cell.symbol());
+                }
+                output.push('\n');
+            }
+            output
+        };
+
+        assert!(rendered.contains("q:quit"));
+        assert!(rendered.contains("a:add"));
+    }
+
+    #[test]
+    fn draw_main_narrow_url_mode_keeps_escape_visible() {
+        let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
+        let mut app = App::new(9723, tx, true);
+        app.url_input_active = true;
+
+        let backend = TestBackend::new(16, 16);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw should succeed");
+        let rendered = {
+            let buffer = terminal.backend().buffer();
+            let area = buffer.area;
+            let mut output = String::new();
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    let cell = buffer.cell((x, y)).expect("cell should exist");
+                    output.push_str(cell.symbol());
+                }
+                output.push('\n');
+            }
+            output
+        };
+
+        assert!(rendered.contains("esc"));
+        assert!(rendered.contains("enter:add"));
     }
 
     #[test]
