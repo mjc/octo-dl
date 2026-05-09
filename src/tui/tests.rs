@@ -148,7 +148,8 @@ fn resume_session_restores_files_and_only_requeues_remaining_urls() {
         url_rx.try_recv().unwrap(),
         DownloadRequest::ResumeFileIds {
             source_url: "https://mega.nz/file/pending".to_string(),
-            file_ids: vec!["pending.mkv".to_string()]
+            file_ids: vec!["pending.mkv".to_string()],
+            attempt_ids: std::collections::HashMap::new(),
         }
     );
     assert!(url_rx.try_recv().is_err());
@@ -196,6 +197,7 @@ fn resume_session_requeues_package_url_once_for_multiple_pending_files() {
     if let DownloadRequest::ResumeFileIds {
         source_url,
         mut file_ids,
+        ..
     } = url_rx.try_recv().unwrap()
     {
         assert_eq!(source_url, "https://mega.nz/folder/pending");
@@ -399,7 +401,8 @@ fn ui_retry_file_recomputes_totals() {
         url_rx.try_recv().unwrap(),
         DownloadRequest::ResumeFileIds {
             source_url: "https://mega.nz/file/error".to_string(),
-            file_ids: vec!["error.bin".to_string()]
+            file_ids: vec!["error.bin".to_string()],
+            attempt_ids: std::collections::HashMap::from([("error.bin".to_string(), 1)]),
         }
     );
 }
@@ -505,7 +508,10 @@ fn deleted_file_completion_event_redeletes_output_artifacts() {
     std::fs::write(&file_path, b"done").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
     std::fs::write(&sidecar_path, b"{}").unwrap();
-    app.handle_download_event(DownloadEvent::FileComplete { id: file_id });
+    app.handle_download_event(DownloadEvent::FileComplete {
+        id: file_id,
+        attempt_id: 0,
+    });
 
     assert!(!file_path.exists());
     assert!(!part_path.exists());
@@ -551,6 +557,7 @@ fn deleted_file_error_event_redeletes_output_artifacts() {
     app.handle_download_event(DownloadEvent::FileError {
         id: file_id,
         error: "boom".to_string(),
+        attempt_id: 0,
     });
 
     assert!(app.files.is_empty());
@@ -593,7 +600,8 @@ fn ui_reset_file_resets_progress_and_requeues_url() {
         url_rx.try_recv().unwrap(),
         DownloadRequest::ResumeFileIds {
             source_url: "https://mega.nz/file/reset".to_string(),
-            file_ids: vec!["active.bin".to_string()]
+            file_ids: vec!["active.bin".to_string()],
+            attempt_ids: std::collections::HashMap::from([("active.bin".to_string(), 1)]),
         }
     );
     assert!(!file_path.exists());
@@ -620,6 +628,7 @@ fn reset_file_ignores_late_completion_until_new_attempt_starts() {
     app.handle_ui_action(UiAction::ResetFile("active.bin".to_string()));
     app.handle_download_event(DownloadEvent::FileComplete {
         id: "active.bin".to_string(),
+        attempt_id: 0,
     });
 
     assert_eq!(app.files[0].status, FileStatus::Queued);
@@ -646,6 +655,7 @@ fn reset_file_ignores_late_error_until_new_attempt_starts() {
     app.handle_download_event(DownloadEvent::FileError {
         id: "active.bin".to_string(),
         error: "boom".to_string(),
+        attempt_id: 0,
     });
 
     assert_eq!(app.files[0].status, FileStatus::Queued);
@@ -672,10 +682,12 @@ fn reset_file_accepts_new_terminal_events_after_restart() {
     app.handle_download_event(DownloadEvent::FileStart {
         id: "active.bin".to_string(),
         size: 100,
+        attempt_id: 1,
     });
     app.handle_download_event(DownloadEvent::FileError {
         id: "active.bin".to_string(),
         error: "boom".to_string(),
+        attempt_id: 1,
     });
 
     assert_eq!(app.files[0].downloaded, 0);
@@ -892,6 +904,7 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
     harness.inject_download(DownloadEvent::FileError {
         id: "a.bin".to_string(),
         error: "boom".to_string(),
+        attempt_id: 0,
     });
     harness.tick();
     let _ = harness.render();
@@ -952,6 +965,7 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
         .handle_ui_action(UiAction::ResetFile("active.bin".to_string()));
     harness.inject_download(DownloadEvent::FileComplete {
         id: "active.bin".to_string(),
+        attempt_id: 0,
     });
     harness.tick();
 
@@ -967,9 +981,26 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
     harness.inject_download(DownloadEvent::FileStart {
         id: "active.bin".to_string(),
         size: 128,
+        attempt_id: 1,
     });
     harness.inject_download(DownloadEvent::FileComplete {
         id: "active.bin".to_string(),
+        attempt_id: 0,
+    });
+    harness.tick();
+
+    let file = harness
+        .app
+        .files
+        .iter()
+        .find(|file| file.id == "active.bin")
+        .expect("stale completion should not hide the restarted file");
+    assert_eq!(file.status, FileStatus::Downloading);
+    assert_eq!(file.downloaded, 0);
+
+    harness.inject_download(DownloadEvent::FileComplete {
+        id: "active.bin".to_string(),
+        attempt_id: 1,
     });
     harness.tick();
 

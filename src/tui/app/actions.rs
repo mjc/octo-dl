@@ -108,6 +108,7 @@ impl App {
             return false;
         }
 
+        self.file_attempt_ids.remove(id);
         self.reset_pending_files.remove(id);
         self.cancellation_tokens.remove(id);
         super::super::download::schedule_download_artifact_delete(artifact_path.to_string());
@@ -117,6 +118,20 @@ impl App {
 
     fn reset_is_waiting_for_new_attempt(&self, id: &str) -> bool {
         self.reset_pending_files.contains(id)
+    }
+
+    fn current_attempt_id(&self, id: &str) -> u64 {
+        self.file_attempt_ids.get(id).copied().unwrap_or(0)
+    }
+
+    fn bump_file_attempt_id(&mut self, id: &str) -> u64 {
+        let next = self.current_attempt_id(id).saturating_add(1);
+        self.file_attempt_ids.insert(id.to_string(), next);
+        next
+    }
+
+    fn event_matches_current_attempt(&self, id: &str, attempt_id: u64) -> bool {
+        self.current_attempt_id(id) == attempt_id
     }
 
     fn is_session_url(&self, url: &str) -> bool {
@@ -130,9 +145,13 @@ impl App {
         self.show_ui_error_only(url, error);
     }
 
-    pub(crate) fn handle_file_error_event(&mut self, id: String, error: String) {
+    pub(crate) fn handle_file_error_event(&mut self, id: String, error: String, attempt_id: u64) {
         log::error!("Download error: {id}: {error}");
         if self.handle_deleted_download_artifact(&id, &id) {
+            return;
+        }
+        if !self.event_matches_current_attempt(&id, attempt_id) {
+            log::info!("Ignoring stale download error after retry/reset: {id}");
             return;
         }
         if self.reset_is_waiting_for_new_attempt(&id) {
@@ -191,9 +210,13 @@ impl App {
         self.handle_session_url_fetched(&url);
     }
 
-    pub(crate) fn handle_file_start_event(&mut self, id: String, size: u64) {
+    pub(crate) fn handle_file_start_event(&mut self, id: String, size: u64, attempt_id: u64) {
         log::info!("Download started: {id} ({})", format_bytes(size));
         if self.deleted_files.contains(&id) {
+            return;
+        }
+        if !self.event_matches_current_attempt(&id, attempt_id) {
+            log::info!("Ignoring stale download start after retry/reset: {id}");
             return;
         }
         self.reset_pending_files.remove(&id);
@@ -209,8 +232,17 @@ impl App {
         self.reset_file_ui_rate(&id);
     }
 
-    pub(crate) fn handle_file_progress_event(&mut self, id: Arc<str>, delta: ProgressDelta) {
+    pub(crate) fn handle_file_progress_event(
+        &mut self,
+        id: Arc<str>,
+        delta: ProgressDelta,
+        attempt_id: u64,
+    ) {
         if self.deleted_files.contains(id.as_ref()) {
+            return;
+        }
+        if !self.event_matches_current_attempt(id.as_ref(), attempt_id) {
+            log::info!("Ignoring stale download progress after retry/reset: {}", id);
             return;
         }
         self.reset_pending_files.remove(id.as_ref());
@@ -228,8 +260,18 @@ impl App {
         let _ = self.update_file_ui_progress(id.as_ref(), previous_downloaded, now);
     }
 
-    pub(crate) fn handle_resume_reused_event(&mut self, id: String, chunks: usize, bytes: u64) {
+    pub(crate) fn handle_resume_reused_event(
+        &mut self,
+        id: String,
+        chunks: usize,
+        bytes: u64,
+        attempt_id: u64,
+    ) {
         if self.deleted_files.contains(&id) {
+            return;
+        }
+        if !self.event_matches_current_attempt(&id, attempt_id) {
+            log::info!("Ignoring stale resume reuse event after retry/reset: {id}");
             return;
         }
         self.reset_pending_files.remove(&id);
@@ -245,9 +287,13 @@ impl App {
         self.set_resume_reuse_status(&id, chunks, bytes);
     }
 
-    pub(crate) fn handle_file_complete_event(&mut self, id: String) {
+    pub(crate) fn handle_file_complete_event(&mut self, id: String, attempt_id: u64) {
         log::info!("Download complete: {id}");
         if self.handle_deleted_download_artifact(&id, &id) {
+            return;
+        }
+        if !self.event_matches_current_attempt(&id, attempt_id) {
+            log::info!("Ignoring stale download completion after retry/reset: {id}");
             return;
         }
         if self.reset_is_waiting_for_new_attempt(&id) {
@@ -261,9 +307,13 @@ impl App {
         self.mark_visible_file_complete(&id, &id);
     }
 
-    pub(crate) fn handle_file_cancelled_event(&mut self, id: String) {
+    pub(crate) fn handle_file_cancelled_event(&mut self, id: String, attempt_id: u64) {
         log::info!("Download cancelled: {id}");
         if self.handle_deleted_download_artifact(&id, &id) {
+            return;
+        }
+        if !self.event_matches_current_attempt(&id, attempt_id) {
+            log::info!("Ignoring stale download cancellation after retry/reset: {id}");
             return;
         }
         if self.reset_is_waiting_for_new_attempt(&id) {
@@ -290,6 +340,7 @@ impl App {
         }
         let is_core_backed = self.core_state.files.contains_key(id);
         self.cancel_file_token(id);
+        self.file_attempt_ids.remove(id);
         self.reset_pending_files.remove(id);
         self.deleted_files.insert(id.to_string());
         if is_core_backed {
@@ -328,6 +379,7 @@ impl App {
                 message: message.clone(),
             });
         }
+        self.bump_file_attempt_id(id);
         self.reset_pending_files.remove(id);
         self.apply_core_command(CoreCommand::RetryFile {
             file_id: id.to_string(),
@@ -370,6 +422,7 @@ impl App {
         };
 
         self.cancel_file_token(id);
+        self.bump_file_attempt_id(id);
         self.reset_pending_files.insert(id.to_string());
 
         self.apply_core_command(CoreCommand::ResetFile {

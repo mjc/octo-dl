@@ -78,9 +78,20 @@ impl App {
                 continue;
             }
             let file_ids = file_ids.into_iter().collect::<Vec<_>>();
+            let attempt_ids = file_ids
+                .iter()
+                .filter_map(|file_id| {
+                    self.file_attempt_ids
+                        .get(file_id)
+                        .copied()
+                        .filter(|attempt_id| *attempt_id > 0)
+                        .map(|attempt_id| (file_id.clone(), attempt_id))
+                })
+                .collect();
             let _ = self.url_tx.send(DownloadRequest::ResumeFileIds {
                 source_url,
                 file_ids,
+                attempt_ids,
             });
         }
     }

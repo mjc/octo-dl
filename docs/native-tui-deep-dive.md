@@ -99,10 +99,9 @@
 ### 5. Session and Late-Event Reconciliation
 - Covered by the selection fix above: completion-driven row collapse no longer retargets the user to a different package.
 - Fixed: delete now re-suppresses late `FileError` the same way it already re-suppressed late `FileComplete`, so removed rows do not revive as error rows.
-- Fixed: reset now holds a short suppression window for terminal events from the old attempt until the restarted attempt emits `FileStart`, `Progress`, or `ResumeReused`.
+- Fixed: retry/reset now assign a per-file attempt ID to `ResumeFileIds`, and the runtime ignores any `FileStart`, `Progress`, `ResumeReused`, `FileComplete`, `FileCancelled`, or `FileError` whose attempt ID does not match the current file attempt.
 - Likely subsystem: [src/tui/app/actions.rs](/home/mjc/projects/octo-dl/src/tui/app/actions.rs:95)
-- Confidence: medium-high
-- Residual risk: there is still no per-attempt generation ID in `DownloadEvent`, so a stale terminal event that races in after the restarted attempt has already emitted `FileStart` is still structurally hard to distinguish from a real current-attempt event.
+- Confidence: high
 
 ## Regression Test Plan by Layer
 - `app`: state projection and late-event suppression rules.

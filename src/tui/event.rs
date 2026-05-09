@@ -45,6 +45,7 @@ pub enum DownloadRequest {
     ResumeFileIds {
         source_url: String,
         file_ids: Vec<String>,
+        attempt_ids: HashMap<String, u64>,
     },
 }
 
@@ -53,25 +54,31 @@ pub enum DownloadEvent {
     FileStart {
         id: String,
         size: u64,
+        attempt_id: u64,
     },
     Progress {
         id: Arc<str>,
         delta: ProgressDelta,
+        attempt_id: u64,
     },
     ResumeReused {
         id: String,
         chunks: usize,
         bytes: u64,
+        attempt_id: u64,
     },
     FileComplete {
         id: String,
+        attempt_id: u64,
     },
     FileCancelled {
         id: String,
+        attempt_id: u64,
     },
     FileError {
         id: String,
         error: String,
+        attempt_id: u64,
     },
     ScopeError {
         scope: String,
@@ -130,12 +137,17 @@ impl DownloadProgress for TuiProgress {
         let _ = self.tx.send(DownloadEvent::FileStart {
             id: name.to_string(),
             size,
+            attempt_id: 0,
         });
     }
 
     fn on_progress(&self, name: &str, delta: ProgressDelta) {
         let id = self.intern_id(name);
-        let _ = self.tx.send(DownloadEvent::Progress { id, delta });
+        let _ = self.tx.send(DownloadEvent::Progress {
+            id,
+            delta,
+            attempt_id: 0,
+        });
     }
 
     fn on_resume_reused(&self, name: &str, chunks: usize, bytes: u64) {
@@ -144,12 +156,14 @@ impl DownloadProgress for TuiProgress {
             id: name.to_string(),
             chunks,
             bytes,
+            attempt_id: 0,
         });
     }
 
     fn on_file_complete(&self, name: &str, _stats: &FileStats) {
         let _ = self.tx.send(DownloadEvent::FileComplete {
             id: name.to_string(),
+            attempt_id: 0,
         });
     }
 
@@ -157,6 +171,7 @@ impl DownloadProgress for TuiProgress {
         let _ = self.tx.send(DownloadEvent::FileError {
             id: name.to_string(),
             error: error.to_string(),
+            attempt_id: 0,
         });
     }
 
