@@ -78,6 +78,7 @@ impl App {
             client_rx: None,
             cancellation_tokens: HashMap::new(),
             deleted_files: HashSet::new(),
+            reset_pending_files: HashSet::new(),
             session: None,
             core_state: DownloadState::new(SessionMeta {
                 config: DownloadConfig::default(),

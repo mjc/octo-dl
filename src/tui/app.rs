@@ -98,6 +98,8 @@ pub struct App {
     pub cancellation_tokens: HashMap<String, CancellationToken>,
     // Files deleted from the UI — used to suppress stale download events
     pub deleted_files: HashSet<String>,
+    // Files reset from the UI — used to suppress stale terminal events from the old attempt
+    pub reset_pending_files: HashSet<String>,
     // Session
     pub session: Option<SessionSnapshotV3>,
     pub core_state: DownloadState,
