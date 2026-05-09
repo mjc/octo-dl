@@ -82,6 +82,25 @@ impl SessionAdapter {
         }
     }
 
+    pub(super) fn remove_url(session: &mut SessionSnapshotV3, url: &str) {
+        let removed_package_ids: HashSet<_> = session
+            .packages
+            .iter()
+            .filter(|package| package.source_url == url || package.id == url)
+            .map(|package| package.id.clone())
+            .collect();
+        if removed_package_ids.is_empty() {
+            return;
+        }
+
+        session
+            .packages
+            .retain(|package| package.source_url != url && package.id != url);
+        session
+            .files
+            .retain(|file| !removed_package_ids.contains(&file.package_id));
+    }
+
     pub(super) fn update_file(
         session: &mut SessionSnapshotV3,
         file_id: &str,
