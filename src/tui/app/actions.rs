@@ -18,6 +18,7 @@ impl App {
         }
         self.deleted_files.remove(&url);
         self.urls.push(url.clone());
+        self.ensure_session_for_pending_urls();
         self.apply_core_command(CoreCommand::SubmitUrl { url: url.clone() });
         self.update_session_url(&url, SessionUrlUpdate::Pending);
     }
