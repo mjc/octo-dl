@@ -1,6 +1,7 @@
 use std::env;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
+use std::panic;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +24,8 @@ use super::draw::draw;
 use super::event::DownloadEvent;
 use super::input::{handle_input, handle_paste};
 use super::terminal_server;
+
+static TERMINAL_PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
 
 /// Connection to the pseudo-terminal master that allows writing keystrokes.
 #[derive(Clone)]
@@ -79,26 +82,68 @@ impl TerminalBridge {
 /// Restores terminal to normal mode even if a panic occurs.
 struct TerminalGuard;
 
+fn restore_terminal_state() {
+    let _ = disable_raw_mode();
+    let _ = crossterm::execute!(
+        io::stdout(),
+        crossterm::event::DisableBracketedPaste,
+        LeaveAlternateScreen
+    );
+}
+
 impl TerminalGuard {
     fn new() -> io::Result<Self> {
         enable_raw_mode()?;
-        crossterm::execute!(
+        if let Err(error) = crossterm::execute!(
             io::stdout(),
             EnterAlternateScreen,
             crossterm::event::EnableBracketedPaste
-        )?;
+        ) {
+            restore_terminal_state();
+            return Err(error);
+        }
         Ok(Self)
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = crossterm::execute!(
-            io::stdout(),
-            crossterm::event::DisableBracketedPaste,
-            LeaveAlternateScreen
-        );
+        restore_terminal_state();
+    }
+}
+
+struct TerminalPanicHookGuard {
+    _lock: parking_lot::MutexGuard<'static, ()>,
+    previous_hook: Arc<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync + 'static>,
+}
+
+impl TerminalPanicHookGuard {
+    fn install() -> Self {
+        Self::install_with_cleanup(Arc::new(restore_terminal_state))
+    }
+
+    fn install_with_cleanup(cleanup: Arc<dyn Fn() + Send + Sync + 'static>) -> Self {
+        let lock = TERMINAL_PANIC_HOOK_LOCK.lock();
+        let previous_hook = Arc::new(panic::take_hook());
+        let previous_for_hook = Arc::clone(&previous_hook);
+        panic::set_hook(Box::new(move |info| {
+            cleanup();
+            previous_for_hook(info);
+        }));
+        Self {
+            _lock: lock,
+            previous_hook,
+        }
+    }
+}
+
+impl Drop for TerminalPanicHookGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        let previous_hook = Arc::clone(&self.previous_hook);
+        panic::set_hook(Box::new(move |info| previous_hook(info)));
     }
 }
 
@@ -302,8 +347,26 @@ pub async fn run_interactive_tui(
     state_tx: &watch::Sender<String>,
     web: bool,
 ) -> io::Result<()> {
-    let _terminal_guard = TerminalGuard::new()?;
+    let panic_hook_guard = TerminalPanicHookGuard::install();
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        run_interactive_tui_loop(app, download_rx, action_rx, state_tx, web)
+    }));
+    drop(panic_hook_guard);
 
+    match result {
+        Ok(result) => result,
+        Err(panic) => panic::resume_unwind(panic),
+    }
+}
+
+fn run_interactive_tui_loop(
+    app: &mut App,
+    download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
+    action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
+    state_tx: &watch::Sender<String>,
+    web: bool,
+) -> io::Result<()> {
+    let _terminal_guard = TerminalGuard::new()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -338,4 +401,62 @@ pub async fn run_interactive_tui(
 
     terminal.show_cursor()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    static TEST_PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn terminal_panic_hook_runs_cleanup_before_previous_hook() {
+        let _lock = TEST_PANIC_HOOK_LOCK.lock();
+        let original_hook = panic::take_hook();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let cleanup_events = Arc::clone(&events);
+        let previous_events = Arc::clone(&events);
+
+        panic::set_hook(Box::new(move |_| {
+            previous_events.lock().push("previous");
+        }));
+
+        let hook_guard = TerminalPanicHookGuard::install_with_cleanup(Arc::new(move || {
+            cleanup_events.lock().push("cleanup");
+        }));
+
+        let _ = panic::catch_unwind(|| panic!("boom"));
+
+        drop(hook_guard);
+        panic::set_hook(original_hook);
+
+        let events = events.lock();
+        assert_eq!(events.as_slice(), ["cleanup", "previous"]);
+    }
+
+    #[test]
+    fn terminal_panic_hook_restores_previous_hook_after_drop() {
+        let _lock = TEST_PANIC_HOOK_LOCK.lock();
+        let original_hook = panic::take_hook();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let cleanup_events = Arc::clone(&events);
+        let previous_events = Arc::clone(&events);
+
+        panic::set_hook(Box::new(move |_| {
+            previous_events.lock().push("previous");
+        }));
+
+        let hook_guard = TerminalPanicHookGuard::install_with_cleanup(Arc::new(move || {
+            cleanup_events.lock().push("cleanup");
+        }));
+        drop(hook_guard);
+
+        let _ = panic::catch_unwind(|| panic!("boom"));
+
+        panic::set_hook(original_hook);
+
+        let events = events.lock();
+        assert_eq!(events.as_slice(), ["previous"]);
+    }
 }

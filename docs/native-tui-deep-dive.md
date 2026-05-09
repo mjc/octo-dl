@@ -25,7 +25,8 @@
 
 ### Other terminal writes
 - `eprintln!` in [src/bin/octo.rs](/home/mjc/projects/octo-dl/src/bin/octo.rs:30) is limited to help/argument errors before TUI ownership.
-- Alternate-screen cleanup is guarded by RAII in [src/tui/terminal.rs](/home/mjc/projects/octo-dl/src/tui/terminal.rs:80). That covers unwind paths, not hard aborts.
+- Fixed: interactive TUI now installs a scoped panic hook in [src/tui/terminal.rs](/home/mjc/projects/octo-dl/src/tui/terminal.rs:111) that restores raw mode, bracketed paste, and the primary screen before the panic report is emitted.
+- Residual risk: hard aborts (`std::process::abort`, SIGKILL, process kill -9) still cannot run cleanup logic.
 
 ## Add Mode: Alignment, Focus, Cursor
 
@@ -49,29 +50,32 @@
 - Regression coverage:
   - `scenario_add_mode_keeps_cursor_visible_during_live_updates` in [src/tui/tests.rs](/home/mjc/projects/octo-dl/src/tui/tests.rs:686)
 
-### Remaining add-mode issue
-- `a`, then `Enter` on empty input is a silent no-op.
-- Likely subsystem: [src/tui/input.rs](/home/mjc/projects/octo-dl/src/tui/input.rs:287)
-- Confidence: high
-- Fix direction: either exit add mode on empty submit or set a status message so the user is not left in a dead-feeling state.
-- Missing regression: input-level unit test plus harness scenario.
+### Additional add-mode fixes landed
+- Fixed: empty `Enter` now sets guidance instead of silently doing nothing.
+- Fixed: invalid text submit now reports `No valid URLs found in input` while keeping add mode active.
+- Regression coverage:
+  - `handle_main_input_empty_url_submit_sets_guidance_status` in [src/tui/input.rs](/home/mjc/projects/octo-dl/src/tui/input.rs:787)
+  - `handle_main_input_invalid_url_submit_sets_error_status` in [src/tui/input.rs](/home/mjc/projects/octo-dl/src/tui/input.rs:804)
 
 ## Ranked Bug Map
 
 ### 1. Screen Corruption
 - Fixed: native logger output escaping the draw loop.
+- Fixed: panic reports now restore the primary screen before writing to stderr.
 - Likely subsystem: [src/bin/octo.rs](/home/mjc/projects/octo-dl/src/bin/octo.rs:55)
 - Confidence: high
 - Root-cause pattern: terminal ownership started after the logger was already pointed at the terminal.
-- Missing regression: PTY-level panic/abort coverage while alternate-screen ownership is active.
+- Missing regression: process-level hard-abort coverage while alternate-screen ownership is active.
 
 ### 2. Mode Drift
-- Remaining: empty add-mode submit gives no feedback.
-- Remaining: narrow controls text is truncated from the end, so the most important escape semantics can disappear on small terminals.
+- Fixed: empty add-mode submit now gives guidance instead of dead-ending.
+- Fixed: narrow controls legends now switch to width-banded variants so `q:quit` and `esc` stay visible.
 - Likely subsystem: [src/tui/input.rs](/home/mjc/projects/octo-dl/src/tui/input.rs:287) and [src/tui/draw.rs](/home/mjc/projects/octo-dl/src/tui/draw.rs:230)
 - Confidence: high
-- Fix direction: add width-banded legends and explicit empty-submit behavior.
-- Missing regression: narrow-width render snapshots and input-mode submit scenarios.
+- Regression coverage:
+  - `handle_main_input_empty_url_submit_sets_guidance_status` in [src/tui/input.rs](/home/mjc/projects/octo-dl/src/tui/input.rs:787)
+  - `draw_main_narrow_width_keeps_quit_visible` in [src/tui/draw.rs](/home/mjc/projects/octo-dl/src/tui/draw.rs:1140)
+  - `draw_main_narrow_url_mode_keeps_escape_visible` in [src/tui/draw.rs](/home/mjc/projects/octo-dl/src/tui/draw.rs:1162)
 
 ### 3. Selection and Targeting
 - Severity 1 fixed: when a selected child row disappeared because an auto-expanded package collapsed, selection could jump to the next visible package instead of staying with the original package.
@@ -90,11 +94,10 @@
 
 ### 4. Layout and Rendering
 - Fixed: long add-mode input no longer hides the active insertion point.
-- Remaining: status and controls lines still use coarse end-truncation, which drops priority information instead of reflowing by width band.
+- Fixed: bottom controls now switch between explicit compact legends instead of relying on coarse end-truncation.
 - Likely subsystem: [src/tui/draw.rs](/home/mjc/projects/octo-dl/src/tui/draw.rs:230)
 - Confidence: high
-- Fix direction: define explicit compact legends/status variants for narrow widths instead of truncating a single long sentence.
-- Missing regression: width-banded draw tests around 20, 30, and 40 columns.
+- Missing regression: additional width-banded status-line snapshots beyond the current legend coverage.
 
 ### 5. Session and Late-Event Reconciliation
 - Covered by the selection fix above: completion-driven row collapse no longer retargets the user to a different package.
