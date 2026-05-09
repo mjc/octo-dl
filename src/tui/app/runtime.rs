@@ -19,6 +19,10 @@ impl App {
             self.authenticated = true;
             self.popup = super::Popup::None;
             self.status = "Login successful".to_string();
+            if let Err(error) = self.persist_login_credentials_to_config() {
+                log::error!("Failed to persist login credentials: {error}");
+                self.status = format!("Login successful (config save failed: {error})");
+            }
             self.start_download_task();
         } else {
             self.login.error = error;
