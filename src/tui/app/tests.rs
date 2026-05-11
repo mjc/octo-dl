@@ -1,7 +1,10 @@
 use super::*;
+use std::env;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tempfile::tempdir;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -15,6 +18,35 @@ use crate::{
 fn test_app() -> App {
     let (tx, _rx) = mpsc::unbounded_channel();
     App::new(9723, tx, true)
+}
+
+struct StateDirectoryGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl StateDirectoryGuard {
+    fn set(path: &Path) -> Self {
+        let lock = crate::core::session::STATE_DIRECTORY_TEST_LOCK
+            .lock()
+            .unwrap();
+        let previous = env::var_os("STATE_DIRECTORY");
+        unsafe { env::set_var("STATE_DIRECTORY", path) };
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+impl Drop for StateDirectoryGuard {
+    fn drop(&mut self) {
+        if let Some(ref value) = self.previous {
+            unsafe { env::set_var("STATE_DIRECTORY", value) };
+        } else {
+            unsafe { env::remove_var("STATE_DIRECTORY") };
+        }
+    }
 }
 
 #[test]
@@ -337,6 +369,8 @@ fn skipped_session_paths_groups_only_skipped_files_by_url() {
 
 #[test]
 fn register_session_queued_file_does_not_revive_skipped_entry() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
     let mut session = session_snapshot(vec![("https://mega.nz/file/a", UrlFixtureStatus::Fetched)]);
     push_file(&mut session, 0, "skip-a.bin", 1, FileFixtureStatus::Skipped);
@@ -356,6 +390,8 @@ fn register_session_queued_file_does_not_revive_skipped_entry() {
 
 #[test]
 fn url_resolved_updates_session_status_and_clears_overlay() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
     let url = "https://mega.nz/folder/root".to_string();
     app.session = Some(session_snapshot(vec![(
@@ -442,6 +478,8 @@ fn overlay_error_remains_visible_alongside_core_package_rows() {
 
 #[test]
 fn url_level_overlay_error_does_not_also_render_empty_package_row() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
     let url = "https://mega.nz/folder/bad".to_string();
     app.session = Some(session_snapshot(vec![(
@@ -465,6 +503,8 @@ fn url_level_overlay_error_does_not_also_render_empty_package_row() {
 
 #[test]
 fn deleting_url_level_error_removes_session_url_and_ignores_late_events() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
     let url = "https://mega.nz/folder/bad".to_string();
     app.session = Some(session_snapshot(vec![(
@@ -506,6 +546,8 @@ fn deleting_url_level_error_removes_session_url_and_ignores_late_events() {
 
 #[test]
 fn resubmitting_deleted_url_clears_late_event_fence() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
     let url = "https://mega.nz/folder/bad".to_string();
     app.deleted_files.insert(url.clone());
@@ -518,6 +560,8 @@ fn resubmitting_deleted_url_clears_late_event_fence() {
 
 #[test]
 fn shutdown_sync_refreshes_session_progress_skipped_during_hot_events() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
     let url = "https://mega.nz/file/root".to_string();
     let mut session = session_snapshot(vec![(url.as_str(), UrlFixtureStatus::Fetched)]);
@@ -557,6 +601,8 @@ fn shutdown_sync_refreshes_session_progress_skipped_during_hot_events() {
 
 #[test]
 fn mark_visible_file_error_updates_session_file_status() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
     let mut session = session_snapshot(vec![(
         "https://mega.nz/file/root",

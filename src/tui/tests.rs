@@ -484,6 +484,8 @@ fn ui_retry_file_recomputes_totals() {
 
 #[test]
 fn ui_retry_empty_failed_package_requeues_source_url() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
     let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel();

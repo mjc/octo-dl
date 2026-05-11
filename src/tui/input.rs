@@ -1205,6 +1205,8 @@ mod tests {
 
     #[test]
     fn add_url_deduplicates() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
         let mut app = test_app();
         let mut url_rx = app.url_rx.take().expect("url_rx should exist");
         app.submit_url("https://mega.nz/file/abc".to_string());
