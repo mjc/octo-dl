@@ -184,8 +184,77 @@ struct SnapshotFile {
 }
 
 #[derive(Deserialize)]
+struct SnapshotPackage {
+    id: String,
+    #[serde(default)]
+    source_url: String,
+    #[serde(default)]
+    display_name: String,
+}
+
+#[derive(Deserialize)]
 struct SnapshotState {
+    #[serde(default)]
     files: Vec<SnapshotFile>,
+    #[serde(default)]
+    packages: Vec<SnapshotPackage>,
+}
+
+fn snapshot_state(state: &ApiState) -> Result<SnapshotState, Box<axum::response::Response>> {
+    let Some(shared) = state.shared.as_ref() else {
+        return Err(Box::new(
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({"error": "Web UI not enabled"})),
+            )
+                .into_response(),
+        ));
+    };
+
+    serde_json::from_str(shared.state_rx.borrow().as_str()).map_err(|_| {
+        Box::new(
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": "invalid app state"})),
+            )
+                .into_response(),
+        )
+    })
+}
+
+fn resolve_package_id(
+    state: &ApiState,
+    id: Option<&str>,
+    name: Option<&str>,
+) -> Result<Option<String>, Box<axum::response::Response>> {
+    let Some(selector) = id.or(name) else {
+        return Ok(None);
+    };
+
+    let Ok(snapshot) = snapshot_state(state) else {
+        return Ok(None);
+    };
+
+    let matches: Vec<_> = snapshot
+        .packages
+        .into_iter()
+        .filter(|package| {
+            package.id == selector
+                || package.display_name == selector
+                || package.source_url == selector
+        })
+        .collect();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [package] => Ok(Some(package.id.clone())),
+        _ => Err(Box::new(
+            (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({"error": "ambiguous package name; use id"})),
+            )
+                .into_response(),
+        )),
+    }
 }
 
 fn resolve_file_id(
@@ -207,26 +276,7 @@ fn resolve_file_id(
         ));
     };
 
-    let Some(shared) = state.shared.as_ref() else {
-        return Err(Box::new(
-            (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(serde_json::json!({"error": "Web UI not enabled"})),
-            )
-                .into_response(),
-        ));
-    };
-
-    let snapshot: SnapshotState =
-        serde_json::from_str(shared.state_rx.borrow().as_str()).map_err(|_| {
-            Box::new(
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({"error": "invalid app state"})),
-                )
-                    .into_response(),
-            )
-        })?;
+    let snapshot = snapshot_state(state)?;
 
     let matches: Vec<_> = snapshot
         .files
@@ -453,6 +503,11 @@ async fn api_delete(
     State(state): State<ApiState>,
     axum::Json(payload): axum::Json<DeleteRequest>,
 ) -> impl IntoResponse {
+    match resolve_package_id(&state, payload.id.as_deref(), payload.name.as_deref()) {
+        Ok(Some(id)) => return send_ui_action(&state, UiAction::DeletePackage(id)),
+        Ok(None) => {}
+        Err(response) => return *response,
+    }
     match resolve_file_id(&state, payload.id, payload.name) {
         Ok(id) => send_ui_action(&state, UiAction::DeleteFile(id)),
         Err(response) => *response,
@@ -464,6 +519,11 @@ async fn api_retry(
     State(state): State<ApiState>,
     axum::Json(payload): axum::Json<RetryRequest>,
 ) -> impl IntoResponse {
+    match resolve_package_id(&state, payload.id.as_deref(), payload.name.as_deref()) {
+        Ok(Some(id)) => return send_ui_action(&state, UiAction::RetryPackage(id)),
+        Ok(None) => {}
+        Err(response) => return *response,
+    }
     match resolve_file_id(&state, payload.id, payload.name) {
         Ok(id) => send_ui_action(&state, UiAction::RetryFile(id)),
         Err(response) => *response,
@@ -708,6 +768,45 @@ mod tests {
         let duplicate =
             resolve_file_id(&state, None, Some("dup.mkv".to_string())).expect_err("duplicate");
         assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn resolve_package_id_matches_package_rows() {
+        let (state, _rx) = state_with_snapshot(
+            r#"{"packages":[{"id":"pkg","source_url":"https://mega.nz/folder/pkg","display_name":"Package"},{"id":"other","source_url":"https://mega.nz/folder/other","display_name":"Other"}],"files":[]}"#,
+        );
+
+        let by_id = resolve_package_id(&state, Some("pkg"), None)
+            .expect("package lookup should succeed")
+            .expect("package should resolve");
+        assert_eq!(by_id, "pkg");
+
+        let by_name = resolve_package_id(&state, None, Some("Package"))
+            .expect("package lookup should succeed")
+            .expect("package should resolve");
+        assert_eq!(by_name, "pkg");
+    }
+
+    #[tokio::test]
+    async fn retry_api_dispatches_package_action_for_package_id() {
+        let (state, mut rx) = state_with_snapshot(
+            r#"{"packages":[{"id":"pkg","source_url":"https://mega.nz/folder/pkg","display_name":"Package"}],"files":[]}"#,
+        );
+
+        let _ = api_retry(
+            State(state),
+            axum::Json(RetryRequest {
+                id: Some("pkg".to_string()),
+                name: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        match rx.try_recv().expect("UI action should be sent") {
+            UiAction::RetryPackage(id) => assert_eq!(id, "pkg"),
+            other => panic!("unexpected UI action: {other:?}"),
+        }
     }
 
     #[test]

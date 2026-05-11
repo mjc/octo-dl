@@ -25,6 +25,18 @@ impl App {
         self.update_session_url(&url, SessionUrlUpdate::Pending);
     }
 
+    fn retry_source_url(&mut self, url: &str) {
+        self.deleted_files.remove(url);
+        if !self.urls.iter().any(|existing| existing == url) {
+            self.urls.push(url.to_string());
+        }
+        self.ensure_session_for_pending_urls();
+        self.apply_core_command(CoreCommand::SubmitUrl {
+            url: url.to_string(),
+        });
+        self.update_session_url(url, SessionUrlUpdate::Pending);
+    }
+
     pub(crate) fn drain_ui_actions(
         &mut self,
         action_rx: &mut tokio::sync::mpsc::UnboundedReceiver<UiAction>,
@@ -452,7 +464,16 @@ impl App {
     }
 
     pub(crate) fn perform_retry_package_action(&mut self, package_id: &str) {
-        for file_id in self.package_file_ids(package_id) {
+        let Some(package) = self.core_state.packages.get(package_id) else {
+            return;
+        };
+        let source_url = package.source_url.clone();
+        let package_failed =
+            package.error.is_some() || matches!(package.status, crate::core::PackageStatus::Failed);
+        let file_ids = package.file_ids.clone();
+        let mut retried_file = false;
+
+        for file_id in file_ids {
             let retryable =
                 self.core_state.files.get(&file_id).is_some_and(|file| {
                     matches!(file.lifecycle, crate::core::FileLifecycle::Failed)
@@ -461,7 +482,15 @@ impl App {
                     .is_some_and(|context| matches!(context.status, super::FileStatus::Error(_)));
             if retryable {
                 self.perform_retry_file_action(&file_id);
+                retried_file = true;
             }
+        }
+
+        if !retried_file && package_failed {
+            self.core_state.packages.shift_remove(package_id);
+            self.retry_source_url(&source_url);
+            self.sync_visible_files();
+            self.recompute_totals();
         }
     }
 

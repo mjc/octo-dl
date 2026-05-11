@@ -1,6 +1,9 @@
 use super::*;
 use crate::{
-    core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus},
+    core::{
+        CoreEvent, FileLifecycle, PackageState, PackageStatus, ResolvedFile, ResolvedPackage,
+        SessionRunStatus,
+    },
     test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot},
     tui::{
         draw::draw,
@@ -477,6 +480,60 @@ fn ui_retry_file_recomputes_totals() {
             attempt_ids: std::collections::HashMap::from([("error.bin".to_string(), 1)]),
         }
     );
+}
+
+#[test]
+fn ui_retry_empty_failed_package_requeues_source_url() {
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+    let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+
+    let source_url = "https://mega.nz/folder/retry".to_string();
+    let package_id = "batch-folder".to_string();
+    app.session = Some(session_snapshot(vec![(
+        source_url.as_str(),
+        UrlFixtureStatus::Pending,
+    )]));
+    app.update_session_url(
+        &source_url,
+        crate::tui::session::SessionUrlUpdate::Error("boom"),
+    );
+    app.urls.push(source_url.clone());
+    app.core_state.packages.insert(
+        package_id.clone(),
+        PackageState {
+            id: package_id.clone(),
+            source_url: source_url.clone(),
+            display_name: "Retry Folder".to_string(),
+            status: PackageStatus::Failed,
+            file_ids: Vec::new(),
+            error: Some("boom".to_string()),
+        },
+    );
+    app.sync_visible_files();
+
+    assert_eq!(
+        app.visible_rows(),
+        vec![TuiRow::Package(package_id.clone())]
+    );
+
+    app.handle_ui_action(UiAction::RetryPackage(package_id.clone()));
+
+    assert!(!app.core_state.packages.contains_key(&package_id));
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::SubmitUrl {
+            url: source_url.clone()
+        }
+    );
+    let session = app.session.as_ref().expect("session should remain");
+    let package = session
+        .packages
+        .iter()
+        .find(|package| package.source_url == source_url)
+        .expect("source URL package should remain tracked");
+    assert!(package.error.is_none());
 }
 
 #[test]
