@@ -11,6 +11,8 @@ use super::{
     VisibleFileContext,
 };
 
+const MAX_UI_ACTIONS_PER_TICK: usize = 64;
+
 impl App {
     pub(crate) fn submit_url(&mut self, url: String) {
         if self.urls.contains(&url) {
@@ -28,7 +30,10 @@ impl App {
         action_rx: &mut tokio::sync::mpsc::UnboundedReceiver<UiAction>,
     ) -> bool {
         let mut handled = false;
-        while let Ok(action) = action_rx.try_recv() {
+        for _ in 0..MAX_UI_ACTIONS_PER_TICK {
+            let Ok(action) = action_rx.try_recv() else {
+                break;
+            };
             self.handle_ui_action(action);
             handled = true;
         }

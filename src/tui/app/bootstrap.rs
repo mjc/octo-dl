@@ -296,7 +296,8 @@ impl App {
         if service_config.credentials.has_credentials() {
             if let Some((email, password, _mfa)) = service_config.credentials.decrypt_if_needed() {
                 log::info!("Loaded credentials from config file");
-                credentials_from_config = self.login.set_credentials(email, password, String::new());
+                credentials_from_config =
+                    self.login.set_credentials(email, password, String::new());
 
                 if !service_config.credentials.encrypted {
                     log::info!("Encrypting plaintext credentials in config file");
@@ -434,6 +435,10 @@ mod tests {
     fn persist_login_credentials_creates_default_config_file() {
         let dir = tempdir().expect("temp dir should exist");
         let _guard = StateDirectoryGuard::set(dir.path());
+        let config_path = dir.path().join("config.toml");
+        let mut config = ServiceConfig::load_or_create(&config_path).expect("config should exist");
+        config.download.path = Some(dir.path().join("downloads").to_string_lossy().into_owned());
+        config.save(&config_path).expect("config should save");
 
         let (tx, _rx) = mpsc::unbounded_channel();
         let (mut app, _host, _port) = App::new_with_optional_service_config(tx, true, None, 9723)
@@ -447,7 +452,6 @@ mod tests {
         app.persist_login_credentials_to_config()
             .expect("credentials should persist");
 
-        let config_path = dir.path().join("config.toml");
         assert!(config_path.exists());
 
         let saved = ServiceConfig::load(&config_path).expect("config should load");
@@ -473,17 +477,20 @@ mod tests {
             password: "saved-secret".to_string(),
             mfa: "654321".to_string(),
         };
+        config.download.path = Some(dir.path().join("downloads").to_string_lossy().into_owned());
         config.credentials.encrypt_in_place();
         config.save(&config_path).expect("config should save");
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (app, _host, _port) =
-            App::new_with_optional_service_config(tx, true, None, 9723)
-                .expect("app should initialize");
+        let (app, _host, _port) = App::new_with_optional_service_config(tx, true, None, 9723)
+            .expect("app should initialize");
 
         assert_eq!(app.login.email(), "saved@example.com");
         assert_eq!(app.login.password(), "saved-secret");
         assert!(app.login.mfa().is_empty());
-        assert_eq!(app.persist_config_path.as_deref(), Some(config_path.as_path()));
+        assert_eq!(
+            app.persist_config_path.as_deref(),
+            Some(config_path.as_path())
+        );
     }
 }
