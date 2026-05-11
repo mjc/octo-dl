@@ -1,13 +1,4 @@
-//! HTTP API server for receiving URLs from the bookmarklet, and WebSocket
-//! server for streaming the ratatui TUI to xterm.js in the browser.
-//!
-//! # Architecture
-//!
-//! The **`--web`** mode renders ratatui into an in-memory buffer
-//! ([`super::BufWriter`]) and streams the ANSI output over a WebSocket to
-//! an xterm.js terminal in the browser.  Keyboard input travels back over
-//! the same WebSocket and is translated to crossterm events via
-//! [`super::ansi_input::parse_xterm_input`].
+//! HTTP API server for receiving URLs and serving state to the xterm.js UI.
 //!
 //! # Security Notice
 //!
@@ -16,43 +7,44 @@
 //! - On `localhost` / `127.0.0.1` for local-only access
 //! - Behind Tailscale or similar VPN for trusted network access
 //! - **Never** exposed directly to the public internet
+//!
+//! The server accepts arbitrary HTML content and URL lists from clients. While request bodies
+//! are limited to 10MB, this is not a substitute for authentication. For production deployments,
+//! consider adding reverse proxy authentication (e.g., Tailscale, Caddy with auth middleware).
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, State, WebSocketUpgrade};
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::HeaderMap;
-use axum::response::{Html, IntoResponse};
+use axum::response::sse::{Event as SseEvent, KeepAlive};
+use axum::response::{Html, IntoResponse, Sse};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::WatchStream;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::extract_urls;
 
+use super::WebOptions;
+use super::app::{SharedAppState, UiAction};
 use super::event::DownloadEvent;
+use super::web;
 
 pub const DEFAULT_API_PORT: u16 = 9723;
 
-/// Channel type for sending raw keyboard bytes from a WebSocket client
-/// into the event loop.
-pub type WsInputTx = mpsc::UnboundedSender<Vec<u8>>;
-
-/// Channel type for receiving ANSI frame bytes from the event loop
-/// to send to a WebSocket client.
-pub type WsFrameRx = tokio::sync::watch::Receiver<Vec<u8>>;
-
 #[derive(Clone)]
-struct AppState {
+struct ApiState {
     tx: mpsc::UnboundedSender<DownloadEvent>,
     host: String,
     port: u16,
-    /// When web mode is active, the event loop listens on this channel
-    /// for raw keyboard input from WebSocket clients.
-    ws_input_tx: Option<WsInputTx>,
-    /// When web mode is active, the event loop publishes ANSI frames here.
-    ws_frame_rx: Option<WsFrameRx>,
+    shared: Option<SharedAppState>,
+    web_opts: Option<WebOptions>,
+    api_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -78,52 +70,335 @@ struct HealthResponse {
     web_ui: bool,
 }
 
-async fn api_health(State(state): State<AppState>) -> impl IntoResponse {
-    axum::Json(HealthResponse {
-        status: "ok".to_string(),
-        web_ui: state.ws_input_tx.is_some(),
+#[derive(Deserialize)]
+struct LoginRequest {
+    email: String,
+    password: String,
+    #[serde(default)]
+    mfa: String,
+}
+
+#[derive(Deserialize)]
+struct DeleteRequest {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RetryRequest {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ConfigUpdateRequest {
+    chunks_per_file: Option<usize>,
+    concurrent_files: Option<usize>,
+    force_overwrite: Option<bool>,
+    cleanup_on_error: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ShareTargetQuery {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    url: String,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Sends a `UiAction` to the event loop, returning 503 if shared state is absent.
+fn send_ui_action(state: &ApiState, action: UiAction) -> axum::response::Response {
+    state.shared.as_ref().map_or_else(
+        || {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Web UI not enabled",
+            )
+                .into_response()
+        },
+        |shared| {
+            let _ = shared.action_tx.send(action);
+            axum::Json(serde_json::json!({"ok": true})).into_response()
+        },
+    )
+}
+
+/// Dispatches extracted URLs — via `UiAction` if shared state is available,
+/// otherwise directly as a `DownloadEvent`.
+fn dispatch_urls(state: &ApiState, urls: Vec<String>) {
+    if urls.is_empty() {
+        return;
+    }
+    if let Some(ref shared) = state.shared {
+        let _ = shared.action_tx.send(UiAction::AddUrls(urls));
+    } else {
+        let _ = state.tx.send(DownloadEvent::UrlsReceived { urls });
+    }
+}
+
+fn provided_api_key(headers: &HeaderMap) -> Option<&str> {
+    if let Some(key) = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some(key);
+    }
+
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn require_api_key(state: &ApiState, headers: &HeaderMap) -> Option<axum::response::Response> {
+    let expected_key = state.api_key.as_ref()?;
+    if provided_api_key(headers).is_some_and(|provided| provided == expected_key) {
+        return None;
+    }
+
+    Some(
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "invalid api key"})),
+        )
+            .into_response(),
+    )
+}
+
+#[derive(Deserialize)]
+struct SnapshotFile {
+    id: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct SnapshotPackage {
+    id: String,
+    #[serde(default)]
+    source_url: String,
+    #[serde(default)]
+    display_name: String,
+}
+
+#[derive(Deserialize)]
+struct SnapshotState {
+    #[serde(default)]
+    files: Vec<SnapshotFile>,
+    #[serde(default)]
+    packages: Vec<SnapshotPackage>,
+}
+
+fn snapshot_state(state: &ApiState) -> Result<SnapshotState, Box<axum::response::Response>> {
+    let Some(shared) = state.shared.as_ref() else {
+        return Err(Box::new(
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({"error": "Web UI not enabled"})),
+            )
+                .into_response(),
+        ));
+    };
+
+    serde_json::from_str(shared.state_rx.borrow().as_str()).map_err(|_| {
+        Box::new(
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": "invalid app state"})),
+            )
+                .into_response(),
+        )
     })
 }
 
-fn emit_urls_event(tx: &mpsc::UnboundedSender<DownloadEvent>, urls: Vec<String>) -> UrlResponse {
-    let count = urls.len();
-    if !urls.is_empty() {
-        let _ = tx.send(DownloadEvent::UrlsReceived { urls: urls.clone() });
+fn resolve_package_id(
+    state: &ApiState,
+    id: Option<&str>,
+    name: Option<&str>,
+) -> Result<Option<String>, Box<axum::response::Response>> {
+    let Some(selector) = id.or(name) else {
+        return Ok(None);
+    };
+
+    let Ok(snapshot) = snapshot_state(state) else {
+        return Ok(None);
+    };
+
+    let matches: Vec<_> = snapshot
+        .packages
+        .into_iter()
+        .filter(|package| {
+            package.id == selector
+                || package.display_name == selector
+                || package.source_url == selector
+        })
+        .collect();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [package] => Ok(Some(package.id.clone())),
+        _ => Err(Box::new(
+            (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({"error": "ambiguous package name; use id"})),
+            )
+                .into_response(),
+        )),
+    }
+}
+
+fn resolve_file_id(
+    state: &ApiState,
+    id: Option<String>,
+    name: Option<String>,
+) -> Result<String, Box<axum::response::Response>> {
+    if let Some(id) = id {
+        return Ok(id);
     }
 
-    UrlResponse { added: urls, count }
+    let Some(name) = name else {
+        return Err(Box::new(
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({"error": "missing id or name"})),
+            )
+                .into_response(),
+        ));
+    };
+
+    let snapshot = snapshot_state(state)?;
+
+    let matches: Vec<_> = snapshot
+        .files
+        .into_iter()
+        .filter(|file| file.name == name)
+        .collect();
+    match matches.as_slice() {
+        [] => Err(Box::new(
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({"error": "file not found"})),
+            )
+                .into_response(),
+        )),
+        [file] => Ok(file.id.clone()),
+        _ => Err(Box::new(
+            (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({"error": "ambiguous file name; use id"})),
+            )
+                .into_response(),
+        )),
+    }
+}
+
+fn header_to_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn parse_forwarded_param(value: &str, key: &str) -> Option<String> {
+    for entry in value.split(',') {
+        for part in entry.split(';') {
+            let mut segments = part.trim().splitn(2, '=');
+            if let (Some(param), Some(raw_value)) = (segments.next(), segments.next())
+                && param.eq_ignore_ascii_case(key)
+            {
+                let cleaned = raw_value.trim().trim_matches('"');
+                if !cleaned.is_empty() {
+                    return Some(cleaned.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn infer_host(headers: &HeaderMap, state: &ApiState) -> String {
+    if let Some(host) = header_to_str(headers, "x-forwarded-host") {
+        return host.split(',').next().unwrap_or(host).trim().to_string();
+    }
+    if let Some(forwarded) = header_to_str(headers, "forwarded")
+        && let Some(host) = parse_forwarded_param(forwarded, "host")
+    {
+        return host;
+    }
+    if let Some(host) = header_to_str(headers, "host") {
+        return host.to_string();
+    }
+    state
+        .web_opts
+        .as_ref()
+        .map_or_else(|| state.host.clone(), |w| w.public_host.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Existing endpoints
+// ---------------------------------------------------------------------------
+
+async fn api_health(State(state): State<ApiState>) -> impl IntoResponse {
+    axum::Json(HealthResponse {
+        status: "ok".to_string(),
+        web_ui: state.web_opts.is_some(),
+    })
 }
 
 async fn api_post_urls(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
+    headers: HeaderMap,
     axum::Json(payload): axum::Json<UrlRequest>,
 ) -> impl IntoResponse {
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
+
     let urls = extract_urls(&payload.text);
-    axum::Json(emit_urls_event(&state.tx, urls))
+    let count = urls.len();
+    dispatch_urls(&state, urls.clone());
+    axum::Json(UrlResponse { added: urls, count }).into_response()
 }
 
 async fn api_parse_page(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
+    headers: HeaderMap,
     axum::Json(payload): axum::Json<ParseRequest>,
 ) -> impl IntoResponse {
-    // Try to extract URLs from the full page HTML first
-    let mut urls = extract_urls(&payload.page);
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
 
-    // If none found, fall back to selected text
+    let mut urls = extract_urls(&payload.page);
     if urls.is_empty() && !payload.fallback.is_empty() {
         urls = extract_urls(&payload.fallback);
     }
-
-    axum::Json(emit_urls_event(&state.tx, urls))
+    let count = urls.len();
+    dispatch_urls(&state, urls.clone());
+    axum::Json(UrlResponse { added: urls, count }).into_response()
 }
 
-async fn bookmarklet_page(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    // Fallback for proxy scenarios where Host header might be wrong
-    let fallback_host = headers
-        .get("host")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or(&format!("{}:{}", state.host, state.port))
-        .to_string();
+async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
+    let fallback_host = infer_host(&headers, &state);
+    let api_key_header = state.api_key.as_ref().map_or_else(
+        || "{}".to_string(),
+        |key| {
+            serde_json::to_string(&serde_json::json!({
+                "x-api-key": key,
+            }))
+            .expect("serializing API key header should not fail")
+        },
+    );
 
     Html(format!(
         r#"<!DOCTYPE html>
@@ -148,7 +423,7 @@ async fn bookmarklet_page(State(state): State<AppState>, headers: HeaderMap) -> 
 <body>
 <h1>octo-dl bookmarklet</h1>
 <p>Drag this link to your bookmarks bar:</p>
-<a class="bookmarklet" href="javascript:void(function(){{var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var proto=window.location.protocol;var h=proto+'//{fallback_host}';fetch(h+'/api/parse',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{page:page,fallback:selected}})}}).then(function(r){{return r.json()}}).then(function(d){{if(d.count>0){{alert('Sent '+d.count+' URL(s) to octo-dl')}}else{{alert('No URLs found on this page')}}}}).catch(function(e){{alert('Error: '+e)}})}})()">
+<a class="bookmarklet" href="javascript:void(function(){{var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var proto=window.location.protocol;var h=proto+'//{fallback_host}';var headers=Object.assign({{'Content-Type':'application/json'}},{api_key_header});fetch(h+'/api/parse',{{method:'POST',headers:headers,body:JSON.stringify({{page:page,fallback:selected}})}}).then(function(r){{return r.json()}}).then(function(d){{if(d.count>0){{alert('Sent '+d.count+' URL(s) to octo-dl')}}else{{alert('No URLs found on this page')}}}}).catch(function(e){{alert('Error: '+e)}})}})()">
   Send to octo-dl
 </a>
 <p>Click it on any page to send the page HTML (with selected text as fallback) to octo-dl for download.</p>
@@ -158,10 +433,178 @@ async fn bookmarklet_page(State(state): State<AppState>, headers: HeaderMap) -> 
     ))
 }
 
-/// Starts the HTTP API server for receiving URLs from the bookmarklet.
-///
-/// When `ws_input_tx` and `ws_frame_rx` are provided (web mode), also
-/// serves the xterm.js web terminal at `/` and a WebSocket endpoint at `/ws`.
+// ---------------------------------------------------------------------------
+// xterm.js support endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/state — returns the latest application snapshot as JSON.
+async fn api_get_state(State(state): State<ApiState>) -> impl IntoResponse {
+    state.shared.as_ref().map_or_else(
+        || {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Web UI not enabled",
+            )
+                .into_response()
+        },
+        |shared| {
+            let json = shared.state_rx.borrow().clone();
+            (
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                json,
+            )
+                .into_response()
+        },
+    )
+}
+
+/// GET /api/events — SSE stream of application state updates.
+async fn api_events(
+    State(state): State<ApiState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
+    let rx = state
+        .shared
+        .as_ref()
+        .expect("SSE requires shared state")
+        .state_rx
+        .clone();
+
+    let stream = WatchStream::new(rx).map(|json| Ok(SseEvent::default().data(json)));
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
+/// POST /api/login — submit login credentials from the web UI.
+async fn api_login(
+    State(state): State<ApiState>,
+    axum::Json(payload): axum::Json<LoginRequest>,
+) -> impl IntoResponse {
+    send_ui_action(
+        &state,
+        UiAction::Login {
+            email: payload.email,
+            password: payload.password,
+            mfa: payload.mfa,
+        },
+    )
+}
+
+/// POST /api/pause — toggle pause state.
+async fn api_pause(State(state): State<ApiState>) -> impl IntoResponse {
+    send_ui_action(&state, UiAction::TogglePause)
+}
+
+/// POST /api/delete — delete a file by name.
+async fn api_delete(
+    State(state): State<ApiState>,
+    axum::Json(payload): axum::Json<DeleteRequest>,
+) -> impl IntoResponse {
+    match resolve_package_id(&state, payload.id.as_deref(), payload.name.as_deref()) {
+        Ok(Some(id)) => return send_ui_action(&state, UiAction::DeletePackage(id)),
+        Ok(None) => {}
+        Err(response) => return *response,
+    }
+    match resolve_file_id(&state, payload.id, payload.name) {
+        Ok(id) => send_ui_action(&state, UiAction::DeleteFile(id)),
+        Err(response) => *response,
+    }
+}
+
+/// POST /api/retry — retry a failed file.
+async fn api_retry(
+    State(state): State<ApiState>,
+    axum::Json(payload): axum::Json<RetryRequest>,
+) -> impl IntoResponse {
+    match resolve_package_id(&state, payload.id.as_deref(), payload.name.as_deref()) {
+        Ok(Some(id)) => return send_ui_action(&state, UiAction::RetryPackage(id)),
+        Ok(None) => {}
+        Err(response) => return *response,
+    }
+    match resolve_file_id(&state, payload.id, payload.name) {
+        Ok(id) => send_ui_action(&state, UiAction::RetryFile(id)),
+        Err(response) => *response,
+    }
+}
+
+/// POST /api/config — update download configuration.
+async fn api_config(
+    State(state): State<ApiState>,
+    axum::Json(payload): axum::Json<ConfigUpdateRequest>,
+) -> impl IntoResponse {
+    send_ui_action(
+        &state,
+        UiAction::UpdateConfig {
+            chunks_per_file: payload.chunks_per_file,
+            concurrent_files: payload.concurrent_files,
+            force_overwrite: payload.force_overwrite,
+            cleanup_on_error: payload.cleanup_on_error,
+        },
+    )
+}
+
+/// GET /share — Web Share Target handler (PWA share sheet integration).
+/// Receives shared data via query parameters, extracts URLs, and redirects to the web UI.
+async fn share_target(
+    State(state): State<ApiState>,
+    axum::extract::Query(params): axum::extract::Query<ShareTargetQuery>,
+) -> impl IntoResponse {
+    let combined = format!("{} {} {}", params.title, params.text, params.url);
+    dispatch_urls(&state, extract_urls(&combined));
+    axum::response::Redirect::to("/")
+}
+
+/// POST /share — Web Share Target handler for POST form submissions.
+async fn share_target_post(
+    State(state): State<ApiState>,
+    axum::Form(params): axum::Form<ShareTargetQuery>,
+) -> impl IntoResponse {
+    let combined = format!("{} {} {}", params.title, params.text, params.url);
+    dispatch_urls(&state, extract_urls(&combined));
+    axum::response::Redirect::to("/")
+}
+
+// ---------------------------------------------------------------------------
+// xterm.js support assets
+// ---------------------------------------------------------------------------
+
+/// GET /manifest.json — PWA manifest.
+async fn web_ui_manifest(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
+    let port = state.port;
+    let host = infer_host(&headers, &state);
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/manifest+json",
+        )],
+        web::manifest_json(&host, port),
+    )
+}
+
+/// GET /sw.js — Service worker for PWA offline support.
+async fn web_ui_sw() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/javascript")],
+        web::service_worker_js(),
+    )
+}
+
+/// GET /icon-192.svg — SVG icon for PWA.
+async fn web_ui_icon() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
+        web::icon_svg(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Server setup
+// ---------------------------------------------------------------------------
+
+/// Starts the HTTP API server for receiving URLs and xterm.js state requests.
 ///
 /// # Security
 ///
@@ -175,16 +618,17 @@ pub async fn run_api_server(
     tx: mpsc::UnboundedSender<DownloadEvent>,
     host: &str,
     port: u16,
-    ws_input_tx: Option<WsInputTx>,
-    ws_frame_rx: Option<WsFrameRx>,
+    web_opts: Option<&WebOptions>,
+    shared: Option<SharedAppState>,
+    api_key: Option<String>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let web_mode = ws_input_tx.is_some();
-    let state = AppState {
+    let state = ApiState {
         tx,
         host: host.to_string(),
         port,
-        ws_input_tx,
-        ws_frame_rx,
+        shared,
+        web_opts: web_opts.cloned(),
+        api_key,
     };
 
     let cors = CorsLayer::new()
@@ -198,13 +642,21 @@ pub async fn run_api_server(
         .route("/api/urls", post(api_post_urls))
         .route("/api/parse", post(api_parse_page));
 
-    if web_mode {
+    // State/action routes are exposed only when the xterm.js bridge is enabled.
+    if web_opts.is_some() {
         app = app
-            .route("/", get(xterm_page))
-            .route("/ws", get(ws_upgrade))
-            .route("/static/xterm.min.js", get(serve_xterm_js))
-            .route("/static/xterm.min.css", get(serve_xterm_css))
-            .route("/static/addon-fit.min.js", get(serve_xterm_fit_js));
+            .route("/manifest.json", get(web_ui_manifest))
+            .route("/sw.js", get(web_ui_sw))
+            .route("/icon-192.svg", get(web_ui_icon))
+            .route("/icon-512.svg", get(web_ui_icon))
+            .route("/api/state", get(api_get_state))
+            .route("/api/events", get(api_events))
+            .route("/api/login", post(api_login))
+            .route("/api/pause", post(api_pause))
+            .route("/api/delete", post(api_delete))
+            .route("/api/retry", post(api_retry))
+            .route("/api/config", post(api_config))
+            .route("/share", get(share_target).post(share_target_post));
     }
 
     let app = app
@@ -219,226 +671,214 @@ pub async fn run_api_server(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// WebSocket handler — streams ANSI frames to xterm.js, receives keyboard input
-// ---------------------------------------------------------------------------
-
-/// Upgrade GET /ws to a WebSocket connection.
-async fn ws_upgrade(
-    State(state): State<AppState>,
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| ws_handler(socket, state))
-}
-
-/// Bidirectional WebSocket handler:
-/// - Sends ANSI frame bytes to the browser (binary messages)
-/// - Receives raw keyboard bytes from xterm.js (binary messages)
-async fn ws_handler(mut socket: WebSocket, state: AppState) {
-    let Some(input_tx) = state.ws_input_tx else {
-        return;
-    };
-    let Some(mut frame_rx) = state.ws_frame_rx else {
-        return;
-    };
-
-    loop {
-        tokio::select! {
-            // New frame from the render loop → send to browser
-            result = frame_rx.changed() => {
-                if result.is_err() {
-                    break; // sender dropped
-                }
-                let frame = frame_rx.borrow_and_update().clone();
-                if !frame.is_empty() {
-                    if socket.send(Message::Binary(frame.into())).await.is_err() {
-                        break;
-                    }
-                }
-            }
-            // Keyboard input from browser → forward to the event loop
-            msg = socket.recv() => {
-                match msg {
-                    Some(Ok(Message::Binary(data))) => {
-                        let _ = input_tx.send(data.to_vec());
-                    }
-                    Some(Ok(Message::Text(text))) => {
-                        let _ = input_tx.send(text.as_bytes().to_vec());
-                    }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// xterm.js web page + static assets
-// ---------------------------------------------------------------------------
-
-/// GET / — serves the xterm.js web terminal page.
-async fn xterm_page(State(_state): State<AppState>) -> impl IntoResponse {
-    Html(format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>octo-dl</title>
-<link rel="stylesheet" href="/static/xterm.min.css">
-<style>
-  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  html, body {{ height: 100%; background: #1a1a2e; overflow: hidden; }}
-  #terminal {{ height: 100%; width: 100%; }}
-  #conn-badge {{
-    display: none; position: fixed; top: 8px; right: 8px; z-index: 10;
-    background: #e94560; color: #fff; padding: 4px 12px;
-    border-radius: 4px; font: 13px/1 system-ui;
-  }}
-  #conn-badge.show {{ display: block; }}
-</style>
-</head>
-<body>
-<div id="conn-badge">Disconnected</div>
-<div id="terminal"></div>
-<script src="/static/xterm.min.js"></script>
-<script src="/static/addon-fit.min.js"></script>
-<script>
-(function() {{
-  const term = new Terminal({{
-    cursorBlink: true,
-    convertEol: true,
-    fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
-    fontSize: 14,
-    theme: {{
-      background: '#1a1a2e',
-      foreground: '#e0e0e0',
-      cursor: '#e94560',
-      selectionBackground: '#0f3460',
-    }},
-  }});
-  const fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(document.getElementById('terminal'));
-  fitAddon.fit();
-
-  const badge = document.getElementById('conn-badge');
-  let ws;
-  let reconnectTimer;
-
-  function connect() {{
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(proto + '//' + location.host + '/ws');
-    ws.binaryType = 'arraybuffer';
-
-    ws.onopen = function() {{
-      badge.classList.remove('show');
-      // Send initial terminal size
-      const cols = term.cols;
-      const rows = term.rows;
-      ws.send(JSON.stringify({{ type: 'resize', cols: cols, rows: rows }}));
-    }};
-
-    ws.onmessage = function(e) {{
-      if (e.data instanceof ArrayBuffer) {{
-        term.write(new Uint8Array(e.data));
-      }} else {{
-        term.write(e.data);
-      }}
-    }};
-
-    ws.onclose = function() {{
-      badge.classList.add('show');
-      clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(connect, 2000);
-    }};
-
-    ws.onerror = function() {{
-      ws.close();
-    }};
-  }}
-
-  // Forward keyboard input to the server
-  term.onData(function(data) {{
-    if (ws && ws.readyState === WebSocket.OPEN) {{
-      // Send as binary for raw terminal input
-      const encoder = new TextEncoder();
-      ws.send(encoder.encode(data));
-    }}
-  }});
-
-  // Handle terminal resize
-  window.addEventListener('resize', function() {{
-    fitAddon.fit();
-    if (ws && ws.readyState === WebSocket.OPEN) {{
-      ws.send(JSON.stringify({{ type: 'resize', cols: term.cols, rows: term.rows }}));
-    }}
-  }});
-
-  connect();
-}})();
-</script>
-</body>
-</html>"#
-    ))
-}
-
-/// GET /static/xterm.min.js
-async fn serve_xterm_js() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/javascript")],
-        include_str!("../../static/xterm.min.js"),
-    )
-}
-
-/// GET /static/xterm.min.css
-async fn serve_xterm_css() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/css")],
-        include_str!("../../static/xterm.min.css"),
-    )
-}
-
-/// GET /static/addon-fit.min.js
-async fn serve_xterm_fit_js() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/javascript")],
-        include_str!("../../static/addon-fit.min.js"),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{HeaderValue, StatusCode};
+    use tokio::sync::watch;
+
+    fn state_without_shared() -> (ApiState, mpsc::UnboundedReceiver<DownloadEvent>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            ApiState {
+                tx,
+                host: "127.0.0.1".to_string(),
+                port: DEFAULT_API_PORT,
+                shared: None,
+                web_opts: None,
+                api_key: None,
+            },
+            rx,
+        )
+    }
+
+    fn state_with_snapshot(snapshot: &str) -> (ApiState, mpsc::UnboundedReceiver<UiAction>) {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (action_tx, action_rx) = mpsc::unbounded_channel();
+        let (_state_tx, state_rx) = watch::channel(snapshot.to_string());
+        (
+            ApiState {
+                tx: event_tx,
+                host: "127.0.0.1".to_string(),
+                port: DEFAULT_API_PORT,
+                shared: Some(SharedAppState {
+                    action_tx,
+                    state_rx,
+                }),
+                web_opts: None,
+                api_key: None,
+            },
+            action_rx,
+        )
+    }
 
     #[test]
-    fn emit_urls_event_sends_download_event_for_non_empty_urls() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let urls = vec![
-            "https://mega.nz/file/abc#key".to_string(),
-            "https://mega.nz/file/def#key".to_string(),
-        ];
+    fn dispatch_urls_without_shared_state_sends_download_event() {
+        let (state, mut rx) = state_without_shared();
+        let urls = vec!["https://mega.nz/file/abc#key".to_string()];
 
-        let response = emit_urls_event(&tx, urls.clone());
-        assert_eq!(response.count, 2);
-        assert_eq!(response.added, urls);
+        dispatch_urls(&state, urls.clone());
 
-        match rx.try_recv() {
-            Ok(DownloadEvent::UrlsReceived { urls }) => {
-                assert_eq!(urls.len(), 2);
-            }
-            other => panic!("expected UrlsReceived event, got {other:?}"),
+        match rx.try_recv().expect("download event should be sent") {
+            DownloadEvent::UrlsReceived { urls: received } => assert_eq!(received, urls),
+            other => panic!("unexpected event: {other:?}"),
         }
     }
 
     #[test]
-    fn emit_urls_event_skips_send_for_empty_urls() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+    fn dispatch_urls_with_shared_state_sends_ui_action() {
+        let (state, mut rx) = state_with_snapshot(r#"{"files":[]}"#);
+        let urls = vec!["https://mega.nz/folder/abc#key".to_string()];
 
-        let response = emit_urls_event(&tx, Vec::new());
-        assert_eq!(response.count, 0);
-        assert!(response.added.is_empty());
-        assert!(rx.try_recv().is_err());
+        dispatch_urls(&state, urls.clone());
+
+        match rx.try_recv().expect("UI action should be sent") {
+            UiAction::AddUrls(received) => assert_eq!(received, urls),
+            other => panic!("unexpected UI action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_file_id_by_id_does_not_require_shared_state() {
+        let (state, _rx) = state_without_shared();
+
+        let id = resolve_file_id(&state, Some("file-id".to_string()), None)
+            .expect("explicit id should resolve");
+
+        assert_eq!(id, "file-id");
+    }
+
+    #[test]
+    fn resolve_file_id_by_name_reports_all_lookup_cases() {
+        let (state, _rx) = state_with_snapshot(
+            r#"{"files":[{"id":"one","name":"unique.mkv"},{"id":"two","name":"dup.mkv"},{"id":"three","name":"dup.mkv"}]}"#,
+        );
+
+        let id = resolve_file_id(&state, None, Some("unique.mkv".to_string()))
+            .expect("unique name should resolve");
+        assert_eq!(id, "one");
+
+        let missing = resolve_file_id(&state, None, None).expect_err("missing selector");
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+
+        let not_found =
+            resolve_file_id(&state, None, Some("missing.mkv".to_string())).expect_err("not found");
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+
+        let duplicate =
+            resolve_file_id(&state, None, Some("dup.mkv".to_string())).expect_err("duplicate");
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn resolve_package_id_matches_package_rows() {
+        let (state, _rx) = state_with_snapshot(
+            r#"{"packages":[{"id":"pkg","source_url":"https://mega.nz/folder/pkg","display_name":"Package"},{"id":"other","source_url":"https://mega.nz/folder/other","display_name":"Other"}],"files":[]}"#,
+        );
+
+        let by_id = resolve_package_id(&state, Some("pkg"), None)
+            .expect("package lookup should succeed")
+            .expect("package should resolve");
+        assert_eq!(by_id, "pkg");
+
+        let by_name = resolve_package_id(&state, None, Some("Package"))
+            .expect("package lookup should succeed")
+            .expect("package should resolve");
+        assert_eq!(by_name, "pkg");
+    }
+
+    #[tokio::test]
+    async fn retry_api_dispatches_package_action_for_package_id() {
+        let (state, mut rx) = state_with_snapshot(
+            r#"{"packages":[{"id":"pkg","source_url":"https://mega.nz/folder/pkg","display_name":"Package"}],"files":[]}"#,
+        );
+
+        let _ = api_retry(
+            State(state),
+            axum::Json(RetryRequest {
+                id: Some("pkg".to_string()),
+                name: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        match rx.try_recv().expect("UI action should be sent") {
+            UiAction::RetryPackage(id) => assert_eq!(id, "pkg"),
+            other => panic!("unexpected UI action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_file_id_by_name_requires_valid_shared_state() {
+        let (state, _rx) = state_without_shared();
+        let unavailable =
+            resolve_file_id(&state, None, Some("file.mkv".to_string())).expect_err("no web UI");
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let (state, _rx) = state_with_snapshot("{not-json");
+        let invalid =
+            resolve_file_id(&state, None, Some("file.mkv".to_string())).expect_err("bad state");
+        assert_eq!(invalid.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn require_api_key_accepts_header_and_bearer_token() {
+        let (mut state, _rx) = state_without_shared();
+        state.api_key = Some("secret".to_string());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+        assert!(require_api_key(&state, &headers).is_none());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer secret"),
+        );
+        assert!(require_api_key(&state, &headers).is_none());
+    }
+
+    #[test]
+    fn require_api_key_rejects_missing_or_wrong_key() {
+        let (mut state, _rx) = state_without_shared();
+        state.api_key = Some("secret".to_string());
+
+        let headers = HeaderMap::new();
+        let missing = require_api_key(&state, &headers).expect("missing key should reject");
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("wrong"));
+        let wrong = require_api_key(&state, &headers).expect("wrong key should reject");
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn forwarded_header_drives_public_host() {
+        let (state, _rx) = state_without_shared();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "forwarded",
+            HeaderValue::from_static(r#"for=192.0.2.10;proto=https;host="octo.example""#),
+        );
+
+        assert_eq!(infer_host(&headers, &state), "octo.example");
+    }
+
+    #[test]
+    fn forwarded_host_precedence_matches_proxy_conventions() {
+        let (state, _rx) = state_without_shared();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("public.example, internal.example"),
+        );
+        headers.insert(
+            "forwarded",
+            HeaderValue::from_static("proto=http;host=ignored.example"),
+        );
+
+        assert_eq!(infer_host(&headers, &state), "public.example");
     }
 }

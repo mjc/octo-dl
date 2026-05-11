@@ -1,0 +1,29 @@
+wing: octo_dl
+rooms:
+- name: cli
+  description: Command-line UX and subcommand flow
+  keywords:
+  - cli
+  - command
+  - args
+- name: api_client
+  description: Remote API interaction and request handling
+  keywords:
+  - api
+  - client
+  - requests
+- name: downloads
+  description: Download execution and file output behavior
+  keywords:
+  - download
+  - output
+  - files
+- name: scripts
+  description: Helper scripts and development tooling
+  keywords:
+  - scripts
+  - tooling
+  - helpers
+- name: general
+  description: Supporting files that do not fit a core room
+  keywords: []

@@ -1,18 +1,24 @@
 //! octo-dl CLI - Command-line interface for downloading MEGA files.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use dirs;
 use futures::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 use crate::{
-    DlcKeyCache, DownloadConfig, DownloadItem, DownloadStatsTracker, FileEntry, FileEntryStatus,
-    FileStats, NoProgress, SavedCredentials, SessionState, SessionStats, SessionStatsBuilder,
-    SessionStatus, UrlEntry, UrlStatus, format_bytes, format_duration, is_dlc_path,
+    DlcKeyCache, DownloadConfig, DownloadItem, DownloadProgress, FileStats, NoProgress,
+    SessionStats, SessionStatsBuilder,
+    core::{
+        DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageSnapshot,
+        ProgressDelta, RestartSnapshot, RuntimeState, SavedCredentials, SessionRunStatus,
+        SessionSnapshotV3, reconcile_restart, scan_filesystem,
+    },
+    format_bytes, format_duration, is_dlc_path,
 };
 
 const DEFAULT_CONCURRENT_FILES: usize = 4;
@@ -27,12 +33,6 @@ fn build_http_client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
-fn dummy_downloader(config: &DownloadConfig) -> crate::Downloader {
-    let http = reqwest::Client::new();
-    let client = mega::Client::builder().build(http).expect("client builder");
-    crate::Downloader::new(client, config.clone())
-}
-
 // ============================================================================
 // CLI Configuration
 // ============================================================================
@@ -42,6 +42,19 @@ struct CliConfig {
     dlc_files: Vec<String>,
     download_config: DownloadConfig,
     resume: bool,
+}
+
+struct CliPackageFiles<'a> {
+    source_url: String,
+    files: Vec<DownloadItem<'a>>,
+    skipped: usize,
+    partial: usize,
+}
+
+impl CliPackageFiles<'_> {
+    fn total_size(&self) -> u64 {
+        self.files.iter().map(|item| item.node.size()).sum()
+    }
 }
 
 // ============================================================================
@@ -77,114 +90,142 @@ fn make_total_progress_bar(size: u64) -> ProgressBar {
 // Download Functions
 // ============================================================================
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-async fn download_file(
-    client: &mega::Client,
-    progress: &MultiProgress,
-    total_bar: &ProgressBar,
-    item: &DownloadItem<'_>,
-    chunks: usize,
-) -> crate::Result<FileStats> {
-    let DownloadItem { path, node } = item;
+struct CliDownloadProgress {
+    progress: MultiProgress,
+    total_bar: ProgressBar,
+    bars: Mutex<HashMap<String, ProgressBar>>,
+    session_peak: AtomicU64,
+}
 
-    // Ensure parent directory exists
-    if let Some(parent) = std::path::Path::new(path)
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-    {
-        let _ = std::fs::create_dir_all(parent);
+impl CliDownloadProgress {
+    fn new(progress: MultiProgress, total_bar: ProgressBar) -> Self {
+        Self {
+            progress,
+            total_bar,
+            bars: Mutex::new(HashMap::new()),
+            session_peak: AtomicU64::new(0),
+        }
     }
 
-    let part_file = format!("{path}.part");
-    let stats = Arc::new(DownloadStatsTracker::new(node.size()));
-    let bar = progress.insert_before(total_bar, make_progress_bar(node.size(), node.name()));
-    bar.enable_steady_tick(std::time::Duration::from_millis(250));
-
-    let bar_clone = bar.clone();
-    let total_bar_clone = total_bar.clone();
-    let stats_clone = Arc::clone(&stats);
-
-    // Open .part file for parallel chunk download with MAC verification
-    let file = tokio::fs::File::create(&part_file).await?;
-    file.set_len(node.size()).await?;
-    let file = file.compat_write();
-
-    let name_for_progress = node.name().to_string();
-    let result = client
-        .download_node_parallel_with_progress(
-            node,
-            file,
-            chunks,
-            Some(move |delta| {
-                bar_clone.inc(delta);
-                total_bar_clone.inc(delta);
-                // per_sec() returns f64; as u64 saturates (Rust 1.45+)
-                stats_clone.update_speed(bar_clone.per_sec() as u64);
-                bar_clone.set_message(name_for_progress.clone());
-            }),
-        )
-        .await;
-
-    if result.is_ok() {
-        // Rename .part → final
-        tokio::fs::rename(&part_file, path).await?;
-        bar.finish_and_clear();
-        let file_stats = FileStats {
-            size: node.size(),
-            elapsed: stats.elapsed(),
-            average_speed: stats.average_speed(),
-            peak_speed: stats.peak_speed(),
-            ramp_up_time: stats.time_to_80pct(),
-        };
-        let ramp_up = file_stats.ramp_up_time.map_or_else(
-            || "ramp <1s".to_string(),
-            |d| format!("ramp {}", format_duration(d)),
-        );
-        let _ = progress.println(format!(
-            "  {} - {} in {} ({}/s avg, {}/s peak, {})",
-            node.name(),
-            format_bytes(file_stats.size),
-            format_duration(file_stats.elapsed),
-            format_bytes(file_stats.average_speed),
-            format_bytes(file_stats.peak_speed),
-            ramp_up,
-        ));
-        Ok(file_stats)
-    } else {
-        // Clean up .part file on error
-        let _ = tokio::fs::remove_file(&part_file).await;
-        bar.abandon();
-        result.map(|()| unreachable!()).map_err(crate::Error::from)
+    fn peak_speed(&self) -> u64 {
+        self.session_peak.load(Ordering::Relaxed)
     }
 }
 
-fn print_file_list(files: &[DownloadItem], skipped: usize, partial: usize) {
-    if files.is_empty() && skipped == 0 {
+impl DownloadProgress for CliDownloadProgress {
+    fn on_file_start(&self, name: &str, size: u64) {
+        let bar = self
+            .progress
+            .insert_before(&self.total_bar, make_progress_bar(size, name));
+        bar.enable_steady_tick(Duration::from_millis(250));
+        self.bars.lock().unwrap().insert(name.to_string(), bar);
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn on_progress(&self, name: &str, delta: ProgressDelta) {
+        self.total_bar.inc(delta.total_bytes_delta);
+        let current_speed = self.total_bar.per_sec() as u64;
+        self.session_peak
+            .fetch_max(current_speed, Ordering::Relaxed);
+        if let Some(bar) = self.bars.lock().unwrap().get(name) {
+            bar.inc(delta.total_bytes_delta);
+        }
+    }
+
+    fn on_file_complete(&self, name: &str, stats: &FileStats) {
+        let bar = self.bars.lock().unwrap().remove(name);
+        if let Some(bar) = bar {
+            bar.finish_and_clear();
+        }
+        let ramp_up = stats.ramp_up_time.map_or_else(
+            || "ramp <1s".to_string(),
+            |d| format!("ramp {}", format_duration(d)),
+        );
+        let _ = self.progress.println(format!(
+            "  {} - {} in {} ({}/s avg, {}/s peak, {}, {} reused)",
+            name,
+            format_bytes(stats.size),
+            format_duration(stats.elapsed),
+            format_bytes(stats.average_speed),
+            format_bytes(stats.peak_speed),
+            ramp_up,
+            format_bytes(stats.reused_bytes),
+        ));
+    }
+
+    fn on_error(&self, name: &str, _error: &str) {
+        let bar = self.bars.lock().unwrap().remove(name);
+        if let Some(bar) = bar {
+            bar.abandon();
+        }
+    }
+
+    fn on_partial_detected(&self, name: &str, existing_size: u64, expected_size: u64) {
+        let _ = self.progress.println(format!(
+            "  partial: {name} ({}/{})",
+            format_bytes(existing_size),
+            format_bytes(expected_size),
+        ));
+    }
+
+    fn on_resume_reused(&self, name: &str, chunks: usize, bytes: u64) {
+        let _ = self.progress.println(format!(
+            "  resuming: {name} reusing {chunks} verified chunk(s), {}",
+            format_bytes(bytes),
+        ));
+    }
+}
+
+fn print_file_list(packages: &[CliPackageFiles<'_>]) {
+    let queued_files: usize = packages.iter().map(|package| package.files.len()).sum();
+    let skipped: usize = packages.iter().map(|package| package.skipped).sum();
+    let partial: usize = packages.iter().map(|package| package.partial).sum();
+
+    if queued_files == 0 && skipped == 0 {
         println!("No files found.");
         return;
     }
 
-    let total_size: u64 = files.iter().map(|i| i.node.size()).sum();
+    let total_size: u64 = packages.iter().map(CliPackageFiles::total_size).sum();
 
     println!("\n{SEPARATOR}");
-    println!("Files to download:");
+    println!("Packages to download:");
     println!("{SEPARATOR}");
 
-    for item in files {
-        println!("  {} ({})", item.path, format_bytes(item.node.size()));
+    for package in packages {
+        println!("Package: {}", package.source_url);
+
+        for item in &package.files {
+            println!("  {} ({})", item.path, format_bytes(item.node.size()));
+        }
+
+        println!(
+            "  queued: {} file(s), {}",
+            package.files.len(),
+            format_bytes(package.total_size())
+        );
+        if package.skipped > 0 {
+            println!("  skipped: {} file(s) already complete", package.skipped);
+        }
+        if package.partial > 0 {
+            println!(
+                "  partial: {} file(s) with verified resumable data",
+                package.partial
+            );
+        }
+        println!("{SEPARATOR}");
     }
 
-    println!("{SEPARATOR}");
     println!(
-        "  {} file(s), {} total",
-        files.len(),
+        "  {} queued file(s), {} total",
+        queued_files,
         format_bytes(total_size)
     );
     if skipped > 0 {
         println!("  {skipped} file(s) skipped (already exist)");
     }
     if partial > 0 {
-        println!("  {partial} file(s) with partial downloads (will re-download)");
+        println!("  {partial} file(s) with partial downloads (verified chunks will be reused)");
     }
     println!("{SEPARATOR}\n");
 }
@@ -201,6 +242,8 @@ fn print_summary(stats: &SessionStats) {
     if stats.files_downloaded > 0 {
         println!("  Files downloaded:  {}", stats.files_downloaded);
         println!("  Total size:        {}", format_bytes(stats.total_bytes));
+        println!("  Network this run:  {}", format_bytes(stats.network_bytes));
+        println!("  Reused partials:   {}", format_bytes(stats.reused_bytes));
         println!("  Total time:        {}", format_duration(stats.elapsed));
         println!(
             "  Average speed:     {}/s",
@@ -222,56 +265,95 @@ fn print_summary(stats: &SessionStats) {
     println!("{SEPARATOR}");
 }
 
+fn build_restart_snapshot(session: &SessionSnapshotV3) -> RestartSnapshot {
+    reconcile_restart(
+        Some(session.clone()),
+        scan_filesystem(session.files.iter().map(|file| file.path.clone())),
+        session
+            .packages
+            .iter()
+            .map(|entry| entry.source_url.clone())
+            .collect(),
+    )
+}
+
+fn mark_session_file_complete(session: &mut SessionSnapshotV3, file_id: &str) {
+    session.mark_file_complete(file_id);
+}
+
+fn mark_session_file_error(session: &mut SessionSnapshotV3, file_id: &str, error: &str) {
+    session.mark_file_error(file_id, error);
+}
+
+#[must_use]
+fn session_completed_count(session: &SessionSnapshotV3) -> usize {
+    session.completed_count()
+}
+
+#[must_use]
+fn session_remaining_count(session: &SessionSnapshotV3) -> usize {
+    session.remaining_count()
+}
+
+#[cfg(test)]
+fn resumable_urls(session: &SessionSnapshotV3) -> Vec<(usize, String)> {
+    let restart = build_restart_snapshot(session);
+    restart
+        .resumable_urls()
+        .into_iter()
+        .filter_map(|url| {
+            session
+                .packages
+                .iter()
+                .position(|entry| entry.source_url == url)
+                .map(|idx| (idx, url))
+        })
+        .collect()
+}
+
 #[allow(clippy::similar_names)]
 async fn download_all(
-    client: &mega::Client,
-    progress: &MultiProgress,
-    total_bar: &ProgressBar,
+    downloader: &crate::Downloader,
     files: &[DownloadItem<'_>],
-    config: &DownloadConfig,
+    progress: &Arc<CliDownloadProgress>,
     builder: &mut SessionStatsBuilder,
-    mut session_state: Option<&mut SessionState>,
+    mut session_state: Option<&mut SessionSnapshotV3>,
 ) -> crate::Result<()> {
     if files.is_empty() {
         return Ok(());
     }
 
-    // Track aggregate peak speed from total_bar
-    let session_peak = Arc::new(AtomicU64::new(0));
-    let session_peak_clone = Arc::clone(&session_peak);
+    let progress_trait: Arc<dyn DownloadProgress> = progress.clone();
 
     let results: Vec<_> = stream::iter(files)
         .map(|item| {
-            let peak_tracker = Arc::clone(&session_peak_clone);
+            let progress = Arc::clone(&progress_trait);
             async move {
-                let result =
-                    download_file(client, progress, total_bar, item, config.chunks_per_file).await;
-                // Update session peak from total_bar's aggregate speed
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let current_speed = total_bar.per_sec() as u64;
-                peak_tracker.fetch_max(current_speed, Ordering::Relaxed);
+                let result = downloader
+                    .download_file(item.node, &item.path, &progress, None)
+                    .await;
                 (item.path.clone(), result)
             }
         })
-        .buffer_unordered(config.concurrent_files)
+        .buffer_unordered(downloader.config().concurrent_files)
         .collect()
         .await;
 
     // Use aggregate peak, not per-file peak
-    builder.set_peak_speed(session_peak.load(Ordering::Relaxed));
+    builder.set_peak_speed(progress.peak_speed());
 
     for (path, result) in results {
         match result {
             Ok(file_stats) => {
                 builder.add_download(&file_stats);
                 if let Some(ref mut state) = session_state.as_deref_mut() {
-                    let _ = state.mark_file_complete(&path);
+                    mark_session_file_complete(state, &path);
                 }
             }
             Err(e) => {
-                let _ = progress.println(format!("Download error: {e:?}"));
+                let _ = progress.progress.println(format!("Download error: {e:?}"));
                 if let Some(ref mut state) = session_state.as_deref_mut() {
-                    let _ = state.mark_file_error(&path, &e.to_string());
+                    mark_session_file_error(state, &path, &e.to_string());
                 }
             }
         }
@@ -319,7 +401,7 @@ fn parse_args() -> CliConfig {
             }
             // Skip global flags handled by the unified binary
             "--tui" | "--api" => {}
-            "--api-host" => {
+            "--host" | "--config" => {
                 let _ = args.next(); // consume the value
             }
             _ if !arg.starts_with('-') => {
@@ -392,23 +474,23 @@ pub async fn run() -> crate::Result<()> {
 
     // Check for resumable session
     if config.resume {
-        if let Some(session) = SessionState::latest() {
+        if let Some(session) = SessionSnapshotV3::latest() {
             println!(
                 "Resuming session {} ({} files, {} completed)",
                 session.id,
                 session.files.len(),
-                session.completed_count()
+                session_completed_count(&session)
             );
             return resume_session(session, &config).await;
         }
         println!("No resumable session found, starting fresh.");
     } else if config.urls.is_empty() && config.dlc_files.is_empty() {
         // Check if there's a session to resume
-        if let Some(session) = SessionState::latest() {
+        if let Some(session) = SessionSnapshotV3::latest() {
             println!(
                 "Found incomplete session: {} ({} remaining files)",
                 session.id,
-                session.remaining_count()
+                session_remaining_count(&session)
             );
             println!("Use --resume to continue, or provide URLs to start a new session.");
             std::process::exit(0);
@@ -454,83 +536,116 @@ pub async fn run() -> crate::Result<()> {
         println!();
     }
 
-    let mut client = mega::Client::builder().build(http)?;
+    let mut client = mega::Client::builder().build(http.clone())?;
 
     println!("Logging in...");
     client.login(&email, &password, mfa.as_deref()).await?;
     println!("Logged in successfully.");
 
-    // Create downloader for file collection
-    let downloader = dummy_downloader(&config.download_config);
+    // Shared downloader owns collection and all payload writes.
+    let downloader = crate::Downloader::new(client, config.download_config.clone());
     let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
-    // Create session state for persistence
-    let url_entries: Vec<UrlEntry> = config
+    let mut session_state = SessionSnapshotV3::new(
+        config.download_config.clone(),
+        SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
+    );
+    session_state.packages = config
         .urls
         .iter()
-        .map(|url| UrlEntry {
-            url: url.clone(),
-            status: UrlStatus::Pending,
+        .map(|url| PackageSnapshot {
+            id: url.clone(),
+            source_url: url.clone(),
+            display_name: url.clone(),
+            file_ids: Vec::new(),
+            error: None,
         })
         .collect();
 
-    let mut session_state = SessionState::new(
-        SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
-        config.download_config.clone(),
-        url_entries,
-    );
-
     // Phase 1: Fetch all URLs and collect files
     println!("Fetching file lists from {} URL(s)...\n", config.urls.len());
-    let mut all_nodes: Vec<(String, mega::Nodes)> = Vec::new();
+    let mut all_nodes: Vec<(usize, String, mega::Nodes)> = Vec::new();
     for (idx, url) in config.urls.iter().enumerate() {
         print!("  {url} ... ");
-        match client.fetch_public_nodes(url).await {
+        match crate::fetch_public_nodes(&http, url).await {
             Ok(nodes) => {
                 let collected_tmp = downloader.collect_files(&nodes, &no_progress).await;
                 let file_count = collected_tmp.to_download.len() + collected_tmp.skipped;
                 println!("{file_count} file(s)");
-                session_state.urls[idx].status = UrlStatus::Fetched;
-                all_nodes.push((url.clone(), nodes));
+                if let Some(package) = session_state.packages.get_mut(idx) {
+                    package.error = None;
+                }
+                all_nodes.push((idx, url.clone(), nodes));
             }
             Err(e) => {
                 println!("ERROR: {e:?}");
-                session_state.urls[idx].status = UrlStatus::Error(e.to_string());
+                if let Some(package) = session_state.packages.get_mut(idx) {
+                    package.error = Some(e.to_string());
+                }
             }
         }
     }
 
-    // Collect files from all fetched nodes
-    let mut all_files: Vec<DownloadItem> = Vec::new();
-    let mut total_skipped = 0;
-    let mut total_partial = 0;
-    for (url_idx, (_url, nodes)) in all_nodes.iter().enumerate() {
+    // Collect files from all fetched nodes, preserving the original URL index
+    let mut package_files = Vec::new();
+    for (url_idx, url, nodes) in &all_nodes {
         let collected = downloader.collect_files(nodes, &no_progress).await;
-        // Record files in session state
-        for item in &collected.to_download {
-            session_state.files.push(FileEntry {
-                url_index: url_idx,
-                path: item.path.clone(),
-                size: item.node.size(),
-                status: FileEntryStatus::Pending,
-            });
+
+        let mut files = Vec::new();
+        if let Some(package) = session_state.packages.get_mut(*url_idx) {
+            for item in &collected.to_download {
+                if !package.file_ids.contains(&item.path) {
+                    package.file_ids.push(item.path.clone());
+                }
+                session_state.files.push(FileSnapshot {
+                    id: item.path.clone(),
+                    package_id: package.id.clone(),
+                    source_url: Some(package.source_url.clone()),
+                    path: item.path.clone(),
+                    size: item.node.size(),
+                    lifecycle: FileLifecycle::Queued,
+                    progress: FileProgressState::default(),
+                    desired: DesiredState::Present,
+                    runtime: RuntimeState {
+                        counts_in_run_totals: true,
+                        active: false,
+                        preexisting_complete: false,
+                        reused_chunks: 0,
+                    },
+                    message: None,
+                });
+            }
         }
-        all_files.extend(collected.to_download);
-        total_skipped += collected.skipped;
-        total_partial += collected.partial;
+        for item in collected.to_download {
+            files.push(item);
+        }
+
+        package_files.push(CliPackageFiles {
+            source_url: url.clone(),
+            files,
+            skipped: collected.skipped,
+            partial: collected.partial,
+        });
     }
 
     // Save initial session state
     let _ = session_state.save();
 
     // Phase 2: Print what we found
-    print_file_list(&all_files, total_skipped, total_partial);
+    print_file_list(&package_files);
+
+    let total_skipped: usize = package_files.iter().map(|package| package.skipped).sum();
+    let all_files: Vec<DownloadItem> = package_files
+        .into_iter()
+        .flat_map(|package| package.files)
+        .collect();
 
     if all_files.is_empty() {
         if total_skipped > 0 {
             println!("All files already downloaded.");
         }
-        let _ = session_state.mark_completed();
+        session_state.status = SessionRunStatus::Completed;
+        let _ = session_state.save();
         return Ok(());
     }
 
@@ -539,16 +654,18 @@ pub async fn run() -> crate::Result<()> {
     let total_size: u64 = all_files.iter().map(|i| i.node.size()).sum();
     let total_bar = progress.add(make_total_progress_bar(total_size));
     total_bar.enable_steady_tick(Duration::from_millis(250));
+    let cli_progress = Arc::new(CliDownloadProgress::new(
+        progress.clone(),
+        total_bar.clone(),
+    ));
 
     let mut builder = SessionStatsBuilder::new();
     builder.set_skipped(total_skipped);
 
     download_all(
-        &client,
-        &progress,
-        &total_bar,
+        &downloader,
         &all_files,
-        &config.download_config,
+        &cli_progress,
         &mut builder,
         Some(&mut session_state),
     )
@@ -560,13 +677,15 @@ pub async fn run() -> crate::Result<()> {
     print_summary(&session_stats);
 
     // Mark session as completed
-    let _ = session_state.mark_completed();
+    session_state.status = SessionRunStatus::Completed;
+    let _ = session_state.save();
 
     Ok(())
 }
 
 /// Resume a previous incomplete session.
-async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate::Result<()> {
+async fn resume_session(mut session: SessionSnapshotV3, config: &CliConfig) -> crate::Result<()> {
+    let restart = build_restart_snapshot(&session);
     // Decrypt credentials
     let (email, password, mfa) = session
         .credentials
@@ -575,91 +694,123 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
 
     let http = build_http_client()?;
 
-    let mut client = mega::Client::builder().build(http)?;
+    let mut client = mega::Client::builder().build(http.clone())?;
 
     println!("Logging in...");
     client.login(&email, &password, mfa.as_deref()).await?;
     println!("Logged in successfully.");
 
-    let downloader = dummy_downloader(&config.download_config);
+    let downloader = crate::Downloader::new(client, config.download_config.clone());
     let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
     // Re-fetch URLs and collect remaining files
-    let remaining_urls: Vec<_> = session
-        .urls
-        .iter()
-        .filter(|u| u.status == UrlStatus::Fetched)
-        .map(|u| u.url.clone())
-        .collect();
+    let remaining_urls = restart
+        .resumable_urls()
+        .into_iter()
+        .filter_map(|url| {
+            session
+                .packages
+                .iter()
+                .position(|entry| entry.source_url == url)
+                .map(|idx| (idx, url))
+        })
+        .collect::<Vec<_>>();
 
     println!(
         "Fetching file lists from {} URL(s)...\n",
         remaining_urls.len()
     );
-    let mut all_nodes: Vec<(String, mega::Nodes)> = Vec::new();
-    for url in &remaining_urls {
+    let mut all_nodes: Vec<(usize, String, mega::Nodes)> = Vec::new();
+    for (url_idx, url) in &remaining_urls {
         print!("  {url} ... ");
-        match client.fetch_public_nodes(url).await {
+        match crate::fetch_public_nodes(&http, url).await {
             Ok(nodes) => {
                 let collected_tmp = downloader.collect_files(&nodes, &no_progress).await;
                 let file_count = collected_tmp.to_download.len() + collected_tmp.skipped;
                 println!("{file_count} file(s)");
-                all_nodes.push((url.clone(), nodes));
+                if let Some(package) = session.packages.get_mut(*url_idx) {
+                    package.error = None;
+                }
+                all_nodes.push((*url_idx, url.clone(), nodes));
             }
             Err(e) => println!("ERROR: {e:?}"),
         }
     }
 
     // Completed file paths from session state
-    let completed_paths: std::collections::HashSet<String> = session
+    let resumable_file_ids: std::collections::HashSet<_> =
+        restart.resume_file_ids.iter().cloned().collect();
+    let ignored_paths: std::collections::HashSet<String> = restart
+        .state
         .files
-        .iter()
-        .filter(|f| f.status == FileEntryStatus::Completed)
-        .map(|f| f.path.clone())
+        .values()
+        .filter(|file| !resumable_file_ids.contains(&file.id))
+        .map(|file| file.path.clone())
         .collect();
 
     // Collect files, skipping already-completed ones
-    let mut all_files: Vec<DownloadItem> = Vec::new();
-    let mut total_skipped = 0;
-    let mut total_partial = 0;
-    for (_url, nodes) in &all_nodes {
+    let mut package_files = Vec::new();
+    for (url_idx, _url, nodes) in &all_nodes {
         let collected = downloader.collect_files(nodes, &no_progress).await;
+        let mut files = Vec::new();
+        let mut skipped = collected.skipped;
         for item in collected.to_download {
-            if completed_paths.contains(&item.path) {
-                total_skipped += 1;
+            if !resumable_file_ids.is_empty()
+                && !resumable_file_ids.contains(&item.path)
+                && ignored_paths.contains(&item.path)
+            {
+                skipped += 1;
             } else {
-                all_files.push(item);
+                files.push(item);
             }
         }
-        total_skipped += collected.skipped;
-        total_partial += collected.partial;
+
+        package_files.push(CliPackageFiles {
+            source_url: session
+                .packages
+                .get(*url_idx)
+                .map(|entry| entry.source_url.clone())
+                .unwrap_or_else(|| format!("url:{url_idx}")),
+            files,
+            skipped,
+            partial: collected.partial,
+        });
     }
 
-    print_file_list(&all_files, total_skipped, total_partial);
+    print_file_list(&package_files);
+
+    let total_skipped: usize = package_files.iter().map(|package| package.skipped).sum();
+    let all_files: Vec<DownloadItem> = package_files
+        .into_iter()
+        .flat_map(|package| package.files)
+        .collect();
 
     if all_files.is_empty() {
         println!("All files already downloaded.");
-        let _ = session.mark_completed();
+        session.status = SessionRunStatus::Completed;
+        let _ = session.save();
         return Ok(());
     }
 
-    session.status = SessionStatus::InProgress;
+    session.status = SessionRunStatus::InProgress;
     let _ = session.save();
 
     let progress = MultiProgress::new();
     let total_size: u64 = all_files.iter().map(|i| i.node.size()).sum();
     let total_bar = progress.add(make_total_progress_bar(total_size));
     total_bar.enable_steady_tick(Duration::from_millis(250));
+    let cli_progress = Arc::new(CliDownloadProgress::new(
+        progress.clone(),
+        total_bar.clone(),
+    ));
 
     let mut builder = SessionStatsBuilder::new();
     builder.set_skipped(total_skipped);
 
     download_all(
-        &client,
-        &progress,
-        &total_bar,
+        &downloader,
         &all_files,
-        &config.download_config,
+        &cli_progress,
         &mut builder,
         Some(&mut session),
     )
@@ -670,7 +821,8 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
     let session_stats = builder.build();
     print_summary(&session_stats);
 
-    let _ = session.mark_completed();
+    session.status = SessionRunStatus::Completed;
+    let _ = session.save();
 
     Ok(())
 }
@@ -682,10 +834,44 @@ async fn resume_session(mut session: SessionState, config: &CliConfig) -> crate:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
 
     #[test]
     fn progress_bar_creation() {
         let bar = make_progress_bar(1000, "test.txt");
         assert_eq!(bar.length(), Some(1000));
+    }
+
+    #[test]
+    fn resume_url_selection_includes_pending_and_fetched() {
+        let session = session_snapshot(vec![
+            ("https://mega.nz/file/pending", UrlFixtureStatus::Pending),
+            ("https://mega.nz/file/fetched", UrlFixtureStatus::Fetched),
+            (
+                "https://mega.nz/file/error",
+                UrlFixtureStatus::Error("nope".to_string()),
+            ),
+        ]);
+
+        let urls = resumable_urls(&session);
+        assert_eq!(
+            urls,
+            vec![
+                (0, "https://mega.nz/file/pending".to_string()),
+                (1, "https://mega.nz/file/fetched".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_url_selection_excludes_fetched_urls_with_only_terminal_files() {
+        let mut session = session_snapshot(vec![(
+            "https://mega.nz/file/skipped",
+            UrlFixtureStatus::Fetched,
+        )]);
+        push_file(&mut session, 0, "skip.bin", 123, FileFixtureStatus::Skipped);
+
+        let urls = resumable_urls(&session);
+        assert!(urls.is_empty());
     }
 }

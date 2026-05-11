@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>octo-dl terminal</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icon-192.svg">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+  <style>
+    html, body { height: 100%; margin: 0; background: #05060a; }
+    #terminal { width: 100%; height: 100%; }
+    /*
+      Keep the terminal rectangular even if the CDN stylesheet is blocked or
+      loads after the first frame. Without these basics xterm rows collapse
+      into inline spans, which turns the whole TUI into one long line.
+    */
+    #terminal .xterm-rows { line-height: normal; }
+    #terminal .xterm-rows > div { display: block; white-space: pre; }
+    #notice {
+      position: absolute;
+      left: 16px;
+      top: 16px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.6);
+      color: #c5c5c5;
+      font-family: system-ui, sans-serif;
+      font-size: 0.8rem;
+      z-index: 5;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="terminal"></div>
+  <div id="notice">Connecting…</div>
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.7.0/lib/xterm-addon-fit.js"></script>
+  <script>
+    const term = new Terminal({ cursorBlink: true, fontFamily: "JetBrains Mono, ui-monospace, monospace" });
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    const terminalElement = document.getElementById("terminal");
+    term.open(terminalElement);
+    const focusTerminal = () => {
+      terminalElement.focus();
+      term.focus();
+    };
+    focusTerminal();
+
+    let socket;
+    const notice = document.getElementById("notice");
+    const encoder = new TextEncoder();
+    const apiKey = window.localStorage.getItem("octoApiKey") || "";
+    const jsonHeaders = apiKey
+      ? { "Content-Type": "application/json", "x-api-key": apiKey }
+      : { "Content-Type": "application/json" };
+    notice.style.transition = "opacity 0.25s ease";
+    let hideAfterMessage = false;
+    let reconnectAttempt = 0;
+
+    const fitAndNotify = () => {
+      fitAddon.fit();
+      focusTerminal();
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: "resize",
+          cols: term.cols,
+          rows: term.rows,
+        }));
+      }
+    };
+
+    const showNotice = (text) => {
+      notice.textContent = text;
+      notice.style.opacity = "1";
+    };
+
+    const hideNotice = () => {
+      notice.style.opacity = "0";
+    };
+
+    const connect = () => {
+      socket = new WebSocket("${WS_SCHEME}://${WS_HOST}/ws");
+      socket.binaryType = "arraybuffer";
+      socket.addEventListener("open", () => {
+        reconnectAttempt = 0;
+        fitAndNotify();
+        focusTerminal();
+        showNotice("Connected");
+        hideAfterMessage = true;
+      });
+      socket.addEventListener("close", () => {
+        reconnectAttempt += 1;
+        showNotice(
+          `Connection closed, reconnecting… (attempt ${reconnectAttempt})`
+        );
+        hideAfterMessage = false;
+        setTimeout(connect, 800);
+      });
+      socket.addEventListener("message", (event) => {
+        term.write(new Uint8Array(event.data));
+        focusTerminal();
+        if (hideAfterMessage) {
+          hideAfterMessage = false;
+          setTimeout(hideNotice, 250);
+        }
+      });
+    };
+    connect();
+
+    terminalElement.tabIndex = 0;
+    terminalElement.addEventListener("pointerdown", focusTerminal);
+    terminalElement.addEventListener("click", focusTerminal);
+    window.addEventListener("focus", focusTerminal);
+
+    term.onData((data) => {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(encoder.encode(data));
+      }
+    });
+
+    requestAnimationFrame(fitAndNotify);
+    window.addEventListener("resize", fitAndNotify);
+
+    const sendText = (text) => {
+      fetch("/api/urls", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ text }),
+      }).catch((err) => console.error("Failed to send URLs:", err));
+    };
+
+    const sendDlcFile = (content, filename) => {
+      fetch("/api/dlc", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ content, filename }),
+      }).catch((err) => console.error("Failed to parse DLC file:", err));
+    };
+
+    const handleDrop = async (dataTransfer) => {
+      const files = Array.from(dataTransfer.files || []);
+      if (files.length > 0) {
+        for (const file of files) {
+          const contents = await file.text();
+          sendDlcFile(contents, file.name);
+        }
+        return;
+      }
+
+      const items = Array.from(dataTransfer.items || []);
+      for (const item of items) {
+        if (item.kind === "string") {
+          item.getAsString(sendText);
+        } else if (item.kind === "file") {
+          const file = item.getAsFile();
+          if (file) {
+            const contents = await file.text();
+            sendDlcFile(contents, file.name);
+          }
+        }
+      }
+    };
+
+    document.addEventListener("dragover", (event) => event.preventDefault());
+    document.addEventListener("drop", (event) => {
+      event.preventDefault();
+      handleDrop(event.dataTransfer);
+    });
+  </script>
+</body>
+</html>

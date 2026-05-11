@@ -36,30 +36,32 @@
 #![warn(clippy::nursery)]
 
 pub mod config;
+pub mod core;
 pub mod dlc;
 pub mod download;
 pub mod error;
 pub mod format;
 pub mod fs;
-pub mod state;
+pub(crate) mod progress;
 pub mod stats;
+#[cfg(test)]
+mod test_support;
 pub mod url;
 
 // Re-export main types for convenience
 pub use config::{ApiConfig, DownloadConfig, ServiceConfig, ServiceCredentials};
-pub use dlc::{DlcKeyCache, parse_dlc_file};
+pub use core::{FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3};
+pub use dlc::{DlcKeyCache, parse_dlc_data, parse_dlc_file};
 pub use download::{
     CollectedFiles, DownloadItem, DownloadProgress, Downloader, FileStatus, NoProgress,
-    OwnedDownloadItem,
+    OwnedDownloadItem, ResumeReuse, ResumeReuseSource, delete_download_artifacts,
+    delete_resume_artifacts, fetch_public_nodes,
 };
 pub use error::{Error, Result};
 pub use format::{format_bytes, format_duration};
 pub use fs::{FileSystem, TokioFileSystem};
-pub use state::{
-    FileEntry, FileEntryStatus, SavedCredentials, SessionState, SessionStatus, UrlEntry, UrlStatus,
-};
 pub use stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBuilder};
-pub use url::{extract_urls, is_dlc_path, normalize_mega_url};
+pub use url::{extract_urls, is_dlc_path};
 
 // Re-export mega types used in the public API
 pub use mega::{Client as MegaClient, Node, Nodes};

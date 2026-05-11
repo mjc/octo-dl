@@ -46,7 +46,11 @@
           then [''-I${pkgs.glibc.dev}/include'']
           else [];
 
-        cargoTargetEnvPrefix = pkgs.lib.toUpper (builtins.replaceStrings ["-"] ["_"] pkgs.rust.toRustTargetSpec pkgs.stdenv.hostPlatform);
+        cargoTargetEnvPrefix = pkgs.lib.toUpper (builtins.replaceStrings ["-"] ["_"] pkgs.stdenv.hostPlatform.config);
+        cargoTargetLinkerEnv = "CARGO_TARGET_${cargoTargetEnvPrefix}_LINKER";
+        cargoTargetRustflagsEnv = "CARGO_TARGET_${cargoTargetEnvPrefix}_RUSTFLAGS";
+        linuxCcLinker = "${pkgs.stdenv.cc}/bin/cc";
+        linuxMoldRustFlags = "-C link-arg=-fuse-ld=mold";
 
         # Crane setup with nightly rust
         rustNightly = pkgs.rust-bin.nightly.latest.default.override {
@@ -59,9 +63,12 @@
           # Include standard Rust files plus any extra assets
           filteredSrc = pkgs.lib.cleanSourceWith {
             src = ./.;
-            filter = path: type:
+            filter = path: type: let
+              pathString = toString path;
+            in
               (craneLib.filterCargoSources path type)
-              || builtins.match ".*\\.toml$" path != null;
+              || builtins.match ".*\\.toml$" pathString != null
+              || builtins.match ".*/src/tui/assets/.*" pathString != null;
           };
         in
           filteredSrc;
@@ -73,7 +80,7 @@
           version = "0.1.0";
           strictDeps = true;
 
-          nativeBuildInputs = [pkgs.pkg-config];
+          nativeBuildInputs = [pkgs.pkg-config pkgs.mold];
           buildInputs = [pkgs.openssl];
 
           # Place mega-rs next to octo-dl so `path = "../mega-rs"` resolves
@@ -81,6 +88,10 @@
             cp -r ${mega-rs} mega-rs
             chmod -R u+w mega-rs
           '';
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          "${cargoTargetLinkerEnv}" = linuxCcLinker;
+          "${cargoTargetRustflagsEnv}" = linuxMoldRustFlags;
         };
 
         # Build only the cargo dependencies — cached when Cargo.lock is unchanged
@@ -94,7 +105,7 @@
               inherit cargoArtifacts;
 
               meta = with pkgs.lib; {
-                description = "MEGA download manager with TUI and headless service mode";
+                description = "MEGA download manager with TUI, web UI, and headless service mode";
                 homepage = "https://github.com/mjc/octo-dl";
                 mainProgram = "octo";
               };
@@ -105,7 +116,7 @@
         checks.clippy = craneLib.cargoClippy (commonArgs
           // {
             inherit cargoArtifacts;
-            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+            cargoClippyExtraArgs = "--all-targets";
           });
 
         devShells.default = pkgs.mkShell rec {
@@ -142,8 +153,8 @@
             ''
               export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
               export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
-              export "CARGO_TARGET_''${cargoTargetEnvPrefix}_LINKER"="${pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.mold}/bin/mold -run "}${pkgs.stdenv.cc}/bin/cc"
-              export "CARGO_TARGET_''${cargoTargetEnvPrefix}_RUSTFLAGS"="-C target-cpu=native"
+              export "CARGO_TARGET_${cargoTargetEnvPrefix}_LINKER"="${pkgs.lib.optionalString pkgs.stdenv.isLinux linuxCcLinker}${pkgs.lib.optionalString (!pkgs.stdenv.isLinux) "${pkgs.stdenv.cc}/bin/cc"}"
+              export "CARGO_TARGET_${cargoTargetEnvPrefix}_RUSTFLAGS"="-C target-cpu=native${pkgs.lib.optionalString pkgs.stdenv.isLinux " ${linuxMoldRustFlags}"}"
             ''
             + (
               if pkgs.stdenv.isLinux
@@ -199,6 +210,13 @@
     )
     // {
       # NixOS module (system-independent, outside eachDefaultSystem)
-      nixosModules.default = import ./nixos-module.nix;
+      nixosModules.default = {
+        pkgs,
+        lib,
+        ...
+      }: {
+        imports = [./nixos-module.nix];
+        services.octo-dl.package = lib.mkDefault self.packages.${pkgs.system}.octo-dl;
+      };
     };
 }

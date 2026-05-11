@@ -1,48 +1,76 @@
-//! Download task management and event handling.
-//!
-//! # TODO: Package-based download grouping
-//!
-//! Currently, downloads are tracked as a flat list of files keyed by filename.
-//! This causes collisions when different MEGA folders contain files with the
-//! same name. Instead, downloads should be grouped into **packages** (similar
-//! to JDownloader2), where each MEGA URL/folder submission becomes a package
-//! that contains its files. This would:
-//!
-//! - Eliminate filename collisions across different sources
-//! - Allow per-package progress, pause/resume, and cancellation
-//! - Enable collapsible package groups in the TUI file list
-//! - Make session persistence more robust (key by package+path, not filename)
+//! Download task management and transport-side event emission.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use futures_util::FutureExt;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    DlcKeyCache, DownloadConfig, DownloadProgress, SavedCredentials, SessionState, UrlEntry,
-    UrlStatus, format_bytes, is_dlc_path,
-};
+use crate::download::part_path;
+#[cfg(test)]
+use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
+use crate::{DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, is_dlc_path};
 use dirs;
 
-use super::app::{App, FileEntry, FileStatus, Popup};
-use super::event::{DownloadChannels, DownloadEvent, TokenMessage, TuiProgress};
-use super::input::add_url;
+#[cfg(test)]
+use super::app::{FileEntry, FileStatus};
+use super::event::{
+    DownloadChannels, DownloadEvent, DownloadRequest, FileOrigin, QueuedFile, TokenMessage,
+    TuiProgress,
+};
 
-/// Computes the full session file path for a given name, using the download
-/// directory from the config when available.
-fn session_file_path(config: &DownloadConfig, name: &str) -> String {
-    if let Some(ref download_dir) = config.path {
-        std::path::Path::new(download_dir)
-            .join(name)
-            .to_string_lossy()
-            .to_string()
+pub(crate) fn schedule_resume_artifact_delete(path: String) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            if let Err(e) = crate::delete_resume_artifacts(&path).await {
+                log::warn!("Failed to delete resume artifacts for {path}: {e}");
+            }
+        });
     } else {
-        name.to_string()
+        let part = crate::download::part_path(&path);
+        let sidecar = crate::download::sidecar_path(&path);
+        if let Err(e) = std::fs::remove_file(&part)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("Failed to delete resume artifact {}: {e}", part.display());
+        }
+        if let Err(e) = std::fs::remove_file(&sidecar)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!(
+                "Failed to delete resume artifact {}: {e}",
+                sidecar.display()
+            );
+        }
     }
 }
 
-fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
+pub(crate) fn schedule_output_artifact_delete(path: String) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            if let Err(e) = tokio::fs::remove_file(&path).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                log::warn!("Failed to delete output artifact {path}: {e}");
+            }
+        });
+    } else {
+        if let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("Failed to delete output artifact {path}: {e}");
+        }
+    }
+}
+
+pub(crate) fn schedule_download_artifact_delete(path: String) {
+    schedule_output_artifact_delete(path.clone());
+    schedule_resume_artifact_delete(path);
+}
+
+pub(super) fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .pool_idle_timeout(Duration::from_secs(60))
         .pool_max_idle_per_host(8)
@@ -50,404 +78,242 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
-/// Spawns the login task which sends back `LoginResult`.
-///
-/// On success, the authenticated `mega::Client` and `reqwest::Client` are sent
-/// via the oneshot channel in `app.client_rx` so the download task can reuse
-/// them without logging in a second time.
-pub fn start_login(app: &mut App) {
-    let tx = app.event_tx.clone();
-    let email = app.login.email.clone();
-    let password = app.login.password.clone();
-    let mfa = if app.login.mfa.is_empty() {
-        None
-    } else {
-        Some(app.login.mfa.clone())
-    };
-
-    let (client_tx, client_rx) = tokio::sync::oneshot::channel();
-    app.client_rx = Some(client_rx);
-
-    tokio::spawn(async move {
-        let _ = tx.send(DownloadEvent::StatusMessage("Logging in...".to_string()));
-
-        let http = match build_http_client() {
-            Ok(http) => http,
-            Err(e) => {
-                let _ = tx.send(DownloadEvent::LoginResult {
-                    success: false,
-                    error: Some(format!("Failed to build HTTP client: {e}")),
-                });
-                return;
-            }
-        };
-
-        let mut mega_client = match mega::Client::builder().build(http.clone()) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx.send(DownloadEvent::LoginResult {
-                    success: false,
-                    error: Some(format!("Failed to create MEGA client: {e}")),
-                });
-                return;
-            }
-        };
-
-        if let Err(e) = mega_client.login(&email, &password, mfa.as_deref()).await {
-            let _ = tx.send(DownloadEvent::LoginResult {
-                success: false,
-                error: Some(format!("Login failed: {e}")),
-            });
-            return;
-        }
-
-        let _ = client_tx.send((mega_client, http));
-        let _ = tx.send(DownloadEvent::LoginResult {
-            success: true,
-            error: None,
-        });
-    });
+fn describe_panic(panic: &(dyn std::any::Any + Send)) -> String {
+    panic.downcast_ref::<&str>().map_or_else(
+        || {
+            panic.downcast_ref::<String>().map_or_else(
+                || "unknown panic payload".to_string(),
+                std::clone::Clone::clone,
+            )
+        },
+        |msg| (*msg).to_string(),
+    )
 }
 
-pub fn handle_login_result(app: &mut App, success: bool, error: Option<String>) {
-    app.login.logging_in = false;
-    if success {
-        app.authenticated = true;
-        app.popup = Popup::None;
-        app.status = "Login successful".to_string();
-
-        // Start the download task now that we're authenticated
-        start_download_task(app);
-
-        // Send queued URLs — skip already-fetched URLs on resume
-        for url in &app.urls {
-            let already_fetched = app.session.as_ref().is_some_and(|s| {
-                s.urls
-                    .iter()
-                    .any(|u| u.url == *url && u.status == UrlStatus::Fetched)
-            });
-            if !already_fetched && let Some(ref url_tx) = app.url_tx {
-                let _ = url_tx.send(url.clone());
-            }
-        }
-    } else {
-        app.login.error = error;
-        app.popup = Popup::Login;
-    }
+#[derive(Clone)]
+struct ResolvedUrl {
+    source_url: String,
+    submitted_url: String,
+    package_id: Option<String>,
+    package_display_name: Option<String>,
 }
 
-pub fn handle_file_complete(app: &mut App, name: &str) {
-    app.cancellation_tokens.remove(name);
-    if let Some(fp) = app.files.iter_mut().find(|f| f.name == name) {
-        fp.status = FileStatus::Complete;
-        fp.downloaded = fp.size;
-        fp.speed = 0;
-    }
-    app.files_completed += 1;
-
-    if let Some(ref mut session) = app.session {
-        let full_path = session_file_path(&app.config.config, name);
-        let _ = session.remove_file(&full_path);
+impl ResolvedUrl {
+    fn direct(url: &str) -> Self {
+        Self {
+            source_url: url.to_string(),
+            submitted_url: url.to_string(),
+            package_id: None,
+            package_display_name: None,
+        }
     }
 
-    if app.files_completed == app.files_total && app.files_total > 0 {
-        app.status = "All downloads complete".to_string();
-    } else {
-        app.status = format!("Downloading ({}/{})", app.files_completed, app.files_total);
-    }
-}
-
-pub fn handle_file_error(app: &mut App, name: &str, error: &str) {
-    app.cancellation_tokens.remove(name);
-    if let Some(fp) = app.files.iter_mut().find(|f| f.name == name) {
-        fp.status = FileStatus::Error(error.to_string());
-        fp.speed = 0;
-    } else {
-        app.files.push(FileEntry {
-            name: name.to_string(),
-            size: 0,
-            downloaded: 0,
-            speed: 0,
-            speed_accum: 0,
-            status: FileStatus::Error(error.to_string()),
-        });
+    fn from_source(source_url: String, submitted_url: &str) -> Self {
+        Self {
+            source_url,
+            submitted_url: submitted_url.to_string(),
+            package_id: None,
+            package_display_name: None,
+        }
     }
 
-    if let Some(ref mut session) = app.session {
-        let full_path = session_file_path(&app.config.config, name);
-        let _ = session.mark_file_error(&full_path, error);
-    }
-}
-
-/// Show error in UI without persisting to session.
-/// Used for URL-level errors that should never be retried.
-pub fn show_error_ui_only(app: &mut App, name: &str, error: &str) {
-    app.cancellation_tokens.remove(name);
-    if let Some(fp) = app.files.iter_mut().find(|f| f.name == name) {
-        fp.status = FileStatus::Error(error.to_string());
-        fp.speed = 0;
-    } else {
-        app.files.push(FileEntry {
-            name: name.to_string(),
-            size: 0,
-            downloaded: 0,
-            speed: 0,
-            speed_accum: 0,
-            status: FileStatus::Error(error.to_string()),
-        });
-    }
-}
-
-#[allow(clippy::too_many_lines)]
-pub fn handle_download_event(app: &mut App, event: DownloadEvent) {
-    match event {
-        DownloadEvent::LoginResult { success, error } => {
-            if success {
-                log::info!("Login successful");
-            } else {
-                log::error!("Login failed: {}", error.as_deref().unwrap_or("unknown"));
-            }
-            handle_login_result(app, success, error);
-        }
-        DownloadEvent::FilesCollected {
-            total,
-            skipped,
-            partial,
-            total_bytes,
-        } => {
-            log::info!(
-                "Files collected: {total} total, {skipped} skipped, {partial} partial, {}",
-                format_bytes(total_bytes)
-            );
-            app.files_total += total;
-            app.total_size += total_bytes;
-            app.status = format!("Found {total} files ({skipped} skipped, {partial} partial)");
-        }
-        DownloadEvent::FileStart { name, size } => {
-            log::info!("Download started: {name} ({})", format_bytes(size));
-            if app.deleted_files.contains(&name) {
-                return;
-            }
-            if let Some(fp) = app.files.iter_mut().find(|f| f.name == name) {
-                fp.status = FileStatus::Downloading;
-                fp.size = size;
-            } else {
-                app.files.push(FileEntry {
-                    name,
-                    size,
-                    downloaded: 0,
-                    speed: 0,
-                    speed_accum: 0,
-                    status: FileStatus::Downloading,
-                });
-            }
-        }
-        DownloadEvent::Progress {
-            name,
-            bytes_delta,
-            speed,
-        } => {
-            if app.deleted_files.contains(&name) {
-                return;
-            }
-            let _ = speed; // lifetime average from library — ignored, we compute our own
-            if let Some(fp) = app.files.iter_mut().find(|f| f.name == name) {
-                fp.downloaded = fp.downloaded.saturating_add(bytes_delta);
-                fp.speed_accum = fp.speed_accum.saturating_add(bytes_delta);
-            }
-            app.total_downloaded = app.total_downloaded.saturating_add(bytes_delta);
-        }
-        DownloadEvent::FileComplete { name } => {
-            log::info!("Download complete: {name}");
-            if app.deleted_files.remove(&name) {
-                app.cancellation_tokens.remove(&name);
-                if let Some(ref mut session) = app.session {
-                    let full_path = session_file_path(&app.config.config, &name);
-                    let _ = session.remove_file(&full_path);
-                }
-                return;
-            }
-            handle_file_complete(app, &name);
-        }
-        DownloadEvent::Error { name, error } => {
-            log::error!("Download error: {name}: {error}");
-            if app.deleted_files.remove(&name) {
-                app.cancellation_tokens.remove(&name);
-                if let Some(ref mut session) = app.session {
-                    let full_path = session_file_path(&app.config.config, &name);
-                    let _ = session.remove_file(&full_path);
-                }
-                return;
-            }
-            // Invalid URL errors: mark URL as terminal error so it won't be retried
-            if error.contains("InvalidPublicUrlFormat") {
-                if let Some(ref mut session) = app.session {
-                    if let Some(url_entry) = session.urls.iter_mut().find(|u| u.url == name) {
-                        url_entry.status = UrlStatus::Error(error.clone());
-                    }
-                    let _ = session.save();
-                }
-                // Remove URL placeholder from UI and show error without persisting as file
-                app.files.retain(|f| f.name != name);
-                show_error_ui_only(app, &name, &error);
-            } else {
-                // For actual file download errors, mark as error and keep in session for retry
-                handle_file_error(app, &name, &error);
-            }
-        }
-        DownloadEvent::UrlQueued { url } => {
-            if app.deleted_files.contains(&url) {
-                return;
-            }
-            // Add a placeholder entry showing the URL while we fetch file info
-            if !app.files.iter().any(|f| f.name == url) {
-                app.files.push(FileEntry {
-                    name: url,
-                    size: 0,
-                    downloaded: 0,
-                    speed: 0,
-                    speed_accum: 0,
-                    status: FileStatus::Queued,
-                });
-            }
-        }
-        DownloadEvent::FileQueued { name, size } => {
-            if app.deleted_files.contains(&name) {
-                return;
-            }
-            // Add a realfile entry with name and size
-            if let Some(fp) = app.files.iter_mut().find(|f| f.name == name) {
-                fp.size = size;
-            } else {
-                app.files.push(FileEntry {
-                    name: name.clone(),
-                    size,
-                    downloaded: 0,
-                    speed: 0,
-                    speed_accum: 0,
-                    status: FileStatus::Queued,
-                });
-            }
-
-            // Track file in session for resume support
-            // NOTE: url_index is hard-coded to 0 because the TUI does not currently
-            // track which URL each file belongs to. This will be fixed when package
-            // grouping is implemented (see module-level TODO).
-            if let Some(ref mut session) = app.session {
-                let full_path = session_file_path(&app.config.config, &name);
-
-                if !session.files.iter().any(|f| f.path == full_path) {
-                    session.files.push(crate::FileEntry {
-                        url_index: 0,
-                        path: full_path,
-                        size,
-                        status: crate::FileEntryStatus::Pending,
-                    });
-                    let _ = session.save();
-                }
-            }
-        }
-        DownloadEvent::UrlResolved { url } => {
-            // Remove the URL placeholder now that real file entries exist
-            app.files.retain(|f| f.name != url);
-            // Mark URL as fetched in session so it's not re-sent on resume
-            if let Some(ref mut session) = app.session {
-                if let Some(entry) = session.urls.iter_mut().find(|u| u.url == url) {
-                    entry.status = UrlStatus::Fetched;
-                }
-                let _ = session.save();
-            }
-        }
-        DownloadEvent::StatusMessage(msg) => {
-            log::info!("Status: {msg}");
-            app.status = msg;
-        }
-        DownloadEvent::UrlsReceived { urls } => {
-            let count = urls.len();
-            for url in urls {
-                add_url(app, url);
-            }
-            app.status = format!("Received {count} URL(s) from bookmarklet");
+    fn file_origin(&self) -> FileOrigin {
+        FileOrigin {
+            package_id: self.package_id.clone(),
+            package_display_name: self.package_display_name.clone(),
+            source_url: self.source_url.clone(),
+            submitted_url: self.submitted_url.clone(),
         }
     }
 }
 
-/// Starts the persistent download task. Called once after login succeeds.
-///
-/// Expects `app.client_rx` to contain the oneshot receiver from `start_login`.
-fn start_download_task(app: &mut App) {
-    let tx = app.event_tx.clone();
-    let config = app.config.config.clone();
+struct FetchedNodeSet {
+    resolved: ResolvedUrl,
+    nodes: Option<mega::Nodes>,
+    requested_file_ids: Option<HashSet<String>>,
+    requested_attempt_ids: HashMap<String, u64>,
+    emit_url_resolved: bool,
+}
 
-    let (url_tx, url_rx) = mpsc::unbounded_channel::<String>();
-    app.url_tx = Some(url_tx);
-    let (token_tx, token_rx) = mpsc::unbounded_channel::<TokenMessage>();
-    app.token_rx = Some(token_rx);
+struct QueuedDownload {
+    resolved: ResolvedUrl,
+    item: crate::OwnedDownloadItem,
+    attempt_id: u64,
+}
 
-    // Reuse existing session on resume, or create a new one
-    if app.session.is_none() {
-        let email = app.login.email.clone();
-        let password = app.login.password.clone();
-        let mfa = if app.login.mfa.is_empty() {
-            None
-        } else {
-            Some(app.login.mfa.clone())
-        };
-        let url_entries: Vec<UrlEntry> = app
-            .urls
+impl QueuedDownload {
+    fn queued_event(&self, count_toward_progress: bool) -> QueuedFile {
+        QueuedFile {
+            id: self.item.path.clone(),
+            size: self.item.node.size(),
+            count_toward_progress,
+            origin: self.resolved.file_origin(),
+        }
+    }
+
+    fn complete_event(&self) -> DownloadEvent {
+        DownloadEvent::FileComplete {
+            id: self.item.path.clone(),
+            attempt_id: self.attempt_id,
+        }
+    }
+}
+
+struct CollectedBatch {
+    queued_items: Vec<QueuedDownload>,
+    completed_items: Vec<QueuedDownload>,
+    skipped_count: usize,
+    partial_count: usize,
+    successful_submitted_urls: Vec<String>,
+}
+
+impl CollectedBatch {
+    fn total_bytes(&self) -> u64 {
+        self.queued_items
             .iter()
-            .map(|url| UrlEntry {
-                url: url.clone(),
-                status: UrlStatus::Pending,
-            })
-            .collect();
-
-        let session = SessionState::new(
-            SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
-            config.clone(),
-            url_entries,
-        );
-        let _ = session.save();
-        app.session = Some(session);
+            .chain(self.completed_items.iter())
+            .map(|item| item.item.node.size())
+            .sum()
     }
 
-    // Take the oneshot receiver with the pre-authenticated client
-    let client_rx = app.client_rx.take();
+    fn file_total(&self) -> usize {
+        self.queued_items.len() + self.completed_items.len()
+    }
 
-    let channels = DownloadChannels {
-        client_rx,
-        event_tx: tx,
-        url_rx,
-        token_tx,
-    };
+    fn emit_events(&self, event_tx: &mpsc::UnboundedSender<DownloadEvent>) {
+        let _ = event_tx.send(DownloadEvent::FilesCollected {
+            total: self.file_total(),
+            skipped: self.skipped_count,
+            partial: self.partial_count,
+            total_bytes: self.total_bytes(),
+        });
 
-    tokio::spawn(async move {
-        run_download(channels, config).await;
-    });
+        self.emit_file_queue_events(event_tx);
+        self.emit_completed_file_events(event_tx);
+        self.emit_url_resolved_events(event_tx);
+    }
+
+    fn emit_file_queue_events(&self, event_tx: &mpsc::UnboundedSender<DownloadEvent>) {
+        for item in &self.queued_items {
+            let _ = event_tx.send(DownloadEvent::FileQueued(item.queued_event(true)));
+        }
+    }
+
+    fn emit_completed_file_events(&self, event_tx: &mpsc::UnboundedSender<DownloadEvent>) {
+        for item in &self.completed_items {
+            let _ = event_tx.send(DownloadEvent::FileQueued(item.queued_event(false)));
+            let _ = event_tx.send(item.complete_event());
+        }
+    }
+
+    fn emit_url_resolved_events(&self, event_tx: &mpsc::UnboundedSender<DownloadEvent>) {
+        for url in &self.successful_submitted_urls {
+            let _ = event_tx.send(DownloadEvent::UrlResolved { url: url.clone() });
+        }
+    }
+}
+
+struct CollectedNodeSet {
+    queued_items: Vec<QueuedDownload>,
+    completed_items: Vec<QueuedDownload>,
+    skipped_count: usize,
+    partial_count: usize,
+}
+
+struct BatchContext<'a> {
+    downloader: &'a Arc<crate::Downloader>,
+    progress: &'a Arc<dyn DownloadProgress>,
+    semaphore: &'a Arc<tokio::sync::Semaphore>,
+    event_tx: &'a mpsc::UnboundedSender<DownloadEvent>,
+    token_tx: &'a mpsc::UnboundedSender<TokenMessage>,
+}
+
+struct DownloadRuntime {
+    downloader: Arc<crate::Downloader>,
+    http: Arc<reqwest::Client>,
+    dlc_cache: Arc<DlcKeyCache>,
+    progress: Arc<dyn DownloadProgress>,
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+struct DownloadTaskResult {
+    id: String,
+    attempt_id: u64,
+    result: crate::Result<crate::FileStats>,
+}
+
+struct FileProgress {
+    tx: mpsc::UnboundedSender<DownloadEvent>,
+    id: String,
+    attempt_id: u64,
+}
+
+impl DownloadProgress for FileProgress {
+    fn on_file_start(&self, _name: &str, size: u64) {
+        let _ = self.tx.send(DownloadEvent::FileStart {
+            id: self.id.clone(),
+            size,
+            attempt_id: self.attempt_id,
+        });
+    }
+
+    fn on_progress(&self, _name: &str, delta: ProgressDelta) {
+        let _ = self.tx.send(DownloadEvent::Progress {
+            id: Arc::<str>::from(self.id.as_str()),
+            delta,
+            attempt_id: self.attempt_id,
+        });
+    }
+
+    fn on_resume_reused(&self, _name: &str, chunks: usize, bytes: u64) {
+        let _ = self.tx.send(DownloadEvent::ResumeReused {
+            id: self.id.clone(),
+            chunks,
+            bytes,
+            attempt_id: self.attempt_id,
+        });
+    }
+
+    fn on_file_complete(&self, _name: &str, _stats: &crate::FileStats) {
+        let _ = self.tx.send(DownloadEvent::FileComplete {
+            id: self.id.clone(),
+            attempt_id: self.attempt_id,
+        });
+    }
+
+    fn on_error(&self, _name: &str, error: &str) {
+        let _ = self.tx.send(DownloadEvent::FileError {
+            id: self.id.clone(),
+            error: error.to_string(),
+            attempt_id: self.attempt_id,
+        });
+    }
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run_download(channels: DownloadChannels, config: DownloadConfig) {
+pub(super) async fn run_download(channels: DownloadChannels, config: DownloadConfig) {
     let DownloadChannels {
         client_rx,
         event_tx: tx,
         mut url_rx,
         token_tx,
+        pause_rx,
+        skipped_session_paths,
     } = channels;
 
-    let progress: Arc<dyn DownloadProgress> = Arc::new(TuiProgress { tx: tx.clone() });
+    let progress: Arc<dyn DownloadProgress> = Arc::new(TuiProgress::new(tx.clone()));
 
     // Receive the pre-authenticated client from the login task
     let Some(rx) = client_rx else {
-        let _ = tx.send(DownloadEvent::Error {
-            name: "setup".to_string(),
+        let _ = tx.send(DownloadEvent::ScopeError {
+            scope: "setup".to_string(),
             error: "No client channel available".to_string(),
         });
         return;
     };
     let Ok((mega_client, http)) = rx.await else {
-        let _ = tx.send(DownloadEvent::Error {
-            name: "setup".to_string(),
+        let _ = tx.send(DownloadEvent::ScopeError {
+            scope: "setup".to_string(),
             error: "Login task dropped before sending client".to_string(),
         });
         return;
@@ -457,118 +323,263 @@ async fn run_download(channels: DownloadChannels, config: DownloadConfig) {
 
     let _ = tx.send(DownloadEvent::StatusMessage("Ready".to_string()));
 
-    let downloader = Arc::new(crate::Downloader::new(mega_client, config.clone()));
-    let http = Arc::new(http);
-    let dlc_cache = Arc::new(dlc_cache);
-
-    // Shared semaphore across all batches so concurrent_files is a global limit
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(config.concurrent_files));
+    let runtime = DownloadRuntime {
+        downloader: Arc::new(crate::Downloader::new(mega_client, config.clone())),
+        http: Arc::new(http),
+        dlc_cache: Arc::new(dlc_cache),
+        progress,
+        // Shared semaphore across all batches so concurrent_files is a global limit
+        semaphore: Arc::new(tokio::sync::Semaphore::new(config.concurrent_files)),
+    };
     let mut join_set = tokio::task::JoinSet::new();
 
     loop {
         tokio::select! {
-            url_opt = url_rx.recv() => {
-                let Some(first_url) = url_opt else { break };
-                let mut batch = vec![first_url];
-                while let Ok(url) = url_rx.try_recv() {
-                    batch.push(url);
-                }
-
-                for url in &batch {
-                    let _ = tx.send(DownloadEvent::UrlQueued { url: url.clone() });
-                }
-
-                let _ = tx.send(DownloadEvent::StatusMessage(format!(
-                    "Processing {} URL(s)...",
-                    batch.len()
-                )));
-
-                // Resolve URLs inline (fast, just URL/DLC parsing)
-                let resolved = resolve_urls(&batch, &http, &dlc_cache, &tx).await;
-
-                // Spawn the download work so we can receive new URLs immediately
-                let dl = Arc::clone(&downloader);
-                let prog = Arc::clone(&progress);
-                let sem = Arc::clone(&semaphore);
-                let tx2 = tx.clone();
-                let token_tx2 = token_tx.clone();
-                join_set.spawn(async move {
-                    download_batch(&resolved, &dl, &prog, &sem, &tx2, &token_tx2, &batch).await;
-                });
+            request_opt = url_rx.recv() => {
+                let Some(first_request) = request_opt else { break };
+                let batch = collect_download_requests(first_request, &mut url_rx);
+                queue_download_batch_events(&batch, &tx);
+                spawn_download_batch(
+                    &mut join_set,
+                    batch,
+                    &runtime,
+                    &tx,
+                    &token_tx,
+                    &pause_rx,
+                    &skipped_session_paths,
+                );
             }
             Some(result) = join_set.join_next() => {
-                if let Err(e) = result {
-                    let _ = tx.send(DownloadEvent::Error {
-                        name: "download".to_string(),
-                        error: format!("Batch task panicked: {e}"),
-                    });
-                }
+                handle_batch_join_result(result, &tx);
             }
         }
     }
 
     // Drain remaining batch tasks
     while let Some(result) = join_set.join_next().await {
-        if let Err(e) = result {
-            let _ = tx.send(DownloadEvent::Error {
-                name: "download".to_string(),
-                error: format!("Batch task panicked: {e}"),
+        handle_batch_join_result(result, &tx);
+    }
+}
+
+fn collect_download_requests(
+    first_request: DownloadRequest,
+    url_rx: &mut mpsc::UnboundedReceiver<DownloadRequest>,
+) -> Vec<DownloadRequest> {
+    let mut batch = vec![first_request];
+    while let Ok(request) = url_rx.try_recv() {
+        batch.push(request);
+    }
+    batch
+}
+
+fn queue_download_batch_events(
+    batch: &[DownloadRequest],
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+) {
+    for url in batch {
+        if let DownloadRequest::SubmitUrl { url } = url {
+            let _ = tx.send(DownloadEvent::UrlQueued { url: url.clone() });
+        }
+    }
+
+    let _ = tx.send(DownloadEvent::StatusMessage(format!(
+        "Processing {} URL(s)...",
+        batch.iter().count()
+    )));
+}
+
+fn spawn_download_batch(
+    join_set: &mut tokio::task::JoinSet<()>,
+    batch: Vec<DownloadRequest>,
+    runtime: &DownloadRuntime,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+    token_tx: &mpsc::UnboundedSender<TokenMessage>,
+    pause_rx: &watch::Receiver<bool>,
+    skipped_session_paths: &HashMap<String, HashSet<String>>,
+) {
+    let downloader = Arc::clone(&runtime.downloader);
+    let progress = Arc::clone(&runtime.progress);
+    let http = Arc::clone(&runtime.http);
+    let dlc_cache = Arc::clone(&runtime.dlc_cache);
+    let semaphore = Arc::clone(&runtime.semaphore);
+    let event_tx = tx.clone();
+    let token_tx = token_tx.clone();
+    let pause_rx = pause_rx.clone();
+    let skipped_paths = skipped_session_paths.clone();
+
+    join_set.spawn(async move {
+        let resolved = resolve_download_requests(&batch, &http, &dlc_cache, &event_tx).await;
+        download_batch(
+            &resolved,
+            pause_rx,
+            &skipped_paths,
+            BatchContext {
+                downloader: &downloader,
+                progress: &progress,
+                semaphore: &semaphore,
+                event_tx: &event_tx,
+                token_tx: &token_tx,
+            },
+        )
+        .await;
+    });
+}
+
+/// Resolves download requests (including DLC files) into MEGA URLs.
+async fn resolve_download_requests(
+    requests: &[DownloadRequest],
+    http: &Arc<reqwest::Client>,
+    dlc_cache: &Arc<DlcKeyCache>,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+) -> Vec<FetchedNodeSet> {
+    let mut by_source: HashMap<String, (Option<HashSet<String>>, HashMap<String, u64>, bool)> =
+        HashMap::new();
+
+    for request in requests {
+        match request {
+            DownloadRequest::SubmitUrl { url } => {
+                by_source
+                    .entry(url.clone())
+                    .and_modify(|entry| {
+                        entry.0 = None;
+                        entry.1.clear();
+                        entry.2 = true;
+                    })
+                    .or_insert_with(|| (None, HashMap::new(), true));
+            }
+            DownloadRequest::ResumeFileIds {
+                source_url,
+                file_ids,
+                attempt_ids,
+            } => {
+                let file_ids = file_ids.iter().cloned().collect::<HashSet<_>>();
+                let entry = by_source
+                    .entry(source_url.clone())
+                    .or_insert_with(|| (None, HashMap::new(), false));
+                match entry.0.as_mut() {
+                    Some(existing) => {
+                        existing.extend(file_ids);
+                    }
+                    None => {
+                        // A submit request for this URL takes precedence and should force all
+                        // files to be resolved.
+                    }
+                }
+                entry.1.extend(attempt_ids.clone());
+            }
+        }
+    }
+
+    let mut resolved = Vec::new();
+    for (submitted_url, (file_ids, attempt_ids, emit_url_resolved)) in by_source {
+        let sources = resolve_submitted_url(&submitted_url, http, dlc_cache, tx).await;
+        for source in sources {
+            let requested_file_ids = file_ids.clone();
+            let requested_attempt_ids = attempt_ids.clone();
+            let nodes = match fetch_node_set(&source, http).await {
+                Ok(nodes) => Some(nodes),
+                Err(error) => {
+                    let _ = tx.send(DownloadEvent::ScopeError {
+                        scope: source.source_url.clone(),
+                        error,
+                    });
+                    None
+                }
+            };
+            resolved.push(FetchedNodeSet {
+                resolved: source,
+                nodes,
+                requested_file_ids,
+                requested_attempt_ids,
+                emit_url_resolved,
             });
+        }
+    }
+
+    resolved
+}
+
+async fn resolve_submitted_url(
+    url: &str,
+    http: &Arc<reqwest::Client>,
+    dlc_cache: &Arc<DlcKeyCache>,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+) -> Vec<ResolvedUrl> {
+    if is_dlc_path(url) {
+        return resolve_dlc_urls(url, http, dlc_cache, tx).await;
+    }
+
+    vec![ResolvedUrl::direct(url)]
+}
+
+async fn resolve_dlc_urls(
+    url: &str,
+    http: &Arc<reqwest::Client>,
+    dlc_cache: &Arc<DlcKeyCache>,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+) -> Vec<ResolvedUrl> {
+    let _ = tx.send(DownloadEvent::StatusMessage(format!(
+        "Processing DLC: {url}"
+    )));
+
+    let dlc_path = match expand_dlc_path(url) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = tx.send(DownloadEvent::ScopeError {
+                scope: url.to_string(),
+                error,
+            });
+            return Vec::new();
+        }
+    };
+
+    match crate::parse_dlc_file(&dlc_path, http, dlc_cache).await {
+        Ok(dlc_urls) => {
+            let _ = tx.send(DownloadEvent::StatusMessage(format!(
+                "DLC {url}: {} MEGA link(s)",
+                dlc_urls.len()
+            )));
+            dlc_urls
+                .into_iter()
+                .map(|resolved_url| ResolvedUrl::from_source(resolved_url, url))
+                .collect()
+        }
+        Err(e) => {
+            let _ = tx.send(DownloadEvent::ScopeError {
+                scope: url.to_string(),
+                error: format!("DLC parse error: {e}"),
+            });
+            Vec::new()
         }
     }
 }
 
-/// Resolves raw URL strings (including DLC files) into MEGA URLs.
-async fn resolve_urls(
-    urls: &[String],
-    http: &Arc<reqwest::Client>,
-    dlc_cache: &Arc<DlcKeyCache>,
-    tx: &mpsc::UnboundedSender<DownloadEvent>,
-) -> Vec<String> {
-    let mut resolved = Vec::new();
-    for url in urls {
-        if is_dlc_path(url) {
-            let _ = tx.send(DownloadEvent::StatusMessage(format!(
-                "Processing DLC: {url}"
-            )));
-            // For local filesystem paths (starting with ~ or /), expand ~ to home directory
-            let dlc_path = if url.starts_with('~') || url.starts_with('/') {
-                if url.starts_with('~') {
-                    if let Some(home) = dirs::home_dir() {
-                        url.replacen('~', home.to_string_lossy().as_ref(), 1)
-                    } else {
-                        let _ = tx.send(DownloadEvent::Error {
-                            name: url.clone(),
-                            error: "Could not determine home directory".to_string(),
-                        });
-                        continue;
-                    }
-                } else {
-                    url.clone()
-                }
-            } else {
-                url.clone()
-            };
-            match crate::parse_dlc_file(&dlc_path, http, dlc_cache).await {
-                Ok(dlc_urls) => {
-                    let _ = tx.send(DownloadEvent::StatusMessage(format!(
-                        "DLC {url}: {} MEGA link(s)",
-                        dlc_urls.len()
-                    )));
-                    resolved.extend(dlc_urls);
-                }
-                Err(e) => {
-                    let _ = tx.send(DownloadEvent::Error {
-                        name: url.clone(),
-                        error: format!("DLC parse error: {e}"),
-                    });
-                }
-            }
-        } else {
-            resolved.push(url.clone());
-        }
+fn expand_dlc_path(url: &str) -> Result<String, String> {
+    if !url.starts_with('~') && !url.starts_with('/') {
+        return Ok(url.to_string());
     }
-    resolved
+
+    if !url.starts_with('~') {
+        return Ok(url.to_string());
+    }
+
+    let Some(home) = dirs::home_dir() else {
+        return Err("Could not determine home directory".to_string());
+    };
+
+    Ok(url.replacen('~', home.to_string_lossy().as_ref(), 1))
+}
+
+fn handle_batch_join_result(
+    result: Result<(), tokio::task::JoinError>,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+) {
+    if let Err(e) = result {
+        let _ = tx.send(DownloadEvent::ScopeError {
+            scope: "download".to_string(),
+            error: format!("Batch task panicked: {e}"),
+        });
+    }
 }
 
 /// Fetches nodes from URLs, collects files, and downloads them.
@@ -581,11 +592,376 @@ mod tests {
     use super::super::app::App;
     use super::super::event::DownloadEvent;
     use super::*;
+    use crate::core::{FileLifecycle, SessionRunStatus};
+    use crate::test_support::StateDirectoryGuard;
+    use tempfile::tempdir;
     use tokio::sync::mpsc;
 
     fn test_app() -> App {
         let (tx, _rx) = mpsc::unbounded_channel();
-        App::new(9723, tx)
+        App::new(9723, tx, true)
+    }
+
+    fn session_with_file(path: &str, size: u64) -> crate::SessionSnapshotV3 {
+        let mut session = session_snapshot(vec![(
+            "https://mega.nz/folder/root",
+            UrlFixtureStatus::Fetched,
+        )]);
+        push_file(&mut session, 0, path, size, FileFixtureStatus::Pending);
+        session
+    }
+
+    #[test]
+    fn describe_panic_handles_known_and_unknown_payloads() {
+        let static_msg: &(dyn std::any::Any + Send) = &"static boom";
+        let string_msg: &(dyn std::any::Any + Send) = &String::from("owned boom");
+        let unknown_msg: &(dyn std::any::Any + Send) = &123_u32;
+
+        assert_eq!(describe_panic(static_msg), "static boom");
+        assert_eq!(describe_panic(string_msg), "owned boom");
+        assert_eq!(describe_panic(unknown_msg), "unknown panic payload");
+    }
+
+    #[test]
+    fn handle_file_complete_marks_session_file_complete() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "first.bin".to_string(),
+            name: "first.bin".to_string(),
+            size: 64,
+            downloaded: 16,
+            status: FileStatus::Downloading,
+        });
+        app.recompute_totals();
+        let session = session_with_file("first.bin", 64);
+        let session_path = session.state_path();
+        app.session = Some(session);
+
+        app.mark_visible_file_complete("first.bin", "renamed.bin");
+
+        let file = app
+            .files
+            .iter()
+            .find(|file| file.id == "first.bin")
+            .expect("file should remain visible");
+        assert_eq!(file.name, "renamed.bin");
+        assert_eq!(file.status, FileStatus::Complete);
+        assert_eq!(file.downloaded, 64);
+        assert_eq!(app.status, "All downloads complete");
+        assert!(session_path.exists());
+
+        let session = app.session.as_ref().expect("session should remain");
+        assert_eq!(session.files.len(), 1);
+        assert_eq!(session.files[0].lifecycle, FileLifecycle::Complete);
+        assert_eq!(session.status, SessionRunStatus::Completed);
+    }
+
+    #[test]
+    fn file_queued_clears_stale_error_state() {
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "file-id".to_string(),
+            name: "old-name.mkv".to_string(),
+            size: 64,
+            downloaded: 17,
+            status: FileStatus::Error("stale error".to_string()),
+        });
+
+        app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
+            id: "file-id".to_string(),
+            size: 128,
+            count_toward_progress: true,
+            origin: FileOrigin {
+                package_id: None,
+                package_display_name: None,
+                source_url: "https://mega.nz/file/new".to_string(),
+                submitted_url: "https://mega.nz/folder/root".to_string(),
+            },
+        }));
+
+        let file = app.files.iter().find(|file| file.id == "file-id").unwrap();
+        assert_eq!(file.name, "file-id");
+        assert_eq!(file.size, 128);
+        assert_eq!(
+            app.visible_file_context("file-id")
+                .and_then(|context| context.source_url),
+            Some("https://mega.nz/file/new".to_string())
+        );
+        assert_eq!(file.status, FileStatus::Queued);
+        assert_eq!(file.downloaded, 0);
+        assert_eq!(app.file_speed("file-id"), 0);
+    }
+
+    #[test]
+    fn file_queued_does_not_restore_session_skipped_file() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let mut app = test_app();
+        let mut session = session_snapshot(vec![(
+            "https://mega.nz/file/root",
+            UrlFixtureStatus::Fetched,
+        )]);
+        push_file(
+            &mut session,
+            0,
+            "episode.mkv",
+            128,
+            FileFixtureStatus::Skipped,
+        );
+        app.session = Some(session);
+
+        app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
+            id: "episode.mkv".to_string(),
+            size: 128,
+            count_toward_progress: true,
+            origin: FileOrigin {
+                package_id: None,
+                package_display_name: None,
+                source_url: "https://mega.nz/file/root".to_string(),
+                submitted_url: "https://mega.nz/file/root".to_string(),
+            },
+        }));
+
+        assert!(app.files.is_empty());
+        let session = app.session.as_ref().expect("session should remain");
+        assert_eq!(session.files.len(), 1);
+        assert_eq!(session.files[0].lifecycle, FileLifecycle::Skipped);
+    }
+
+    #[test]
+    fn url_placeholder_lives_in_overlay_until_resolved() {
+        let mut app = test_app();
+        let url = "https://mega.nz/folder/root".to_string();
+
+        app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
+        assert!(app.overlay_files.contains_key(&url));
+        assert!(app.files.iter().any(|file| file.id == url));
+
+        app.handle_download_event(DownloadEvent::UrlResolved { url: url.clone() });
+        assert!(!app.overlay_files.contains_key(&url));
+        assert!(!app.files.iter().any(|file| file.id == url));
+    }
+
+    #[test]
+    fn url_level_error_replaces_placeholder_in_overlay() {
+        let dir = tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let mut app = test_app();
+        let url = "https://mega.nz/folder/root".to_string();
+        let session = session_snapshot(vec![(url.as_str(), UrlFixtureStatus::Pending)]);
+        app.session = Some(session);
+
+        app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
+        app.handle_download_event(DownloadEvent::ScopeError {
+            scope: url.clone(),
+            error: "bad folder".to_string(),
+        });
+
+        let overlay = app
+            .overlay_files
+            .get(&url)
+            .expect("url-level errors should remain in overlay");
+        assert!(matches!(overlay.file.status, FileStatus::Error(ref msg) if msg == "bad folder"));
+        let session = app.session.as_ref().expect("session should remain");
+        assert_eq!(session.packages[0].source_url, url);
+        assert_eq!(session.packages[0].error.as_deref(), Some("bad folder"));
+    }
+
+    #[test]
+    fn handle_file_complete_is_idempotent_for_visible_complete_rows() {
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "file-id".to_string(),
+            name: "file.mkv".to_string(),
+            size: 128,
+            downloaded: 128,
+            status: FileStatus::Complete,
+        });
+        app.recompute_totals();
+        assert_eq!(app.files_completed, 1);
+
+        app.mark_visible_file_complete("file-id", "file.mkv");
+
+        assert_eq!(app.files_completed, 1);
+        let file = app.files.iter().find(|file| file.id == "file-id").unwrap();
+        assert_eq!(file.status, FileStatus::Complete);
+        assert_eq!(file.downloaded, 128);
+    }
+
+    #[test]
+    fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
+        let mut app = test_app();
+        app.upsert_overlay_file(
+            FileEntry {
+                id: "episode.mkv".to_string(),
+                name: "episode.mkv".to_string(),
+                size: 128,
+                downloaded: 128,
+                status: FileStatus::Complete,
+            },
+            Some("https://mega.nz/file/root".to_string()),
+            false,
+        );
+        app.recompute_totals();
+
+        app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
+            id: "episode.mkv".to_string(),
+            size: 128,
+            count_toward_progress: false,
+            origin: FileOrigin {
+                package_id: None,
+                package_display_name: None,
+                source_url: "https://mega.nz/file/root".to_string(),
+                submitted_url: "https://mega.nz/file/root".to_string(),
+            },
+        }));
+        app.handle_download_event(DownloadEvent::FileComplete {
+            id: "episode.mkv".to_string(),
+            attempt_id: 0,
+        });
+
+        assert_eq!(app.files.len(), 1);
+        let file = app
+            .files
+            .iter()
+            .find(|file| file.id == "episode.mkv")
+            .unwrap();
+        assert_eq!(file.status, FileStatus::Complete);
+        assert_eq!(file.downloaded, 128);
+        assert_eq!(app.files_completed, 0);
+        assert_eq!(app.files_total, 0);
+    }
+
+    #[test]
+    fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
+        let resolved = vec![
+            FetchedNodeSet {
+                resolved: ResolvedUrl {
+                    source_url: "https://mega.nz/file/one".to_string(),
+                    submitted_url: "bundle.dlc".to_string(),
+                    package_id: None,
+                    package_display_name: None,
+                },
+                nodes: None,
+                requested_file_ids: None,
+                requested_attempt_ids: HashMap::new(),
+                emit_url_resolved: true,
+            },
+            FetchedNodeSet {
+                resolved: ResolvedUrl {
+                    source_url: "https://mega.nz/file/two".to_string(),
+                    submitted_url: "bundle.dlc".to_string(),
+                    package_id: None,
+                    package_display_name: None,
+                },
+                nodes: None,
+                requested_file_ids: None,
+                requested_attempt_ids: HashMap::new(),
+                emit_url_resolved: true,
+            },
+            FetchedNodeSet {
+                resolved: ResolvedUrl {
+                    source_url: "https://mega.nz/file/three".to_string(),
+                    submitted_url: "https://mega.nz/folder/direct".to_string(),
+                    package_id: None,
+                    package_display_name: None,
+                },
+                nodes: None,
+                requested_file_ids: None,
+                requested_attempt_ids: HashMap::new(),
+                emit_url_resolved: true,
+            },
+        ];
+
+        let urls = successful_submitted_urls(resolved.iter());
+
+        assert_eq!(
+            urls,
+            vec![
+                "bundle.dlc".to_string(),
+                "https://mega.nz/folder/direct".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn same_batch_folder_package_ids_groups_matching_folders_from_distinct_sources() {
+        let groups = same_batch_folder_package_ids([
+            ("folder/file1.mkv", "https://mega.nz/folder/one"),
+            ("folder/file2.mkv", "https://mega.nz/folder/two"),
+            ("other/file3.mkv", "https://mega.nz/folder/three"),
+        ]);
+
+        let group = groups.get("folder").expect("folder should be grouped");
+        assert_eq!(group.display_name, "folder");
+        assert!(group.id.starts_with("batch-"));
+        assert_ne!(group.id, "folder");
+        assert!(!groups.contains_key("other"));
+    }
+
+    #[test]
+    fn remote_files_match_prefers_sparse_checksum_then_size_and_date() {
+        let left = BatchItemSnapshot {
+            location: BatchItemLocation::Queued(0),
+            package_id: "folder".to_string(),
+            path: "folder/file.mkv".to_string(),
+            size: 100,
+            modified_at: Some(123),
+            sparse_checksum: Some([7; 16]),
+        };
+        let same_checksum_different_date = BatchItemSnapshot {
+            modified_at: Some(456),
+            ..left.clone()
+        };
+        let same_size_and_date_without_checksum = BatchItemSnapshot {
+            location: BatchItemLocation::Queued(1),
+            sparse_checksum: None,
+            ..left.clone()
+        };
+        let different_size = BatchItemSnapshot {
+            location: BatchItemLocation::Queued(2),
+            size: 90,
+            sparse_checksum: None,
+            ..left.clone()
+        };
+
+        assert!(remote_files_match(&left, &same_checksum_different_date));
+        assert!(remote_files_match(
+            &BatchItemSnapshot {
+                sparse_checksum: None,
+                ..left.clone()
+            },
+            &same_size_and_date_without_checksum
+        ));
+        assert!(!remote_files_match(&left, &different_size));
+    }
+
+    #[test]
+    fn duplicate_path_renames_file_inside_folder_preserving_extension() {
+        assert_eq!(duplicate_path("folder/file.mkv", 2), "folder/file (2).mkv");
+        assert_eq!(duplicate_path("folder/file", 3), "folder/file (3)");
+    }
+
+    #[test]
+    fn resolved_url_direct_uses_same_source_and_submission() {
+        let resolved = ResolvedUrl::direct("https://mega.nz/file/test");
+
+        assert_eq!(resolved.source_url, "https://mega.nz/file/test");
+        assert_eq!(resolved.submitted_url, "https://mega.nz/file/test");
+    }
+
+    #[test]
+    fn expand_dlc_path_leaves_non_filesystem_inputs_unchanged() {
+        assert_eq!(
+            expand_dlc_path("bundle.dlc").unwrap(),
+            "bundle.dlc".to_string()
+        );
+        assert_eq!(
+            expand_dlc_path("/tmp/archive.dlc").unwrap(),
+            "/tmp/archive.dlc".to_string()
+        );
     }
 
     /// Regression test: the mega library reports *cumulative* bytes downloaded,
@@ -597,29 +973,27 @@ mod tests {
         let file_size: u64 = 1_000_000;
 
         // Simulate FileStart
-        handle_download_event(
-            &mut app,
-            DownloadEvent::FileStart {
-                name: "test.bin".to_string(),
-                size: file_size,
-            },
-        );
+        app.handle_download_event(DownloadEvent::FileStart {
+            id: "test.bin".to_string(),
+            size: file_size,
+            attempt_id: 0,
+        });
 
         // Simulate a sequence of correct *delta* progress events
         // (as they should arrive after the cumulative→delta fix in download.rs).
         let deltas = [100_000u64, 250_000, 350_000, 200_000, 100_000]; // sum = 1_000_000
         for d in deltas {
-            handle_download_event(
-                &mut app,
-                DownloadEvent::Progress {
-                    name: "test.bin".to_string(),
-                    bytes_delta: d,
-                    speed: 0,
+            app.handle_download_event(DownloadEvent::Progress {
+                id: std::sync::Arc::<str>::from("test.bin"),
+                delta: ProgressDelta {
+                    total_bytes_delta: d,
+                    network_bytes_delta: d,
                 },
-            );
+                attempt_id: 0,
+            });
         }
 
-        let file = app.files.iter().find(|f| f.name == "test.bin").unwrap();
+        let file = app.files.iter().find(|f| f.id == "test.bin").unwrap();
         assert_eq!(
             file.downloaded, file_size,
             "downloaded should equal sum of deltas"
@@ -633,150 +1007,621 @@ mod tests {
         assert_eq!(app.total_downloaded, file_size);
     }
 
-    /// Verify that if buggy cumulative values were sent as deltas,
-    /// downloaded would blow past the file size (the pre-fix behaviour).
+    /// Verify that even if buggy cumulative values were sent as deltas,
+    /// visible progress is capped at the known file size.
     #[test]
-    fn cumulative_values_as_deltas_would_overshoot() {
+    fn cumulative_values_as_deltas_are_capped_at_file_size() {
         let mut app = test_app();
         let file_size: u64 = 1_000_000;
 
-        handle_download_event(
-            &mut app,
-            DownloadEvent::FileStart {
-                name: "test.bin".to_string(),
-                size: file_size,
-            },
-        );
+        app.handle_download_event(DownloadEvent::FileStart {
+            id: "test.bin".to_string(),
+            size: file_size,
+            attempt_id: 0,
+        });
 
         // Simulate the OLD bug: cumulative totals sent as bytes_delta
         let cumulatives = [100_000u64, 350_000, 700_000, 900_000, 1_000_000];
         for c in cumulatives {
-            handle_download_event(
-                &mut app,
-                DownloadEvent::Progress {
-                    name: "test.bin".to_string(),
-                    bytes_delta: c, // wrong! these are cumulative
-                    speed: 0,
+            app.handle_download_event(DownloadEvent::Progress {
+                id: std::sync::Arc::<str>::from("test.bin"),
+                delta: ProgressDelta {
+                    total_bytes_delta: c, // wrong! these are cumulative
+                    network_bytes_delta: c,
                 },
-            );
+                attempt_id: 0,
+            });
         }
 
-        let file = app.files.iter().find(|f| f.name == "test.bin").unwrap();
-        // Sum of cumulatives = 3_050_000, which is 3x the file size
-        assert_eq!(file.downloaded, 3_050_000);
-        assert!(
-            file.downloaded > file.size,
-            "this demonstrates the bug: {} > {}",
-            file.downloaded,
-            file.size,
-        );
+        let file = app.files.iter().find(|f| f.id == "test.bin").unwrap();
+        assert_eq!(file.downloaded, file_size);
+        assert_eq!(app.total_downloaded, file_size);
     }
 }
 
 async fn download_batch(
-    urls: &[String],
+    node_sets: &[FetchedNodeSet],
+    mut pause_rx: watch::Receiver<bool>,
+    skipped_session_paths: &HashMap<String, HashSet<String>>,
+    ctx: BatchContext<'_>,
+) {
+    let collected = collect_batch(
+        &node_sets,
+        ctx.downloader,
+        ctx.progress,
+        skipped_session_paths,
+    )
+    .await;
+
+    collected.emit_events(ctx.event_tx);
+
+    let mut join_set = tokio::task::JoinSet::new();
+    for item in collected.queued_items {
+        let cancel_token = register_download_token(&item, ctx.token_tx);
+        if wait_until_resumed(&mut pause_rx).await.is_err() {
+            return;
+        }
+        let permit = acquire_download_permit(ctx.semaphore).await;
+        spawn_file_download(
+            &mut join_set,
+            item,
+            permit,
+            Arc::clone(ctx.downloader),
+            ctx.event_tx.clone(),
+            pause_rx.clone(),
+            cancel_token,
+        );
+    }
+
+    drain_download_join_set(join_set, ctx.event_tx).await;
+}
+
+fn register_download_token(
+    item: &QueuedDownload,
+    token_tx: &mpsc::UnboundedSender<TokenMessage>,
+) -> CancellationToken {
+    let cancel_token = CancellationToken::new();
+    let _ = token_tx.send(TokenMessage {
+        file_id: item.item.path.clone(),
+        token: cancel_token.clone(),
+    });
+    cancel_token
+}
+
+async fn wait_until_resumed(pause_rx: &mut watch::Receiver<bool>) -> Result<(), ()> {
+    while *pause_rx.borrow() {
+        if pause_rx.changed().await.is_err() {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+async fn acquire_download_permit(
+    semaphore: &Arc<tokio::sync::Semaphore>,
+) -> tokio::sync::OwnedSemaphorePermit {
+    Arc::clone(semaphore)
+        .acquire_owned()
+        .await
+        .expect("semaphore not closed")
+}
+
+fn spawn_file_download(
+    join_set: &mut tokio::task::JoinSet<DownloadTaskResult>,
+    item: QueuedDownload,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    downloader: Arc<crate::Downloader>,
+    event_tx: mpsc::UnboundedSender<DownloadEvent>,
+    pause_rx: watch::Receiver<bool>,
+    cancel_token: CancellationToken,
+) {
+    join_set.spawn(async move {
+        let _permit = permit;
+        let file_id = item.item.path.clone();
+        let attempt_id = item.attempt_id;
+        let progress = file_progress(&file_id, attempt_id, &event_tx);
+        let result = downloader
+            .download_file(
+                &item.item.node,
+                &item.item.path,
+                &progress,
+                Some(cancel_token),
+            )
+            .await;
+        emit_pause_cancellation_if_needed(&file_id, attempt_id, &result, &pause_rx, &event_tx);
+        DownloadTaskResult {
+            id: item.item.path,
+            attempt_id,
+            result,
+        }
+    });
+}
+
+fn file_progress(
+    file_id: &str,
+    attempt_id: u64,
+    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
+) -> Arc<dyn DownloadProgress> {
+    Arc::new(FileProgress {
+        tx: event_tx.clone(),
+        id: file_id.to_string(),
+        attempt_id,
+    })
+}
+
+fn emit_pause_cancellation_if_needed(
+    file_id: &str,
+    attempt_id: u64,
+    result: &crate::Result<crate::FileStats>,
+    pause_rx: &watch::Receiver<bool>,
+    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
+) {
+    if matches!(result, Err(crate::Error::Cancelled)) && *pause_rx.borrow() {
+        let _ = event_tx.send(DownloadEvent::FileCancelled {
+            id: file_id.to_string(),
+            attempt_id,
+        });
+    }
+}
+
+async fn fetch_node_set(
+    resolved: &ResolvedUrl,
+    http: &Arc<reqwest::Client>,
+) -> Result<mega::Nodes, String> {
+    let fetch_result =
+        std::panic::AssertUnwindSafe(crate::fetch_public_nodes(http, &resolved.source_url))
+            .catch_unwind()
+            .await;
+
+    match fetch_result {
+        Ok(Ok(nodes)) => Ok(nodes),
+        Ok(Err(e)) => Err(format!("Fetch failed: {e}")),
+        Err(panic) => Err(format!("Fetch panicked: {}", describe_panic(&*panic))),
+    }
+}
+
+async fn collect_batch(
+    node_sets: &[FetchedNodeSet],
     downloader: &Arc<crate::Downloader>,
     progress: &Arc<dyn DownloadProgress>,
-    semaphore: &Arc<tokio::sync::Semaphore>,
-    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
-    token_tx: &mpsc::UnboundedSender<TokenMessage>,
-    source_urls: &[String],
-) {
-    let mut node_sets: Vec<mega::Nodes> = Vec::new();
-    for url in urls {
-        let _ = event_tx.send(DownloadEvent::StatusMessage(format!("Fetching: {url}")));
-        match downloader.client().fetch_public_nodes(url).await {
-            Ok(nodes) => {
-                node_sets.push(nodes);
-            }
-            Err(e) => {
-                let _ = event_tx.send(DownloadEvent::Error {
-                    name: url.clone(),
-                    error: format!("Fetch failed: {e}"),
-                });
-            }
+    skipped_paths: &HashMap<String, HashSet<String>>,
+) -> CollectedBatch {
+    let mut queued_items = Vec::new();
+    let mut completed_items = Vec::new();
+    let mut skipped_count = 0;
+    let mut partial_count = 0;
+    let successful_submitted_urls = successful_submitted_urls(node_sets.iter());
+
+    for node_set in node_sets {
+        let collected = collect_node_set(node_set, downloader, progress, skipped_paths).await;
+        skipped_count += collected.skipped_count;
+        partial_count += collected.partial_count;
+        queued_items.extend(collected.queued_items);
+        completed_items.extend(collected.completed_items);
+    }
+    combine_same_batch_folder_packages(&mut queued_items, &mut completed_items);
+    CollectedBatch {
+        queued_items,
+        completed_items,
+        skipped_count,
+        partial_count,
+        successful_submitted_urls,
+    }
+}
+
+async fn collect_node_set(
+    node_set: &FetchedNodeSet,
+    downloader: &Arc<crate::Downloader>,
+    progress: &Arc<dyn DownloadProgress>,
+    skipped_paths: &HashMap<String, HashSet<String>>,
+) -> CollectedNodeSet {
+    let Some(nodes) = node_set.nodes.as_ref() else {
+        return CollectedNodeSet {
+            queued_items: Vec::new(),
+            completed_items: Vec::new(),
+            skipped_count: 0,
+            partial_count: 0,
+        };
+    };
+
+    let skipped_for_url = skipped_paths.get(&node_set.resolved.submitted_url);
+    let collected = downloader.collect_files(nodes, progress).await;
+    let mut skipped_count = 0;
+    let keep_file = |path: &str| -> bool {
+        node_set
+            .requested_file_ids
+            .as_ref()
+            .is_none_or(|ids| ids.contains(path))
+    };
+
+    let to_download = collected
+        .to_download
+        .into_iter()
+        .filter(|item| keep_file(&item.path))
+        .collect::<Vec<_>>();
+    let completed = collected
+        .completed
+        .into_iter()
+        .filter(|item| keep_file(&item.path))
+        .collect::<Vec<_>>();
+
+    let mut partial_count: usize = 0;
+    for item in &to_download {
+        if downloader.config().force_overwrite {
+            continue;
+        }
+        if tokio::fs::metadata(&item.path)
+            .await
+            .is_ok_and(|metadata| metadata.len() == item.node.size())
+        {
+            continue;
+        }
+        if tokio::fs::metadata(part_path(&item.path)).await.is_ok() {
+            partial_count = partial_count.saturating_add(1);
         }
     }
 
-    let mut all_owned_items = Vec::new();
-    let mut actual_skipped = 0;
-    let mut actual_partial = 0;
+    let to_download = to_download
+        .into_iter()
+        .map(|item| crate::OwnedDownloadItem {
+            path: item.path.to_string(),
+            node: item.node.clone(),
+        })
+        .collect::<Vec<_>>();
 
-    for nodes in &node_sets {
-        let collected = downloader.collect_files(nodes, progress).await;
-        actual_skipped += collected.skipped;
-        actual_partial += collected.partial;
-        all_owned_items.extend(collected.into_owned());
+    let completed = completed
+        .into_iter()
+        .map(|item| crate::OwnedDownloadItem {
+            path: item.path.to_string(),
+            node: item.node.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let queued_items = visible_downloads(
+        to_download,
+        &node_set.resolved,
+        skipped_for_url,
+        &mut skipped_count,
+        &node_set.requested_attempt_ids,
+    );
+    let completed_items = visible_downloads(
+        completed,
+        &node_set.resolved,
+        skipped_for_url,
+        &mut skipped_count,
+        &node_set.requested_attempt_ids,
+    );
+
+    CollectedNodeSet {
+        queued_items,
+        completed_items,
+        skipped_count,
+        partial_count,
+    }
+}
+
+fn combine_same_batch_folder_packages(
+    queued_items: &mut Vec<QueuedDownload>,
+    completed_items: &mut Vec<QueuedDownload>,
+) {
+    let groups = same_batch_folder_package_ids(
+        queued_items
+            .iter()
+            .chain(completed_items.iter())
+            .map(|item| (item.item.path.as_str(), item.resolved.source_url.as_str())),
+    );
+    if groups.is_empty() {
+        return;
     }
 
-    let total_bytes: u64 = all_owned_items.iter().map(|i| i.node.size()).sum();
-    let total_files = all_owned_items.len();
-
-    let _ = event_tx.send(DownloadEvent::FilesCollected {
-        total: total_files,
-        skipped: actual_skipped,
-        partial: actual_partial,
-        total_bytes,
-    });
-
-    // Queue all files so they appear in the list immediately
-    for item in &all_owned_items {
-        let _ = event_tx.send(DownloadEvent::FileQueued {
-            name: item.node.name().to_string(),
-            size: item.node.size(),
-        });
+    for item in queued_items.iter_mut().chain(completed_items.iter_mut()) {
+        if let Some(folder) = folder_component(&item.item.path)
+            && let Some(package_id) = groups.get(folder)
+        {
+            item.resolved.package_id = Some(package_id.id.clone());
+            item.resolved.package_display_name = Some(package_id.display_name.clone());
+        }
     }
 
-    // Remove URL placeholders now that real file entries exist
-    for source_url in source_urls {
-        let _ = event_tx.send(DownloadEvent::UrlResolved {
-            url: source_url.clone(),
-        });
-    }
+    resolve_same_package_path_duplicates(queued_items, completed_items);
+}
 
-    // Download concurrently using JoinSet + shared Semaphore.
-    // Permits are acquired BEFORE spawning so files start in queue order.
-    let mut join_set = tokio::task::JoinSet::new();
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BatchPackageIdentity {
+    id: String,
+    display_name: String,
+}
 
-    for item in all_owned_items {
-        // Create a cancellation token for this download
-        let cancel_token = CancellationToken::new();
-        let token_msg = TokenMessage {
-            file_path: item.node.name().to_string(),
-            token: cancel_token.clone(),
+fn same_batch_folder_package_ids<'a>(
+    items: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> HashMap<String, BatchPackageIdentity> {
+    let mut sources_by_folder = HashMap::<&str, HashSet<&str>>::new();
+    for (path, source_url) in items {
+        let Some(folder) = folder_component(path) else {
+            continue;
         };
-        let _ = token_tx.send(token_msg);
-
-        // Wait for a permit before spawning — this ensures files start in order.
-        let permit = Arc::clone(semaphore)
-            .acquire_owned()
-            .await
-            .expect("semaphore not closed");
-        let dl = Arc::clone(downloader);
-        let prog = Arc::clone(progress);
-        join_set.spawn(async move {
-            let _permit = permit; // held until download completes
-            dl.download_file(&item.node, &item.path, &prog, Some(cancel_token))
-                .await
-        });
+        sources_by_folder
+            .entry(folder)
+            .or_default()
+            .insert(source_url);
     }
 
+    sources_by_folder
+        .into_iter()
+        .filter_map(|(folder, sources)| {
+            if sources.len() > 1 {
+                Some((
+                    folder.to_string(),
+                    BatchPackageIdentity {
+                        id: format!("batch-{}", uuid::Uuid::new_v4()),
+                        display_name: folder.to_string(),
+                    },
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn folder_component(path: &str) -> Option<&str> {
+    let (folder, file) = path.split_once('/')?;
+    if folder.is_empty() || file.is_empty() {
+        return None;
+    }
+    Some(folder)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum BatchItemLocation {
+    Queued(usize),
+    Completed(usize),
+}
+
+#[derive(Clone, Debug)]
+struct BatchItemSnapshot {
+    location: BatchItemLocation,
+    package_id: String,
+    path: String,
+    size: u64,
+    modified_at: Option<i64>,
+    sparse_checksum: Option<[u8; 16]>,
+}
+
+fn resolve_same_package_path_duplicates(
+    queued_items: &mut Vec<QueuedDownload>,
+    completed_items: &mut Vec<QueuedDownload>,
+) {
+    let snapshots = batch_item_snapshots(queued_items, completed_items);
+    let mut by_path = HashMap::<(String, String), Vec<BatchItemSnapshot>>::new();
+    let mut used_paths = snapshots
+        .iter()
+        .map(|item| (item.package_id.clone(), item.path.clone()))
+        .collect::<HashSet<_>>();
+
+    for item in snapshots {
+        by_path
+            .entry((item.package_id.clone(), item.path.clone()))
+            .or_default()
+            .push(item);
+    }
+
+    let mut drop_locations = HashSet::<BatchItemLocation>::new();
+    let mut renamed_paths = HashMap::<BatchItemLocation, String>::new();
+
+    for ((package_id, path), mut items) in by_path {
+        if items.len() < 2 {
+            continue;
+        }
+        if same_remote_file(&items) {
+            for item in items.iter().skip(1) {
+                drop_locations.insert(item.location);
+            }
+            continue;
+        }
+
+        items.sort_by(|left, right| right.size.cmp(&left.size));
+        for item in items.iter().skip(1) {
+            let renamed = next_available_duplicate_path(&package_id, &path, &mut used_paths);
+            renamed_paths.insert(item.location, renamed);
+        }
+    }
+
+    apply_duplicate_resolution(queued_items, &drop_locations, &renamed_paths, true);
+    apply_duplicate_resolution(completed_items, &drop_locations, &renamed_paths, false);
+}
+
+fn batch_item_snapshots(
+    queued_items: &[QueuedDownload],
+    completed_items: &[QueuedDownload],
+) -> Vec<BatchItemSnapshot> {
+    queued_items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| batch_item_snapshot(item, BatchItemLocation::Queued(index)))
+        .chain(
+            completed_items.iter().enumerate().map(|(index, item)| {
+                batch_item_snapshot(item, BatchItemLocation::Completed(index))
+            }),
+        )
+        .collect()
+}
+
+fn batch_item_snapshot(item: &QueuedDownload, location: BatchItemLocation) -> BatchItemSnapshot {
+    BatchItemSnapshot {
+        location,
+        package_id: item
+            .resolved
+            .package_id
+            .clone()
+            .unwrap_or_else(|| item.resolved.source_url.clone()),
+        path: item.item.path.clone(),
+        size: item.item.node.size(),
+        modified_at: item.item.node.modified_at().map(|date| date.timestamp()),
+        sparse_checksum: item.item.node.sparse_checksum().copied(),
+    }
+}
+
+fn same_remote_file(items: &[BatchItemSnapshot]) -> bool {
+    let Some(first) = items.first() else {
+        return true;
+    };
+    items
+        .iter()
+        .skip(1)
+        .all(|item| remote_files_match(first, item))
+}
+
+fn remote_files_match(left: &BatchItemSnapshot, right: &BatchItemSnapshot) -> bool {
+    if let (Some(left_checksum), Some(right_checksum)) =
+        (left.sparse_checksum, right.sparse_checksum)
+    {
+        return left_checksum == right_checksum;
+    }
+    left.size == right.size && left.modified_at.is_some() && left.modified_at == right.modified_at
+}
+
+fn next_available_duplicate_path(
+    package_id: &str,
+    path: &str,
+    used_paths: &mut HashSet<(String, String)>,
+) -> String {
+    for ordinal in 2.. {
+        let candidate = duplicate_path(path, ordinal);
+        if used_paths.insert((package_id.to_string(), candidate.clone())) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded duplicate suffix search should always find a path")
+}
+
+fn duplicate_path(path: &str, ordinal: usize) -> String {
+    let (parent, file_name) = path
+        .rsplit_once('/')
+        .map_or(("", path), |(parent, file)| (parent, file));
+    let (stem, extension) = file_name
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())
+        .map_or((file_name, ""), |(stem, extension)| (stem, extension));
+    let renamed = if extension.is_empty() {
+        format!("{stem} ({ordinal})")
+    } else {
+        format!("{stem} ({ordinal}).{extension}")
+    };
+    if parent.is_empty() {
+        renamed
+    } else {
+        format!("{parent}/{renamed}")
+    }
+}
+
+fn apply_duplicate_resolution(
+    items: &mut Vec<QueuedDownload>,
+    drop_locations: &HashSet<BatchItemLocation>,
+    renamed_paths: &HashMap<BatchItemLocation, String>,
+    queued: bool,
+) {
+    for (index, item) in items.iter_mut().enumerate() {
+        let location = if queued {
+            BatchItemLocation::Queued(index)
+        } else {
+            BatchItemLocation::Completed(index)
+        };
+        if let Some(path) = renamed_paths.get(&location) {
+            item.item.path.clone_from(path);
+        }
+    }
+
+    let mut index = 0;
+    items.retain(|_| {
+        let location = if queued {
+            BatchItemLocation::Queued(index)
+        } else {
+            BatchItemLocation::Completed(index)
+        };
+        index += 1;
+        !drop_locations.contains(&location)
+    });
+}
+
+fn successful_submitted_urls<'a>(
+    resolved_urls: impl IntoIterator<Item = &'a FetchedNodeSet>,
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut urls = Vec::new();
+
+    for resolved in resolved_urls {
+        if !resolved.emit_url_resolved {
+            continue;
+        }
+        if seen.insert(resolved.resolved.submitted_url.clone()) {
+            urls.push(resolved.resolved.submitted_url.clone());
+        }
+    }
+
+    urls
+}
+
+fn visible_downloads(
+    items: Vec<crate::OwnedDownloadItem>,
+    resolved: &ResolvedUrl,
+    skipped_paths: Option<&HashSet<String>>,
+    skipped_count: &mut usize,
+    requested_attempt_ids: &HashMap<String, u64>,
+) -> Vec<QueuedDownload> {
+    items
+        .into_iter()
+        .filter_map(|item| {
+            if skipped_paths.is_some_and(|paths| paths.contains(&item.path)) {
+                *skipped_count += 1;
+                return None;
+            }
+            Some(QueuedDownload {
+                resolved: resolved.clone(),
+                attempt_id: requested_attempt_ids.get(&item.path).copied().unwrap_or(0),
+                item,
+            })
+        })
+        .collect()
+}
+
+async fn drain_download_join_set(
+    mut join_set: tokio::task::JoinSet<DownloadTaskResult>,
+    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
+) {
     while let Some(result) = join_set.join_next().await {
-        match result {
-            Ok(Ok(_stats)) => {}
-            Ok(Err(crate::Error::Cancelled)) => {} // user cancelled
-            Ok(Err(e)) => {
-                let _ = event_tx.send(DownloadEvent::Error {
-                    name: "download".to_string(),
-                    error: format!("Download failed: {e}"),
-                });
-            }
-            Err(e) => {
-                let _ = event_tx.send(DownloadEvent::Error {
-                    name: "download".to_string(),
-                    error: format!("Task panicked: {e}"),
-                });
-            }
+        handle_download_join_result(result, event_tx);
+    }
+}
+
+fn handle_download_join_result(
+    result: Result<DownloadTaskResult, tokio::task::JoinError>,
+    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
+) {
+    match result {
+        Ok(DownloadTaskResult {
+            result: Ok(_stats), ..
+        }) => {}
+        Ok(DownloadTaskResult {
+            result: Err(crate::Error::Cancelled),
+            ..
+        }) => {} // user cancelled
+        Ok(DownloadTaskResult {
+            id,
+            attempt_id,
+            result: Err(e),
+        }) => {
+            let _ = event_tx.send(DownloadEvent::FileError {
+                id: id.clone(),
+                error: format!("Download failed: {e}"),
+                attempt_id,
+            });
+        }
+        Err(e) => {
+            let _ = event_tx.send(DownloadEvent::ScopeError {
+                scope: "download".to_string(),
+                error: format!("Task panicked: {e}"),
+            });
         }
     }
 }

@@ -4,14 +4,14 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::{decrypt_credential, encrypt_credential};
+use crate::core::{decrypt_credential, encrypt_credential};
 
 const fn default_download_path() -> Option<String> {
     None
 }
 
 /// Configuration for download operations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DownloadConfig {
     /// Download directory path (used in service mode).
     #[serde(default = "default_download_path")]
@@ -22,7 +22,7 @@ pub struct DownloadConfig {
     pub concurrent_files: usize,
     /// Whether to overwrite existing files.
     pub force_overwrite: bool,
-    /// Whether to clean up `.part` files on download error.
+    /// Whether to clean up `.part` files on recoverable download errors.
     pub cleanup_on_error: bool,
 }
 
@@ -33,7 +33,7 @@ impl Default for DownloadConfig {
             chunks_per_file: 2,
             concurrent_files: 4,
             force_overwrite: false,
-            cleanup_on_error: true,
+            cleanup_on_error: false,
         }
     }
 }
@@ -84,7 +84,7 @@ mod tests {
         assert_eq!(config.chunks_per_file, 2);
         assert_eq!(config.concurrent_files, 4);
         assert!(!config.force_overwrite);
-        assert!(config.cleanup_on_error);
+        assert!(!config.cleanup_on_error);
     }
 
     #[test]
@@ -93,12 +93,12 @@ mod tests {
             .with_chunks_per_file(8)
             .with_concurrent_files(2)
             .with_force_overwrite(true)
-            .with_cleanup_on_error(false);
+            .with_cleanup_on_error(true);
 
         assert_eq!(config.chunks_per_file, 8);
         assert_eq!(config.concurrent_files, 2);
         assert!(config.force_overwrite);
-        assert!(!config.cleanup_on_error);
+        assert!(config.cleanup_on_error);
     }
 
     #[test]
@@ -188,6 +188,9 @@ pub struct ApiConfig {
     pub host: String,
     #[serde(default = "default_api_port")]
     pub port: u16,
+    /// Optional API key for authenticating API requests (e.g., /api/parse).
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 impl Default for ApiConfig {
@@ -195,6 +198,7 @@ impl Default for ApiConfig {
         Self {
             host: default_api_host(),
             port: default_api_port(),
+            api_key: None,
         }
     }
 }
@@ -216,7 +220,8 @@ impl ServiceConfig {
     ///
     /// Returns an error if the file cannot be read or parsed.
     pub fn load(path: &Path) -> std::io::Result<Self> {
-        let contents = std::fs::read_to_string(path)?;
+        let contents = std::fs::read_to_string(path)
+            .map_err(|error| path_io_error("read config file", path, error))?;
         toml::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
@@ -233,7 +238,8 @@ impl ServiceConfig {
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| path_io_error("create config directory", parent, error))?;
         }
 
         let template = Self {
@@ -261,17 +267,26 @@ impl ServiceConfig {
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let toml_str = toml::to_string(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, &toml_str)?;
+        std::fs::write(path, &toml_str)
+            .map_err(|error| path_io_error("write config file", path, error))?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(path, perms)?;
+            std::fs::set_permissions(path, perms)
+                .map_err(|error| path_io_error("set config file permissions", path, error))?;
         }
 
         Ok(())
     }
+}
+
+fn path_io_error(action: &str, path: &Path, error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        error.kind(),
+        format!("{action} {}: {error}", path.display()),
+    )
 }
 
 #[cfg(test)]
@@ -352,10 +367,21 @@ email = "x@y.com"
 password = "pw"
 "#;
         let config: ServiceConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.api.host, "0.0.0.0");
+        assert_eq!(config.api.host, "127.0.0.1");
         assert_eq!(config.api.port, 9723);
         assert_eq!(config.download.concurrent_files, 4);
         assert!(!config.credentials.encrypted);
         assert!(config.credentials.mfa.is_empty());
+    }
+
+    #[test]
+    fn service_config_load_reports_path_in_io_errors() {
+        let path = Path::new("/definitely/missing/octo-dl-config.toml");
+        let error = ServiceConfig::load(path).expect_err("missing config should fail");
+        let message = error.to_string();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(message.contains("read config file"));
+        assert!(message.contains(&path.display().to_string()));
     }
 }
