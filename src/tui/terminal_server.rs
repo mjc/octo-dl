@@ -29,7 +29,7 @@ mod tests {
     use aes::Aes128;
     use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
     use axum::http::HeaderValue;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use base64::Engine;
     use cbc::Encryptor;
     use futures_util::{SinkExt, StreamExt};
@@ -93,6 +93,42 @@ mod tests {
                 })
                 .await
                 .expect("test websocket server should run");
+        });
+        (addr, shutdown_tx, server)
+    }
+
+    async fn spawn_proxy_target() -> (SocketAddr, oneshot::Sender<()>, JoinHandle<()>) {
+        async fn handler(headers: HeaderMap, body: Bytes) -> impl IntoResponse {
+            let content_type_ok = headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                == Some("application/json");
+            let api_key_ok = headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+                == Some("secret");
+            let body_ok = body.as_ref() == br#"{"id":"pkg"}"#;
+
+            if content_type_ok && api_key_ok && body_ok {
+                (StatusCode::OK, "ok")
+            } else {
+                (StatusCode::BAD_REQUEST, "bad proxy request")
+            }
+        }
+
+        let app = Router::new().route("/api/retry", post(handler));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind proxy target");
+        let addr = listener.local_addr().expect("target should have addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("test proxy target should run");
         });
         (addr, shutdown_tx, server)
     }
@@ -212,6 +248,34 @@ mod tests {
         let n = std::io::Read::read(&mut reader, &mut buf).expect("failed to read PTY output");
         let received = String::from_utf8_lossy(&buf[..n]).into_owned();
         assert!(received.contains(mega_url));
+    }
+
+    #[tokio::test]
+    async fn proxy_api_post_forwards_json_headers_and_api_key() {
+        let (addr, shutdown_tx, server) = spawn_proxy_target().await;
+        let (mut state, _reader) = build_test_state();
+        state.upstream_api_base = Some(format!("http://{addr}"));
+        state.api_key = Some("secret".to_string());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        let uri = "/api/retry".parse().expect("valid URI");
+
+        let response = proxy_api_request(
+            &state,
+            reqwest::Method::POST,
+            &uri,
+            &headers,
+            Bytes::from_static(br#"{"id":"pkg"}"#),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = shutdown_tx.send(());
+        server.await.expect("proxy target should stop");
     }
 
     fn build_dlc_content(dlc_key: &str, decrypt_key: &str, mega_url: &str) -> String {
@@ -757,35 +821,44 @@ async fn api_health(State(_state): State<TerminalApiState>) -> impl IntoResponse
 async fn proxy_api_get(
     State(state): State<TerminalApiState>,
     OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    proxy_api_request(&state, reqwest::Method::GET, &uri, Bytes::new()).await
+    proxy_api_request(&state, reqwest::Method::GET, &uri, &headers, Bytes::new()).await
 }
 
 async fn proxy_api_post(
     State(state): State<TerminalApiState>,
     OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    proxy_api_request(&state, reqwest::Method::POST, &uri, body).await
+    proxy_api_request(&state, reqwest::Method::POST, &uri, &headers, body).await
 }
 
 async fn proxy_api_request(
     state: &TerminalApiState,
     method: reqwest::Method,
     uri: &axum::http::Uri,
+    headers: &HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
     let Some(base) = &state.upstream_api_base else {
         return (StatusCode::SERVICE_UNAVAILABLE, "API server not available").into_response();
     };
     let url = format!("{base}{uri}");
-    let response = match state
-        .http_client
-        .request(method, url)
-        .body(body)
-        .send()
-        .await
-    {
+    let mut request = state.http_client.request(method, url);
+    for header_name in [header::CONTENT_TYPE, header::ACCEPT, header::AUTHORIZATION] {
+        if let Some(value) = headers.get(&header_name) {
+            request = request.header(header_name.as_str(), value.as_bytes());
+        }
+    }
+    if let Some(api_key) = &state.api_key {
+        request = request.header("x-api-key", api_key);
+    } else if let Some(value) = headers.get("x-api-key") {
+        request = request.header("x-api-key", value.as_bytes());
+    }
+
+    let response = match request.body(body).send().await {
         Ok(response) => response,
         Err(error) => {
             return (
