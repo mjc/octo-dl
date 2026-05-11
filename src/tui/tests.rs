@@ -1047,6 +1047,8 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
         size: 128,
         count_toward_progress: true,
         origin: crate::tui::event::FileOrigin {
+            package_id: None,
+            package_display_name: None,
             source_url: "https://mega.nz/folder/pkg-a".to_string(),
             submitted_url: "https://mega.nz/folder/pkg-a".to_string(),
         },

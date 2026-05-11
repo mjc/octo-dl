@@ -94,6 +94,8 @@ fn describe_panic(panic: &(dyn std::any::Any + Send)) -> String {
 struct ResolvedUrl {
     source_url: String,
     submitted_url: String,
+    package_id: Option<String>,
+    package_display_name: Option<String>,
 }
 
 impl ResolvedUrl {
@@ -101,6 +103,8 @@ impl ResolvedUrl {
         Self {
             source_url: url.to_string(),
             submitted_url: url.to_string(),
+            package_id: None,
+            package_display_name: None,
         }
     }
 
@@ -108,11 +112,15 @@ impl ResolvedUrl {
         Self {
             source_url,
             submitted_url: submitted_url.to_string(),
+            package_id: None,
+            package_display_name: None,
         }
     }
 
     fn file_origin(&self) -> FileOrigin {
         FileOrigin {
+            package_id: self.package_id.clone(),
+            package_display_name: self.package_display_name.clone(),
             source_url: self.source_url.clone(),
             submitted_url: self.submitted_url.clone(),
         }
@@ -696,6 +704,8 @@ mod tests {
             size: 128,
             count_toward_progress: true,
             origin: FileOrigin {
+                package_id: None,
+                package_display_name: None,
                 source_url: "https://mega.nz/file/new".to_string(),
                 submitted_url: "https://mega.nz/folder/root".to_string(),
             },
@@ -737,6 +747,8 @@ mod tests {
             size: 128,
             count_toward_progress: true,
             origin: FileOrigin {
+                package_id: None,
+                package_display_name: None,
                 source_url: "https://mega.nz/file/root".to_string(),
                 submitted_url: "https://mega.nz/file/root".to_string(),
             },
@@ -829,6 +841,8 @@ mod tests {
             size: 128,
             count_toward_progress: false,
             origin: FileOrigin {
+                package_id: None,
+                package_display_name: None,
                 source_url: "https://mega.nz/file/root".to_string(),
                 submitted_url: "https://mega.nz/file/root".to_string(),
             },
@@ -857,6 +871,8 @@ mod tests {
                 resolved: ResolvedUrl {
                     source_url: "https://mega.nz/file/one".to_string(),
                     submitted_url: "bundle.dlc".to_string(),
+                    package_id: None,
+                    package_display_name: None,
                 },
                 nodes: None,
                 requested_file_ids: None,
@@ -867,6 +883,8 @@ mod tests {
                 resolved: ResolvedUrl {
                     source_url: "https://mega.nz/file/two".to_string(),
                     submitted_url: "bundle.dlc".to_string(),
+                    package_id: None,
+                    package_display_name: None,
                 },
                 nodes: None,
                 requested_file_ids: None,
@@ -877,6 +895,8 @@ mod tests {
                 resolved: ResolvedUrl {
                     source_url: "https://mega.nz/file/three".to_string(),
                     submitted_url: "https://mega.nz/folder/direct".to_string(),
+                    package_id: None,
+                    package_display_name: None,
                 },
                 nodes: None,
                 requested_file_ids: None,
@@ -894,6 +914,64 @@ mod tests {
                 "https://mega.nz/folder/direct".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn same_batch_folder_package_ids_groups_matching_folders_from_distinct_sources() {
+        let groups = same_batch_folder_package_ids([
+            ("folder/file1.mkv", "https://mega.nz/folder/one"),
+            ("folder/file2.mkv", "https://mega.nz/folder/two"),
+            ("other/file3.mkv", "https://mega.nz/folder/three"),
+        ]);
+
+        let group = groups.get("folder").expect("folder should be grouped");
+        assert_eq!(group.display_name, "folder");
+        assert!(group.id.starts_with("batch-"));
+        assert_ne!(group.id, "folder");
+        assert!(!groups.contains_key("other"));
+    }
+
+    #[test]
+    fn remote_files_match_prefers_sparse_checksum_then_size_and_date() {
+        let left = BatchItemSnapshot {
+            location: BatchItemLocation::Queued(0),
+            package_id: "folder".to_string(),
+            path: "folder/file.mkv".to_string(),
+            size: 100,
+            modified_at: Some(123),
+            sparse_checksum: Some([7; 16]),
+        };
+        let same_checksum_different_date = BatchItemSnapshot {
+            modified_at: Some(456),
+            ..left.clone()
+        };
+        let same_size_and_date_without_checksum = BatchItemSnapshot {
+            location: BatchItemLocation::Queued(1),
+            sparse_checksum: None,
+            ..left.clone()
+        };
+        let different_size = BatchItemSnapshot {
+            location: BatchItemLocation::Queued(2),
+            size: 90,
+            sparse_checksum: None,
+            ..left.clone()
+        };
+
+        assert!(remote_files_match(&left, &same_checksum_different_date));
+        assert!(remote_files_match(
+            &BatchItemSnapshot {
+                sparse_checksum: None,
+                ..left.clone()
+            },
+            &same_size_and_date_without_checksum
+        ));
+        assert!(!remote_files_match(&left, &different_size));
+    }
+
+    #[test]
+    fn duplicate_path_renames_file_inside_folder_preserving_extension() {
+        assert_eq!(duplicate_path("folder/file.mkv", 2), "folder/file (2).mkv");
+        assert_eq!(duplicate_path("folder/file", 3), "folder/file (3)");
     }
 
     #[test]
@@ -1151,6 +1229,7 @@ async fn collect_batch(
         queued_items.extend(collected.queued_items);
         completed_items.extend(collected.completed_items);
     }
+    combine_same_batch_folder_packages(&mut queued_items, &mut completed_items);
     CollectedBatch {
         queued_items,
         completed_items,
@@ -1249,6 +1328,250 @@ async fn collect_node_set(
         skipped_count,
         partial_count,
     }
+}
+
+fn combine_same_batch_folder_packages(
+    queued_items: &mut Vec<QueuedDownload>,
+    completed_items: &mut Vec<QueuedDownload>,
+) {
+    let groups = same_batch_folder_package_ids(
+        queued_items
+            .iter()
+            .chain(completed_items.iter())
+            .map(|item| (item.item.path.as_str(), item.resolved.source_url.as_str())),
+    );
+    if groups.is_empty() {
+        return;
+    }
+
+    for item in queued_items.iter_mut().chain(completed_items.iter_mut()) {
+        if let Some(folder) = folder_component(&item.item.path)
+            && let Some(package_id) = groups.get(folder)
+        {
+            item.resolved.package_id = Some(package_id.id.clone());
+            item.resolved.package_display_name = Some(package_id.display_name.clone());
+        }
+    }
+
+    resolve_same_package_path_duplicates(queued_items, completed_items);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BatchPackageIdentity {
+    id: String,
+    display_name: String,
+}
+
+fn same_batch_folder_package_ids<'a>(
+    items: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> HashMap<String, BatchPackageIdentity> {
+    let mut sources_by_folder = HashMap::<&str, HashSet<&str>>::new();
+    for (path, source_url) in items {
+        let Some(folder) = folder_component(path) else {
+            continue;
+        };
+        sources_by_folder
+            .entry(folder)
+            .or_default()
+            .insert(source_url);
+    }
+
+    sources_by_folder
+        .into_iter()
+        .filter_map(|(folder, sources)| {
+            if sources.len() > 1 {
+                Some((
+                    folder.to_string(),
+                    BatchPackageIdentity {
+                        id: format!("batch-{}", uuid::Uuid::new_v4()),
+                        display_name: folder.to_string(),
+                    },
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn folder_component(path: &str) -> Option<&str> {
+    let (folder, file) = path.split_once('/')?;
+    if folder.is_empty() || file.is_empty() {
+        return None;
+    }
+    Some(folder)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum BatchItemLocation {
+    Queued(usize),
+    Completed(usize),
+}
+
+#[derive(Clone, Debug)]
+struct BatchItemSnapshot {
+    location: BatchItemLocation,
+    package_id: String,
+    path: String,
+    size: u64,
+    modified_at: Option<i64>,
+    sparse_checksum: Option<[u8; 16]>,
+}
+
+fn resolve_same_package_path_duplicates(
+    queued_items: &mut Vec<QueuedDownload>,
+    completed_items: &mut Vec<QueuedDownload>,
+) {
+    let snapshots = batch_item_snapshots(queued_items, completed_items);
+    let mut by_path = HashMap::<(String, String), Vec<BatchItemSnapshot>>::new();
+    let mut used_paths = snapshots
+        .iter()
+        .map(|item| (item.package_id.clone(), item.path.clone()))
+        .collect::<HashSet<_>>();
+
+    for item in snapshots {
+        by_path
+            .entry((item.package_id.clone(), item.path.clone()))
+            .or_default()
+            .push(item);
+    }
+
+    let mut drop_locations = HashSet::<BatchItemLocation>::new();
+    let mut renamed_paths = HashMap::<BatchItemLocation, String>::new();
+
+    for ((package_id, path), mut items) in by_path {
+        if items.len() < 2 {
+            continue;
+        }
+        if same_remote_file(&items) {
+            for item in items.iter().skip(1) {
+                drop_locations.insert(item.location);
+            }
+            continue;
+        }
+
+        items.sort_by(|left, right| right.size.cmp(&left.size));
+        for item in items.iter().skip(1) {
+            let renamed = next_available_duplicate_path(&package_id, &path, &mut used_paths);
+            renamed_paths.insert(item.location, renamed);
+        }
+    }
+
+    apply_duplicate_resolution(queued_items, &drop_locations, &renamed_paths, true);
+    apply_duplicate_resolution(completed_items, &drop_locations, &renamed_paths, false);
+}
+
+fn batch_item_snapshots(
+    queued_items: &[QueuedDownload],
+    completed_items: &[QueuedDownload],
+) -> Vec<BatchItemSnapshot> {
+    queued_items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| batch_item_snapshot(item, BatchItemLocation::Queued(index)))
+        .chain(
+            completed_items.iter().enumerate().map(|(index, item)| {
+                batch_item_snapshot(item, BatchItemLocation::Completed(index))
+            }),
+        )
+        .collect()
+}
+
+fn batch_item_snapshot(item: &QueuedDownload, location: BatchItemLocation) -> BatchItemSnapshot {
+    BatchItemSnapshot {
+        location,
+        package_id: item
+            .resolved
+            .package_id
+            .clone()
+            .unwrap_or_else(|| item.resolved.source_url.clone()),
+        path: item.item.path.clone(),
+        size: item.item.node.size(),
+        modified_at: item.item.node.modified_at().map(|date| date.timestamp()),
+        sparse_checksum: item.item.node.sparse_checksum().copied(),
+    }
+}
+
+fn same_remote_file(items: &[BatchItemSnapshot]) -> bool {
+    let Some(first) = items.first() else {
+        return true;
+    };
+    items
+        .iter()
+        .skip(1)
+        .all(|item| remote_files_match(first, item))
+}
+
+fn remote_files_match(left: &BatchItemSnapshot, right: &BatchItemSnapshot) -> bool {
+    if let (Some(left_checksum), Some(right_checksum)) =
+        (left.sparse_checksum, right.sparse_checksum)
+    {
+        return left_checksum == right_checksum;
+    }
+    left.size == right.size && left.modified_at.is_some() && left.modified_at == right.modified_at
+}
+
+fn next_available_duplicate_path(
+    package_id: &str,
+    path: &str,
+    used_paths: &mut HashSet<(String, String)>,
+) -> String {
+    for ordinal in 2.. {
+        let candidate = duplicate_path(path, ordinal);
+        if used_paths.insert((package_id.to_string(), candidate.clone())) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded duplicate suffix search should always find a path")
+}
+
+fn duplicate_path(path: &str, ordinal: usize) -> String {
+    let (parent, file_name) = path
+        .rsplit_once('/')
+        .map_or(("", path), |(parent, file)| (parent, file));
+    let (stem, extension) = file_name
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())
+        .map_or((file_name, ""), |(stem, extension)| (stem, extension));
+    let renamed = if extension.is_empty() {
+        format!("{stem} ({ordinal})")
+    } else {
+        format!("{stem} ({ordinal}).{extension}")
+    };
+    if parent.is_empty() {
+        renamed
+    } else {
+        format!("{parent}/{renamed}")
+    }
+}
+
+fn apply_duplicate_resolution(
+    items: &mut Vec<QueuedDownload>,
+    drop_locations: &HashSet<BatchItemLocation>,
+    renamed_paths: &HashMap<BatchItemLocation, String>,
+    queued: bool,
+) {
+    for (index, item) in items.iter_mut().enumerate() {
+        let location = if queued {
+            BatchItemLocation::Queued(index)
+        } else {
+            BatchItemLocation::Completed(index)
+        };
+        if let Some(path) = renamed_paths.get(&location) {
+            item.item.path.clone_from(path);
+        }
+    }
+
+    let mut index = 0;
+    items.retain(|_| {
+        let location = if queued {
+            BatchItemLocation::Queued(index)
+        } else {
+            BatchItemLocation::Completed(index)
+        };
+        index += 1;
+        !drop_locations.contains(&location)
+    });
 }
 
 fn successful_submitted_urls<'a>(

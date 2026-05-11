@@ -192,8 +192,20 @@ impl App {
         if !self.register_session_queued_file(&file.origin.submitted_url, &file.id, file.size) {
             return false;
         }
-        self.ensure_core_file(
+        let package_id = file
+            .origin
+            .package_id
+            .as_deref()
+            .unwrap_or(&file.origin.source_url);
+        let package_display_name = file
+            .origin
+            .package_display_name
+            .as_deref()
+            .unwrap_or(package_id);
+        self.ensure_core_file_in_package(
             &file.id,
+            package_id,
+            package_display_name,
             &file.origin.source_url,
             &file.id,
             file.size,

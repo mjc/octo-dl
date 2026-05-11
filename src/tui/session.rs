@@ -156,7 +156,11 @@ impl SessionAdapter {
             if !matches!(file.lifecycle, FileLifecycle::Skipped) {
                 continue;
             }
-            let Some(url) = package_urls.get(&file.package_id) else {
+            let Some(url) = file
+                .source_url
+                .as_ref()
+                .or_else(|| package_urls.get(&file.package_id))
+            else {
                 continue;
             };
             skipped
@@ -283,6 +287,7 @@ impl SessionAdapter {
         session.files.push(FileSnapshot {
             id: file_id,
             package_id,
+            source_url: Some(submitted_url.to_string()),
             path: path.to_string(),
             size,
             lifecycle: FileLifecycle::Queued,
@@ -328,6 +333,7 @@ impl SessionAdapter {
         FileSnapshot {
             id: file.id.clone(),
             package_id: file.package_id.clone(),
+            source_url: file.source_url.clone(),
             path: file.path.clone(),
             size: file.size,
             lifecycle: file.lifecycle,

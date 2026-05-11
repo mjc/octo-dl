@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::{
-    core::{CoreCommand, CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus},
+    core::{
+        CoreCommand, CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus,
+    },
     test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot},
     tui::visible::TuiRow,
 };
@@ -442,7 +444,10 @@ fn overlay_error_remains_visible_alongside_core_package_rows() {
 fn url_level_overlay_error_does_not_also_render_empty_package_row() {
     let mut app = test_app();
     let url = "https://mega.nz/folder/bad".to_string();
-    app.session = Some(session_snapshot(vec![(url.as_str(), UrlFixtureStatus::Pending)]));
+    app.session = Some(session_snapshot(vec![(
+        url.as_str(),
+        UrlFixtureStatus::Pending,
+    )]));
 
     app.handle_download_event(crate::tui::event::DownloadEvent::ScopeError {
         scope: url.clone(),
@@ -462,7 +467,10 @@ fn url_level_overlay_error_does_not_also_render_empty_package_row() {
 fn deleting_url_level_error_removes_session_url_and_ignores_late_events() {
     let mut app = test_app();
     let url = "https://mega.nz/folder/bad".to_string();
-    app.session = Some(session_snapshot(vec![(url.as_str(), UrlFixtureStatus::Pending)]));
+    app.session = Some(session_snapshot(vec![(
+        url.as_str(),
+        UrlFixtureStatus::Pending,
+    )]));
 
     app.handle_download_event(crate::tui::event::DownloadEvent::ScopeError {
         scope: url.clone(),
@@ -473,11 +481,14 @@ fn deleting_url_level_error_removes_session_url_and_ignores_late_events() {
     assert!(app.visible_rows().is_empty());
     assert!(!app.urls.contains(&url));
     let session = app.session.as_ref().expect("session should remain");
-    assert!(session.packages.iter().all(|package| package.source_url != url));
+    assert!(
+        session
+            .packages
+            .iter()
+            .all(|package| package.source_url != url)
+    );
 
-    app.handle_download_event(crate::tui::event::DownloadEvent::UrlResolved {
-        url: url.clone(),
-    });
+    app.handle_download_event(crate::tui::event::DownloadEvent::UrlResolved { url: url.clone() });
     app.handle_download_event(crate::tui::event::DownloadEvent::ScopeError {
         scope: url.clone(),
         error: "late folder error".to_string(),
@@ -485,7 +496,12 @@ fn deleting_url_level_error_removes_session_url_and_ignores_late_events() {
 
     assert!(app.visible_rows().is_empty());
     let session = app.session.as_ref().expect("session should remain");
-    assert!(session.packages.iter().all(|package| package.source_url != url));
+    assert!(
+        session
+            .packages
+            .iter()
+            .all(|package| package.source_url != url)
+    );
 }
 
 #[test]

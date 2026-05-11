@@ -15,6 +15,8 @@ pub struct TokenMessage {
 
 #[derive(Debug, Clone)]
 pub struct FileOrigin {
+    pub package_id: Option<String>,
+    pub package_display_name: Option<String>,
     pub source_url: String,
     pub submitted_url: String,
 }

@@ -173,6 +173,7 @@ pub fn reconcile_restart(
                     file: FileState {
                         id: file.id.clone(),
                         package_id: file.package_id.clone(),
+                        source_url: file.source_url.clone(),
                         path: file.path.clone(),
                         size: file.size,
                         lifecycle: file.lifecycle,
@@ -188,6 +189,7 @@ pub fn reconcile_restart(
                     file: FileState {
                         id: file.id.clone(),
                         package_id: file.package_id.clone(),
+                        source_url: file.source_url.clone(),
                         path: file.path.clone(),
                         size: file.size,
                         lifecycle: file.lifecycle,
@@ -297,7 +299,8 @@ pub fn reconcile_restart(
             file_id.clone(),
             FileState {
                 id: file_id.clone(),
-                package_id,
+                package_id: package_id.clone(),
+                source_url: Some(package_id.clone()),
                 path: file_id.clone(),
                 size,
                 lifecycle: FileLifecycle::Complete,
@@ -344,7 +347,8 @@ pub fn reconcile_restart(
             partial.file_id.clone(),
             FileState {
                 id: partial.file_id.clone(),
-                package_id,
+                package_id: package_id.clone(),
+                source_url: Some(package_id.clone()),
                 path: partial.file_id.clone(),
                 size: partial.bytes,
                 lifecycle: FileLifecycle::Queued,
@@ -416,6 +420,7 @@ mod tests {
             files: vec![FileSnapshot {
                 id: "a.bin".to_string(),
                 package_id: "pkg".to_string(),
+                source_url: Some("https://mega.nz/file/test".to_string()),
                 path: "a.bin".to_string(),
                 size: 100,
                 lifecycle: FileLifecycle::Queued,
@@ -501,6 +506,7 @@ mod tests {
         snapshot.files = vec![FileSnapshot {
             id: "a.bin".to_string(),
             package_id: "pkg".to_string(),
+            source_url: Some("https://mega.nz/file/test".to_string()),
             path: "a.bin".to_string(),
             size: 100,
             lifecycle: FileLifecycle::Deleted,
@@ -524,6 +530,7 @@ mod tests {
             FileSnapshot {
                 id: "a.bin".to_string(),
                 package_id: "pkg".to_string(),
+                source_url: Some("https://mega.nz/file/test".to_string()),
                 path: "a.bin".to_string(),
                 size: 100,
                 lifecycle: FileLifecycle::Failed,
@@ -535,6 +542,7 @@ mod tests {
             FileSnapshot {
                 id: "a.bin".to_string(),
                 package_id: "pkg".to_string(),
+                source_url: Some("https://mega.nz/file/test".to_string()),
                 path: "a.bin".to_string(),
                 size: 100,
                 lifecycle: FileLifecycle::Complete,

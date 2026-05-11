@@ -113,6 +113,8 @@ pub struct PackageState {
 pub struct FileState {
     pub id: FileId,
     pub package_id: PackageId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<UrlId>,
     pub path: String,
     pub size: u64,
     pub lifecycle: FileLifecycle,

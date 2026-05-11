@@ -95,6 +95,7 @@ pub fn push_file(
     session.files.push(FileSnapshot {
         id: path.to_string(),
         package_id: package.id.clone(),
+        source_url: Some(package.source_url.clone()),
         path: path.to_string(),
         size,
         lifecycle,

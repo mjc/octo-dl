@@ -600,6 +600,7 @@ pub async fn run() -> crate::Result<()> {
                 session_state.files.push(FileSnapshot {
                     id: item.path.clone(),
                     package_id: package.id.clone(),
+                    source_url: Some(package.source_url.clone()),
                     path: item.path.clone(),
                     size: item.node.size(),
                     lifecycle: FileLifecycle::Queued,
