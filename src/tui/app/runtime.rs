@@ -12,6 +12,9 @@ use crate::{
 
 use super::{App, DownloadEvent, FileEntry, FileStatus, UiAction};
 
+const MAX_DOWNLOAD_EVENTS_PER_TICK: usize = 256;
+const MAX_TOKEN_MESSAGES_PER_TICK: usize = 256;
+
 impl App {
     fn saved_login_credentials(&self) -> SavedCredentials {
         SavedCredentials::encrypt(self.login.email(), self.login.password(), None)
@@ -217,14 +220,23 @@ impl App {
     pub(crate) fn drain_download_events(
         &mut self,
         download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
-    ) {
-        while let Ok(event) = download_rx.try_recv() {
+    ) -> bool {
+        let mut handled = false;
+        for _ in 0..MAX_DOWNLOAD_EVENTS_PER_TICK {
+            let Ok(event) = download_rx.try_recv() else {
+                break;
+            };
             self.handle_download_event(event);
+            handled = true;
         }
+        handled
     }
 
     pub(crate) fn drain_token_messages(&mut self) {
-        while let Ok(msg) = self.token_rx.try_recv() {
+        for _ in 0..MAX_TOKEN_MESSAGES_PER_TICK {
+            let Ok(msg) = self.token_rx.try_recv() else {
+                break;
+            };
             self.cancellation_tokens.insert(msg.file_id, msg.token);
         }
     }
@@ -282,7 +294,7 @@ impl App {
             self.refresh_resource_usage(sys, pid);
         }
 
-        self.drain_download_events(download_rx);
+        let _ = self.drain_download_events(download_rx);
         self.update_speeds();
         if tick_count.is_multiple_of(50) {
             self.log_progress_summary();
@@ -319,7 +331,7 @@ impl App {
                 }
             }
 
-            self.drain_download_events(download_rx);
+            let _ = self.drain_download_events(download_rx);
             self.drain_token_messages();
         }
     }
@@ -355,7 +367,7 @@ impl App {
                 event = download_rx.recv() => {
                     if let Some(evt) = event {
                         self.handle_download_event(evt);
-                        self.drain_download_events(download_rx);
+                        let _ = self.drain_download_events(download_rx);
                         self.drain_token_messages();
                         dirty = true;
                     } else {
@@ -368,7 +380,7 @@ impl App {
                     dirty = true;
                 }
                 _ = fast_tick.tick() => {
-                    self.drain_download_events(download_rx);
+                    dirty |= self.drain_download_events(download_rx);
                     self.update_speeds();
                     self.drain_token_messages();
                     dirty |= self.drain_ui_actions(action_rx);
@@ -453,5 +465,28 @@ mod tests {
         assert_eq!(email, "fresh@example.com");
         assert_eq!(password, "fresh-pass");
         assert!(mfa.is_none());
+    }
+
+    #[test]
+    fn terminal_tick_bounds_download_event_drain_to_keep_input_responsive() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let (download_tx, mut download_rx) = mpsc::unbounded_channel();
+        let (_action_tx, mut action_rx) = mpsc::unbounded_channel();
+        let mut sys = System::new();
+
+        for index in 0..MAX_DOWNLOAD_EVENTS_PER_TICK + 10 {
+            download_tx
+                .send(DownloadEvent::StatusMessage(format!("status {index}")))
+                .expect("download event should send");
+        }
+
+        app.handle_terminal_tick(&mut download_rx, &mut action_rx, 1, &mut sys, None);
+
+        assert_eq!(download_rx.len(), 10);
+        assert_eq!(
+            app.status,
+            format!("status {}", MAX_DOWNLOAD_EVENTS_PER_TICK - 1)
+        );
     }
 }
