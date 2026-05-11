@@ -6,13 +6,17 @@ use crate::core::{
     snapshot_from_state,
 };
 
-use super::{App, FileStatus, SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate};
+use super::{
+    App, FileStatus, SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate,
+};
 use crate::tui::event::DownloadRequest;
 
 fn core_event_requires_visible_sync(event: &CoreEvent) -> bool {
     !matches!(
         event,
-        CoreEvent::FileProgress { .. } | CoreEvent::FileReuseDetected { .. } | CoreEvent::Tick { .. }
+        CoreEvent::FileProgress { .. }
+            | CoreEvent::FileReuseDetected { .. }
+            | CoreEvent::Tick { .. }
     )
 }
 
@@ -54,7 +58,10 @@ impl App {
         visible_file.size = core_file.size;
         visible_file.downloaded = match core_file.lifecycle {
             crate::core::FileLifecycle::Complete => core_file.size,
-            _ => core_file.progress.visible_completed_bytes.min(core_file.size),
+            _ => core_file
+                .progress
+                .visible_completed_bytes
+                .min(core_file.size),
         };
         visible_file.status = match core_file.lifecycle {
             crate::core::FileLifecycle::Planned | crate::core::FileLifecycle::Queued => {
@@ -98,13 +105,14 @@ impl App {
                     self.status = message;
                 }
                 CoreEffect::EnqueueFileDownload { file_id } => {
-                    let Some(source_url) = self
-                        .core_state
-                        .files
-                        .get(&file_id)
-                        .and_then(|file| self.core_state.packages.get(&file.package_id))
-                        .map(|package| package.source_url.clone())
-                    else {
+                    let Some(source_url) = self.core_state.files.get(&file_id).and_then(|file| {
+                        file.source_url.clone().or_else(|| {
+                            self.core_state
+                                .packages
+                                .get(&file.package_id)
+                                .map(|package| package.source_url.clone())
+                        })
+                    }) else {
                         continue;
                     };
                     queued_file_map
@@ -172,11 +180,32 @@ impl App {
         size: u64,
         counts_toward_progress: bool,
     ) {
+        self.ensure_core_file_in_package(
+            file_id,
+            source_url,
+            source_url,
+            source_url,
+            path,
+            size,
+            counts_toward_progress,
+        );
+    }
+
+    pub(crate) fn ensure_core_file_in_package(
+        &mut self,
+        file_id: &str,
+        package_id: &str,
+        package_display_name: &str,
+        source_url: &str,
+        path: &str,
+        size: u64,
+        counts_toward_progress: bool,
+    ) {
         self.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
-                id: source_url.to_string(),
+                id: package_id.to_string(),
                 source_url: source_url.to_string(),
-                display_name: source_url.to_string(),
+                display_name: package_display_name.to_string(),
                 files: vec![ResolvedFile {
                     file_id: file_id.to_string(),
                     path: path.to_string(),
@@ -189,6 +218,7 @@ impl App {
             file_id: file_id.to_string(),
         });
         if let Some(file) = self.core_state.files.get_mut(file_id) {
+            file.source_url = Some(source_url.to_string());
             file.size = size;
             file.path = path.to_string();
             file.runtime.counts_in_run_totals = counts_toward_progress;
@@ -204,8 +234,7 @@ impl App {
     }
 
     pub(crate) fn remove_session_url(&mut self, url: &str) {
-        let _ = self
-            .mutate_session_and_save(|session| SessionAdapter::remove_url(session, url));
+        let _ = self.mutate_session_and_save(|session| SessionAdapter::remove_url(session, url));
     }
 
     pub(crate) fn update_session_file(&mut self, file_id: &str, update: SessionFileUpdate<'_>) {
@@ -276,8 +305,7 @@ impl App {
         log::info!("Resuming session {}", session.id);
 
         if let Some((email, password, _mfa)) = session.credentials.decrypt() {
-            self.login
-                .set_credentials_if_missing(&email, &password, "");
+            self.login.set_credentials_if_missing(&email, &password, "");
         }
 
         let file_ids = session

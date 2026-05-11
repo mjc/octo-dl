@@ -173,19 +173,18 @@ fn package_is_auto_expanded_for(
 
 fn file_is_visible_in_package(core_state: &DownloadState, file_id: &str) -> bool {
     core_state.files.get(file_id).is_some_and(|file| {
-        !matches!(file.lifecycle, FileLifecycle::Skipped | FileLifecycle::Deleted)
+        !matches!(
+            file.lifecycle,
+            FileLifecycle::Skipped | FileLifecycle::Deleted
+        )
     })
 }
 
-fn overlay_row_is_hidden_placeholder(
-    file: &FileEntry,
-    overlay: Option<&OverlayFile>,
-) -> bool {
+fn overlay_row_is_hidden_placeholder(file: &FileEntry, overlay: Option<&OverlayFile>) -> bool {
     matches!(file.status, FileStatus::Queued)
         && file.size == 0
-        && overlay.is_some_and(|overlay| {
-            overlay.source_url.is_none() && !overlay.counts_toward_progress
-        })
+        && overlay
+            .is_some_and(|overlay| overlay.source_url.is_none() && !overlay.counts_toward_progress)
 }
 
 fn package_has_visible_content(
@@ -201,20 +200,16 @@ fn package_has_visible_content(
         .file_ids
         .iter()
         .any(|file_id| file_is_visible_in_package(core_state, file_id))
-        || (package.error.is_some()
-            && !overlay_files.contains_key(package_id))
+        || (package.error.is_some() && !overlay_files.contains_key(package_id))
 }
 
 fn package_has_visible_files(core_state: &DownloadState, package_id: &str) -> bool {
-    core_state
-        .packages
-        .get(package_id)
-        .is_some_and(|package| {
-            package
-                .file_ids
-                .iter()
-                .any(|file_id| file_is_visible_in_package(core_state, file_id))
-        })
+    core_state.packages.get(package_id).is_some_and(|package| {
+        package
+            .file_ids
+            .iter()
+            .any(|file_id| file_is_visible_in_package(core_state, file_id))
+    })
 }
 
 fn package_has_visible_children(core_state: &DownloadState, package_id: &str) -> bool {
@@ -288,10 +283,10 @@ fn visible_rows_for(
                 file_ids
                     .into_iter()
                     .filter(|file_id| file_is_visible_in_package(core_state, file_id))
-                .map(|file_id| TuiRow::File {
-                    package_id: package_id.clone(),
-                    file_id,
-                }),
+                    .map(|file_id| TuiRow::File {
+                        package_id: package_id.clone(),
+                        file_id,
+                    }),
             );
         }
     }

@@ -96,7 +96,9 @@ pub enum CoreEffect {
 fn should_persist_session(event: &CoreEvent) -> bool {
     !matches!(
         event,
-        CoreEvent::FileProgress { .. } | CoreEvent::FileReuseDetected { .. } | CoreEvent::Tick { .. }
+        CoreEvent::FileProgress { .. }
+            | CoreEvent::FileReuseDetected { .. }
+            | CoreEvent::Tick { .. }
     )
 }
 
@@ -166,6 +168,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                         let file = FileState {
                             id: resolved.file_id.clone(),
                             package_id: package_id.clone(),
+                            source_url: Some(package.source_url.clone()),
                             path: resolved.path,
                             size: resolved.size,
                             lifecycle: FileLifecycle::Planned,
@@ -375,6 +378,7 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
             .map(|file| FileSnapshot {
                 id: file.id.clone(),
                 package_id: file.package_id.clone(),
+                source_url: file.source_url.clone(),
                 path: file.path.clone(),
                 size: file.size,
                 lifecycle: file.lifecycle,
@@ -527,6 +531,7 @@ mod tests {
             FileState {
                 id: "file.bin".to_string(),
                 package_id: "pkg".to_string(),
+                source_url: Some("pkg".to_string()),
                 path: "file.bin".to_string(),
                 size: 100,
                 lifecycle: FileLifecycle::Queued,
@@ -685,12 +690,16 @@ mod tests {
             },
         );
 
-        assert!(!effects
-            .iter()
-            .any(|effect| matches!(effect, CoreEffect::PersistSession(..))));
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect, CoreEffect::PublishViewSnapshot)));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, CoreEffect::PersistSession(..)))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, CoreEffect::PublishViewSnapshot))
+        );
     }
 
     #[test]
@@ -705,8 +714,10 @@ mod tests {
             },
         );
 
-        assert!(!effects
-            .iter()
-            .any(|effect| matches!(effect, CoreEffect::PersistSession(..))));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, CoreEffect::PersistSession(..)))
+        );
     }
 }

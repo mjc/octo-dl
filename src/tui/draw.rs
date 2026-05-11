@@ -1,10 +1,10 @@
 //! All drawing / rendering functions.
 
-use std::collections::HashSet;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table};
+use std::collections::HashSet;
 
 use crate::core::{FileLifecycle, PackageStatus};
 use crate::{format_bytes, format_duration};
