@@ -317,17 +317,23 @@ fn extract_mega_links_from_xml(xml: &str) -> Vec<String> {
                 .decode(encoded)
                 .ok()?;
             let raw_url = String::from_utf8(bytes).ok()?;
-            if !raw_url.starts_with("https://mega.nz/") && !raw_url.starts_with("http://mega.nz/") {
+            if !is_modern_mega_link(&raw_url) {
                 return None;
             }
-            let url = crate::normalize_mega_url(&raw_url);
-            if seen.insert(url.clone()) {
-                Some(url)
+            if seen.insert(raw_url.clone()) {
+                Some(raw_url)
             } else {
                 None
             }
         })
         .collect()
+}
+
+fn is_modern_mega_link(url: &str) -> bool {
+    url.starts_with("https://mega.nz/file/")
+        || url.starts_with("https://mega.nz/folder/")
+        || url.starts_with("http://mega.nz/file/")
+        || url.starts_with("http://mega.nz/folder/")
 }
 
 /// Check if a string is valid base64
@@ -684,9 +690,48 @@ mod tests {
         let _ = urls;
     }
 
+    #[test]
+    fn extract_keeps_modern_mega_links() {
+        let file = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/abc#key");
+        let folder =
+            base64::engine::general_purpose::STANDARD.encode("http://mega.nz/folder/def#key");
+        let xml = format!("<dlc><url>{file}</url><url>{folder}</url></dlc>");
+
+        let urls = extract_mega_links_from_xml(&xml);
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://mega.nz/file/abc#key",
+                "http://mega.nz/folder/def#key",
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_ignores_legacy_mega_links() {
+        let file = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/#!abc!key");
+        let folder = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/#F!def!key");
+        let xml = format!("<dlc><url>{file}</url><url>{folder}</url></dlc>");
+
+        let urls = extract_mega_links_from_xml(&xml);
+
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn extract_deduplicates_modern_mega_links() {
+        let url = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/abc#key");
+        let xml = format!("<dlc><url>{url}</url><url>{url}</url></dlc>");
+
+        let urls = extract_mega_links_from_xml(&xml);
+
+        assert_eq!(urls, vec!["https://mega.nz/file/abc#key"]);
+    }
+
     #[tokio::test]
     #[ignore = "requires local DLC file"]
-    async fn parse_dlc_converts_legacy_urls() {
+    async fn parse_dlc_extracts_modern_urls() {
         let http = reqwest::Client::builder()
             .user_agent("JDownloader/2.0 (octo-dl/test)")
             .build()
