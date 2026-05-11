@@ -141,6 +141,15 @@
     };
 
     const handleDrop = async (dataTransfer) => {
+      const files = Array.from(dataTransfer.files || []);
+      if (files.length > 0) {
+        for (const file of files) {
+          const contents = await file.text();
+          sendDlcFile(contents, file.name);
+        }
+        return;
+      }
+
       const items = Array.from(dataTransfer.items || []);
       for (const item of items) {
         if (item.kind === "string") {

@@ -106,7 +106,7 @@ impl App {
     }
 
     fn handle_deleted_download_artifact(&mut self, id: &str, artifact_path: &str) -> bool {
-        if !self.deleted_files.remove(id) {
+        if !self.deleted_files.contains(id) {
             return false;
         }
 
@@ -199,7 +199,12 @@ impl App {
 
     pub(crate) fn handle_file_queued_event(&mut self, file: QueuedFile) {
         if self.deleted_files.contains(&file.id) {
-            return;
+            if self.deleted_files.contains(&file.origin.submitted_url)
+                || self.deleted_files.contains(&file.origin.source_url)
+            {
+                return;
+            }
+            self.deleted_files.remove(&file.id);
         }
         if !self.register_queued_file(&file) {
             return;
@@ -374,7 +379,26 @@ impl App {
     }
 
     pub(crate) fn perform_delete_package_action(&mut self, package_id: &str) {
-        for file_id in self.package_file_ids(package_id) {
+        let file_ids = self.package_file_ids(package_id);
+        if file_ids.is_empty() {
+            let source_url = self
+                .core_state
+                .packages
+                .get(package_id)
+                .map(|package| package.source_url.clone());
+            self.deleted_files.insert(package_id.to_string());
+            if let Some(source_url) = source_url.as_ref() {
+                self.deleted_files.insert(source_url.clone());
+                self.remove_session_url(source_url);
+                self.urls.retain(|url| url != source_url);
+            }
+            self.core_state.packages.shift_remove(package_id);
+            self.sync_visible_files();
+            self.recompute_totals();
+            return;
+        }
+
+        for file_id in file_ids {
             self.perform_delete_file_action(&file_id);
         }
     }

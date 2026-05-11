@@ -103,11 +103,8 @@ fn resume_session_restores_email_password_without_restoring_mfa() {
         "https://mega.nz/file/pending",
         UrlFixtureStatus::Pending,
     )]);
-    session.credentials = crate::core::SavedCredentials::encrypt(
-        "saved@example.com",
-        "saved-pass",
-        Some("654321"),
-    );
+    session.credentials =
+        crate::core::SavedCredentials::encrypt("saved@example.com", "saved-pass", Some("654321"));
     session.save().unwrap();
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -129,11 +126,8 @@ fn resume_session_does_not_override_existing_login_credentials() {
         "https://mega.nz/file/pending",
         UrlFixtureStatus::Pending,
     )]);
-    session.credentials = crate::core::SavedCredentials::encrypt(
-        "stale@example.com",
-        "stale-pass",
-        Some("654321"),
-    );
+    session.credentials =
+        crate::core::SavedCredentials::encrypt("stale@example.com", "stale-pass", Some("654321"));
     session.save().unwrap();
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -591,6 +585,58 @@ fn deleted_file_completion_event_redeletes_output_artifacts() {
         attempt_id: 0,
     });
 
+    assert!(!file_path.exists());
+    assert!(!part_path.exists());
+    assert!(!sidecar_path.exists());
+}
+
+#[test]
+fn deleted_file_stays_deleted_after_cancel_then_completion_events() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("late-cancel-complete.bin");
+    let part_path = dir.path().join("late-cancel-complete.bin.part");
+    let sidecar_path = dir.path().join("late-cancel-complete.bin.part.meta.json");
+    std::fs::write(&file_path, b"done").unwrap();
+    std::fs::write(&part_path, b"partial").unwrap();
+    std::fs::write(&sidecar_path, b"{}").unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+    let file_id = file_path.to_string_lossy().into_owned();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: "https://mega.nz/file/late-cancel-complete".to_string(),
+            source_url: "https://mega.nz/file/late-cancel-complete".to_string(),
+            display_name: "Late Cancel Complete".to_string(),
+            files: vec![ResolvedFile {
+                file_id: file_id.clone(),
+                path: file_id.clone(),
+                size: 4,
+            }],
+            collision: None,
+        },
+    });
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: file_id.clone(),
+        size: 4,
+    });
+
+    app.handle_ui_action(UiAction::DeleteFile(file_id.clone()));
+    app.handle_download_event(DownloadEvent::FileCancelled {
+        id: file_id.clone(),
+        attempt_id: 0,
+    });
+
+    std::fs::write(&file_path, b"done").unwrap();
+    std::fs::write(&part_path, b"partial").unwrap();
+    std::fs::write(&sidecar_path, b"{}").unwrap();
+    app.handle_download_event(DownloadEvent::FileComplete {
+        id: file_id.clone(),
+        attempt_id: 0,
+    });
+
+    assert!(app.files.is_empty());
+    assert!(app.deleted_files.contains(&file_id));
     assert!(!file_path.exists());
     assert!(!part_path.exists());
     assert!(!sidecar_path.exists());
