@@ -335,89 +335,13 @@ impl App {
             self.drain_token_messages();
         }
     }
-
-    #[allow(dead_code)]
-    pub(crate) async fn run_web_until_shutdown<F>(
-        &mut self,
-        download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
-        action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
-        state_tx: &watch::Sender<String>,
-        shutdown: F,
-    ) where
-        F: Future<Output = ()>,
-    {
-        let mut progress_interval = tokio::time::interval(Duration::from_secs(30));
-        progress_interval.tick().await;
-
-        let mut fast_tick = tokio::time::interval(Duration::from_millis(100));
-        fast_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        let mut resource_tick = tokio::time::interval(Duration::from_secs(5));
-        resource_tick.tick().await;
-        let mut sys = System::new();
-        let pid = sysinfo::get_current_pid().ok();
-
-        let mut dirty = true;
-
-        tokio::pin!(shutdown);
-
-        loop {
-            tokio::select! {
-                () = &mut shutdown => break,
-                event = download_rx.recv() => {
-                    if let Some(evt) = event {
-                        self.handle_download_event(evt);
-                        let _ = self.drain_download_events(download_rx);
-                        self.drain_token_messages();
-                        dirty = true;
-                    } else {
-                        log::warn!("Event channel closed");
-                        break;
-                    }
-                }
-                Some(action) = action_rx.recv() => {
-                    self.handle_ui_action(action);
-                    dirty = true;
-                }
-                _ = fast_tick.tick() => {
-                    dirty |= self.drain_download_events(download_rx);
-                    self.update_speeds();
-                    self.drain_token_messages();
-                    dirty |= self.drain_ui_actions(action_rx);
-                }
-                _ = resource_tick.tick() => {
-                    self.refresh_resource_usage(&mut sys, pid);
-                    dirty = true;
-                }
-                _ = progress_interval.tick() => {
-                    self.log_progress_summary();
-                }
-            }
-
-            if dirty && self.publish_snapshot_if_observed(state_tx) {
-                dirty = false;
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use crate::test_support::StateDirectoryGuard;
     use tempfile::tempdir;
-
-    struct StateDirectoryGuard {
-        _guard: crate::core::session::StateDirectoryTestGuard,
-    }
-
-    impl StateDirectoryGuard {
-        fn set(path: &Path) -> Self {
-            Self {
-                _guard: crate::core::session::set_state_directory_for_test(path),
-            }
-        }
-    }
 
     #[test]
     fn ensure_download_session_refreshes_existing_session_credentials_without_mfa() {

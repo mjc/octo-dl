@@ -387,18 +387,6 @@ fn compare_digit_runs(left: &str, right: &str) -> Ordering {
         .then_with(|| left.len().cmp(&right.len()))
 }
 
-pub(super) fn selected_file_index(
-    file_list_state: &ListState,
-    files: &[FileEntry],
-    core_state: &DownloadState,
-    overlay_files: &IndexMap<String, OverlayFile>,
-) -> Option<usize> {
-    let selected = file_list_state.selected()?;
-    sorted_file_indices(files, core_state, overlay_files)
-        .get(selected)
-        .copied()
-}
-
 pub(super) fn seed_overlay_from_visible(
     files: &[FileEntry],
     core_state: &DownloadState,

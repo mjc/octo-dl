@@ -118,21 +118,6 @@ pub struct App {
 }
 
 impl App {
-    #[allow(dead_code)]
-    pub fn sorted_file_indices(&self) -> Vec<usize> {
-        visible::sorted_file_indices(&self.files, &self.core_state, &self.overlay_files)
-    }
-
-    #[allow(dead_code)]
-    pub fn selected_file_index(&self) -> Option<usize> {
-        visible::selected_file_index(
-            &self.file_list_state,
-            &self.files,
-            &self.core_state,
-            &self.overlay_files,
-        )
-    }
-
     pub fn visible_rows(&self) -> Vec<visible::TuiRow> {
         visible::visible_rows(self)
     }
@@ -184,7 +169,6 @@ impl App {
     ///
     /// Called by the event loop *only* when state has changed and at least
     /// one SSE/API client is connected — never on a blind timer.
-    #[allow(dead_code)]
     pub fn to_json(&self) -> String {
         snapshot::to_json(self)
     }

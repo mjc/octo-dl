@@ -363,20 +363,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::StateDirectoryGuard;
     use std::fs;
     use tempfile::tempdir;
-
-    struct StateDirectoryGuard {
-        _guard: crate::core::session::StateDirectoryTestGuard,
-    }
-
-    impl StateDirectoryGuard {
-        fn set(path: &Path) -> Self {
-            Self {
-                _guard: crate::core::session::set_state_directory_for_test(path),
-            }
-        }
-    }
 
     #[test]
     fn apply_service_config_reports_download_directory_path() {

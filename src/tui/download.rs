@@ -593,21 +593,9 @@ mod tests {
     use super::super::event::DownloadEvent;
     use super::*;
     use crate::core::{FileLifecycle, SessionRunStatus};
-    use std::path::Path;
+    use crate::test_support::StateDirectoryGuard;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
-
-    struct StateDirectoryGuard {
-        _guard: crate::core::session::StateDirectoryTestGuard,
-    }
-
-    impl StateDirectoryGuard {
-        fn set(path: &Path) -> Self {
-            Self {
-                _guard: crate::core::session::set_state_directory_for_test(path),
-            }
-        }
-    }
 
     fn test_app() -> App {
         let (tx, _rx) = mpsc::unbounded_channel();
