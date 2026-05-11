@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
     core::{
-        CoreEvent, FileLifecycle, PackageState, PackageStatus, ResolvedFile, ResolvedPackage,
-        SessionRunStatus,
+        CoreEvent, FileLifecycle, PackageSnapshot, PackageState, PackageStatus, ResolvedFile,
+        ResolvedPackage, SessionRunStatus,
     },
     test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot},
     tui::{
@@ -501,6 +501,17 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
         &source_url,
         crate::tui::session::SessionUrlUpdate::Error("boom"),
     );
+    app.session
+        .as_mut()
+        .expect("session should be installed")
+        .packages
+        .push(PackageSnapshot {
+            id: package_id.clone(),
+            source_url: source_url.clone(),
+            display_name: "Retry Folder".to_string(),
+            file_ids: Vec::new(),
+            error: Some("boom".to_string()),
+        });
     app.urls.push(source_url.clone());
     app.core_state.packages.insert(
         package_id.clone(),
@@ -536,6 +547,12 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
         .find(|package| package.source_url == source_url)
         .expect("source URL package should remain tracked");
     assert!(package.error.is_none());
+    assert!(
+        session
+            .packages
+            .iter()
+            .all(|package| package.id != package_id)
+    );
 }
 
 #[test]

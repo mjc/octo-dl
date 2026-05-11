@@ -487,6 +487,9 @@ impl App {
         }
 
         if !retried_file && package_failed {
+            let _ = self.mutate_session_and_save(|session| {
+                session.packages.retain(|package| package.id != package_id);
+            });
             self.core_state.packages.shift_remove(package_id);
             self.retry_source_url(&source_url);
             self.sync_visible_files();
