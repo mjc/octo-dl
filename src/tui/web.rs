@@ -155,8 +155,11 @@ mod tests {
     fn index_html_supports_dlc_file_drop() {
         let html = index_html("example.com:9723", "wss");
         assert!(html.contains("handleDrop"));
+        assert!(html.contains("dataTransfer.files"));
         assert!(html.contains("file.text()"));
         assert!(html.contains("\"/api/dlc\""));
+        assert!(html.find("dataTransfer.files") < html.find("dataTransfer.items"));
+        assert!(html.contains("return;\n      }\n\n      const items"));
     }
 
     #[test]

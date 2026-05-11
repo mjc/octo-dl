@@ -253,6 +253,7 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('p') => {
             app.handle_ui_action(UiAction::TogglePause);
         }
+        KeyCode::Char('D') => delete_selected_immediately(app),
         KeyCode::Char('d') | KeyCode::Delete => delete_selected(app),
         KeyCode::Char('R') => reset_selected(app),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::SHIFT) => reset_selected(app),
@@ -394,6 +395,18 @@ fn delete_selected(app: &mut App) {
     }
 }
 
+fn delete_selected_immediately(app: &mut App) {
+    match app.selected_row() {
+        Some(TuiRow::Package(package_id)) => {
+            app.handle_ui_action(UiAction::DeletePackage(package_id));
+        }
+        Some(TuiRow::File { file_id, .. }) => {
+            app.handle_ui_action(UiAction::DeleteFile(file_id));
+        }
+        None => {}
+    }
+}
+
 fn toggle_selected_package(app: &mut App) {
     if let Some(TuiRow::Package(package_id)) = app.selected_row() {
         if !app.expanded_packages.insert(package_id.clone()) {
@@ -422,7 +435,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
 mod tests {
     use super::super::app::{App, FileEntry, FileStatus, Popup, QuitPolicy};
     use super::*;
-    use crate::core::{CoreEvent, ResolvedFile, ResolvedPackage};
+    use crate::core::{CoreEvent, PackageCollision, ResolvedFile, ResolvedPackage};
     use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use std::env;
@@ -789,7 +802,10 @@ mod tests {
         }
 
         app.file_list_state.select(Some(0));
-        assert_eq!(app.selected_row(), Some(TuiRow::Package("pkg-z".to_string())));
+        assert_eq!(
+            app.selected_row(),
+            Some(TuiRow::Package("pkg-z".to_string()))
+        );
 
         handle_input(&mut app, key(KeyCode::Char('s')));
         handle_input(&mut app, key(KeyCode::Down));
@@ -797,7 +813,10 @@ mod tests {
         handle_input(&mut app, key(KeyCode::Enter));
 
         assert_eq!(app.sort.key, SortKey::Name);
-        assert_eq!(app.selected_row(), Some(TuiRow::Package("pkg-z".to_string())));
+        assert_eq!(
+            app.selected_row(),
+            Some(TuiRow::Package("pkg-z".to_string()))
+        );
         assert_eq!(app.file_list_state.selected(), Some(1));
     }
 
@@ -900,6 +919,145 @@ mod tests {
         assert_eq!(app.files.len(), 1);
         assert_eq!(app.files[0].id, "complete.bin");
         assert_eq!(app.file_list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn handle_main_input_delete_removes_failed_file() {
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "failed.bin".to_string(),
+            name: "failed.bin".to_string(),
+            size: 10,
+            downloaded: 4,
+            status: FileStatus::Error("boom".to_string()),
+        });
+        app.file_list_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Delete));
+        assert_eq!(
+            app.pending_confirmation,
+            Some(ConfirmAction::DeleteFile("failed.bin".to_string()))
+        );
+        confirm(&mut app);
+
+        assert!(app.files.is_empty());
+        assert!(app.deleted_files.contains("failed.bin"));
+    }
+
+    #[test]
+    fn handle_main_input_delete_removes_failed_package_without_files() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "failed-pkg".to_string(),
+                source_url: "https://mega.nz/folder/failed".to_string(),
+                display_name: "Failed package".to_string(),
+                files: Vec::new(),
+                collision: Some(PackageCollision {
+                    file_id: "duplicate.bin".to_string(),
+                    existing_package_id: "existing".to_string(),
+                    incoming_package_id: "failed-pkg".to_string(),
+                }),
+            },
+        });
+        app.file_list_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Delete));
+        assert_eq!(
+            app.pending_confirmation,
+            Some(ConfirmAction::DeletePackage("failed-pkg".to_string()))
+        );
+        confirm(&mut app);
+
+        assert!(app.visible_rows().is_empty());
+        assert!(!app.core_state.packages.contains_key("failed-pkg"));
+        assert!(app.deleted_files.contains("failed-pkg"));
+        assert!(app.deleted_files.contains("https://mega.nz/folder/failed"));
+    }
+
+    #[test]
+    fn handle_main_input_shift_d_deletes_without_confirmation() {
+        let mut app = test_app();
+        app.files.push(FileEntry {
+            id: "remove.bin".to_string(),
+            name: "remove.bin".to_string(),
+            size: 10,
+            downloaded: 0,
+            status: FileStatus::Queued,
+        });
+        app.file_list_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('D')));
+
+        assert_eq!(app.popup, Popup::None);
+        assert_eq!(app.pending_confirmation, None);
+        assert!(app.files.is_empty());
+        assert!(app.deleted_files.contains("remove.bin"));
+    }
+
+    #[test]
+    fn handle_main_input_shift_d_removes_completed_file_and_artifacts() {
+        let dir = tempdir().unwrap();
+        let final_path = dir.path().join("shift-delete-complete.bin");
+        let final_path_string = final_path.to_string_lossy();
+        let part_path = std::path::PathBuf::from(format!("{final_path_string}.part"));
+        let sidecar_path = std::path::PathBuf::from(format!("{final_path_string}.part.meta.json"));
+        std::fs::write(&final_path, b"complete").unwrap();
+        std::fs::write(&part_path, b"partial").unwrap();
+        std::fs::write(&sidecar_path, b"metadata").unwrap();
+
+        let mut app = test_app();
+        app.upsert_overlay_file(
+            FileEntry {
+                id: "shift-delete-complete.bin".to_string(),
+                name: final_path.to_string_lossy().into_owned(),
+                size: 100,
+                downloaded: 100,
+                status: FileStatus::Complete,
+            },
+            Some("https://mega.nz/file/shift-delete-complete".to_string()),
+            false,
+        );
+        app.file_list_state.select(Some(0));
+
+        handle_input(&mut app, key(KeyCode::Char('D')));
+
+        assert_eq!(app.popup, Popup::None);
+        assert_eq!(app.pending_confirmation, None);
+        assert!(app.files.is_empty());
+        assert!(!final_path.exists());
+        assert!(!part_path.exists());
+        assert!(!sidecar_path.exists());
+    }
+
+    #[test]
+    fn handle_main_input_shift_d_removes_failed_package_without_files() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: "failed-pkg".to_string(),
+                source_url: "https://mega.nz/folder/failed".to_string(),
+                display_name: "Failed package".to_string(),
+                files: Vec::new(),
+                collision: Some(PackageCollision {
+                    file_id: "duplicate.bin".to_string(),
+                    existing_package_id: "existing".to_string(),
+                    incoming_package_id: "failed-pkg".to_string(),
+                }),
+            },
+        });
+        app.file_list_state.select(Some(0));
+        assert_eq!(
+            app.visible_rows(),
+            vec![TuiRow::Package("failed-pkg".to_string())]
+        );
+
+        handle_input(&mut app, key(KeyCode::Char('D')));
+
+        assert!(app.visible_rows().is_empty());
+        assert!(!app.core_state.packages.contains_key("failed-pkg"));
+        assert!(app.deleted_files.contains("failed-pkg"));
+        assert!(app.deleted_files.contains("https://mega.nz/folder/failed"));
     }
 
     #[test]
