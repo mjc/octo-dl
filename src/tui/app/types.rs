@@ -264,7 +264,6 @@ impl QuitPolicy {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum UiAction {
     AddUrls(Vec<String>),

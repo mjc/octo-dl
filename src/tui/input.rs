@@ -436,23 +436,12 @@ mod tests {
     use super::super::app::{App, FileEntry, FileStatus, Popup, QuitPolicy};
     use super::*;
     use crate::core::{CoreEvent, PackageCollision, ResolvedFile, ResolvedPackage};
-    use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
+    use crate::test_support::{
+        FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, push_file, session_snapshot,
+    };
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use std::path::Path;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
-
-    struct StateDirectoryGuard {
-        _guard: crate::core::session::StateDirectoryTestGuard,
-    }
-
-    impl StateDirectoryGuard {
-        fn set(path: &Path) -> Self {
-            Self {
-                _guard: crate::core::session::set_state_directory_for_test(path),
-            }
-        }
-    }
 
     fn test_app() -> App {
         let (tx, _rx) = mpsc::unbounded_channel();

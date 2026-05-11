@@ -4,7 +4,9 @@ use crate::{
         CoreEvent, FileLifecycle, PackageSnapshot, PackageState, PackageStatus, ResolvedFile,
         ResolvedPackage, SessionRunStatus,
     },
-    test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot},
+    test_support::{
+        FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, push_file, session_snapshot,
+    },
     tui::{
         draw::draw,
         event::{DownloadEvent, DownloadRequest, QueuedFile},
@@ -14,24 +16,11 @@ use crate::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend, layout::Position};
-use std::path::Path;
 use sysinfo::System;
 use tempfile::tempdir;
 use tokio::sync::{mpsc, watch};
 
 use super::app::{FileStatus, Popup, UiAction};
-
-struct StateDirectoryGuard {
-    _guard: crate::core::session::StateDirectoryTestGuard,
-}
-
-impl StateDirectoryGuard {
-    fn set(path: &Path) -> Self {
-        Self {
-            _guard: crate::core::session::set_state_directory_for_test(path),
-        }
-    }
-}
 
 #[test]
 fn resume_session_requeues_urls() {

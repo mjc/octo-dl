@@ -1,5 +1,4 @@
 use super::*;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,25 +9,15 @@ use crate::{
     core::{
         CoreCommand, CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus,
     },
-    test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot},
+    test_support::{
+        FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, push_file, session_snapshot,
+    },
     tui::visible::TuiRow,
 };
 
 fn test_app() -> App {
     let (tx, _rx) = mpsc::unbounded_channel();
     App::new(9723, tx, true)
-}
-
-struct StateDirectoryGuard {
-    _guard: crate::core::session::StateDirectoryTestGuard,
-}
-
-impl StateDirectoryGuard {
-    fn set(path: &Path) -> Self {
-        Self {
-            _guard: crate::core::session::set_state_directory_for_test(path),
-        }
-    }
 }
 
 #[test]
@@ -689,11 +678,11 @@ fn sorted_file_indices_group_by_package_before_status() {
         size: 10,
     });
 
-    let ordered: Vec<_> = app
-        .sorted_file_indices()
-        .into_iter()
-        .map(|index| app.files[index].id.clone())
-        .collect();
+    let ordered: Vec<_> =
+        super::super::visible::sorted_file_indices(&app.files, &app.core_state, &app.overlay_files)
+            .into_iter()
+            .map(|index| app.files[index].id.clone())
+            .collect();
 
     assert_eq!(
         ordered,
