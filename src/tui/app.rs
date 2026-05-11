@@ -1,136 +1,78 @@
 //! Application state model.
 
+#[path = "app/actions.rs"]
+mod actions;
+#[path = "app/bootstrap.rs"]
+mod bootstrap;
+#[path = "app/overlay.rs"]
+mod overlay;
+#[path = "app/progress.rs"]
+mod progress;
+#[path = "app/runtime.rs"]
+mod runtime;
+#[path = "app/snapshot.rs"]
+mod snapshot;
+#[path = "app/state.rs"]
+mod state;
+#[cfg(test)]
+#[path = "app/tests.rs"]
+mod tests;
+#[path = "app/types.rs"]
+mod types;
+
 use std::collections::{HashMap, HashSet};
-use std::env;
+use std::path::PathBuf;
 use std::time::Instant;
 
+use indexmap::IndexMap;
 use ratatui::widgets::ListState;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::{DownloadConfig, SessionState};
+use crate::core::{DownloadState, ProgressDelta, SessionSnapshotV3};
 
-use super::event::{DownloadEvent, TokenMessage};
+pub(crate) use self::progress::FileUiState;
+use self::progress::TransferRate;
+pub use self::types::{
+    ConfigField, ConfigState, ConfirmAction, FileEntry, FileStatus, LoginState,
+    NoCredentialsFallback, Popup, QuitPolicy, SharedAppState, SortDirection, SortKey, SortState,
+    UiAction,
+};
+pub(crate) use self::types::{OverlayFile, SharedStateChannels, VisibleFileContext};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Popup {
-    None,
-    Login,
-    Config,
-}
-
-pub struct LoginState {
-    pub email: String,
-    pub password: String,
-    pub mfa: String,
-    pub active_field: usize,
-    pub error: Option<String>,
-    pub logging_in: bool,
-}
-
-impl LoginState {
-    pub fn new() -> Self {
-        Self {
-            email: env::var("MEGA_EMAIL").unwrap_or_default(),
-            password: env::var("MEGA_PASSWORD").unwrap_or_default(),
-            mfa: env::var("MEGA_MFA").unwrap_or_default(),
-            active_field: 0,
-            error: None,
-            logging_in: false,
-        }
-    }
-
-    pub const fn active_value_mut(&mut self) -> &mut String {
-        match self.active_field {
-            0 => &mut self.email,
-            1 => &mut self.password,
-            _ => &mut self.mfa,
-        }
-    }
-
-    pub const fn field_count() -> usize {
-        3
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum ConfigField {
-    ChunksPerFile,
-    ConcurrentFiles,
-    ForceOverwrite,
-    CleanupOnError,
-}
-
-impl ConfigField {
-    pub const ALL: [Self; 4] = [
-        Self::ChunksPerFile,
-        Self::ConcurrentFiles,
-        Self::ForceOverwrite,
-        Self::CleanupOnError,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::ChunksPerFile => "Chunks per file",
-            Self::ConcurrentFiles => "Concurrent files",
-            Self::ForceOverwrite => "Force overwrite",
-            Self::CleanupOnError => "Cleanup on error",
-        }
-    }
-}
-
-pub struct ConfigState {
-    pub config: DownloadConfig,
-    pub active_field: usize,
-}
-
-impl ConfigState {
-    pub fn new() -> Self {
-        Self {
-            config: DownloadConfig::default(),
-            active_field: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FileStatus {
-    Queued,
-    Downloading,
-    Complete,
-    Error(String),
-}
-
-#[derive(Debug, Clone)]
-pub struct FileEntry {
-    pub name: String,
-    pub size: u64,
-    pub downloaded: u64,
-    pub speed: u64,
-    /// Bytes received since the last speed calculation (reset each tick).
-    pub speed_accum: u64,
-    pub status: FileStatus,
-}
+use super::event::DownloadRequest;
+use super::event::{DownloadEvent, QueuedFile, TokenMessage};
+use super::session::{SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate};
+use super::visible;
 
 pub struct App {
     pub popup: Popup,
+    pub pending_confirmation: Option<ConfirmAction>,
     pub should_quit: bool,
+    pub quit_policy: QuitPolicy,
     // Auth
     pub login: LoginState,
     pub authenticated: bool,
     // URL input (top bar)
     pub url_input: String,
+    pub url_input_active: bool,
     // Tracked URLs for session persistence
     pub urls: Vec<String>,
     // File queue (main content)
     pub files: Vec<FileEntry>,
+    pub(crate) overlay_files: IndexMap<String, OverlayFile>,
+    pub(crate) file_ui: HashMap<String, FileUiState>,
     pub file_list_state: ListState,
+    pub expanded_packages: HashSet<String>,
+    pub sort: SortState,
     // Aggregate stats
     pub total_downloaded: u64,
     pub total_size: u64,
     pub files_completed: usize,
     pub files_total: usize,
     pub current_speed: u64,
+    total_network_downloaded: u64,
+    aggregate_rate: TransferRate,
     // Status
     pub status: String,
     pub paused: bool,
@@ -138,18 +80,36 @@ pub struct App {
     pub config: ConfigState,
     // Channels
     pub event_tx: mpsc::UnboundedSender<DownloadEvent>,
-    pub url_tx: Option<mpsc::UnboundedSender<String>>,
-    pub token_rx: Option<mpsc::UnboundedReceiver<TokenMessage>>,
+    /// Always valid — URLs buffer in the channel until the download task starts.
+    pub url_tx: mpsc::UnboundedSender<DownloadRequest>,
+    /// Taken by `start_download_task` to give the receiver to the download task.
+    pub(super) url_rx: Option<mpsc::UnboundedReceiver<DownloadRequest>>,
+    /// Broadcasts pause state changes to the background download task.
+    pub pause_tx: watch::Sender<bool>,
+    /// Taken by `start_download_task` to give the receiver to the download task.
+    pub(super) pause_rx: Option<watch::Receiver<bool>>,
+    /// Always valid — tokens arrive once the download task is running.
+    pub token_rx: mpsc::UnboundedReceiver<TokenMessage>,
+    /// Taken by `start_download_task` to give the sender to the download task.
+    pub(super) token_tx: Option<mpsc::UnboundedSender<TokenMessage>>,
     /// Receives the authenticated client from the login task.
     pub client_rx: Option<tokio::sync::oneshot::Receiver<(mega::Client, reqwest::Client)>>,
     // Cancellation tokens for active downloads (maps file path to token)
     pub cancellation_tokens: HashMap<String, CancellationToken>,
+    // Per-file download attempt IDs for retry/reset flows
+    pub file_attempt_ids: HashMap<String, u64>,
     // Files deleted from the UI — used to suppress stale download events
     pub deleted_files: HashSet<String>,
+    // Files reset from the UI — used to suppress stale terminal events from the old attempt
+    pub reset_pending_files: HashSet<String>,
     // Session
-    pub session: Option<SessionState>,
+    pub session: Option<SessionSnapshotV3>,
+    pub core_state: DownloadState,
     // API port for display
     pub api_port: u16,
+    // API key for authentication
+    pub api_key: Option<String>,
+    pub(crate) persist_config_path: Option<PathBuf>,
     // Resource usage
     pub cpu_usage: f32,
     pub memory_rss: u64,
@@ -158,170 +118,58 @@ pub struct App {
 }
 
 impl App {
-    /// Computes per-file instantaneous speeds from accumulated bytes since last tick.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    pub fn update_speeds(&mut self) {
-        let now = Instant::now();
-        let dt = now.duration_since(self.last_tick).as_secs_f64();
-        self.last_tick = now;
-
-        if dt > 0.0 {
-            for f in &mut self.files {
-                if matches!(f.status, FileStatus::Downloading) {
-                    f.speed = (f.speed_accum as f64 / dt) as u64;
-                }
-                f.speed_accum = 0;
-            }
-        }
-
-        self.current_speed = self
-            .files
-            .iter()
-            .filter(|f| matches!(f.status, FileStatus::Downloading))
-            .map(|f| f.speed)
-            .sum();
+    pub fn visible_rows(&self) -> Vec<visible::TuiRow> {
+        visible::visible_rows(self)
     }
 
-    /// Recomputes aggregate totals from the current files list.
+    pub fn selected_row(&self) -> Option<visible::TuiRow> {
+        let selected = self.file_list_state.selected()?;
+        self.visible_rows().get(selected).cloned()
+    }
+
+    pub fn package_file_ids(&self, package_id: &str) -> Vec<String> {
+        self.core_state
+            .packages
+            .get(package_id)
+            .map(|package| package.file_ids.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn package_display_name(&self, package_id: &str) -> String {
+        self.core_state
+            .packages
+            .get(package_id)
+            .map(|package| package.display_name.clone())
+            .unwrap_or_else(|| package_id.to_string())
+    }
+
+    pub(crate) fn sync_visible_files(&mut self) {
+        let selected_row_identity = self.selected_row();
+        self.sync_visible_files_preserving(selected_row_identity);
+    }
+
+    pub(crate) fn sync_visible_files_preserving(
+        &mut self,
+        selected_row_identity: Option<visible::TuiRow>,
+    ) {
+        visible::sync_visible_files(
+            &mut self.files,
+            &mut self.overlay_files,
+            &mut self.file_ui,
+            &mut self.file_list_state,
+            &self.core_state,
+            &self.expanded_packages,
+            &self.sort,
+            &self.deleted_files,
+            selected_row_identity,
+        );
+    }
+
+    /// Serialises UI-visible state to a JSON string.
     ///
-    /// Call after deleting files to keep counters consistent.
-    pub fn recompute_totals(&mut self) {
-        self.total_size = self.files.iter().map(|f| f.size).sum();
-        self.total_downloaded = self.files.iter().map(|f| f.downloaded).sum();
-        self.files_completed = self
-            .files
-            .iter()
-            .filter(|f| matches!(f.status, FileStatus::Complete))
-            .count();
-        self.files_total = self
-            .files
-            .iter()
-            .filter(|f| !matches!(f.status, FileStatus::Error(_)))
-            .count();
-        self.current_speed = self
-            .files
-            .iter()
-            .filter(|f| matches!(f.status, FileStatus::Downloading))
-            .map(|f| f.speed)
-            .sum();
-    }
-
-    pub fn new(api_port: u16, event_tx: mpsc::UnboundedSender<DownloadEvent>) -> Self {
-        Self {
-            popup: Popup::None,
-            should_quit: false,
-            login: LoginState::new(),
-            authenticated: false,
-            url_input: String::new(),
-            urls: Vec::new(),
-            files: Vec::new(),
-            file_list_state: ListState::default(),
-            total_downloaded: 0,
-            total_size: 0,
-            files_completed: 0,
-            files_total: 0,
-            current_speed: 0,
-            status: String::new(),
-            paused: false,
-            config: ConfigState::new(),
-            event_tx,
-            url_tx: None,
-            token_rx: None,
-            client_rx: None,
-            cancellation_tokens: HashMap::new(),
-            deleted_files: HashSet::new(),
-            session: None,
-            api_port,
-            cpu_usage: 0.0,
-            last_tick: Instant::now(),
-            memory_rss: 0,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::sync::mpsc;
-
-    fn test_app() -> App {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        App::new(9723, tx)
-    }
-
-    #[test]
-    fn login_state_field_cycling() {
-        let mut login = LoginState::new();
-        assert_eq!(login.active_field, 0);
-        login.active_field = (login.active_field + 1) % LoginState::field_count();
-        assert_eq!(login.active_field, 1);
-        login.active_field = (login.active_field + 1) % LoginState::field_count();
-        assert_eq!(login.active_field, 2);
-        login.active_field = (login.active_field + 1) % LoginState::field_count();
-        assert_eq!(login.active_field, 0);
-    }
-
-    #[test]
-    fn config_field_increment_decrement() {
-        let mut config = ConfigState::new();
-        let initial_chunks = config.config.chunks_per_file;
-        config.config.chunks_per_file = config.config.chunks_per_file.saturating_add(1);
-        assert_eq!(config.config.chunks_per_file, initial_chunks + 1);
-        config.config.chunks_per_file = config.config.chunks_per_file.saturating_sub(1).max(1);
-        assert_eq!(config.config.chunks_per_file, initial_chunks);
-    }
-
-    #[test]
-    fn config_field_toggle_bool() {
-        let mut config = ConfigState::new();
-        let initial = config.config.force_overwrite;
-        config.config.force_overwrite = !config.config.force_overwrite;
-        assert_ne!(config.config.force_overwrite, initial);
-        config.config.force_overwrite = !config.config.force_overwrite;
-        assert_eq!(config.config.force_overwrite, initial);
-    }
-
-    #[test]
-    fn app_initial_state() {
-        let app = test_app();
-        assert_eq!(app.popup, Popup::None);
-        assert!(!app.should_quit);
-        assert!(!app.authenticated);
-        assert!(app.url_input.is_empty());
-        assert!(app.files.is_empty());
-        assert_eq!(app.files_completed, 0);
-        assert_eq!(app.files_total, 0);
-    }
-
-    #[test]
-    fn login_state_active_value_mut() {
-        let mut login = LoginState::new();
-        login.email.clear();
-        login.password.clear();
-        login.mfa.clear();
-
-        login.active_field = 0;
-        login.active_value_mut().push_str("test@example.com");
-        assert_eq!(login.email, "test@example.com");
-
-        login.active_field = 1;
-        login.active_value_mut().push_str("password123");
-        assert_eq!(login.password, "password123");
-
-        login.active_field = 2;
-        login.active_value_mut().push_str("123456");
-        assert_eq!(login.mfa, "123456");
-    }
-
-    #[test]
-    fn config_field_labels() {
-        assert_eq!(ConfigField::ChunksPerFile.label(), "Chunks per file");
-        assert_eq!(ConfigField::ConcurrentFiles.label(), "Concurrent files");
-        assert_eq!(ConfigField::ForceOverwrite.label(), "Force overwrite");
-        assert_eq!(ConfigField::CleanupOnError.label(), "Cleanup on error");
+    /// Called by the event loop *only* when state has changed and at least
+    /// one SSE/API client is connected — never on a blind timer.
+    pub fn to_json(&self) -> String {
+        snapshot::to_json(self)
     }
 }

@@ -1,17 +1,40 @@
 //! Core download logic and abstractions.
 
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use futures::{StreamExt, stream};
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::oneshot;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::DownloadConfig;
+use crate::core::ProgressDelta;
 use crate::error::{Error, Result};
 use crate::fs::{FileSystem, TokioFileSystem};
+use crate::progress::CumulativeProgress;
 use crate::stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBuilder};
+
+/// Fetches public-link metadata with a fresh anonymous MEGA client.
+///
+/// Public-link browsing should not depend on the caller's authenticated client
+/// state. Using a fresh client avoids cross-talk between account session state
+/// and public-link metadata fetches.
+///
+/// # Errors
+///
+/// Returns an error if the MEGA client cannot be created or the public link
+/// metadata fetch fails.
+pub async fn fetch_public_nodes(http: &reqwest::Client, url: &str) -> Result<mega::Nodes> {
+    let client = mega::Client::builder().build(http.clone())?;
+    client.fetch_public_nodes(url).await.map_err(Error::Mega)
+}
 
 /// Classification of a file's current state on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +55,12 @@ pub trait DownloadProgress: Send + Sync {
     /// Called when a file download starts.
     fn on_file_start(&self, _name: &str, _size: u64) {}
 
-    /// Called periodically with the number of bytes downloaded since the last call.
-    fn on_progress(&self, _name: &str, _bytes_delta: u64, _speed: u64) {}
+    /// Called periodically with the number of bytes advanced since the last call.
+    ///
+    /// `total_bytes_delta` includes any locally reused bytes revealed by
+    /// resume revalidation, while `network_bytes_delta` counts only fresh
+    /// bytes received from the network during this callback interval.
+    fn on_progress(&self, _name: &str, _delta: ProgressDelta) {}
 
     /// Called when a file download completes successfully.
     fn on_file_complete(&self, _name: &str, _stats: &FileStats) {}
@@ -43,6 +70,9 @@ pub trait DownloadProgress: Send + Sync {
 
     /// Called when a partial `.part` file is detected from a previous run.
     fn on_partial_detected(&self, _name: &str, _existing_size: u64, _expected_size: u64) {}
+
+    /// Called when previously verified chunks will be reused.
+    fn on_resume_reused(&self, _name: &str, _chunks: usize, _bytes: u64) {}
 }
 
 /// A null progress implementation that ignores all events.
@@ -63,6 +93,8 @@ pub struct DownloadItem<'a> {
 pub struct CollectedFiles<'a> {
     /// Files that need to be downloaded.
     pub to_download: Vec<DownloadItem<'a>>,
+    /// Files already complete on disk.
+    pub completed: Vec<DownloadItem<'a>>,
     /// Number of files skipped (already exist with correct size).
     pub skipped: usize,
     /// Number of files with partial `.part` downloads detected.
@@ -96,6 +128,28 @@ impl CollectedFiles<'_> {
             })
             .collect()
     }
+
+    /// Converts both download and already-complete items into owned items.
+    #[must_use]
+    pub fn into_owned_parts(self) -> (Vec<OwnedDownloadItem>, Vec<OwnedDownloadItem>) {
+        let to_download = self
+            .to_download
+            .into_iter()
+            .map(|item| OwnedDownloadItem {
+                path: item.path,
+                node: item.node.clone(),
+            })
+            .collect();
+        let completed = self
+            .completed
+            .into_iter()
+            .map(|item| OwnedDownloadItem {
+                path: item.path,
+                node: item.node.clone(),
+            })
+            .collect();
+        (to_download, completed)
+    }
 }
 
 /// A file to be downloaded with an owned node (no lifetime parameter).
@@ -109,9 +163,270 @@ pub struct OwnedDownloadItem {
     pub node: mega::Node,
 }
 
+/// Bytes and chunks reused from resumable state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResumeReuse {
+    pub chunks: usize,
+    pub bytes: u64,
+    pub source: ResumeReuseSource,
+}
+
+/// Source of reused chunk state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeReuseSource {
+    Sidecar,
+    SalvagedScan,
+}
+
 /// Returns the `.part` file path for a given final path.
-fn part_path(path: &str) -> PathBuf {
+pub(crate) fn part_path(path: &str) -> PathBuf {
     PathBuf::from(format!("{path}.part"))
+}
+
+pub(crate) fn sidecar_path(path: &str) -> PathBuf {
+    PathBuf::from(format!("{path}.part.meta.json"))
+}
+
+/// Deletes resumable download artifacts for a final output path.
+pub async fn delete_resume_artifacts(path: &str) -> io::Result<()> {
+    remove_file_if_exists(&part_path(path)).await?;
+    remove_file_if_exists(&sidecar_path(path)).await
+}
+
+/// Deletes the final output and resumable download artifacts for a path.
+pub async fn delete_download_artifacts(path: &str) -> io::Result<()> {
+    remove_file_if_exists(Path::new(path)).await?;
+    delete_resume_artifacts(path).await
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VerifiedChunkRecord {
+    index: u32,
+    mac_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResumeSidecar {
+    version: u32,
+    file_size: u64,
+    expected_condensed_mac_b64: String,
+    verified_chunks: Vec<VerifiedChunkRecord>,
+}
+
+#[derive(Debug)]
+struct ResumeTracker {
+    file_size: u64,
+    expected_condensed_mac_b64: String,
+    chunk_macs: Vec<Option<[u8; 16]>>,
+    dirty_chunks: usize,
+}
+
+impl ResumeTracker {
+    const fn new(
+        file_size: u64,
+        expected_condensed_mac_b64: String,
+        chunk_macs: Vec<Option<[u8; 16]>>,
+    ) -> Self {
+        Self {
+            file_size,
+            expected_condensed_mac_b64,
+            chunk_macs,
+            dirty_chunks: 0,
+        }
+    }
+
+    fn mark_verified(&mut self, index: u32, mac: [u8; 16]) {
+        let Some(slot) = self.chunk_macs.get_mut(index as usize) else {
+            return;
+        };
+        let was_unverified = slot.is_none();
+        *slot = Some(mac);
+        if was_unverified {
+            self.dirty_chunks = self.dirty_chunks.saturating_add(1);
+        }
+    }
+
+    const fn has_dirty_chunks(&self) -> bool {
+        self.dirty_chunks > 0
+    }
+
+    fn snapshot(&mut self) -> ResumeSidecar {
+        self.dirty_chunks = 0;
+        ResumeSidecar {
+            version: 1,
+            file_size: self.file_size,
+            expected_condensed_mac_b64: self.expected_condensed_mac_b64.clone(),
+            verified_chunks: self
+                .chunk_macs
+                .iter()
+                .enumerate()
+                .filter_map(|(index, mac)| {
+                    mac.and_then(|mac| {
+                        Some(VerifiedChunkRecord {
+                            index: u32::try_from(index).ok()?,
+                            mac_b64: STANDARD.encode(mac),
+                        })
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    fn trusted_chunks(&self) -> Vec<Option<[u8; 16]>> {
+        self.chunk_macs.clone()
+    }
+}
+
+#[derive(Debug)]
+struct ResumeValidation {
+    trusted_chunks: Vec<Option<[u8; 16]>>,
+    trusted_count: usize,
+    trusted_bytes: u64,
+    sidecar_loaded: bool,
+    source: Option<ResumeReuseSource>,
+}
+
+impl ResumeValidation {
+    fn empty(chunk_count: usize) -> Self {
+        Self {
+            trusted_chunks: vec![None; chunk_count],
+            trusted_count: 0,
+            trusted_bytes: 0,
+            sidecar_loaded: false,
+            source: None,
+        }
+    }
+}
+
+struct SidecarValidationInput<'a> {
+    boundaries: &'a [mega::MegaChunk],
+    part_path: &'a Path,
+    sidecar: &'a ResumeSidecar,
+    file_size: u64,
+    aes_key: &'a [u8; 16],
+    aes_iv: &'a [u8; 8],
+    expected_condensed_mac_b64: &'a str,
+}
+
+async fn load_sidecar(path: &Path) -> Option<ResumeSidecar> {
+    let data = tokio::fs::read(path).await.ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+async fn save_sidecar_atomic(path: &Path, sidecar: &ResumeSidecar) -> io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    let data = serde_json::to_vec(sidecar)?;
+    let mut file = tokio::fs::File::create(&tmp).await?;
+    file.write_all(&data).await?;
+    file.flush().await?;
+    file.sync_data().await?;
+    drop(file);
+    tokio::fs::rename(&tmp, path).await?;
+
+    #[cfg(unix)]
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let parent = parent.to_path_buf();
+        let _ = tokio::task::spawn_blocking(move || {
+            std::fs::File::open(parent).and_then(|dir| dir.sync_all())
+        })
+        .await;
+    }
+
+    Ok(())
+}
+
+async fn remove_file_if_exists(path: &Path) -> io::Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+async fn delete_sidecar(path: &Path) -> io::Result<()> {
+    remove_file_if_exists(path).await
+}
+
+fn encode_expected_mac(node: &mega::Node) -> Result<String> {
+    let mac = node
+        .condensed_mac()
+        .ok_or(mega::Error::MissingCondensedMac)?;
+    Ok(STANDARD.encode(mac))
+}
+
+const fn is_condensed_mac_mismatch(error: &Error) -> bool {
+    matches!(error, Error::Mega(mega::Error::CondensedMacMismatch))
+}
+
+const fn should_delete_resume_state_on_error(config: &DownloadConfig, error: &Error) -> bool {
+    is_condensed_mac_mismatch(error)
+        || (config.cleanup_on_error && !matches!(error, Error::Cancelled))
+}
+
+fn consume_reused_bytes(remaining: &AtomicU64, delta: u64) -> u64 {
+    let mut current = remaining.load(Ordering::Relaxed);
+    loop {
+        if current == 0 || delta == 0 {
+            return 0;
+        }
+        let consumed = delta.min(current);
+        match remaining.compare_exchange_weak(
+            current,
+            current - consumed,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return consumed,
+            Err(next) => current = next,
+        }
+    }
+}
+
+fn spawn_sidecar_flusher(
+    tracker: Arc<Mutex<ResumeTracker>>,
+    sidecar_path: PathBuf,
+) -> (oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+    let (flush_stop_tx, mut flush_stop_rx) = oneshot::channel::<()>();
+    let flush_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let snapshot = {
+                        let mut guard = tracker.lock().unwrap();
+                        if guard.has_dirty_chunks() {
+                            Some(guard.snapshot())
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(snapshot) = snapshot {
+                        if let Err(e) = save_sidecar_atomic(&sidecar_path, &snapshot).await {
+                            log::warn!(
+                                "Failed to save resume sidecar {}: {e}",
+                                sidecar_path.display()
+                            );
+                        }
+                    }
+                }
+                _ = &mut flush_stop_rx => break,
+            }
+        }
+    });
+
+    (flush_stop_tx, flush_handle)
+}
+
+struct DownloadFinishContext<'a> {
+    node: &'a mega::Node,
+    path: &'a str,
+    part_path: &'a Path,
+    sidecar_path: &'a Path,
+    reused_bytes: u64,
+    stats: &'a DownloadStatsTracker,
+    tracker: &'a Mutex<ResumeTracker>,
+    progress: &'a Arc<dyn DownloadProgress>,
+    name: &'a str,
 }
 
 /// Core downloader that handles MEGA file downloads.
@@ -200,16 +515,20 @@ impl<F: FileSystem> Downloader<F> {
             .collect();
 
         let mut to_download = Vec::new();
+        let mut completed = Vec::new();
         let mut skipped = 0;
         let mut partial = 0;
 
         for item in all_items {
             match self.classify_file(&item.path, item.node.size()).await {
-                FileStatus::Complete => skipped += 1,
+                FileStatus::Complete => {
+                    skipped += 1;
+                    completed.push(item);
+                }
                 FileStatus::Partial => {
                     let pp = part_path(&item.path);
                     let existing_size = self.fs.file_size(&pp).await.unwrap_or(0);
-                    progress.on_partial_detected(item.node.name(), existing_size, item.node.size());
+                    progress.on_partial_detected(&item.path, existing_size, item.node.size());
                     partial += 1;
                     to_download.push(item);
                 }
@@ -221,6 +540,7 @@ impl<F: FileSystem> Downloader<F> {
 
         CollectedFiles {
             to_download,
+            completed,
             skipped,
             partial,
         }
@@ -237,15 +557,215 @@ impl<F: FileSystem> Downloader<F> {
         Ok(())
     }
 
+    async fn complete_existing_file(
+        &self,
+        node: &mega::Node,
+        path: &str,
+        progress: &Arc<dyn DownloadProgress>,
+    ) -> Option<FileStats> {
+        if self.config.force_overwrite
+            || self
+                .fs
+                .file_size(Path::new(path))
+                .await
+                .is_none_or(|size| size != node.size())
+        {
+            return None;
+        }
+        let stats = FileStats {
+            size: node.size(),
+            network_bytes: 0,
+            reused_bytes: 0,
+            elapsed: std::time::Duration::ZERO,
+            average_speed: 0,
+            peak_speed: 0,
+            ramp_up_time: None,
+        };
+        progress.on_file_complete(path, &stats);
+        Some(stats)
+    }
+
+    async fn revalidate_resume_chunks(
+        &self,
+        node: &mega::Node,
+        boundaries: &[mega::MegaChunk],
+        part_path: &Path,
+        sidecar_path: &Path,
+        expected_condensed_mac_b64: &str,
+    ) -> Result<ResumeValidation> {
+        let Some(sidecar) = load_sidecar(sidecar_path).await else {
+            return Ok(ResumeValidation::empty(boundaries.len()));
+        };
+
+        let Some(aes_iv) = node.aes_iv() else {
+            return Ok(ResumeValidation {
+                sidecar_loaded: true,
+                ..ResumeValidation::empty(boundaries.len())
+            });
+        };
+
+        Ok(self
+            .revalidate_sidecar_chunks(SidecarValidationInput {
+                boundaries,
+                part_path,
+                sidecar: &sidecar,
+                file_size: node.size(),
+                aes_key: node.aes_key(),
+                aes_iv,
+                expected_condensed_mac_b64,
+            })
+            .await)
+    }
+
+    async fn revalidate_sidecar_chunks(
+        &self,
+        input: SidecarValidationInput<'_>,
+    ) -> ResumeValidation {
+        let mut validation = ResumeValidation {
+            sidecar_loaded: true,
+            ..ResumeValidation::empty(input.boundaries.len())
+        };
+
+        if input.sidecar.version != 1
+            || input.sidecar.file_size != input.file_size
+            || input.sidecar.expected_condensed_mac_b64 != input.expected_condensed_mac_b64
+        {
+            return validation;
+        }
+
+        let part_size = self.fs.file_size(input.part_path).await.unwrap_or(0);
+        let max_chunk_len = input
+            .boundaries
+            .iter()
+            .filter_map(|chunk| usize::try_from(chunk.length).ok())
+            .max()
+            .unwrap_or(0);
+        let mut scratch = vec![0u8; max_chunk_len];
+
+        for record in &input.sidecar.verified_chunks {
+            let Some(boundary) = input.boundaries.get(record.index as usize) else {
+                continue;
+            };
+            if validation.trusted_chunks[record.index as usize].is_some() {
+                continue;
+            }
+            if boundary.offset.saturating_add(boundary.length) > part_size {
+                continue;
+            }
+            let Ok(decoded) = STANDARD.decode(record.mac_b64.as_bytes()) else {
+                continue;
+            };
+            let Ok(expected_mac) = <[u8; 16]>::try_from(decoded.as_slice()) else {
+                continue;
+            };
+
+            let Ok(chunk_len) = usize::try_from(boundary.length) else {
+                continue;
+            };
+            let buf = &mut scratch[..chunk_len];
+            if self
+                .fs
+                .read_exact_at(input.part_path, boundary.offset, buf)
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let actual_mac = mega::compute_mega_chunk_mac(buf, input.aes_key, input.aes_iv);
+            if actual_mac == expected_mac {
+                validation.trusted_chunks[record.index as usize] = Some(actual_mac);
+                validation.trusted_count = validation.trusted_count.saturating_add(1);
+                validation.trusted_bytes = validation.trusted_bytes.saturating_add(boundary.length);
+            }
+        }
+
+        if validation.trusted_count > 0 {
+            validation.source = Some(ResumeReuseSource::Sidecar);
+        }
+
+        validation
+    }
+
+    async fn salvage_resume_chunks(
+        &self,
+        boundaries: &[mega::MegaChunk],
+        part_path: &Path,
+        sidecar_path: &Path,
+        file_size: u64,
+        aes_key: &[u8; 16],
+        aes_iv: &[u8; 8],
+        expected_condensed_mac_b64: &str,
+    ) -> ResumeValidation {
+        let mut validation = ResumeValidation::empty(boundaries.len());
+        let part_size = self.fs.file_size(part_path).await.unwrap_or(0);
+        if part_size == 0 {
+            return validation;
+        }
+
+        let max_chunk_len = boundaries
+            .iter()
+            .filter_map(|chunk| usize::try_from(chunk.length).ok())
+            .max()
+            .unwrap_or(0);
+        let mut scratch = vec![0u8; max_chunk_len];
+
+        for boundary in boundaries {
+            if boundary.offset.saturating_add(boundary.length) > part_size {
+                continue;
+            }
+            let Ok(chunk_len) = usize::try_from(boundary.length) else {
+                continue;
+            };
+            let buf = &mut scratch[..chunk_len];
+            if self
+                .fs
+                .read_exact_at(part_path, boundary.offset, buf)
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let mac = mega::compute_mega_chunk_mac(buf, aes_key, aes_iv);
+            validation.trusted_chunks[boundary.index as usize] = Some(mac);
+            validation.trusted_count = validation.trusted_count.saturating_add(1);
+            validation.trusted_bytes = validation.trusted_bytes.saturating_add(boundary.length);
+        }
+
+        if validation.trusted_count > 0 {
+            validation.source = Some(ResumeReuseSource::SalvagedScan);
+            let mut tracker = ResumeTracker::new(
+                file_size,
+                expected_condensed_mac_b64.to_string(),
+                validation.trusted_chunks.clone(),
+            );
+            let snapshot = tracker.snapshot();
+            if let Err(e) = save_sidecar_atomic(sidecar_path, &snapshot).await {
+                log::warn!(
+                    "Failed to save salvaged resume sidecar {}: {e}",
+                    sidecar_path.display()
+                );
+            }
+        }
+
+        validation
+    }
+
     /// Downloads a single file using atomic `.part` file semantics.
     ///
     /// Writes to `{path}.part` during download, then renames to `{path}` on success.
-    /// On error, cleans up the `.part` file if `cleanup_on_error` is enabled.
+    /// On recoverable errors, keeps the `.part` file for resume unless
+    /// `cleanup_on_error` is enabled. Final MAC mismatches always discard
+    /// resumable state because the assembled plaintext failed verification.
     /// If a `cancellation_token` is provided, the download can be cancelled.
     ///
     /// # Errors
     ///
     /// Returns an error if the file cannot be created or the download fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal resume tracker mutex is poisoned.
+    #[allow(clippy::too_many_lines)]
     pub async fn download_file(
         &self,
         node: &mega::Node,
@@ -253,18 +773,81 @@ impl<F: FileSystem> Downloader<F> {
         progress: &Arc<dyn DownloadProgress>,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<FileStats> {
+        if let Some(stats) = self.complete_existing_file(node, path, progress).await {
+            return Ok(stats);
+        }
+
         self.ensure_parent_dir(path).await?;
-
-        let pp = part_path(path);
-        let stats = Arc::new(DownloadStatsTracker::new(node.size()));
-        let name = node.name().to_string();
-
+        let name = path.to_string();
         progress.on_file_start(&name, node.size());
 
-        // Create .part file with pre-allocated size
-        let file = self.fs.create_file(&pp, node.size()).await?;
+        let pp = part_path(path);
+        let sp = sidecar_path(path);
+        let expected_condensed_mac_b64 = encode_expected_mac(node)?;
+        let boundaries = mega::mega_chunk_boundaries(node.size());
+        let mut resume_validation = if self.config.force_overwrite {
+            ResumeValidation::empty(boundaries.len())
+        } else {
+            self.revalidate_resume_chunks(node, &boundaries, &pp, &sp, &expected_condensed_mac_b64)
+                .await?
+        };
+        if !self.config.force_overwrite
+            && resume_validation.trusted_count == 0
+            && self.fs.file_exists(&pp).await
+            && let Some(aes_iv) = node.aes_iv()
+        {
+            resume_validation = self
+                .salvage_resume_chunks(
+                    &boundaries,
+                    &pp,
+                    &sp,
+                    node.size(),
+                    node.aes_key(),
+                    aes_iv,
+                    &expected_condensed_mac_b64,
+                )
+                .await;
+        }
+        let preserve_existing = resume_validation.trusted_count > 0;
+        if !preserve_existing {
+            let _ = delete_sidecar(&sp).await;
+        }
+        if resume_validation.sidecar_loaded && resume_validation.trusted_count == 0 {
+            log::debug!("Resume sidecar found for {path}, but no chunks were reusable");
+        }
+        let trusted_bytes = resume_validation.trusted_bytes;
+
+        let stats = Arc::new(DownloadStatsTracker::new(
+            node.size().saturating_sub(trusted_bytes),
+        ));
+
+        if trusted_bytes > 0 {
+            progress.on_resume_reused(&name, resume_validation.trusted_count, trusted_bytes);
+            if matches!(
+                resume_validation.source,
+                Some(ResumeReuseSource::SalvagedScan)
+            ) {
+                log::info!(
+                    "Salvaged {} verified chunk(s) for {path} by scanning partial data",
+                    resume_validation.trusted_count
+                );
+            }
+        }
+
+        // Open the plaintext .part file, preserving only locally revalidated chunks.
+        let file = self
+            .fs
+            .open_part_file(&pp, node.size(), preserve_existing)
+            .await?;
 
         let name_clone = name.clone();
+        let tracker = Arc::new(Mutex::new(ResumeTracker::new(
+            node.size(),
+            expected_condensed_mac_b64,
+            resume_validation.trusted_chunks,
+        )));
+        let trusted_for_download = tracker.lock().unwrap().trusted_chunks();
+        let (flush_stop_tx, flush_handle) = spawn_sidecar_flusher(Arc::clone(&tracker), sp.clone());
 
         // Wrap tokio file for futures::AsyncWrite/AsyncSeek compatibility
         let file = file.compat_write();
@@ -273,26 +856,43 @@ impl<F: FileSystem> Downloader<F> {
         // total bytes downloaded so far, NOT a delta.  We use fetch_max (not
         // swap) so that out-of-order callbacks from parallel workers never
         // regress the high-water mark.
-        let prev_bytes = Arc::new(AtomicU64::new(0));
+        let cumulative = Arc::new(CumulativeProgress::new());
+        let reused_remaining = Arc::new(AtomicU64::new(trusted_bytes));
         let stats_clone = Arc::clone(&stats);
         let progress_clone = Arc::clone(progress);
         let name_for_cb = name.clone();
-        let progress_cb = move |cumulative: u64| {
-            let previous = prev_bytes.fetch_max(cumulative, Ordering::Relaxed);
-            let delta = cumulative.saturating_sub(previous);
+        let progress_cb = move |cumulative_bytes: u64| {
+            let delta = cumulative.delta(cumulative_bytes);
             if delta > 0 {
-                let speed = stats_clone.record_bytes(delta);
-                progress_clone.on_progress(&name_for_cb, delta, speed);
+                let reused_delta = consume_reused_bytes(&reused_remaining, delta);
+                let fresh_delta = delta.saturating_sub(reused_delta);
+                if fresh_delta > 0 {
+                    let _ = stats_clone.record_bytes(fresh_delta);
+                }
+                progress_clone.on_progress(
+                    &name_for_cb,
+                    ProgressDelta {
+                        total_bytes_delta: delta,
+                        network_bytes_delta: fresh_delta,
+                    },
+                );
             }
+        };
+        let verify_tracker = Arc::clone(&tracker);
+        let chunk_verified_cb = move |index: u32, mac: [u8; 16]| {
+            let mut guard = verify_tracker.lock().unwrap();
+            guard.mark_verified(index, mac);
         };
 
         // Download with progress callback, optionally with cancellation support
         let download_result = if let Some(token) = cancellation_token {
-            let download_fut = self.client.download_node_parallel_with_progress(
+            let download_fut = self.client.download_node_parallel_resumable_with_progress(
                 node,
                 file,
                 self.config.chunks_per_file,
+                &trusted_for_download,
                 Some(progress_cb),
+                Some(chunk_verified_cb),
             );
             tokio::select! {
                 res = download_fut => res.map_err(Error::Mega),
@@ -302,38 +902,81 @@ impl<F: FileSystem> Downloader<F> {
             }
         } else {
             self.client
-                .download_node_parallel_with_progress(
+                .download_node_parallel_resumable_with_progress(
                     node,
                     file,
                     self.config.chunks_per_file,
+                    &trusted_for_download,
                     Some(progress_cb),
+                    Some(chunk_verified_cb),
                 )
                 .await
                 .map_err(Error::Mega)
         };
+        let _ = flush_stop_tx.send(());
+        let _ = flush_handle.await;
 
+        self.finish_download_result(
+            DownloadFinishContext {
+                node,
+                path,
+                part_path: &pp,
+                sidecar_path: &sp,
+                reused_bytes: trusted_bytes,
+                stats: &stats,
+                tracker: &tracker,
+                progress,
+                name: &name_clone,
+            },
+            download_result,
+        )
+        .await
+    }
+
+    async fn finish_download_result(
+        &self,
+        ctx: DownloadFinishContext<'_>,
+        download_result: Result<()>,
+    ) -> Result<FileStats> {
         match download_result {
             Ok(()) => {
+                if self.config.force_overwrite {
+                    let _ = self.fs.remove_file(Path::new(ctx.path)).await;
+                }
                 // Rename .part → final
-                self.fs.rename_file(&pp, Path::new(path)).await?;
+                self.fs
+                    .rename_file(ctx.part_path, Path::new(ctx.path))
+                    .await?;
+                delete_sidecar(ctx.sidecar_path).await?;
 
                 let file_stats = FileStats {
-                    size: node.size(),
-                    elapsed: stats.elapsed(),
-                    average_speed: stats.average_speed(),
-                    peak_speed: stats.peak_speed(),
-                    ramp_up_time: stats.time_to_80pct(),
+                    size: ctx.node.size(),
+                    network_bytes: ctx.stats.downloaded_bytes(),
+                    reused_bytes: ctx.reused_bytes,
+                    elapsed: ctx.stats.elapsed(),
+                    average_speed: ctx.stats.average_speed(),
+                    peak_speed: ctx.stats.peak_speed(),
+                    ramp_up_time: ctx.stats.time_to_80pct(),
                 };
-                progress.on_file_complete(&name_clone, &file_stats);
+                ctx.progress.on_file_complete(ctx.name, &file_stats);
                 Ok(file_stats)
             }
             Err(e) => {
                 // Keep .part files for future resume support; only clean up if configured
-                if self.config.cleanup_on_error && !matches!(e, Error::Cancelled) {
-                    let _ = self.fs.remove_file(&pp).await;
+                if should_delete_resume_state_on_error(&self.config, &e) {
+                    let _ = self.fs.remove_file(ctx.part_path).await;
+                    let _ = delete_sidecar(ctx.sidecar_path).await;
+                } else {
+                    let snapshot = ctx.tracker.lock().unwrap().snapshot();
+                    if let Err(save_err) = save_sidecar_atomic(ctx.sidecar_path, &snapshot).await {
+                        log::warn!(
+                            "Failed to save final resume sidecar {}: {save_err}",
+                            ctx.sidecar_path.display()
+                        );
+                    }
                 }
                 if !matches!(e, Error::Cancelled) {
-                    progress.on_error(&name_clone, &e.to_string());
+                    ctx.progress.on_error(ctx.name, &e.to_string());
                 }
                 Err(e)
             }
@@ -465,7 +1108,7 @@ fn collect_files_recursive<'a>(
         .partition(|n| n.kind().is_folder());
 
     let current_files = files.into_iter().map(|file| DownloadItem {
-        path: build_path(nodes, node, file),
+        path: build_path(nodes, file),
         node: file,
     });
 
@@ -477,15 +1120,33 @@ fn collect_files_recursive<'a>(
 }
 
 /// Builds the full path for a file within a folder structure.
-fn build_path(nodes: &mega::Nodes, parent: &mega::Node, file: &mega::Node) -> String {
-    // Try to build full path with grandparent, fallback to parent/file if no grandparent
-    if let Some(gp_handle) = parent.parent()
-        && let Some(grandparent) = nodes.get_node_by_handle(gp_handle)
-    {
-        return format!("{}/{}/{}", grandparent.name(), parent.name(), file.name());
+fn build_path(nodes: &mega::Nodes, file: &mega::Node) -> String {
+    build_relative_path(file.name(), file.parent(), |handle| {
+        let node = nodes.get_node_by_handle(handle)?;
+        Some((node.name().to_string(), node.parent().map(str::to_string)))
+    })
+}
+
+fn build_relative_path<F>(file_name: &str, parent: Option<&str>, mut lookup: F) -> String
+where
+    F: FnMut(&str) -> Option<(String, Option<String>)>,
+{
+    let mut components = vec![file_name.to_string()];
+    let mut parent = parent.map(str::to_string);
+
+    while let Some(handle) = parent.as_deref() {
+        let Some((name, next_parent)) = lookup(handle) else {
+            break;
+        };
+        if next_parent.is_none() {
+            break;
+        }
+        components.push(name);
+        parent = next_parent;
     }
-    // Parent is at root level, just use parent/file
-    format!("{}/{}", parent.name(), file.name())
+
+    components.reverse();
+    components.join("/")
 }
 
 #[cfg(test)]
@@ -502,6 +1163,7 @@ mod tests {
     fn collected_files_total_size() {
         let collected = CollectedFiles {
             to_download: vec![],
+            completed: vec![],
             skipped: 5,
             partial: 0,
         };
@@ -566,6 +1228,24 @@ mod tests {
             Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "mock"))
         }
 
+        async fn open_part_file(
+            &self,
+            _path: &Path,
+            _size: u64,
+            _preserve_existing: bool,
+        ) -> std::io::Result<tokio::fs::File> {
+            Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "mock"))
+        }
+
+        async fn read_exact_at(
+            &self,
+            _path: &Path,
+            _offset: u64,
+            _buf: &mut [u8],
+        ) -> std::io::Result<()> {
+            Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "mock"))
+        }
+
         async fn rename_file(&self, _from: &Path, _to: &Path) -> std::io::Result<()> {
             Ok(())
         }
@@ -589,6 +1269,329 @@ mod tests {
             ..DownloadConfig::default()
         };
         Downloader::with_fs(client, config, fs)
+    }
+
+    fn tokio_downloader() -> Downloader<TokioFileSystem> {
+        let http = reqwest::Client::new();
+        let client = mega::Client::builder().build(http).unwrap();
+        Downloader::new(client, DownloadConfig::default())
+    }
+
+    fn test_plaintext(size: usize) -> Vec<u8> {
+        (0..size).map(|i| u8::try_from(i % 251).unwrap()).collect()
+    }
+
+    fn usize_from_u64(value: u64) -> usize {
+        usize::try_from(value).unwrap()
+    }
+
+    fn chunk_data<'a>(data: &'a [u8], chunk: &mega::MegaChunk) -> &'a [u8] {
+        &data[usize_from_u64(chunk.offset)..usize_from_u64(chunk.offset + chunk.length)]
+    }
+
+    fn sidecar_for_chunk(
+        file_size: u64,
+        expected_condensed_mac_b64: &str,
+        index: u32,
+        mac: [u8; 16],
+    ) -> ResumeSidecar {
+        ResumeSidecar {
+            version: 1,
+            file_size,
+            expected_condensed_mac_b64: expected_condensed_mac_b64.to_string(),
+            verified_chunks: vec![VerifiedChunkRecord {
+                index,
+                mac_b64: STANDARD.encode(mac),
+            }],
+        }
+    }
+
+    #[test]
+    fn consume_reused_bytes_caps_at_remaining() {
+        let remaining = AtomicU64::new(100);
+
+        assert_eq!(consume_reused_bytes(&remaining, 60), 60);
+        assert_eq!(remaining.load(Ordering::Relaxed), 40);
+        assert_eq!(consume_reused_bytes(&remaining, 60), 40);
+        assert_eq!(remaining.load(Ordering::Relaxed), 0);
+        assert_eq!(consume_reused_bytes(&remaining, 60), 0);
+    }
+
+    #[test]
+    fn cleanup_policy_preserves_recoverable_errors_by_default() {
+        let config = DownloadConfig::default();
+
+        assert!(!should_delete_resume_state_on_error(
+            &config,
+            &Error::Download("temporary network failure".to_string()),
+        ));
+        assert!(!should_delete_resume_state_on_error(
+            &config,
+            &Error::Cancelled,
+        ));
+        assert!(should_delete_resume_state_on_error(
+            &config,
+            &Error::Mega(mega::Error::CondensedMacMismatch),
+        ));
+    }
+
+    #[test]
+    fn cleanup_policy_honors_explicit_cleanup_except_cancel() {
+        let config = DownloadConfig {
+            cleanup_on_error: true,
+            ..DownloadConfig::default()
+        };
+
+        assert!(should_delete_resume_state_on_error(
+            &config,
+            &Error::Download("temporary network failure".to_string()),
+        ));
+        assert!(!should_delete_resume_state_on_error(
+            &config,
+            &Error::Cancelled,
+        ));
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_accepts_matching_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let aes_key = [7u8; 16];
+        let aes_iv = [3u8; 8];
+        let expected = STANDARD.encode([9u8; 8]);
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let first = &boundaries[0];
+        let first_data = chunk_data(&data, first);
+        let mac = mega::compute_mega_chunk_mac(first_data, &aes_key, &aes_iv);
+        let sidecar = sidecar_for_chunk(file_size, &expected, first.index, mac);
+
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(SidecarValidationInput {
+                boundaries: &boundaries,
+                part_path: &part,
+                sidecar: &sidecar,
+                file_size,
+                aes_key: &aes_key,
+                aes_iv: &aes_iv,
+                expected_condensed_mac_b64: &expected,
+            })
+            .await;
+
+        assert!(validation.sidecar_loaded);
+        assert_eq!(validation.trusted_count, 1);
+        assert_eq!(validation.trusted_bytes, first.length);
+        assert_eq!(validation.trusted_chunks[0], Some(mac));
+        assert!(validation.trusted_chunks[1].is_none());
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_rejects_bad_chunk_mac() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let aes_key = [7u8; 16];
+        let aes_iv = [3u8; 8];
+        let expected = STANDARD.encode([9u8; 8]);
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let sidecar = sidecar_for_chunk(file_size, &expected, 0, [1u8; 16]);
+
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(SidecarValidationInput {
+                boundaries: &boundaries,
+                part_path: &part,
+                sidecar: &sidecar,
+                file_size,
+                aes_key: &aes_key,
+                aes_iv: &aes_iv,
+                expected_condensed_mac_b64: &expected,
+            })
+            .await;
+
+        assert!(validation.sidecar_loaded);
+        assert_eq!(validation.trusted_count, 0);
+        assert_eq!(validation.trusted_bytes, 0);
+        assert!(validation.trusted_chunks.iter().all(Option::is_none));
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_rejects_short_part_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+
+        let aes_key = [7u8; 16];
+        let aes_iv = [3u8; 8];
+        let expected = STANDARD.encode([9u8; 8]);
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let second = &boundaries[1];
+        let second_data = chunk_data(&data, second);
+        let mac = mega::compute_mega_chunk_mac(second_data, &aes_key, &aes_iv);
+        let sidecar = sidecar_for_chunk(file_size, &expected, second.index, mac);
+
+        tokio::fs::write(&part, &data[..usize_from_u64(second.offset)])
+            .await
+            .unwrap();
+
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(SidecarValidationInput {
+                boundaries: &boundaries,
+                part_path: &part,
+                sidecar: &sidecar,
+                file_size,
+                aes_key: &aes_key,
+                aes_iv: &aes_iv,
+                expected_condensed_mac_b64: &expected,
+            })
+            .await;
+
+        assert_eq!(validation.trusted_count, 0);
+        assert_eq!(validation.trusted_bytes, 0);
+        assert!(validation.trusted_chunks.iter().all(Option::is_none));
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_rejects_stale_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let aes_key = [7u8; 16];
+        let aes_iv = [3u8; 8];
+        let expected = STANDARD.encode([9u8; 8]);
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let sidecar = sidecar_for_chunk(file_size, "stale", 0, [1u8; 16]);
+
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(SidecarValidationInput {
+                boundaries: &boundaries,
+                part_path: &part,
+                sidecar: &sidecar,
+                file_size,
+                aes_key: &aes_key,
+                aes_iv: &aes_iv,
+                expected_condensed_mac_b64: &expected,
+            })
+            .await;
+
+        assert!(validation.sidecar_loaded);
+        assert_eq!(validation.trusted_count, 0);
+        assert_eq!(validation.trusted_bytes, 0);
+        assert!(validation.trusted_chunks.iter().all(Option::is_none));
+    }
+
+    #[tokio::test]
+    async fn missing_sidecar_scan_salvages_full_chunks_and_writes_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let sidecar = dir.path().join("file.bin.part.meta.json");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let aes_key = [7u8; 16];
+        let aes_iv = [3u8; 8];
+        let expected = STANDARD.encode([9u8; 8]);
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let validation = tokio_downloader()
+            .salvage_resume_chunks(
+                &boundaries,
+                &part,
+                &sidecar,
+                file_size,
+                &aes_key,
+                &aes_iv,
+                &expected,
+            )
+            .await;
+
+        assert_eq!(validation.source, Some(ResumeReuseSource::SalvagedScan));
+        assert_eq!(validation.trusted_count, boundaries.len());
+        assert_eq!(validation.trusted_bytes, file_size);
+        assert!(sidecar.exists());
+        let loaded = load_sidecar(&sidecar).await.unwrap();
+        assert_eq!(loaded.verified_chunks.len(), boundaries.len());
+    }
+
+    #[tokio::test]
+    async fn scan_salvage_ignores_incomplete_tail_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let sidecar = dir.path().join("file.bin.part.meta.json");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(200_000);
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let aes_key = [7u8; 16];
+        let aes_iv = [3u8; 8];
+        let expected = STANDARD.encode([9u8; 8]);
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let validation = tokio_downloader()
+            .salvage_resume_chunks(
+                &boundaries,
+                &part,
+                &sidecar,
+                file_size,
+                &aes_key,
+                &aes_iv,
+                &expected,
+            )
+            .await;
+
+        assert_eq!(validation.trusted_count, 1);
+        assert_eq!(validation.trusted_bytes, boundaries[0].length);
+        assert!(validation.trusted_chunks[0].is_some());
+        assert!(validation.trusted_chunks[1].is_none());
+    }
+
+    #[tokio::test]
+    async fn sidecar_save_and_delete_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar_path = dir.path().join("file.bin.part.meta.json");
+        let sidecar = ResumeSidecar {
+            version: 1,
+            file_size: 42,
+            expected_condensed_mac_b64: STANDARD.encode([9u8; 8]),
+            verified_chunks: vec![VerifiedChunkRecord {
+                index: 0,
+                mac_b64: STANDARD.encode([1u8; 16]),
+            }],
+        };
+
+        save_sidecar_atomic(&sidecar_path, &sidecar).await.unwrap();
+        let loaded = load_sidecar(&sidecar_path).await.unwrap();
+        assert_eq!(loaded.file_size, sidecar.file_size);
+        assert_eq!(loaded.verified_chunks.len(), 1);
+
+        delete_sidecar(&sidecar_path).await.unwrap();
+        assert!(load_sidecar(&sidecar_path).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_resume_artifacts_removes_part_and_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.bin");
+        let path_str = path.to_string_lossy().to_string();
+        tokio::fs::write(part_path(&path_str), b"partial")
+            .await
+            .unwrap();
+        tokio::fs::write(sidecar_path(&path_str), b"{}")
+            .await
+            .unwrap();
+
+        delete_resume_artifacts(&path_str).await.unwrap();
+
+        assert!(!part_path(&path_str).exists());
+        assert!(!sidecar_path(&path_str).exists());
     }
 
     #[tokio::test]
@@ -646,5 +1649,37 @@ mod tests {
             dl.classify_file("movie.mkv", 1_000_000).await,
             FileStatus::Missing
         );
+    }
+
+    #[test]
+    fn build_relative_path_handles_deep_nesting() {
+        let mut parents = std::collections::HashMap::new();
+        parents.insert(
+            "folder-b".to_string(),
+            ("b".to_string(), Some("folder-a".to_string())),
+        );
+        parents.insert(
+            "folder-a".to_string(),
+            ("a".to_string(), Some("root".to_string())),
+        );
+        parents.insert("root".to_string(), ("ignored-root".to_string(), None));
+
+        let path = build_relative_path("file.bin", Some("folder-b"), |handle| {
+            parents.get(handle).cloned()
+        });
+
+        assert_eq!(path, "a/b/file.bin");
+    }
+
+    #[test]
+    fn build_relative_path_keeps_root_level_files_flat() {
+        let mut parents = std::collections::HashMap::new();
+        parents.insert("root".to_string(), ("ignored-root".to_string(), None));
+
+        let path = build_relative_path("file.bin", Some("root"), |handle| {
+            parents.get(handle).cloned()
+        });
+
+        assert_eq!(path, "file.bin");
     }
 }

@@ -1,8 +1,16 @@
+use env_logger::Target;
 use std::env;
+use std::fs::File;
+use std::io::{self, Write};
+use std::net::TcpStream;
+#[cfg(unix)]
+use std::os::unix::io::{FromRawFd, RawFd};
+#[cfg(windows)]
+use std::os::windows::io::{FromRawHandle, RawHandle};
 use std::path::PathBuf;
 
 /// Flags that consume the next argument as a value (not a positional arg).
-const FLAGS_WITH_VALUES: &[&str] = &["--api-host", "--config"];
+const FLAGS_WITH_VALUES: &[&str] = &["--host", "--config", "-j", "--chunks", "-p", "--parallel"];
 
 /// Returns true if `args` contains positional arguments (URLs, DLC paths, etc.)
 /// as opposed to just flags and their values.
@@ -25,40 +33,125 @@ fn print_usage() {
     eprintln!("Usage: octo [MODE] [OPTIONS] [url|dlc]...");
     eprintln!();
     eprintln!("Modes:");
-    eprintln!("  --tui               Launch interactive TUI");
-    eprintln!("  --api               Start HTTP API server (combinable with --tui or standalone)");
+    eprintln!("  --tui               Launch interactive terminal TUI");
+    eprintln!("  --web               Launch web UI in browser (PWA with mobile share support)");
+    eprintln!("  --api               Start headless API server (requires --config)");
     eprintln!("  (default)           CLI download mode when URLs/DLC files are provided");
     eprintln!();
+    eprintln!("Combinable:");
+    eprintln!("  --tui --api         Terminal TUI with API server");
+    eprintln!("  --tui --web         Terminal TUI with web UI alongside");
+    eprintln!();
     eprintln!("Global options:");
-    eprintln!("  --api-host <HOST>   API server bind address (default: 127.0.0.1)");
+    eprintln!(
+        "  --host <HOST>       Bind address for API/web (default: 127.0.0.1, or from config)"
+    );
     eprintln!("  --config <PATH>     Config file for headless/service mode");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
     eprintln!("Run 'octo --tui --help' or 'octo --help' for mode-specific options.");
 }
 
+fn init_logger(args: &[String]) {
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("octo_dl=info"));
+    if let Some(pipe_writer) = log_writer(args) {
+        builder.target(Target::Pipe(pipe_writer));
+    }
+    builder.init();
+}
+
+fn log_writer(args: &[String]) -> Option<Box<dyn Write + Send>> {
+    log_pipe_writer()
+        .or_else(|| native_tui_log_detachment_required(args).then(native_tui_log_writer))
+}
+
+fn log_pipe_writer() -> Option<Box<dyn Write + Send>> {
+    if let Ok(addr) = env::var("OCTO_TUI_LOG_ADDR")
+        && let Some(writer) = log_pipe_writer_from_addr(&addr)
+    {
+        return Some(writer);
+    }
+    let raw_fd = env::var_os("OCTO_TUI_LOG_FD")?;
+    let fd = raw_fd.to_string_lossy().parse::<usize>().ok()?;
+    log_pipe_writer_from_raw(fd)
+}
+
+fn log_pipe_writer_from_addr(addr: &str) -> Option<Box<dyn Write + Send>> {
+    TcpStream::connect(addr)
+        .ok()
+        .map(|stream| Box::new(stream) as Box<dyn Write + Send>)
+}
+
+fn native_tui_log_detachment_required(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--tui")
+        && env::var_os("OCTO_TUI_LOG_ADDR").is_none()
+        && env::var_os("OCTO_TUI_LOG_FD").is_none()
+}
+
+fn native_tui_log_writer() -> Box<dyn Write + Send> {
+    let path = native_tui_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    match File::options().create(true).append(true).open(path) {
+        Ok(file) => Box::new(file),
+        Err(_) => Box::new(io::sink()),
+    }
+}
+
+fn native_tui_log_path() -> PathBuf {
+    let mut path = octo_dl::SessionSnapshotV3::state_dir();
+    path.pop();
+    path.push("native-tui.log");
+    path
+}
+
+#[cfg(unix)]
+fn log_pipe_writer_from_raw(fd: usize) -> Option<Box<dyn Write + Send>> {
+    if fd > i32::MAX as usize {
+        return None;
+    }
+    unsafe {
+        let file = File::from_raw_fd(fd as RawFd);
+        Some(Box::new(file))
+    }
+}
+
+#[cfg(windows)]
+fn log_pipe_writer_from_raw(fd: usize) -> Option<Box<dyn Write + Send>> {
+    unsafe {
+        let file = File::from_raw_handle(fd as RawHandle);
+        Some(Box::new(file))
+    }
+}
+
 #[tokio::main]
 async fn main() -> octo_dl::Result<()> {
-    env_logger::init();
+    // Scan for global flags without consuming — sub-modules re-parse for their own flags
+    let args: Vec<String> = env::args().skip(1).collect();
+    init_logger(&args);
 
     let mut tui = false;
     let mut api = false;
-    let mut api_host = "127.0.0.1".to_string();
+    let mut web = false;
+    let mut host = "127.0.0.1".to_string();
+    let mut host_explicit = false;
     let mut config_path: Option<PathBuf> = None;
-
-    // Scan for global flags without consuming — sub-modules re-parse for their own flags
-    let args: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--tui" => tui = true,
             "--api" => api = true,
-            "--api-host" => {
+            "--web" => web = true,
+            "--host" => {
                 i += 1;
                 if i < args.len() {
-                    api_host = args[i].clone();
+                    host = args[i].clone();
+                    host_explicit = true;
                 } else {
-                    eprintln!("Error: --api-host requires a value");
+                    eprintln!("Error: --host requires a value");
                     std::process::exit(1);
                 }
             }
@@ -76,25 +169,46 @@ async fn main() -> octo_dl::Result<()> {
         i += 1;
     }
 
-    let api_host = if api { Some(api_host) } else { None };
-
     if tui {
+        // Terminal TUI mode, optionally with --api and/or --web alongside
+        let host_param = if api || web {
+            if host_explicit {
+                Some(Some(host))
+            } else {
+                Some(None) // Let config provide the host
+            }
+        } else {
+            None // No API server
+        };
         #[cfg(feature = "tui")]
         {
-            octo_dl::tui::run(api_host)
+            octo_dl::tui::run(host_param, web, config_path.as_deref())
                 .await
                 .map_err(octo_dl::Error::Io)
         }
         #[cfg(not(feature = "tui"))]
         {
-            let _ = api_host;
+            let _ = host_param;
             eprintln!("TUI support not compiled in");
             std::process::exit(1);
         }
+    } else if web && !has_positional_args(&args) {
+        // --web without --tui = web UI as the primary interface
+        #[cfg(feature = "tui")]
+        {
+            octo_dl::tui::run_web(&host, config_path.as_deref())
+                .await
+                .map_err(octo_dl::Error::Io)
+        }
+        #[cfg(not(feature = "tui"))]
+        {
+            eprintln!("Web UI requires the 'tui' feature");
+            std::process::exit(1);
+        }
     } else if api && !has_positional_args(&args) {
-        // --api with no URLs/DLC = API-only mode (headless)
+        // --api without --tui = headless API-only mode, requires --config
         let config = config_path.unwrap_or_else(|| {
-            eprintln!("Error: --api mode requires --config <PATH>");
+            eprintln!("Error: --api mode requires --config <PATH> (or use --web for browser UI)");
             std::process::exit(1);
         });
         #[cfg(feature = "tui")]
@@ -129,5 +243,57 @@ async fn main() -> octo_dl::Result<()> {
             eprintln!("CLI support not compiled in");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[test]
+    fn log_pipe_writer_handles_missing_and_invalid_values() {
+        unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
+        assert!(log_pipe_writer().is_none());
+
+        unsafe { env::set_var("OCTO_TUI_LOG_FD", "invalid") };
+        assert!(log_pipe_writer().is_none());
+
+        unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
+    }
+
+    #[test]
+    fn positional_args_ignore_cli_flag_values() {
+        let args = vec!["--web".to_string(), "--chunks".to_string(), "4".to_string()];
+        assert!(!has_positional_args(&args));
+    }
+
+    #[test]
+    fn positional_args_detect_url_after_global_flag_value() {
+        let args = vec![
+            "--host".to_string(),
+            "0.0.0.0".to_string(),
+            "https://mega.nz/file/test".to_string(),
+        ];
+        assert!(has_positional_args(&args));
+    }
+
+    #[test]
+    fn native_tui_log_detachment_only_applies_to_unforwarded_tui() {
+        unsafe {
+            env::remove_var("OCTO_TUI_LOG_ADDR");
+            env::remove_var("OCTO_TUI_LOG_FD");
+        }
+
+        assert!(native_tui_log_detachment_required(&["--tui".to_string()]));
+        assert!(!native_tui_log_detachment_required(&["--web".to_string()]));
+
+        unsafe { env::set_var("OCTO_TUI_LOG_ADDR", "127.0.0.1:1") };
+        assert!(!native_tui_log_detachment_required(&["--tui".to_string()]));
+        unsafe { env::remove_var("OCTO_TUI_LOG_ADDR") };
+
+        unsafe { env::set_var("OCTO_TUI_LOG_FD", "9") };
+        assert!(!native_tui_log_detachment_required(&["--tui".to_string()]));
+        unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
     }
 }

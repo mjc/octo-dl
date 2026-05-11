@@ -38,7 +38,7 @@ impl DlcKeyCache {
         self.cache.lock().unwrap().get(key).cloned()
     }
 
-    fn set(&self, key: String, value: String) {
+    pub(crate) fn set(&self, key: String, value: String) {
         self.cache.lock().unwrap().insert(key, value);
     }
 }
@@ -66,18 +66,31 @@ pub async fn parse_dlc_file(
 ) -> Result<Vec<String>> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| Error::Dlc(format!("Failed to read file: {e}")))?;
+    parse_dlc_data(&content, http_client, cache).await
+}
 
+/// Parses DLC data that has already been loaded into memory (e.g. a dropped file).
+///
+/// # Errors
+///
+/// Returns an error if the content is malformed, too small, uses invalid
+/// base64, cannot be decrypted, or contains no MEGA links.
+pub async fn parse_dlc_data(
+    content: &str,
+    http_client: &reqwest::Client,
+    cache: &DlcKeyCache,
+) -> Result<Vec<String>> {
     // Validate file size
     if content.trim().len() < MIN_DLC_SIZE {
         return Err(Error::Dlc(format!(
-            "DLC file too small (< {MIN_DLC_SIZE} bytes)"
+            "DLC content too small (< {MIN_DLC_SIZE} bytes)"
         )));
     }
 
     // Split into encrypted data and key
     let trimmed = content.trim();
     if trimmed.len() < DLC_KEY_LENGTH {
-        return Err(Error::Dlc("DLC file missing encryption key".to_string()));
+        return Err(Error::Dlc("DLC content missing encryption key".to_string()));
     }
 
     let dlc_key = trimmed[trimmed.len() - DLC_KEY_LENGTH..].to_string();
@@ -116,7 +129,7 @@ pub async fn parse_dlc_file(
     urls.dedup();
 
     if urls.is_empty() {
-        return Err(Error::Dlc("No MEGA links found in DLC file".to_string()));
+        return Err(Error::Dlc("No MEGA links found in DLC content".to_string()));
     }
 
     Ok(urls)
@@ -304,17 +317,23 @@ fn extract_mega_links_from_xml(xml: &str) -> Vec<String> {
                 .decode(encoded)
                 .ok()?;
             let raw_url = String::from_utf8(bytes).ok()?;
-            if !raw_url.starts_with("https://mega.nz/") && !raw_url.starts_with("http://mega.nz/") {
+            if !is_modern_mega_link(&raw_url) {
                 return None;
             }
-            let url = crate::normalize_mega_url(&raw_url);
-            if seen.insert(url.clone()) {
-                Some(url)
+            if seen.insert(raw_url.clone()) {
+                Some(raw_url)
             } else {
                 None
             }
         })
         .collect()
+}
+
+fn is_modern_mega_link(url: &str) -> bool {
+    url.starts_with("https://mega.nz/file/")
+        || url.starts_with("https://mega.nz/folder/")
+        || url.starts_with("http://mega.nz/file/")
+        || url.starts_with("http://mega.nz/folder/")
 }
 
 /// Check if a string is valid base64
@@ -671,9 +690,48 @@ mod tests {
         let _ = urls;
     }
 
+    #[test]
+    fn extract_keeps_modern_mega_links() {
+        let file = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/abc#key");
+        let folder =
+            base64::engine::general_purpose::STANDARD.encode("http://mega.nz/folder/def#key");
+        let xml = format!("<dlc><url>{file}</url><url>{folder}</url></dlc>");
+
+        let urls = extract_mega_links_from_xml(&xml);
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://mega.nz/file/abc#key",
+                "http://mega.nz/folder/def#key",
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_ignores_legacy_mega_links() {
+        let file = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/#!abc!key");
+        let folder = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/#F!def!key");
+        let xml = format!("<dlc><url>{file}</url><url>{folder}</url></dlc>");
+
+        let urls = extract_mega_links_from_xml(&xml);
+
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn extract_deduplicates_modern_mega_links() {
+        let url = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/file/abc#key");
+        let xml = format!("<dlc><url>{url}</url><url>{url}</url></dlc>");
+
+        let urls = extract_mega_links_from_xml(&xml);
+
+        assert_eq!(urls, vec!["https://mega.nz/file/abc#key"]);
+    }
+
     #[tokio::test]
-    #[ignore] // requires local DLC file
-    async fn parse_dlc_converts_legacy_urls() {
+    #[ignore = "requires local DLC file"]
+    async fn parse_dlc_extracts_modern_urls() {
         let http = reqwest::Client::builder()
             .user_agent("JDownloader/2.0 (octo-dl/test)")
             .build()

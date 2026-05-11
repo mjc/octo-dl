@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use std::path::Path;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 /// Abstraction over file system operations for testability.
 #[async_trait]
@@ -17,6 +18,17 @@ pub trait FileSystem: Send + Sync {
 
     /// Creates a file at the given path and pre-allocates the specified size.
     async fn create_file(&self, path: &Path, size: u64) -> std::io::Result<tokio::fs::File>;
+
+    /// Opens a `.part` file and pre-allocates it to `size`.
+    async fn open_part_file(
+        &self,
+        path: &Path,
+        size: u64,
+        preserve_existing: bool,
+    ) -> std::io::Result<tokio::fs::File>;
+
+    /// Reads exactly `buf.len()` bytes at `offset` without trusting file cursor state.
+    async fn read_exact_at(&self, path: &Path, offset: u64, buf: &mut [u8]) -> std::io::Result<()>;
 
     /// Renames a file from one path to another.
     async fn rename_file(&self, from: &Path, to: &Path) -> std::io::Result<()>;
@@ -55,6 +67,30 @@ impl FileSystem for TokioFileSystem {
         let file = tokio::fs::File::create(path).await?;
         file.set_len(size).await?;
         Ok(file)
+    }
+
+    async fn open_part_file(
+        &self,
+        path: &Path,
+        size: u64,
+        preserve_existing: bool,
+    ) -> std::io::Result<tokio::fs::File> {
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(!preserve_existing)
+            .open(path)
+            .await?;
+        file.set_len(size).await?;
+        Ok(file)
+    }
+
+    async fn read_exact_at(&self, path: &Path, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        let mut file = tokio::fs::File::open(path).await?;
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        file.read_exact(buf).await?;
+        Ok(())
     }
 
     async fn rename_file(&self, from: &Path, to: &Path) -> std::io::Result<()> {

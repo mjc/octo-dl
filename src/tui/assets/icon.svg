@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+  <defs>
+    <style>
+      .icon-bg { fill: #1a1a2e; }
+      .icon-ring { stroke: #00bcd4; stroke-width: 6; fill: none; }
+      .icon-arrow { stroke: #e94560; fill: none; stroke-width: 6; stroke-linecap: round; stroke-linejoin: round; }
+      .icon-stem { stroke: #e94560; stroke-width: 6; stroke-linecap: round; }
+    </style>
+  </defs>
+  <rect class="icon-bg" width="192" height="192" rx="32"/>
+  <g transform="translate(96,96)">
+    <circle class="icon-ring" r="60"/>
+    <path class="icon-arrow" d="M-20,-15 L0,15 L20,-15"/>
+    <line class="icon-stem" x1="0" y1="15" x2="0" y2="40"/>
+    <line class="icon-stem" x1="-30" y1="45" x2="30" y2="45"/>
+  </g>
+</svg>
