@@ -3,6 +3,19 @@ use crate::core::{
     DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageSnapshot, RuntimeState,
     SavedCredentials, SessionSnapshotV3,
 };
+use std::path::Path;
+
+pub struct StateDirectoryGuard {
+    _guard: crate::core::session::StateDirectoryTestGuard,
+}
+
+impl StateDirectoryGuard {
+    pub fn set(path: &Path) -> Self {
+        Self {
+            _guard: crate::core::session::set_state_directory_for_test(path),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UrlFixtureStatus {
