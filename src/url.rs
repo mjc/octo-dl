@@ -7,11 +7,8 @@ use std::sync::LazyLock;
 use base64::Engine;
 use regex::Regex;
 
-static URL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"https?://mega\.nz/[^\s"'<>\[\](){}]+"#).expect("valid regex"));
-
-static LEGACY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"https?://mega\.nz/#[F!][^\s"'<>\[\](){}]+"#).expect("valid regex")
+static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"https?://mega\.nz/(?:file|folder)/[^\s"'<>\[\](){}]+"#).expect("valid regex")
 });
 
 /// Extracts MEGA URLs and DLC file paths from raw input text.
@@ -29,17 +26,6 @@ static LEGACY_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub fn extract_urls(input: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut result: Vec<String> = Vec::new();
-
-    // Match legacy URLs first so they get normalized before the modern regex
-    // would capture them as raw (unusable) strings.
-    for m in LEGACY_RE.find_iter(input) {
-        let url = normalize_mega_url(m.as_str());
-        if seen.insert(url.clone()) {
-            result.push(url);
-        }
-        // Also mark the raw match as seen so url_re doesn't duplicate it.
-        seen.insert(m.as_str().to_string());
-    }
 
     // Pull modern-format URLs out of the entire input.
     for m in URL_RE.find_iter(input) {
@@ -90,14 +76,6 @@ fn try_decode_base64(
         };
         decoded = s;
 
-        // Check for legacy URLs first and normalize them
-        for m in LEGACY_RE.find_iter(&decoded) {
-            let url = normalize_mega_url(m.as_str());
-            if seen.insert(url.clone()) {
-                result.push(url);
-            }
-        }
-
         // Check for modern URLs in decoded result
         for m in URL_RE.find_iter(&decoded) {
             let url = m.as_str().to_string();
@@ -109,32 +87,6 @@ fn try_decode_base64(
             result.push(decoded.clone());
         }
     }
-}
-
-/// Converts a legacy MEGA URL to the modern format.
-///
-/// Legacy formats:
-/// - `https://mega.nz/#F!{id}!{key}` → `https://mega.nz/folder/{id}#{key}`
-/// - `https://mega.nz/#!{id}!{key}`  → `https://mega.nz/file/{id}#{key}`
-///
-/// Modern URLs are returned unchanged.
-#[must_use]
-pub fn normalize_mega_url(url: &str) -> String {
-    if let Some(rest) = url
-        .strip_prefix("https://mega.nz/#F!")
-        .or_else(|| url.strip_prefix("http://mega.nz/#F!"))
-        && let Some((id, key)) = rest.split_once('!')
-    {
-        return format!("https://mega.nz/folder/{id}#{key}");
-    }
-    if let Some(rest) = url
-        .strip_prefix("https://mega.nz/#!")
-        .or_else(|| url.strip_prefix("http://mega.nz/#!"))
-        && let Some((id, key)) = rest.split_once('!')
-    {
-        return format!("https://mega.nz/file/{id}#{key}");
-    }
-    url.to_string()
 }
 
 /// Returns `true` if `s` looks like a path to a `.dlc` file.
@@ -359,57 +311,24 @@ mod tests {
         assert!(!is_dlc_path("noextension"));
     }
 
-    // --- normalize_mega_url ---
+    // --- extract_urls: legacy URLs ignored ---
 
     #[test]
-    fn normalize_legacy_folder_url() {
-        assert_eq!(
-            normalize_mega_url("https://mega.nz/#F!3RYjXIAK!6cjk7zs42McdRTT4C-J-sg"),
-            "https://mega.nz/folder/3RYjXIAK#6cjk7zs42McdRTT4C-J-sg"
-        );
-    }
-
-    #[test]
-    fn normalize_legacy_file_url() {
-        assert_eq!(
-            normalize_mega_url("https://mega.nz/#!abc123!keydata"),
-            "https://mega.nz/file/abc123#keydata"
-        );
-    }
-
-    #[test]
-    fn normalize_modern_url_unchanged() {
-        let url = "https://mega.nz/folder/abc123#key456";
-        assert_eq!(normalize_mega_url(url), url);
-    }
-
-    #[test]
-    fn normalize_http_legacy_folder() {
-        assert_eq!(
-            normalize_mega_url("http://mega.nz/#F!id!key"),
-            "https://mega.nz/folder/id#key"
-        );
-    }
-
-    #[test]
-    fn normalize_http_legacy_file() {
-        assert_eq!(
-            normalize_mega_url("http://mega.nz/#!id!key"),
-            "https://mega.nz/file/id#key"
-        );
-    }
-
-    // --- extract_urls: legacy URL conversion ---
-
-    #[test]
-    fn extract_converts_legacy_folder_url() {
+    fn extract_ignores_legacy_folder_url() {
         let urls = extract_urls("https://mega.nz/#F!abc!key123");
-        assert_eq!(urls, vec!["https://mega.nz/folder/abc#key123"]);
+        assert!(urls.is_empty());
     }
 
     #[test]
-    fn extract_converts_legacy_file_url() {
+    fn extract_ignores_legacy_file_url() {
         let urls = extract_urls("https://mega.nz/#!abc!key123");
-        assert_eq!(urls, vec!["https://mega.nz/file/abc#key123"]);
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn extract_ignores_base64_encoded_legacy_url() {
+        let encoded = STANDARD.encode("https://mega.nz/#!abc!key123");
+        let urls = extract_urls(&encoded);
+        assert!(urls.is_empty());
     }
 }
