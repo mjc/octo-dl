@@ -1,5 +1,4 @@
 use super::*;
-use std::env;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,30 +20,13 @@ fn test_app() -> App {
 }
 
 struct StateDirectoryGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    previous: Option<std::ffi::OsString>,
+    _guard: crate::core::session::StateDirectoryTestGuard,
 }
 
 impl StateDirectoryGuard {
     fn set(path: &Path) -> Self {
-        let lock = crate::core::session::STATE_DIRECTORY_TEST_LOCK
-            .lock()
-            .unwrap();
-        let previous = env::var_os("STATE_DIRECTORY");
-        unsafe { env::set_var("STATE_DIRECTORY", path) };
         Self {
-            _lock: lock,
-            previous,
-        }
-    }
-}
-
-impl Drop for StateDirectoryGuard {
-    fn drop(&mut self) {
-        if let Some(ref value) = self.previous {
-            unsafe { env::set_var("STATE_DIRECTORY", value) };
-        } else {
-            unsafe { env::remove_var("STATE_DIRECTORY") };
+            _guard: crate::core::session::set_state_directory_for_test(path),
         }
     }
 }

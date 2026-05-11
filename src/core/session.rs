@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use aes::Aes128;
@@ -26,7 +28,37 @@ const CREDENTIAL_VERSION_PREFIX: &str = "v2:";
 pub(crate) static LEGACY_WARNING: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 #[cfg(test)]
-pub(crate) static STATE_DIRECTORY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+thread_local! {
+    static TEST_STATE_DIRECTORY: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct StateDirectoryTestGuard {
+    previous: Option<PathBuf>,
+}
+
+#[cfg(test)]
+impl Drop for StateDirectoryTestGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        TEST_STATE_DIRECTORY.with(|state_dir| {
+            *state_dir.borrow_mut() = previous;
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_state_directory_for_test(path: &Path) -> StateDirectoryTestGuard {
+    TEST_STATE_DIRECTORY.with(|state_dir| {
+        let previous = state_dir.replace(Some(path.to_path_buf()));
+        StateDirectoryTestGuard { previous }
+    })
+}
+
+#[cfg(test)]
+fn test_state_dir() -> Option<PathBuf> {
+    TEST_STATE_DIRECTORY.with(|state_dir| state_dir.borrow().clone())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SavedCredentials {
@@ -90,6 +122,11 @@ impl SessionSnapshotV3 {
 
     #[must_use]
     pub fn state_dir() -> PathBuf {
+        #[cfg(test)]
+        if let Some(state_dir) = test_state_dir() {
+            return state_dir.join("sessions");
+        }
+
         std::env::var("STATE_DIRECTORY").map_or_else(
             |_| {
                 dirs::data_dir()
@@ -371,31 +408,15 @@ impl SavedCredentials {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
     struct StateDirectoryGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        previous: Option<std::ffi::OsString>,
+        _guard: StateDirectoryTestGuard,
     }
 
     impl StateDirectoryGuard {
         fn set(path: &Path) -> Self {
-            let lock = STATE_DIRECTORY_TEST_LOCK.lock().unwrap();
-            let previous = env::var_os("STATE_DIRECTORY");
-            unsafe { env::set_var("STATE_DIRECTORY", path) };
             Self {
-                _lock: lock,
-                previous,
-            }
-        }
-    }
-
-    impl Drop for StateDirectoryGuard {
-        fn drop(&mut self) {
-            if let Some(ref value) = self.previous {
-                unsafe { env::set_var("STATE_DIRECTORY", value) };
-            } else {
-                unsafe { env::remove_var("STATE_DIRECTORY") };
+                _guard: set_state_directory_for_test(path),
             }
         }
     }
