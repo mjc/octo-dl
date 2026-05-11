@@ -2,14 +2,10 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use aes::Aes128;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes128Gcm, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-#[cfg(test)]
-use cbc::cipher::BlockEncryptMut;
-use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,12 +16,7 @@ use crate::core::model::{
     SessionRunStatus, UrlId,
 };
 
-type Aes128CbcDec = cbc::Decryptor<Aes128>;
-#[cfg(test)]
-type Aes128CbcEnc = cbc::Encryptor<Aes128>;
-
 const CREDENTIAL_VERSION_PREFIX: &str = "v2:";
-pub(crate) static LEGACY_WARNING: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 #[cfg(test)]
 thread_local! {
@@ -174,7 +165,37 @@ impl SessionSnapshotV3 {
     }
 
     pub fn latest() -> Option<Self> {
-        Self::latest_with_backups().0
+        let dir = Self::state_dir();
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => return None,
+        };
+
+        let mut v3_sessions = Vec::new();
+        for entry in read_dir.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "toml") {
+                continue;
+            }
+            match Self::load(&path) {
+                Ok(snapshot) => v3_sessions.push((path, snapshot)),
+                Err(_) => {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+
+        v3_sessions.sort_by(|a, b| b.1.created.cmp(&a.1.created));
+        for (path, snapshot) in v3_sessions.iter() {
+            if snapshot.status == SessionRunStatus::Completed {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        for (path, _) in v3_sessions.iter().skip(1) {
+            let _ = std::fs::remove_file(path);
+        }
+
+        v3_sessions.into_iter().next().map(|(_, session)| session)
     }
 
     pub fn mark_file_complete(&mut self, file_id: &str) {
@@ -192,70 +213,6 @@ impl SessionSnapshotV3 {
             file.message = Some(error.to_string());
             file.runtime.active = false;
         }
-    }
-
-    #[must_use]
-    pub fn latest_with_backups() -> (Option<Self>, Vec<String>) {
-        let dir = Self::state_dir();
-        let read_dir = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => return (None, Vec::new()),
-        };
-
-        let mut backups = Vec::new();
-        let mut v3_sessions = Vec::new();
-        for entry in read_dir.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.extension().is_none_or(|ext| ext != "toml") {
-                continue;
-            }
-            let contents = match std::fs::read_to_string(&path) {
-                Ok(contents) => contents,
-                Err(_) => continue,
-            };
-            let raw: toml::Value = match toml::from_str(&contents) {
-                Ok(value) => value,
-                Err(_) => {
-                    let corrupt = path.with_extension("toml.corrupt");
-                    let _ = std::fs::rename(&path, &corrupt);
-                    continue;
-                }
-            };
-            if raw
-                .get("version")
-                .and_then(toml::Value::as_integer)
-                .is_some_and(|version| version == 3)
-            {
-                if let Ok(snapshot) = toml::from_str::<Self>(&contents) {
-                    v3_sessions.push((path, snapshot));
-                }
-                continue;
-            }
-
-            let backup = path.with_extension("toml.legacy.bak");
-            if std::fs::rename(&path, &backup).is_ok() {
-                backups.push(backup.display().to_string());
-                if LEGACY_WARNING.get().is_none() {
-                    let _ = LEGACY_WARNING.set(());
-                    log::warn!("Discarded legacy octo-dl session format during 0.x upgrade");
-                }
-            }
-        }
-
-        v3_sessions.sort_by(|a, b| b.1.created.cmp(&a.1.created));
-        for (path, snapshot) in v3_sessions.iter() {
-            if snapshot.status == SessionRunStatus::Completed {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-        for (path, _) in v3_sessions.iter().skip(1) {
-            let _ = std::fs::remove_file(path);
-        }
-
-        (
-            v3_sessions.into_iter().next().map(|(_, session)| session),
-            backups,
-        )
     }
 
     #[must_use]
@@ -331,59 +288,9 @@ fn decrypt_credential_v2(encrypted: &str) -> Option<String> {
     String::from_utf8(plaintext).ok()
 }
 
-fn decrypt_credential_legacy(encrypted: &str) -> Option<String> {
-    let key = derive_machine_key();
-    let iv = key;
-
-    let mut data = BASE64.decode(encrypted).ok()?;
-    if data.is_empty() || data.len() % 16 != 0 {
-        return None;
-    }
-
-    let cipher = Aes128CbcDec::new(&key.into(), &iv.into());
-    let encrypted = cipher
-        .decrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut data)
-        .ok()?;
-    let pad_byte = *encrypted.last()? as usize;
-    if pad_byte == 0 || pad_byte > 16 {
-        return None;
-    }
-    let unpadded_len = encrypted.len().checked_sub(pad_byte)?;
-    if !encrypted[unpadded_len..]
-        .iter()
-        .all(|&byte| byte as usize == pad_byte)
-    {
-        return None;
-    }
-    String::from_utf8(encrypted[..unpadded_len].to_vec()).ok()
-}
-
 #[must_use]
 pub fn decrypt_credential(encrypted: &str) -> Option<String> {
-    if encrypted.starts_with(CREDENTIAL_VERSION_PREFIX) {
-        return decrypt_credential_v2(encrypted);
-    }
-    decrypt_credential_legacy(encrypted)
-}
-
-#[cfg(test)]
-#[allow(clippy::cast_possible_truncation)]
-fn encrypt_credential_legacy_for_test(plaintext: &str) -> String {
-    let key = derive_machine_key();
-    let iv = key;
-
-    let plaintext_bytes = plaintext.as_bytes();
-    let padded_len = ((plaintext_bytes.len() / 16) + 1) * 16;
-    let mut buf = vec![0u8; padded_len];
-    buf[..plaintext_bytes.len()].copy_from_slice(plaintext_bytes);
-    let pad_byte = (padded_len - plaintext_bytes.len()) as u8;
-    buf[plaintext_bytes.len()..].fill(pad_byte);
-
-    let cipher = Aes128CbcEnc::new(&key.into(), &iv.into());
-    let encrypted = cipher
-        .encrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut buf, padded_len)
-        .expect("buffer size is correct");
-    BASE64.encode(encrypted)
+    decrypt_credential_v2(encrypted)
 }
 
 impl SavedCredentials {
@@ -408,18 +315,7 @@ impl SavedCredentials {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct StateDirectoryGuard {
-        _guard: StateDirectoryTestGuard,
-    }
-
-    impl StateDirectoryGuard {
-        fn set(path: &Path) -> Self {
-            Self {
-                _guard: set_state_directory_for_test(path),
-            }
-        }
-    }
+    use crate::test_support::StateDirectoryGuard;
 
     #[test]
     fn credential_round_trip() {
@@ -431,21 +327,20 @@ mod tests {
     }
 
     #[test]
-    fn legacy_credential_decryption_still_works() {
-        let encrypted = encrypt_credential_legacy_for_test("old-secret");
-        assert_eq!(decrypt_credential(&encrypted).unwrap(), "old-secret");
+    fn unversioned_credential_decryption_is_rejected() {
+        assert!(decrypt_credential("old-secret").is_none());
     }
 
     #[test]
-    fn latest_backs_up_legacy_sessions() {
+    fn latest_deletes_non_v3_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
-        let legacy_path = SessionSnapshotV3::state_dir().join("legacy.toml");
+        let old_path = SessionSnapshotV3::state_dir().join("legacy.toml");
         std::fs::create_dir_all(SessionSnapshotV3::state_dir()).unwrap();
-        std::fs::write(&legacy_path, "id = 'legacy'\n").unwrap();
-        let (_session, backups) = SessionSnapshotV3::latest_with_backups();
-        assert_eq!(backups.len(), 1);
-        assert!(backups[0].ends_with(".legacy.bak"));
+        std::fs::write(&old_path, "id = 'legacy'\n").unwrap();
+
+        assert!(SessionSnapshotV3::latest().is_none());
+        assert!(!old_path.exists());
     }
 
     #[test]
