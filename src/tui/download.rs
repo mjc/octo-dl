@@ -12,7 +12,7 @@ use futures_util::FutureExt;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::{PackageId, PackageKey};
+use crate::core::PackageId;
 use crate::download::part_path;
 use crate::{DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, is_dlc_path};
 use dirs;
@@ -1029,26 +1029,9 @@ fn package_identity_for_nodes(
     nodes: &mega::Nodes,
     collected: &crate::CollectedFiles<'_>,
 ) -> (PackageId, String) {
-    let display_name = nodes
-        .roots()
-        .find(|root| root.kind().is_folder())
-        .map(|root| root.name().to_string())
-        .or_else(|| common_collected_root(collected))
-        .unwrap_or_else(|| "root".to_string());
-    let key = PackageKey::new(display_name.clone());
-    (PackageId::for_package_key(&key), display_name)
-}
-
-fn common_collected_root(collected: &crate::CollectedFiles<'_>) -> Option<String> {
-    let mut roots = collected
-        .to_download
-        .iter()
-        .chain(collected.completed.iter())
-        .filter_map(|item| item.path.split('/').next())
-        .filter(|root| !root.is_empty())
-        .map(str::to_string);
-    let first = roots.next()?;
-    roots.all(|root| root == first).then_some(first)
+    let display_name = crate::download::infer_package_display_name(nodes, collected);
+    let package_id = crate::download::infer_package_id(nodes, collected);
+    (package_id, display_name)
 }
 
 fn batch_item_snapshot(item: &QueuedDownload) -> BatchItemSnapshot {

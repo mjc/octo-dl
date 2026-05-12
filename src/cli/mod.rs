@@ -13,10 +13,11 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use crate::{
     DlcKeyCache, DownloadConfig, DownloadItem, DownloadProgress, FileStats, NoProgress,
     SessionStats, SessionStatsBuilder,
+    download::{infer_package_display_name, infer_package_id},
     core::{
-        DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, ProgressDelta,
-        RestartSnapshot, RuntimeState, SavedCredentials, SessionRunStatus, SessionSnapshotV3,
-        SessionUrlSnapshot, reconcile_restart, scan_filesystem,
+        DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
+        PackageSnapshot, ProgressDelta, RestartSnapshot, RuntimeState, SavedCredentials,
+        SessionRunStatus, SessionSnapshotV3, SessionUrlSnapshot, reconcile_restart, scan_filesystem,
     },
     format_bytes, format_duration, is_dlc_path,
 };
@@ -45,7 +46,8 @@ struct CliConfig {
 }
 
 struct CliPackageFiles<'a> {
-    source_url: String,
+    id: PackageId,
+    display_name: String,
     files: Vec<DownloadItem<'a>>,
     skipped: usize,
     partial: usize,
@@ -193,7 +195,7 @@ fn print_file_list(packages: &[CliPackageFiles<'_>]) {
     println!("{SEPARATOR}");
 
     for package in packages {
-        println!("Package: {}", package.source_url);
+        println!("Package: {}", package.display_name);
 
         for item in &package.files {
             println!("  {} ({})", item.path, format_bytes(item.node.size()));
@@ -605,16 +607,29 @@ pub async fn run() -> crate::Result<()> {
     }
 
     // Collect files from all fetched nodes, preserving the original URL index
-    let mut package_files = Vec::new();
+    let mut package_files: Vec<CliPackageFiles<'_>> = Vec::new();
     for (_url_idx, url, nodes) in &all_nodes {
         let collected = downloader.collect_files(nodes, &no_progress).await;
+        let package_id = infer_package_id(nodes, &collected);
+        let display_name = infer_package_display_name(nodes, &collected);
 
-        let mut files = Vec::new();
-        let package_id = PackageId::for_source_url(url);
+        if !session_state
+            .packages
+            .iter()
+            .any(|package| package.id == package_id)
+        {
+            session_state.packages.push(PackageSnapshot {
+                id: package_id,
+                key: PackageKey::new(display_name.clone()),
+                display_name: display_name.clone(),
+                file_ids: Vec::new(),
+                error: None,
+            });
+        }
         for item in &collected.to_download {
             session_state.files.push(FileSnapshot {
                 id: item.path.clone(),
-                package_id: package_id.clone(),
+                package_id,
                 source_url: Some(url.clone()),
                 path: item.path.clone(),
                 size: item.node.size(),
@@ -630,16 +645,22 @@ pub async fn run() -> crate::Result<()> {
                 message: None,
             });
         }
-        for item in collected.to_download {
-            files.push(item);
+        if let Some(existing) = package_files
+            .iter_mut()
+            .find(|package| package.id == package_id)
+        {
+            existing.files.extend(collected.to_download);
+            existing.skipped += collected.skipped;
+            existing.partial += collected.partial;
+        } else {
+            package_files.push(CliPackageFiles {
+                id: package_id,
+                display_name,
+                files: collected.to_download,
+                skipped: collected.skipped,
+                partial: collected.partial,
+            });
         }
-
-        package_files.push(CliPackageFiles {
-            source_url: url.clone(),
-            files,
-            skipped: collected.skipped,
-            partial: collected.partial,
-        });
     }
 
     // Save initial session state
@@ -763,9 +784,11 @@ async fn resume_session(mut session: SessionSnapshotV3, config: &CliConfig) -> c
         .collect();
 
     // Collect files, skipping already-completed ones
-    let mut package_files = Vec::new();
-    for (url_idx, _url, nodes) in &all_nodes {
+    let mut package_files: Vec<CliPackageFiles<'_>> = Vec::new();
+    for (_url_idx, _url, nodes) in &all_nodes {
         let collected = downloader.collect_files(nodes, &no_progress).await;
+        let package_id = infer_package_id(nodes, &collected);
+        let display_name = infer_package_display_name(nodes, &collected);
         let mut files = Vec::new();
         let mut skipped = collected.skipped;
         for item in collected.to_download {
@@ -779,16 +802,22 @@ async fn resume_session(mut session: SessionSnapshotV3, config: &CliConfig) -> c
             }
         }
 
-        package_files.push(CliPackageFiles {
-            source_url: session
-                .urls
-                .get(*url_idx)
-                .map(|entry| entry.url.clone())
-                .unwrap_or_else(|| format!("url:{url_idx}")),
-            files,
-            skipped,
-            partial: collected.partial,
-        });
+        if let Some(existing) = package_files
+            .iter_mut()
+            .find(|package| package.id == package_id)
+        {
+            existing.files.extend(files);
+            existing.skipped += skipped;
+            existing.partial += collected.partial;
+        } else {
+            package_files.push(CliPackageFiles {
+                id: package_id,
+                display_name,
+                files,
+                skipped,
+                partial: collected.partial,
+            });
+        }
     }
 
     print_file_list(&package_files);
