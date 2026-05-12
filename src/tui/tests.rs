@@ -43,6 +43,13 @@ fn resume_session_requeues_urls() {
         "https://mega.nz/file/second".to_string(),
     ];
     assert_eq!(app.urls, expected_urls);
+    assert_eq!(
+        app.visible_rows(),
+        vec![
+            TuiRow::Package(expected_urls[0].clone()),
+            TuiRow::Package(expected_urls[1].clone()),
+        ]
+    );
 
     let mut url_rx = app.url_rx.take().expect("url_rx should exist");
     assert_eq!(
