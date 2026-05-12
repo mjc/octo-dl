@@ -100,6 +100,7 @@
       in {
         apps.default = flake-utils.lib.mkApp {
           drv = self.packages.${system}.octo-dl;
+          exePath = "/bin/octo";
         };
 
         packages = {

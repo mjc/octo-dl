@@ -3,7 +3,8 @@ use crate::core::{
     DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageSnapshot, RuntimeState,
     SavedCredentials, SessionSnapshotV3,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 pub struct StateDirectoryGuard {
     _guard: crate::core::session::StateDirectoryTestGuard,
@@ -14,6 +15,33 @@ impl StateDirectoryGuard {
         Self {
             _guard: crate::core::session::set_state_directory_for_test(path),
         }
+    }
+}
+
+pub struct CurrentDirGuard {
+    _lock: MutexGuard<'static, ()>,
+    previous: PathBuf,
+}
+
+impl CurrentDirGuard {
+    pub fn set(path: &Path) -> Self {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("current directory guard mutex should not be poisoned");
+        let previous = std::env::current_dir().expect("current directory should resolve");
+        std::env::set_current_dir(path).expect("current directory should update");
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
     }
 }
 
