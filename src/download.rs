@@ -413,6 +413,10 @@ pub(crate) fn stable_batch_package_id(folder: &str, sources: &HashSet<&str>) -> 
     format!("batch-{folder}-{:08x}", u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]))
 }
 
+const fn should_reuse_resume_state(force_overwrite: bool, trust_resume_state: bool) -> bool {
+    !force_overwrite && trust_resume_state
+}
+
 const fn is_condensed_mac_mismatch(error: &Error) -> bool {
     matches!(error, Error::Mega(mega::Error::CondensedMacMismatch))
 }
@@ -731,6 +735,7 @@ impl<F: FileSystem> Downloader<F> {
         node: &mega::Node,
         path: &str,
         progress: &Arc<dyn DownloadProgress>,
+        trust_resume_state: bool,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<FileStats> {
         if let Some(stats) = self.complete_existing_file(node, path, progress).await {
@@ -745,7 +750,7 @@ impl<F: FileSystem> Downloader<F> {
         let sp = sidecar_path(path);
         let expected_condensed_mac_b64 = encode_expected_mac(node)?;
         let boundaries = mega::mega_chunk_boundaries(node.size());
-        let resume_validation = if self.config.force_overwrite {
+        let resume_validation = if !should_reuse_resume_state(self.config.force_overwrite, trust_resume_state) {
             ResumeValidation::empty(boundaries.len())
         } else {
             self.revalidate_resume_chunks(node, &boundaries, &pp, &sp, &expected_condensed_mac_b64)
@@ -961,7 +966,7 @@ impl<F: FileSystem> Downloader<F> {
                 let peak_tracker = Arc::clone(&peak_speed);
                 async move {
                     let result = self
-                        .download_file(item.node, &item.path, progress, None)
+                        .download_file(item.node, &item.path, progress, false, None)
                         .await;
                     if let Ok(ref stats) = result {
                         peak_tracker.fetch_max(stats.peak_speed, Ordering::Relaxed);
@@ -1018,7 +1023,7 @@ impl<F: FileSystem> Downloader<F> {
                 let peak_tracker = Arc::clone(&peak_speed);
                 async move {
                     let result = self
-                        .download_file(&item.node, &item.path, progress, None)
+                        .download_file(&item.node, &item.path, progress, false, None)
                         .await;
                     if let Ok(ref stats) = result {
                         peak_tracker.fetch_max(stats.peak_speed, Ordering::Relaxed);
@@ -1124,6 +1129,13 @@ mod tests {
     fn part_path_appends_extension() {
         assert_eq!(part_path("foo/bar.zip"), PathBuf::from("foo/bar.zip.part"));
         assert_eq!(part_path("file.txt"), PathBuf::from("file.txt.part"));
+    }
+
+    #[test]
+    fn resume_state_is_reused_only_for_session_tracked_files() {
+        assert!(should_reuse_resume_state(false, true));
+        assert!(!should_reuse_resume_state(false, false));
+        assert!(!should_reuse_resume_state(true, true));
     }
 
     #[test]

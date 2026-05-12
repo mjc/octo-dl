@@ -139,6 +139,7 @@ struct QueuedDownload {
     resolved: ResolvedUrl,
     item: crate::OwnedDownloadItem,
     attempt_id: u64,
+    trust_resume_state: bool,
 }
 
 impl QueuedDownload {
@@ -673,6 +674,7 @@ fn spawn_file_download(
                 &item.item.node,
                 &item.item.path,
                 &progress,
+                item.trust_resume_state,
                 Some(cancel_token),
             )
             .await;
@@ -830,6 +832,7 @@ async fn collect_node_set(
         &node_set.resolved,
         skipped_for_url,
         &mut skipped_count,
+        node_set.requested_file_ids.as_ref(),
         &node_set.requested_attempt_ids,
     );
     let completed_items = visible_downloads(
@@ -837,6 +840,7 @@ async fn collect_node_set(
         &node_set.resolved,
         skipped_for_url,
         &mut skipped_count,
+        node_set.requested_file_ids.as_ref(),
         &node_set.requested_attempt_ids,
     );
 
@@ -1115,6 +1119,7 @@ fn visible_downloads(
     resolved: &ResolvedUrl,
     skipped_paths: Option<&HashSet<String>>,
     skipped_count: &mut usize,
+    requested_file_ids: Option<&HashSet<String>>,
     requested_attempt_ids: &HashMap<String, u64>,
 ) -> Vec<QueuedDownload> {
     items
@@ -1127,6 +1132,8 @@ fn visible_downloads(
             Some(QueuedDownload {
                 resolved: resolved.clone(),
                 attempt_id: requested_attempt_ids.get(&item.path).copied().unwrap_or(0),
+                trust_resume_state: requested_file_ids
+                    .is_some_and(|file_ids| file_ids.contains(&item.path)),
                 item,
             })
         })
