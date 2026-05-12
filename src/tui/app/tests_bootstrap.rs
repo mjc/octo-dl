@@ -131,7 +131,18 @@ fn implicit_cwd_template_falls_back_to_state_config_credentials() {
         .expect("state config should save");
 
     let cwd_config_path = cwd_dir.path().join("config.toml");
-    ServiceConfig::load_or_create(&cwd_config_path).expect("cwd config should exist");
+    let mut cwd_config =
+        ServiceConfig::load_or_create(&cwd_config_path).expect("cwd config should exist");
+    cwd_config.download.path = Some(
+        cwd_dir
+            .path()
+            .join("downloads")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    cwd_config
+        .save(&cwd_config_path)
+        .expect("cwd config should save");
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let (app, _host, _port) =

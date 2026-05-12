@@ -29,7 +29,7 @@ impl CurrentDirGuard {
         let lock = LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("current directory guard mutex should not be poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = std::env::current_dir().expect("current directory should resolve");
         std::env::set_current_dir(path).expect("current directory should update");
         Self {
