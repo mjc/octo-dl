@@ -14,9 +14,9 @@ use crate::{
     DlcKeyCache, DownloadConfig, DownloadItem, DownloadProgress, FileStats, NoProgress,
     SessionStats, SessionStatsBuilder,
     core::{
-        DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageSnapshot,
-        ProgressDelta, RestartSnapshot, RuntimeState, SavedCredentials, SessionRunStatus,
-        SessionSnapshotV3, SessionUrlSnapshot, reconcile_restart, scan_filesystem,
+        DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, ProgressDelta,
+        RestartSnapshot, RuntimeState, SavedCredentials, SessionRunStatus, SessionSnapshotV3,
+        SessionUrlSnapshot, reconcile_restart, scan_filesystem,
     },
     format_bytes, format_duration, is_dlc_path,
 };
@@ -284,30 +284,6 @@ fn ensure_session_url<'a>(session: &'a mut SessionSnapshotV3, url: &str) -> &'a 
     session.urls.last_mut().expect("url was just pushed")
 }
 
-fn ensure_session_package<'a>(
-    session: &'a mut SessionSnapshotV3,
-    source_url: &str,
-) -> &'a mut PackageSnapshot {
-    if let Some(index) = session
-        .packages
-        .iter()
-        .position(|package| package.source_url == source_url)
-    {
-        return &mut session.packages[index];
-    }
-    session.packages.push(PackageSnapshot {
-        id: PackageId::for_source_url(source_url),
-        source_url: source_url.to_string(),
-        display_name: source_url.to_string(),
-        file_ids: Vec::new(),
-        error: None,
-    });
-    session
-        .packages
-        .last_mut()
-        .expect("package was just pushed")
-}
-
 fn mark_session_file_complete(session: &mut SessionSnapshotV3, file_id: &str) {
     session.mark_file_complete(file_id);
 }
@@ -324,6 +300,12 @@ fn session_completed_count(session: &SessionSnapshotV3) -> usize {
 #[must_use]
 fn session_remaining_count(session: &SessionSnapshotV3) -> usize {
     session.remaining_count()
+}
+
+fn persist_session(session: &mut SessionSnapshotV3) -> crate::Result<()> {
+    session.save()?;
+    *session = SessionSnapshotV3::load(&session.state_path())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -628,15 +610,7 @@ pub async fn run() -> crate::Result<()> {
         let collected = downloader.collect_files(nodes, &no_progress).await;
 
         let mut files = Vec::new();
-        let package_id = {
-            let package = ensure_session_package(&mut session_state, url);
-            for item in &collected.to_download {
-                if !package.file_ids.contains(&item.path) {
-                    package.file_ids.push(item.path.clone());
-                }
-            }
-            package.id.clone()
-        };
+        let package_id = PackageId::for_source_url(url);
         for item in &collected.to_download {
             session_state.files.push(FileSnapshot {
                 id: item.path.clone(),
@@ -669,7 +643,7 @@ pub async fn run() -> crate::Result<()> {
     }
 
     // Save initial session state
-    let _ = session_state.save();
+    persist_session(&mut session_state)?;
 
     // Phase 2: Print what we found
     print_file_list(&package_files);
@@ -685,7 +659,7 @@ pub async fn run() -> crate::Result<()> {
             println!("All files already downloaded.");
         }
         session_state.status = SessionRunStatus::Completed;
-        let _ = session_state.save();
+        persist_session(&mut session_state)?;
         return Ok(());
     }
 
@@ -718,7 +692,7 @@ pub async fn run() -> crate::Result<()> {
 
     // Mark session as completed
     session_state.status = SessionRunStatus::Completed;
-    let _ = session_state.save();
+    persist_session(&mut session_state)?;
 
     Ok(())
 }
@@ -828,12 +802,12 @@ async fn resume_session(mut session: SessionSnapshotV3, config: &CliConfig) -> c
     if all_files.is_empty() {
         println!("All files already downloaded.");
         session.status = SessionRunStatus::Completed;
-        let _ = session.save();
+        persist_session(&mut session)?;
         return Ok(());
     }
 
     session.status = SessionRunStatus::InProgress;
-    let _ = session.save();
+    persist_session(&mut session)?;
 
     let progress = MultiProgress::new();
     let total_size: u64 = all_files.iter().map(|i| i.node.size()).sum();
@@ -862,7 +836,7 @@ async fn resume_session(mut session: SessionSnapshotV3, config: &CliConfig) -> c
     print_summary(&session_stats);
 
     session.status = SessionRunStatus::Completed;
-    let _ = session.save();
+    persist_session(&mut session)?;
 
     Ok(())
 }
@@ -880,6 +854,22 @@ mod tests {
     fn progress_bar_creation() {
         let bar = make_progress_bar(1000, "test.txt");
         assert_eq!(bar.length(), Some(1000));
+    }
+
+    #[test]
+    fn persist_session_reloads_canonical_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::test_support::StateDirectoryGuard::set(dir.path());
+        let mut session = session_snapshot(vec![(
+            "https://mega.nz/file/root",
+            UrlFixtureStatus::Fetched,
+        )]);
+        push_file(&mut session, 0, "episode-1.mkv", 128, FileFixtureStatus::Pending);
+        session.packages[0].file_ids.clear();
+
+        persist_session(&mut session).unwrap();
+
+        assert_eq!(session.packages[0].file_ids, vec!["episode-1.mkv".to_string()]);
     }
 
     #[test]
