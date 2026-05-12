@@ -216,10 +216,21 @@ impl App {
             .clone()
             .or_else(|| existing_package.map(|package| package.display_name.clone()))
             .unwrap_or_else(|| package_id.clone());
+        if file.origin.submitted_url != file.origin.source_url {
+            self.urls.retain(|url| url != &file.origin.submitted_url);
+            if !self.urls.iter().any(|url| url == &file.origin.source_url) {
+                self.urls.push(file.origin.source_url.clone());
+            }
+            self.core_state
+                .url_order
+                .retain(|url| url != &file.origin.submitted_url);
+            let _ = self.drop_overlay_file(&file.origin.submitted_url);
+        }
         if !self.register_session_queued_file(
             &package_id,
             &package_display_name,
             &file.origin.submitted_url,
+            &file.origin.source_url,
             &file.id,
             file.size,
         ) {

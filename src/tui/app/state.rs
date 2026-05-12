@@ -251,6 +251,7 @@ impl App {
         package_id: &str,
         package_display_name: &str,
         submitted_url: &str,
+        source_url: &str,
         path: &str,
         size: u64,
     ) -> bool {
@@ -260,6 +261,7 @@ impl App {
                 package_id,
                 package_display_name,
                 submitted_url,
+                source_url,
                 path,
                 size,
             )
