@@ -738,6 +738,7 @@ async fn collect_batch(
 ) -> CollectedBatch {
     let mut queued_items = Vec::new();
     let mut completed_items = Vec::new();
+    let mut duplicate_resolver = BatchDuplicateResolver::default();
     let mut skipped_count = 0;
     let mut partial_count = 0;
     let successful_submitted_urls = successful_submitted_urls(node_sets.iter());
@@ -746,10 +747,17 @@ async fn collect_batch(
         let collected = collect_node_set(node_set, downloader, progress, skipped_paths).await;
         skipped_count += collected.skipped_count;
         partial_count += collected.partial_count;
-        queued_items.extend(collected.queued_items);
-        completed_items.extend(collected.completed_items);
+        duplicate_resolver.extend_queued(
+            &mut queued_items,
+            &mut completed_items,
+            collected.queued_items,
+        );
+        duplicate_resolver.extend_completed(
+            &mut queued_items,
+            &mut completed_items,
+            collected.completed_items,
+        );
     }
-    resolve_same_package_path_duplicates(&mut queued_items, &mut completed_items);
     CollectedBatch {
         queued_items,
         completed_items,
@@ -852,15 +860,8 @@ async fn collect_node_set(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum BatchItemLocation {
-    Queued(usize),
-    Completed(usize),
-}
-
 #[derive(Clone, Debug)]
 struct BatchItemSnapshot {
-    location: BatchItemLocation,
     package_id: String,
     path: String,
     size: u64,
@@ -868,88 +869,167 @@ struct BatchItemSnapshot {
     sparse_checksum: Option<[u8; 16]>,
 }
 
-fn resolve_same_package_path_duplicates(
-    queued_items: &mut Vec<QueuedDownload>,
-    completed_items: &mut Vec<QueuedDownload>,
-) {
-    let snapshots = batch_item_snapshots(queued_items, completed_items);
-    let mut by_path = HashMap::<(String, String), Vec<BatchItemSnapshot>>::new();
-    let mut used_paths = snapshots
-        .iter()
-        .map(|item| (item.package_id.clone(), item.path.clone()))
-        .collect::<HashSet<_>>();
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum BatchDestination {
+    Queued,
+    Completed,
+}
 
-    for item in snapshots {
-        by_path
-            .entry((item.package_id.clone(), item.path.clone()))
-            .or_default()
-            .push(item);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct BatchItemRef {
+    destination: BatchDestination,
+    index: usize,
+}
+
+#[derive(Default)]
+struct BatchDuplicateResolver {
+    item_paths: HashMap<(String, String), BatchItemRef>,
+    used_paths: HashSet<(String, String)>,
+}
+
+impl BatchDuplicateResolver {
+    fn extend_queued(
+        &mut self,
+        queued_items: &mut Vec<QueuedDownload>,
+        completed_items: &mut Vec<QueuedDownload>,
+        items: Vec<QueuedDownload>,
+    ) {
+        for item in items {
+            self.insert(queued_items, completed_items, item, BatchDestination::Queued);
+        }
     }
 
-    let mut drop_locations = HashSet::<BatchItemLocation>::new();
-    let mut renamed_paths = HashMap::<BatchItemLocation, String>::new();
-
-    for ((package_id, path), mut items) in by_path {
-        if items.len() < 2 {
-            continue;
+    fn extend_completed(
+        &mut self,
+        queued_items: &mut Vec<QueuedDownload>,
+        completed_items: &mut Vec<QueuedDownload>,
+        items: Vec<QueuedDownload>,
+    ) {
+        for item in items {
+            self.insert(queued_items, completed_items, item, BatchDestination::Completed);
         }
-        if same_remote_file(&items) {
-            for item in items.iter().skip(1) {
-                drop_locations.insert(item.location);
+    }
+
+    fn insert(
+        &mut self,
+        queued_items: &mut Vec<QueuedDownload>,
+        completed_items: &mut Vec<QueuedDownload>,
+        mut item: QueuedDownload,
+        destination: BatchDestination,
+    ) {
+        let package_id = batch_item_package_id(&item);
+        let original_path = item.item.path.clone();
+        let snapshot = batch_item_snapshot(&item);
+
+        if let Some(existing_ref) = self
+            .item_paths
+            .get(&(package_id.clone(), original_path.clone()))
+            .copied()
+        {
+            let existing_snapshot = self.snapshot_for(queued_items, completed_items, existing_ref);
+            if remote_files_match(&existing_snapshot, &snapshot) {
+                return;
             }
-            continue;
+
+            if snapshot.size > existing_snapshot.size {
+                let renamed_existing =
+                    next_available_duplicate_path(&package_id, &original_path, &mut self.used_paths);
+                self.rename_item(
+                    queued_items,
+                    completed_items,
+                    existing_ref,
+                    &package_id,
+                    &original_path,
+                    &renamed_existing,
+                );
+            } else {
+                let renamed_incoming =
+                    next_available_duplicate_path(&package_id, &original_path, &mut self.used_paths);
+                item.item.path = renamed_incoming;
+            }
         }
 
-        items.sort_by(|left, right| right.size.cmp(&left.size));
-        for item in items.iter().skip(1) {
-            let renamed = next_available_duplicate_path(&package_id, &path, &mut used_paths);
-            renamed_paths.insert(item.location, renamed);
-        }
+        let final_path = item.item.path.clone();
+        let item_ref = self.push_item(queued_items, completed_items, item, destination);
+        self.used_paths.insert((package_id.clone(), final_path.clone()));
+        self.item_paths.insert((package_id, final_path), item_ref);
     }
 
-    apply_duplicate_resolution(queued_items, &drop_locations, &renamed_paths, true);
-    apply_duplicate_resolution(completed_items, &drop_locations, &renamed_paths, false);
+    fn snapshot_for(
+        &self,
+        queued_items: &[QueuedDownload],
+        completed_items: &[QueuedDownload],
+        item_ref: BatchItemRef,
+    ) -> BatchItemSnapshot {
+        let item = match item_ref.destination {
+            BatchDestination::Queued => &queued_items[item_ref.index],
+            BatchDestination::Completed => &completed_items[item_ref.index],
+        };
+        batch_item_snapshot(item)
+    }
+
+    fn rename_item(
+        &mut self,
+        queued_items: &mut [QueuedDownload],
+        completed_items: &mut [QueuedDownload],
+        item_ref: BatchItemRef,
+        package_id: &str,
+        old_path: &str,
+        new_path: &str,
+    ) {
+        let item = match item_ref.destination {
+            BatchDestination::Queued => &mut queued_items[item_ref.index],
+            BatchDestination::Completed => &mut completed_items[item_ref.index],
+        };
+        item.item.path = new_path.to_string();
+        self.item_paths.remove(&(package_id.to_string(), old_path.to_string()));
+        self.item_paths.insert(
+            (package_id.to_string(), new_path.to_string()),
+            item_ref,
+        );
+    }
+
+    fn push_item(
+        &self,
+        queued_items: &mut Vec<QueuedDownload>,
+        completed_items: &mut Vec<QueuedDownload>,
+        item: QueuedDownload,
+        destination: BatchDestination,
+    ) -> BatchItemRef {
+        match destination {
+            BatchDestination::Queued => {
+                queued_items.push(item);
+                BatchItemRef {
+                    destination,
+                    index: queued_items.len() - 1,
+                }
+            }
+            BatchDestination::Completed => {
+                completed_items.push(item);
+                BatchItemRef {
+                    destination,
+                    index: completed_items.len() - 1,
+                }
+            }
+        }
+    }
 }
 
-fn batch_item_snapshots(
-    queued_items: &[QueuedDownload],
-    completed_items: &[QueuedDownload],
-) -> Vec<BatchItemSnapshot> {
-    queued_items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| batch_item_snapshot(item, BatchItemLocation::Queued(index)))
-        .chain(
-            completed_items.iter().enumerate().map(|(index, item)| {
-                batch_item_snapshot(item, BatchItemLocation::Completed(index))
-            }),
-        )
-        .collect()
+fn batch_item_package_id(item: &QueuedDownload) -> String {
+    item.resolved
+        .package_id
+        .clone()
+        .unwrap_or_else(|| item.resolved.source_url.clone())
 }
 
-fn batch_item_snapshot(item: &QueuedDownload, location: BatchItemLocation) -> BatchItemSnapshot {
+fn batch_item_snapshot(item: &QueuedDownload) -> BatchItemSnapshot {
     BatchItemSnapshot {
-        location,
-        package_id: item
-            .resolved
-            .package_id
-            .clone()
-            .unwrap_or_else(|| item.resolved.source_url.clone()),
+        package_id: batch_item_package_id(item),
         path: item.item.path.clone(),
         size: item.item.node.size(),
         modified_at: item.item.node.modified_at().map(|date| date.timestamp()),
         sparse_checksum: item.item.node.sparse_checksum().copied(),
     }
-}
-
-fn same_remote_file(items: &[BatchItemSnapshot]) -> bool {
-    let Some(first) = items.first() else {
-        return true;
-    };
-    items
-        .iter()
-        .skip(1)
-        .all(|item| remote_files_match(first, item))
 }
 
 fn remote_files_match(left: &BatchItemSnapshot, right: &BatchItemSnapshot) -> bool {
@@ -993,35 +1073,6 @@ fn duplicate_path(path: &str, ordinal: usize) -> String {
     } else {
         format!("{parent}/{renamed}")
     }
-}
-
-fn apply_duplicate_resolution(
-    items: &mut Vec<QueuedDownload>,
-    drop_locations: &HashSet<BatchItemLocation>,
-    renamed_paths: &HashMap<BatchItemLocation, String>,
-    queued: bool,
-) {
-    for (index, item) in items.iter_mut().enumerate() {
-        let location = if queued {
-            BatchItemLocation::Queued(index)
-        } else {
-            BatchItemLocation::Completed(index)
-        };
-        if let Some(path) = renamed_paths.get(&location) {
-            item.item.path.clone_from(path);
-        }
-    }
-
-    let mut index = 0;
-    items.retain(|_| {
-        let location = if queued {
-            BatchItemLocation::Queued(index)
-        } else {
-            BatchItemLocation::Completed(index)
-        };
-        index += 1;
-        !drop_locations.contains(&location)
-    });
 }
 
 fn successful_submitted_urls<'a>(
