@@ -854,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn package_resolved_promotes_nonempty_url_package_to_resolved_package_id() {
+    fn package_resolved_reassigns_existing_files_to_new_package_id_for_same_url() {
         let mut state = DownloadState::default();
         state.packages.insert(
             "https://mega.nz/folder/test".to_string(),
