@@ -16,8 +16,6 @@ struct SnapshotFile {
 struct SnapshotPackage {
     id: String,
     #[serde(default)]
-    source_url: String,
-    #[serde(default)]
     display_name: String,
 }
 
@@ -67,11 +65,7 @@ pub(super) fn resolve_package_id(
     let matches: Vec<_> = snapshot
         .packages
         .into_iter()
-        .filter(|package| {
-            package.id == selector
-                || package.display_name == selector
-                || package.source_url == selector
-        })
+        .filter(|package| package.id == selector || package.display_name == selector)
         .collect();
     match matches.as_slice() {
         [] => Ok(None),

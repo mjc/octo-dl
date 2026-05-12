@@ -15,7 +15,7 @@ use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::DownloadConfig;
-use crate::core::ProgressDelta;
+use crate::core::{PackageId, PackageKey, ProgressDelta};
 use crate::error::{Error, Result};
 use crate::fs::{FileSystem, TokioFileSystem};
 use crate::progress::CumulativeProgress;
@@ -1084,6 +1084,33 @@ where
 
     components.reverse();
     components.join("/")
+}
+
+#[must_use]
+pub fn infer_package_display_name(nodes: &mega::Nodes, collected: &CollectedFiles<'_>) -> String {
+    nodes.roots()
+        .find(|root| root.kind().is_folder())
+        .map(|root| root.name().to_string())
+        .or_else(|| common_collected_root(collected))
+        .unwrap_or_else(|| "root".to_string())
+}
+
+#[must_use]
+pub fn infer_package_id(nodes: &mega::Nodes, collected: &CollectedFiles<'_>) -> PackageId {
+    let display_name = infer_package_display_name(nodes, collected);
+    PackageId::for_package_key(&PackageKey::new(display_name))
+}
+
+fn common_collected_root(collected: &CollectedFiles<'_>) -> Option<String> {
+    let mut roots = collected
+        .to_download
+        .iter()
+        .chain(collected.completed.iter())
+        .filter_map(|item| item.path.split('/').next())
+        .filter(|root| !root.is_empty())
+        .map(str::to_string);
+    let first = roots.next()?;
+    roots.all(|root| root == first).then_some(first)
 }
 
 #[cfg(test)]
