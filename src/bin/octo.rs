@@ -10,7 +10,46 @@ use std::os::windows::io::{FromRawHandle, RawHandle};
 use std::path::PathBuf;
 
 /// Flags that consume the next argument as a value (not a positional arg).
-const FLAGS_WITH_VALUES: &[&str] = &["--host", "--config", "-j", "--chunks", "-p", "--parallel"];
+const FLAGS_WITH_VALUES: &[&str] = &[
+    "--host",
+    "--config",
+    "--ui",
+    "--tui-listen",
+    "--tui-attach",
+    "-j",
+    "--chunks",
+    "-p",
+    "--parallel",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiMode {
+    Headless,
+    Tui,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeOptions {
+    ui: Option<UiMode>,
+    tui_listen: Option<String>,
+    tui_attach: Option<String>,
+    host: String,
+    host_explicit: bool,
+    config_path: Option<PathBuf>,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self {
+            ui: None,
+            tui_listen: None,
+            tui_attach: None,
+            host: "127.0.0.1".to_string(),
+            host_explicit: false,
+            config_path: None,
+        }
+    }
+}
 
 /// Returns true if `args` contains positional arguments (URLs, DLC paths, etc.)
 /// as opposed to just flags and their values.
@@ -34,18 +73,15 @@ fn print_usage() {
     eprintln!();
     eprintln!("Modes:");
     eprintln!("  --tui               Launch interactive terminal TUI");
-    eprintln!("  --web               Launch web UI in browser (PWA with mobile share support)");
-    eprintln!("  --api               Start headless API server (requires --config)");
+    eprintln!("  --headless          Start headless API service (requires --config)");
+    eprintln!("  --tui --tui-attach ADDR");
+    eprintln!("                      Attach a read-only terminal UI to ADDR");
+    eprintln!("  --ui tui|headless   Equivalent explicit form for mode selection");
     eprintln!("  (default)           CLI download mode when URLs/DLC files are provided");
     eprintln!();
-    eprintln!("Combinable:");
-    eprintln!("  --tui --api         Terminal TUI with API server");
-    eprintln!("  --tui --web         Terminal TUI with web UI alongside");
-    eprintln!();
     eprintln!("Global options:");
-    eprintln!(
-        "  --host <HOST>       Bind address for API/web (default: 127.0.0.1, or from config)"
-    );
+    eprintln!("  --tui-listen ADDR   Publish remote TUI attach stream on loopback ADDR");
+    eprintln!("  --host <HOST>       Bind address for API server when enabled");
     eprintln!("  --config <PATH>     Config file for headless/service mode");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
@@ -84,9 +120,107 @@ fn log_pipe_writer_from_addr(addr: &str) -> Option<Box<dyn Write + Send>> {
 }
 
 fn native_tui_log_detachment_required(args: &[String]) -> bool {
-    args.iter().any(|arg| arg == "--tui")
+    (args.iter().any(|arg| arg == "--tui")
+        || args
+            .windows(2)
+            .any(|pair| pair[0] == "--ui" && pair[1] == "tui"))
         && env::var_os("OCTO_TUI_LOG_ADDR").is_none()
         && env::var_os("OCTO_TUI_LOG_FD").is_none()
+}
+
+fn set_ui_mode(options: &mut RuntimeOptions, mode: UiMode, flag: &str) -> Result<(), String> {
+    match options.ui {
+        Some(existing) if existing != mode => Err(format!(
+            "{flag} conflicts with previously selected mode {}; choose one of --tui, --headless, or --ui",
+            match existing {
+                UiMode::Headless => "headless",
+                UiMode::Tui => "tui",
+            }
+        )),
+        _ => {
+            options.ui = Some(mode);
+            Ok(())
+        }
+    }
+}
+
+fn parse_runtime_options(args: &[String]) -> Result<RuntimeOptions, String> {
+    let mut options = RuntimeOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--tui" => set_ui_mode(&mut options, UiMode::Tui, "--tui")?,
+            "--headless" => set_ui_mode(&mut options, UiMode::Headless, "--headless")?,
+            "--api" | "--web" => {
+                return Err(format!(
+                    "{} has been removed; use --headless/--tui or --ui headless|tui, plus --tui-listen/--tui-attach",
+                    args[i]
+                ));
+            }
+            "--ui" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err("--ui requires headless or tui".to_string());
+                };
+                let mode = match value.as_str() {
+                    "headless" => UiMode::Headless,
+                    "tui" => UiMode::Tui,
+                    _ => return Err(format!("invalid --ui value {value:?}; use headless or tui")),
+                };
+                set_ui_mode(&mut options, mode, "--ui")?;
+            }
+            "--tui-listen" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err("--tui-listen requires IP:PORT".to_string());
+                };
+                options.tui_listen = Some(value.clone());
+            }
+            "--tui-attach" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err("--tui-attach requires IP:PORT".to_string());
+                };
+                options.tui_attach = Some(value.clone());
+            }
+            "--host" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err("--host requires a value".to_string());
+                };
+                options.host = value.clone();
+                options.host_explicit = true;
+            }
+            "--config" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err("--config requires a path".to_string());
+                };
+                options.config_path = Some(PathBuf::from(value));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if options.tui_attach.is_some() {
+        if options.tui_listen.is_some() {
+            return Err("--tui-attach cannot be combined with --tui-listen".to_string());
+        }
+        if options.ui == Some(UiMode::Headless) {
+            return Err("--tui-attach requires TUI mode (--tui or --ui tui)".to_string());
+        }
+        if options.ui.is_none() {
+            options.ui = Some(UiMode::Tui);
+        }
+        return Ok(options);
+    }
+
+    if options.ui.is_none() && options.tui_listen.is_some() {
+        options.ui = Some(UiMode::Headless);
+    }
+
+    Ok(options)
 }
 
 fn native_tui_log_writer() -> Box<dyn Write + Send> {
@@ -133,56 +267,43 @@ async fn main() -> octo_dl::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     init_logger(&args);
 
-    let mut tui = false;
-    let mut api = false;
-    let mut web = false;
-    let mut host = "127.0.0.1".to_string();
-    let mut host_explicit = false;
-    let mut config_path: Option<PathBuf> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--tui" => tui = true,
-            "--api" => api = true,
-            "--web" => web = true,
-            "--host" => {
-                i += 1;
-                if i < args.len() {
-                    host = args[i].clone();
-                    host_explicit = true;
-                } else {
-                    eprintln!("Error: --host requires a value");
-                    std::process::exit(1);
-                }
-            }
-            "--config" => {
-                i += 1;
-                if i < args.len() {
-                    config_path = Some(PathBuf::from(&args[i]));
-                } else {
-                    eprintln!("Error: --config requires a path");
-                    std::process::exit(1);
-                }
-            }
-            _ => {} // sub-module flags, URLs, etc.
-        }
-        i += 1;
-    }
+    let options = parse_runtime_options(&args).unwrap_or_else(|error| {
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    });
 
-    if tui {
-        // Terminal TUI mode, optionally with --api and/or --web alongside
-        let host_param = if api || web {
-            if host_explicit {
-                Some(Some(host))
-            } else {
-                Some(None) // Let config provide the host
-            }
-        } else {
-            None // No API server
-        };
+    if options.ui == Some(UiMode::Tui)
+        && let Some(addr) = options.tui_attach.as_deref()
+    {
         #[cfg(feature = "tui")]
         {
-            octo_dl::tui::run(host_param, web, config_path.as_deref())
+            let addr = octo_dl::tui::parse_loopback_addr(addr).unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            });
+            return octo_dl::tui::run_attach(addr)
+                .await
+                .map_err(octo_dl::Error::Io);
+        }
+        #[cfg(not(feature = "tui"))]
+        {
+            let _ = addr;
+            eprintln!("TUI support not compiled in");
+            std::process::exit(1);
+        }
+    }
+
+    if options.ui == Some(UiMode::Tui) {
+        let listen = options.tui_listen.as_deref().map(|value| {
+            octo_dl::tui::parse_loopback_addr(value).unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            })
+        });
+        let host_param = options.host_explicit.then_some(Some(options.host.clone()));
+        #[cfg(feature = "tui")]
+        {
+            octo_dl::tui::run(host_param, options.config_path.as_deref(), listen)
                 .await
                 .map_err(octo_dl::Error::Io)
         }
@@ -192,28 +313,20 @@ async fn main() -> octo_dl::Result<()> {
             eprintln!("TUI support not compiled in");
             std::process::exit(1);
         }
-    } else if web && !has_positional_args(&args) {
-        // --web without --tui = web UI as the primary interface
-        #[cfg(feature = "tui")]
-        {
-            octo_dl::tui::run_web(&host, config_path.as_deref())
-                .await
-                .map_err(octo_dl::Error::Io)
-        }
-        #[cfg(not(feature = "tui"))]
-        {
-            eprintln!("Web UI requires the 'tui' feature");
+    } else if options.ui == Some(UiMode::Headless) {
+        let config = options.config_path.unwrap_or_else(|| {
+            eprintln!("Error: --headless requires --config <PATH>");
             std::process::exit(1);
-        }
-    } else if api && !has_positional_args(&args) {
-        // --api without --tui = headless API-only mode, requires --config
-        let config = config_path.unwrap_or_else(|| {
-            eprintln!("Error: --api mode requires --config <PATH> (or use --web for browser UI)");
-            std::process::exit(1);
+        });
+        let listen = options.tui_listen.as_deref().map(|value| {
+            octo_dl::tui::parse_loopback_addr(value).unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            })
         });
         #[cfg(feature = "tui")]
         {
-            octo_dl::tui::run_api_only(&config)
+            octo_dl::tui::run_api_only(&config, listen)
                 .await
                 .map_err(octo_dl::Error::Io)
         }
@@ -264,7 +377,12 @@ mod tests {
 
     #[test]
     fn positional_args_ignore_cli_flag_values() {
-        let args = vec!["--web".to_string(), "--chunks".to_string(), "4".to_string()];
+        let args = vec![
+            "--ui".to_string(),
+            "headless".to_string(),
+            "--chunks".to_string(),
+            "4".to_string(),
+        ];
         assert!(!has_positional_args(&args));
     }
 
@@ -285,15 +403,100 @@ mod tests {
             env::remove_var("OCTO_TUI_LOG_FD");
         }
 
+        assert!(native_tui_log_detachment_required(&[
+            "--ui".to_string(),
+            "tui".to_string()
+        ]));
         assert!(native_tui_log_detachment_required(&["--tui".to_string()]));
-        assert!(!native_tui_log_detachment_required(&["--web".to_string()]));
+        assert!(!native_tui_log_detachment_required(&[
+            "--ui".to_string(),
+            "headless".to_string()
+        ]));
+        assert!(!native_tui_log_detachment_required(&[
+            "--headless".to_string()
+        ]));
 
         unsafe { env::set_var("OCTO_TUI_LOG_ADDR", "127.0.0.1:1") };
-        assert!(!native_tui_log_detachment_required(&["--tui".to_string()]));
+        assert!(!native_tui_log_detachment_required(&[
+            "--ui".to_string(),
+            "tui".to_string()
+        ]));
         unsafe { env::remove_var("OCTO_TUI_LOG_ADDR") };
 
         unsafe { env::set_var("OCTO_TUI_LOG_FD", "9") };
-        assert!(!native_tui_log_detachment_required(&["--tui".to_string()]));
+        assert!(!native_tui_log_detachment_required(&[
+            "--ui".to_string(),
+            "tui".to_string()
+        ]));
         unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
+    }
+
+    #[test]
+    fn runtime_options_reject_old_mode_flags() {
+        assert!(parse_runtime_options(&["--api".to_string()]).is_err());
+        assert!(parse_runtime_options(&["--web".to_string()]).is_err());
+    }
+
+    #[test]
+    fn runtime_options_parse_new_ui_modes() {
+        let options =
+            parse_runtime_options(&["--tui".to_string()]).expect("--tui should select TUI mode");
+        assert_eq!(options.ui, Some(UiMode::Tui));
+
+        let options = parse_runtime_options(&["--headless".to_string()])
+            .expect("--headless should select headless mode");
+        assert_eq!(options.ui, Some(UiMode::Headless));
+
+        let options = parse_runtime_options(&[
+            "--ui".to_string(),
+            "tui".to_string(),
+            "--tui-listen".to_string(),
+            "127.0.0.1:9724".to_string(),
+        ])
+        .expect("new mode flags should parse");
+        assert_eq!(options.ui, Some(UiMode::Tui));
+        assert_eq!(options.tui_listen.as_deref(), Some("127.0.0.1:9724"));
+
+        let options =
+            parse_runtime_options(&["--tui-attach".to_string(), "127.0.0.1:9724".to_string()])
+                .expect("attach should parse");
+        assert_eq!(options.ui, Some(UiMode::Tui));
+        assert_eq!(options.tui_attach.as_deref(), Some("127.0.0.1:9724"));
+    }
+
+    #[test]
+    fn runtime_options_reject_conflicting_mode_flags() {
+        let error = parse_runtime_options(&["--tui".to_string(), "--headless".to_string()])
+            .expect_err("conflicting aliases should reject");
+        assert!(error.contains("conflicts"));
+
+        let error = parse_runtime_options(&[
+            "--headless".to_string(),
+            "--ui".to_string(),
+            "tui".to_string(),
+        ])
+        .expect_err("mixed explicit/conflicting modes should reject");
+        assert!(error.contains("conflicts"));
+    }
+
+    #[test]
+    fn runtime_options_reject_attach_combinations() {
+        let error = parse_runtime_options(&[
+            "--tui-attach".to_string(),
+            "127.0.0.1:9724".to_string(),
+            "--ui".to_string(),
+            "headless".to_string(),
+        ])
+        .expect_err("attach cannot run in headless mode");
+        assert!(error.contains("requires TUI mode"));
+
+        let error = parse_runtime_options(&[
+            "--tui-attach".to_string(),
+            "127.0.0.1:9724".to_string(),
+            "--tui-listen".to_string(),
+            "127.0.0.1:9725".to_string(),
+        ])
+        .expect_err("attach cannot listen");
+        assert!(error.contains("cannot be combined"));
     }
 }

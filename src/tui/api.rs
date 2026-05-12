@@ -1,4 +1,4 @@
-//! HTTP API server for receiving URLs and serving state to the xterm.js UI.
+//! HTTP API server for receiving URLs and serving the remote TUI stream.
 //!
 //! # Security Notice
 //!
@@ -12,38 +12,30 @@
 //! are limited to 10MB, this is not a substitute for authentication. For production deployments,
 //! consider adding reverse proxy authentication (e.g., Tailscale, Caddy with auth middleware).
 
-use std::convert::Infallible;
-use std::net::SocketAddr;
-use std::time::Duration;
-
 use axum::Router;
+use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::HeaderMap;
-use axum::response::sse::{Event as SseEvent, KeepAlive};
-use axum::response::{Html, IntoResponse, Sse};
+use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio_stream::StreamExt as _;
-use tokio_stream::wrappers::WatchStream;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::extract_urls;
 
-use super::WebOptions;
 use super::app::{SharedAppState, UiAction};
+use super::bookmarklet;
 use super::event::DownloadEvent;
-use super::web;
-
 pub const DEFAULT_API_PORT: u16 = 9723;
 
 #[derive(Clone)]
 struct ApiState {
     tx: mpsc::UnboundedSender<DownloadEvent>,
     host: String,
-    port: u16,
     shared: Option<SharedAppState>,
-    web_opts: Option<WebOptions>,
+    remote_tui_stream: bool,
+    bookmarklet_host: Option<String>,
     api_key: Option<String>,
 }
 
@@ -67,7 +59,7 @@ struct UrlResponse {
 #[derive(Serialize)]
 struct HealthResponse {
     status: String,
-    web_ui: bool,
+    remote_tui_stream: bool,
 }
 
 #[derive(Deserialize)]
@@ -102,16 +94,6 @@ struct ConfigUpdateRequest {
     cleanup_on_error: Option<bool>,
 }
 
-#[derive(Deserialize)]
-struct ShareTargetQuery {
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    text: String,
-    #[serde(default)]
-    url: String,
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -122,7 +104,7 @@ fn send_ui_action(state: &ApiState, action: UiAction) -> axum::response::Respons
         || {
             (
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Web UI not enabled",
+                "interactive state not enabled",
             )
                 .into_response()
         },
@@ -205,7 +187,7 @@ fn snapshot_state(state: &ApiState) -> Result<SnapshotState, Box<axum::response:
         return Err(Box::new(
             (
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(serde_json::json!({"error": "Web UI not enabled"})),
+                axum::Json(serde_json::json!({"error": "interactive state not enabled"})),
             )
                 .into_response(),
         ));
@@ -339,9 +321,9 @@ fn infer_host(headers: &HeaderMap, state: &ApiState) -> String {
         return host.to_string();
     }
     state
-        .web_opts
-        .as_ref()
-        .map_or_else(|| state.host.clone(), |w| w.public_host.clone())
+        .bookmarklet_host
+        .clone()
+        .unwrap_or_else(|| state.host.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +333,7 @@ fn infer_host(headers: &HeaderMap, state: &ApiState) -> String {
 async fn api_health(State(state): State<ApiState>) -> impl IntoResponse {
     axum::Json(HealthResponse {
         status: "ok".to_string(),
-        web_ui: state.web_opts.is_some(),
+        remote_tui_stream: state.remote_tui_stream,
     })
 }
 
@@ -400,85 +382,52 @@ async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> 
         },
     );
 
-    Html(format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>octo-dl bookmarklet</title>
-<style>
-  body {{ font-family: system-ui, sans-serif; max-width: 480px; margin: 60px auto; color: #e0e0e0; background: #1a1a2e; }}
-  h1 {{ font-size: 1.4rem; }}
-  p {{ line-height: 1.5; }}
-  a.bookmarklet {{
-    display: inline-block; padding: 10px 20px; margin: 20px 0;
-    background: #0f3460; color: #e94560; border-radius: 6px;
-    text-decoration: none; font-weight: bold; font-size: 1.1rem;
-    border: 2px solid #e94560; cursor: grab;
-  }}
-  a.bookmarklet:hover {{ background: #16213e; }}
-  code {{ background: #16213e; padding: 2px 6px; border-radius: 3px; }}
-</style>
-</head>
-<body>
-<h1>octo-dl bookmarklet</h1>
-<p>Drag this link to your bookmarks bar:</p>
-<a class="bookmarklet" href="javascript:void(function(){{var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var proto=window.location.protocol;var h=proto+'//{fallback_host}';var headers=Object.assign({{'Content-Type':'application/json'}},{api_key_header});fetch(h+'/api/parse',{{method:'POST',headers:headers,body:JSON.stringify({{page:page,fallback:selected}})}}).then(function(r){{return r.json()}}).then(function(d){{if(d.count>0){{alert('Sent '+d.count+' URL(s) to octo-dl')}}else{{alert('No URLs found on this page')}}}}).catch(function(e){{alert('Error: '+e)}})}})()">
-  Send to octo-dl
-</a>
-<p>Click it on any page to send the page HTML (with selected text as fallback) to octo-dl for download.</p>
-<p>Configured to use <code>{fallback_host}</code></p>
-</body>
-</html>"#
+    Html(bookmarklet::bookmarklet_html(
+        &fallback_host,
+        &api_key_header,
     ))
 }
 
 // ---------------------------------------------------------------------------
-// xterm.js support endpoints
+// Remote TUI stream
 // ---------------------------------------------------------------------------
 
-/// GET /api/state — returns the latest application snapshot as JSON.
-async fn api_get_state(State(state): State<ApiState>) -> impl IntoResponse {
-    state.shared.as_ref().map_or_else(
-        || {
-            (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "Web UI not enabled",
-            )
-                .into_response()
-        },
-        |shared| {
-            let json = shared.state_rx.borrow().clone();
-            (
-                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                json,
-            )
-                .into_response()
-        },
-    )
-}
-
-/// GET /api/events — SSE stream of application state updates.
-async fn api_events(
+/// GET /api/dashboard — websocket stream of application state updates for attached TUI clients.
+async fn api_dashboard_ws(
     State(state): State<ApiState>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
-    let rx = state
-        .shared
-        .as_ref()
-        .expect("SSE requires shared state")
-        .state_rx
-        .clone();
-
-    let stream = WatchStream::new(rx).map(|json| Ok(SseEvent::default().data(json)));
-
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("ping"),
-    )
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    match (state.remote_tui_stream, state.shared.as_ref()) {
+        (false, _) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "remote TUI stream not enabled",
+        )
+            .into_response(),
+        (true, Some(shared)) => ws.on_upgrade({
+            let rx = shared.state_rx.clone();
+            move |socket| dashboard_socket(socket, rx)
+        }),
+        (true, None) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "interactive state not enabled",
+        )
+            .into_response(),
+    }
 }
 
-/// POST /api/login — submit login credentials from the web UI.
+async fn dashboard_socket(mut socket: WebSocket, mut rx: tokio::sync::watch::Receiver<String>) {
+    loop {
+        let json = rx.borrow().clone();
+        if socket.send(WsMessage::Text(json.into())).await.is_err() {
+            break;
+        }
+        if rx.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+/// POST /api/login — submit login credentials to the shared runtime.
 async fn api_login(
     State(state): State<ApiState>,
     axum::Json(payload): axum::Json<LoginRequest>,
@@ -546,65 +495,12 @@ async fn api_config(
     )
 }
 
-/// GET /share — Web Share Target handler (PWA share sheet integration).
-/// Receives shared data via query parameters, extracts URLs, and redirects to the web UI.
-async fn share_target(
-    State(state): State<ApiState>,
-    axum::extract::Query(params): axum::extract::Query<ShareTargetQuery>,
-) -> impl IntoResponse {
-    let combined = format!("{} {} {}", params.title, params.text, params.url);
-    dispatch_urls(&state, extract_urls(&combined));
-    axum::response::Redirect::to("/")
-}
-
-/// POST /share — Web Share Target handler for POST form submissions.
-async fn share_target_post(
-    State(state): State<ApiState>,
-    axum::Form(params): axum::Form<ShareTargetQuery>,
-) -> impl IntoResponse {
-    let combined = format!("{} {} {}", params.title, params.text, params.url);
-    dispatch_urls(&state, extract_urls(&combined));
-    axum::response::Redirect::to("/")
-}
-
-// ---------------------------------------------------------------------------
-// xterm.js support assets
-// ---------------------------------------------------------------------------
-
-/// GET /manifest.json — PWA manifest.
-async fn web_ui_manifest(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
-    let port = state.port;
-    let host = infer_host(&headers, &state);
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/manifest+json",
-        )],
-        web::manifest_json(&host, port),
-    )
-}
-
-/// GET /sw.js — Service worker for PWA offline support.
-async fn web_ui_sw() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/javascript")],
-        web::service_worker_js(),
-    )
-}
-
-/// GET /icon-192.svg — SVG icon for PWA.
-async fn web_ui_icon() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
-        web::icon_svg(),
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Server setup
 // ---------------------------------------------------------------------------
 
-/// Starts the HTTP API server for receiving URLs and xterm.js state requests.
+/// Starts the HTTP API server for receiving URLs, bookmarklet requests,
+/// and optional remote TUI attach connections.
 ///
 /// # Security
 ///
@@ -618,16 +514,17 @@ pub async fn run_api_server(
     tx: mpsc::UnboundedSender<DownloadEvent>,
     host: &str,
     port: u16,
-    web_opts: Option<&WebOptions>,
+    bookmarklet_host: Option<&str>,
     shared: Option<SharedAppState>,
+    remote_tui_stream: bool,
     api_key: Option<String>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = ApiState {
         tx,
         host: host.to_string(),
-        port,
         shared,
-        web_opts: web_opts.cloned(),
+        remote_tui_stream,
+        bookmarklet_host: bookmarklet_host.map(str::to_string),
         api_key,
     };
 
@@ -642,21 +539,18 @@ pub async fn run_api_server(
         .route("/api/urls", post(api_post_urls))
         .route("/api/parse", post(api_parse_page));
 
-    // State/action routes are exposed only when the xterm.js bridge is enabled.
-    if web_opts.is_some() {
+    // Interactive mutation routes are exposed whenever the API is connected to app state.
+    if state.shared.is_some() {
         app = app
-            .route("/manifest.json", get(web_ui_manifest))
-            .route("/sw.js", get(web_ui_sw))
-            .route("/icon-192.svg", get(web_ui_icon))
-            .route("/icon-512.svg", get(web_ui_icon))
-            .route("/api/state", get(api_get_state))
-            .route("/api/events", get(api_events))
             .route("/api/login", post(api_login))
             .route("/api/pause", post(api_pause))
             .route("/api/delete", post(api_delete))
             .route("/api/retry", post(api_retry))
-            .route("/api/config", post(api_config))
-            .route("/share", get(share_target).post(share_target_post));
+            .route("/api/config", post(api_config));
+    }
+
+    if state.remote_tui_stream {
+        app = app.route("/api/dashboard", get(api_dashboard_ws));
     }
 
     let app = app
@@ -664,8 +558,7 @@ pub async fn run_api_server(
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB limit
         .with_state(state);
 
-    let addr: SocketAddr = format!("{host}:{port}").parse()?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind((host, port)).await?;
     axum::serve(listener, app).await?;
 
     Ok(())
@@ -683,9 +576,9 @@ mod tests {
             ApiState {
                 tx,
                 host: "127.0.0.1".to_string(),
-                port: DEFAULT_API_PORT,
                 shared: None,
-                web_opts: None,
+                remote_tui_stream: false,
+                bookmarklet_host: None,
                 api_key: None,
             },
             rx,
@@ -693,6 +586,14 @@ mod tests {
     }
 
     fn state_with_snapshot(snapshot: &str) -> (ApiState, mpsc::UnboundedReceiver<UiAction>) {
+        state_with_snapshot_options(snapshot, None, None)
+    }
+
+    fn state_with_snapshot_options(
+        snapshot: &str,
+        bookmarklet_host: Option<String>,
+        api_key: Option<String>,
+    ) -> (ApiState, mpsc::UnboundedReceiver<UiAction>) {
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
         let (_state_tx, state_rx) = watch::channel(snapshot.to_string());
@@ -700,13 +601,13 @@ mod tests {
             ApiState {
                 tx: event_tx,
                 host: "127.0.0.1".to_string(),
-                port: DEFAULT_API_PORT,
                 shared: Some(SharedAppState {
                     action_tx,
                     state_rx,
                 }),
-                web_opts: None,
-                api_key: None,
+                remote_tui_stream: false,
+                bookmarklet_host,
+                api_key,
             },
             action_rx,
         )
@@ -809,11 +710,33 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn dashboard_url_submission_still_requires_configured_api_key() {
+        let (state, mut rx) = state_with_snapshot_options(
+            r#"{"files":[]}"#,
+            Some("127.0.0.1".to_string()),
+            Some("secret".to_string()),
+        );
+
+        let response = api_post_urls(
+            State(state),
+            HeaderMap::new(),
+            axum::Json(UrlRequest {
+                text: "https://mega.nz/file/abc#key".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn resolve_file_id_by_name_requires_valid_shared_state() {
         let (state, _rx) = state_without_shared();
         let unavailable =
-            resolve_file_id(&state, None, Some("file.mkv".to_string())).expect_err("no web UI");
+            resolve_file_id(&state, None, Some("file.mkv".to_string())).expect_err("no dashboard");
         assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         let (state, _rx) = state_with_snapshot("{not-json");

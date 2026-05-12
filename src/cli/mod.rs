@@ -400,10 +400,10 @@ fn parse_args() -> CliConfig {
                 std::process::exit(0);
             }
             // Skip global flags handled by the unified binary
-            "--tui" | "--api" => {}
-            "--host" | "--config" => {
+            "--host" | "--config" | "--ui" | "--tui-listen" | "--tui-attach" => {
                 let _ = args.next(); // consume the value
             }
+            "--tui" | "--headless" => {}
             _ if !arg.starts_with('-') => {
                 if is_dlc_path(&arg) {
                     dlc_files.push(arg);
@@ -445,6 +445,7 @@ fn print_usage() {
     eprintln!("  -f, --force         Overwrite existing files");
     eprintln!("  -r, --resume        Resume a previous incomplete session");
     eprintln!("  --tui               Launch interactive TUI mode");
+    eprintln!("  --ui tui            Equivalent explicit form");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
     eprintln!("Environment:");

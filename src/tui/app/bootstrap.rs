@@ -8,11 +8,12 @@ use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 use tokio::sync::{mpsc, watch};
 
-use crate::tui::WebOptions;
 use crate::{
     DownloadConfig, ServiceConfig,
     core::{DownloadState, SessionMeta, SessionSnapshotV3},
 };
+
+use crate::tui::dashboard::DashboardUiMode;
 
 use super::{
     App, DownloadEvent, NoCredentialsFallback, Popup, SharedAppState, SharedStateChannels, UiAction,
@@ -157,9 +158,13 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn shared_state_channels(&self, enabled: bool) -> SharedStateChannels {
+    pub(crate) fn shared_state_channels(
+        &self,
+        enabled: bool,
+        ui_mode: DashboardUiMode,
+    ) -> SharedStateChannels {
         let (action_tx, action_rx) = mpsc::unbounded_channel::<UiAction>();
-        let (state_tx, state_rx) = watch::channel(self.to_json());
+        let (state_tx, state_rx) = watch::channel(self.dashboard_json(ui_mode, false));
         let shared_state = enabled.then_some(SharedAppState {
             action_tx,
             state_rx,
@@ -175,8 +180,9 @@ impl App {
         &self,
         host: String,
         port: u16,
-        web_opts: Option<WebOptions>,
+        bookmarklet_host: Option<String>,
         shared_state: Option<SharedAppState>,
+        remote_tui_stream: bool,
     ) {
         let api_tx = self.event_tx.clone();
         let api_key = self.api_key.clone();
@@ -185,8 +191,9 @@ impl App {
                 api_tx,
                 &host,
                 port,
-                web_opts.as_ref(),
+                bookmarklet_host.as_deref(),
                 shared_state,
+                remote_tui_stream,
                 api_key,
             )
             .await
