@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     DownloadConfig,
-    core::{PackageSnapshot, SavedCredentials, SessionSnapshotV3},
+    core::{SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot},
     format_bytes,
     tui::dashboard::DashboardUiMode,
 };
@@ -149,14 +149,11 @@ impl App {
         }
 
         let mut session = SessionSnapshotV3::new(config.clone(), credentials);
-        session.packages = self
+        session.urls = self
             .urls
             .iter()
-            .map(|url| PackageSnapshot {
-                id: url.clone(),
-                source_url: url.clone(),
-                display_name: url.clone(),
-                file_ids: Vec::new(),
+            .map(|url| SessionUrlSnapshot {
+                url: url.clone(),
                 error: None,
             })
             .collect();

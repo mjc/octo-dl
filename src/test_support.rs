@@ -1,7 +1,7 @@
 use crate::config::DownloadConfig;
 use crate::core::{
     DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageSnapshot, RuntimeState,
-    SavedCredentials, SessionSnapshotV3,
+    SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -66,13 +66,10 @@ pub fn test_credentials() -> SavedCredentials {
 
 pub fn session_snapshot(urls: Vec<(&str, UrlFixtureStatus)>) -> SessionSnapshotV3 {
     let mut session = SessionSnapshotV3::new(DownloadConfig::default(), test_credentials());
-    session.packages = urls
+    session.urls = urls
         .into_iter()
-        .map(|(url, status)| PackageSnapshot {
-            id: url.to_string(),
-            source_url: url.to_string(),
-            display_name: url.to_string(),
-            file_ids: Vec::new(),
+        .map(|(url, status)| SessionUrlSnapshot {
+            url: url.to_string(),
             error: match status {
                 UrlFixtureStatus::Error(message) => Some(message),
                 UrlFixtureStatus::Pending | UrlFixtureStatus::Fetched => None,
@@ -89,6 +86,27 @@ pub fn push_file(
     size: u64,
     status: FileFixtureStatus,
 ) {
+    let source_url = session
+        .urls
+        .get(package_index)
+        .map(|entry| entry.url.clone())
+        .expect("package_index should map to a tracked url");
+    let package_index = if let Some(index) = session
+        .packages
+        .iter()
+        .position(|package| package.source_url == source_url)
+    {
+        index
+    } else {
+        session.packages.push(PackageSnapshot {
+            id: source_url.clone(),
+            source_url: source_url.clone(),
+            display_name: source_url.clone(),
+            file_ids: Vec::new(),
+            error: None,
+        });
+        session.packages.len() - 1
+    };
     let package = session
         .packages
         .get_mut(package_index)

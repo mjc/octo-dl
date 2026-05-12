@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     core::{
-        CoreCommand, CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus,
+        CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus,
     },
     test_support::{
         FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, push_file, session_snapshot,
@@ -389,25 +389,29 @@ fn url_resolved_updates_session_status_and_clears_overlay() {
 
     assert!(!app.overlay_files.contains_key(&url));
     let session = app.session.as_ref().expect("session should remain");
-    assert_eq!(session.packages[0].source_url, url);
-    assert!(session.packages[0].error.is_none());
+    assert_eq!(session.urls[0].url, url);
+    assert!(session.urls[0].error.is_none());
 }
 
 #[test]
 fn pending_empty_package_placeholder_is_visible() {
     let mut app = test_app();
 
-    app.apply_core_command(CoreCommand::SubmitUrl {
-        url: "https://mega.nz/folder/root".to_string(),
-    });
+    app.submit_url("https://mega.nz/folder/root".to_string());
 
     assert_eq!(
         app.visible_rows(),
-        vec![TuiRow::Package("https://mega.nz/folder/root".to_string())]
+        vec![TuiRow::File {
+            package_id: String::new(),
+            file_id: "https://mega.nz/folder/root".to_string(),
+        }]
     );
     assert_eq!(
         app.selected_row(),
-        Some(TuiRow::Package("https://mega.nz/folder/root".to_string()))
+        Some(TuiRow::File {
+            package_id: String::new(),
+            file_id: "https://mega.nz/folder/root".to_string(),
+        })
     );
 }
 
@@ -661,9 +665,9 @@ fn session_adapter_replace_state_replaces_stale_package_rows() {
 
     SessionAdapter::replace_state(&mut session, next);
 
-    assert_eq!(session.packages.len(), 1);
-    assert_eq!(session.packages[0].source_url, "https://mega.nz/file/a");
-    assert_eq!(session.packages[0].id, "https://mega.nz/file/a");
+    assert!(session.packages.is_empty());
+    assert_eq!(session.urls.len(), 1);
+    assert_eq!(session.urls[0].url, "https://mega.nz/file/a");
 }
 
 #[test]
