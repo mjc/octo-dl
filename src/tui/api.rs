@@ -12,6 +12,9 @@
 //! are limited to 10MB, this is not a substitute for authentication. For production deployments,
 //! consider adding reverse proxy authentication (e.g., Tailscale, Caddy with auth middleware).
 
+mod helpers;
+mod selection;
+
 use axum::Router;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, State};
@@ -22,15 +25,15 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::extract_urls;
-
+use self::helpers::{infer_host, require_api_key, send_ui_action};
+use self::selection::{resolve_file_id, resolve_package_id};
 use super::app::{SharedAppState, UiAction};
 use super::bookmarklet;
 use super::event::DownloadEvent;
 pub const DEFAULT_API_PORT: u16 = 9723;
 
 #[derive(Clone)]
-struct ApiState {
+pub(super) struct ApiState {
     tx: mpsc::UnboundedSender<DownloadEvent>,
     host: String,
     shared: Option<SharedAppState>,
@@ -95,238 +98,6 @@ struct ConfigUpdateRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Sends a `UiAction` to the event loop, returning 503 if shared state is absent.
-fn send_ui_action(state: &ApiState, action: UiAction) -> axum::response::Response {
-    state.shared.as_ref().map_or_else(
-        || {
-            (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "interactive state not enabled",
-            )
-                .into_response()
-        },
-        |shared| {
-            let _ = shared.action_tx.send(action);
-            axum::Json(serde_json::json!({"ok": true})).into_response()
-        },
-    )
-}
-
-/// Dispatches extracted URLs — via `UiAction` if shared state is available,
-/// otherwise directly as a `DownloadEvent`.
-fn dispatch_urls(state: &ApiState, urls: Vec<String>) {
-    if urls.is_empty() {
-        return;
-    }
-    if let Some(ref shared) = state.shared {
-        let _ = shared.action_tx.send(UiAction::AddUrls(urls));
-    } else {
-        let _ = state.tx.send(DownloadEvent::UrlsReceived { urls });
-    }
-}
-
-fn provided_api_key(headers: &HeaderMap) -> Option<&str> {
-    if let Some(key) = headers
-        .get("x-api-key")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-    {
-        return Some(key);
-    }
-
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| !value.trim().is_empty())
-}
-
-fn require_api_key(state: &ApiState, headers: &HeaderMap) -> Option<axum::response::Response> {
-    let expected_key = state.api_key.as_ref()?;
-    if provided_api_key(headers).is_some_and(|provided| provided == expected_key) {
-        return None;
-    }
-
-    Some(
-        (
-            axum::http::StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "invalid api key"})),
-        )
-            .into_response(),
-    )
-}
-
-#[derive(Deserialize)]
-struct SnapshotFile {
-    id: String,
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct SnapshotPackage {
-    id: String,
-    #[serde(default)]
-    source_url: String,
-    #[serde(default)]
-    display_name: String,
-}
-
-#[derive(Deserialize)]
-struct SnapshotState {
-    #[serde(default)]
-    files: Vec<SnapshotFile>,
-    #[serde(default)]
-    packages: Vec<SnapshotPackage>,
-}
-
-fn snapshot_state(state: &ApiState) -> Result<SnapshotState, Box<axum::response::Response>> {
-    let Some(shared) = state.shared.as_ref() else {
-        return Err(Box::new(
-            (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(serde_json::json!({"error": "interactive state not enabled"})),
-            )
-                .into_response(),
-        ));
-    };
-
-    serde_json::from_str(shared.state_rx.borrow().as_str()).map_err(|_| {
-        Box::new(
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({"error": "invalid app state"})),
-            )
-                .into_response(),
-        )
-    })
-}
-
-fn resolve_package_id(
-    state: &ApiState,
-    id: Option<&str>,
-    name: Option<&str>,
-) -> Result<Option<String>, Box<axum::response::Response>> {
-    let Some(selector) = id.or(name) else {
-        return Ok(None);
-    };
-
-    let Ok(snapshot) = snapshot_state(state) else {
-        return Ok(None);
-    };
-
-    let matches: Vec<_> = snapshot
-        .packages
-        .into_iter()
-        .filter(|package| {
-            package.id == selector
-                || package.display_name == selector
-                || package.source_url == selector
-        })
-        .collect();
-    match matches.as_slice() {
-        [] => Ok(None),
-        [package] => Ok(Some(package.id.clone())),
-        _ => Err(Box::new(
-            (
-                axum::http::StatusCode::CONFLICT,
-                axum::Json(serde_json::json!({"error": "ambiguous package name; use id"})),
-            )
-                .into_response(),
-        )),
-    }
-}
-
-fn resolve_file_id(
-    state: &ApiState,
-    id: Option<String>,
-    name: Option<String>,
-) -> Result<String, Box<axum::response::Response>> {
-    if let Some(id) = id {
-        return Ok(id);
-    }
-
-    let Some(name) = name else {
-        return Err(Box::new(
-            (
-                axum::http::StatusCode::BAD_REQUEST,
-                axum::Json(serde_json::json!({"error": "missing id or name"})),
-            )
-                .into_response(),
-        ));
-    };
-
-    let snapshot = snapshot_state(state)?;
-
-    let matches: Vec<_> = snapshot
-        .files
-        .into_iter()
-        .filter(|file| file.name == name)
-        .collect();
-    match matches.as_slice() {
-        [] => Err(Box::new(
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                axum::Json(serde_json::json!({"error": "file not found"})),
-            )
-                .into_response(),
-        )),
-        [file] => Ok(file.id.clone()),
-        _ => Err(Box::new(
-            (
-                axum::http::StatusCode::CONFLICT,
-                axum::Json(serde_json::json!({"error": "ambiguous file name; use id"})),
-            )
-                .into_response(),
-        )),
-    }
-}
-
-fn header_to_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-}
-
-fn parse_forwarded_param(value: &str, key: &str) -> Option<String> {
-    for entry in value.split(',') {
-        for part in entry.split(';') {
-            let mut segments = part.trim().splitn(2, '=');
-            if let (Some(param), Some(raw_value)) = (segments.next(), segments.next())
-                && param.eq_ignore_ascii_case(key)
-            {
-                let cleaned = raw_value.trim().trim_matches('"');
-                if !cleaned.is_empty() {
-                    return Some(cleaned.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-fn infer_host(headers: &HeaderMap, state: &ApiState) -> String {
-    if let Some(host) = header_to_str(headers, "x-forwarded-host") {
-        return host.split(',').next().unwrap_or(host).trim().to_string();
-    }
-    if let Some(forwarded) = header_to_str(headers, "forwarded")
-        && let Some(host) = parse_forwarded_param(forwarded, "host")
-    {
-        return host;
-    }
-    if let Some(host) = header_to_str(headers, "host") {
-        return host.to_string();
-    }
-    state
-        .bookmarklet_host
-        .clone()
-        .unwrap_or_else(|| state.host.clone())
-}
-
-// ---------------------------------------------------------------------------
 // Existing endpoints
 // ---------------------------------------------------------------------------
 
@@ -346,9 +117,7 @@ async fn api_post_urls(
         return response;
     }
 
-    let urls = extract_urls(&payload.text);
-    let count = urls.len();
-    dispatch_urls(&state, urls.clone());
+    let (urls, count) = helpers::extract_and_dispatch_urls(&state, &payload.text);
     axum::Json(UrlResponse { added: urls, count }).into_response()
 }
 
@@ -361,12 +130,12 @@ async fn api_parse_page(
         return response;
     }
 
-    let mut urls = extract_urls(&payload.page);
+    let mut urls = crate::extract_urls(&payload.page);
     if urls.is_empty() && !payload.fallback.is_empty() {
-        urls = extract_urls(&payload.fallback);
+        urls = crate::extract_urls(&payload.fallback);
     }
     let count = urls.len();
-    dispatch_urls(&state, urls.clone());
+    helpers::dispatch_urls(&state, urls.clone());
     axum::Json(UrlResponse { added: urls, count }).into_response()
 }
 
@@ -567,6 +336,7 @@ pub async fn run_api_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::{helpers, selection};
     use axum::http::{HeaderValue, StatusCode};
     use tokio::sync::watch;
 
@@ -618,7 +388,7 @@ mod tests {
         let (state, mut rx) = state_without_shared();
         let urls = vec!["https://mega.nz/file/abc#key".to_string()];
 
-        dispatch_urls(&state, urls.clone());
+        helpers::dispatch_urls(&state, urls.clone());
 
         match rx.try_recv().expect("download event should be sent") {
             DownloadEvent::UrlsReceived { urls: received } => assert_eq!(received, urls),
@@ -631,7 +401,7 @@ mod tests {
         let (state, mut rx) = state_with_snapshot(r#"{"files":[]}"#);
         let urls = vec!["https://mega.nz/folder/abc#key".to_string()];
 
-        dispatch_urls(&state, urls.clone());
+        helpers::dispatch_urls(&state, urls.clone());
 
         match rx.try_recv().expect("UI action should be sent") {
             UiAction::AddUrls(received) => assert_eq!(received, urls),
@@ -643,7 +413,7 @@ mod tests {
     fn resolve_file_id_by_id_does_not_require_shared_state() {
         let (state, _rx) = state_without_shared();
 
-        let id = resolve_file_id(&state, Some("file-id".to_string()), None)
+        let id = selection::resolve_file_id(&state, Some("file-id".to_string()), None)
             .expect("explicit id should resolve");
 
         assert_eq!(id, "file-id");
@@ -655,19 +425,19 @@ mod tests {
             r#"{"files":[{"id":"one","name":"unique.mkv"},{"id":"two","name":"dup.mkv"},{"id":"three","name":"dup.mkv"}]}"#,
         );
 
-        let id = resolve_file_id(&state, None, Some("unique.mkv".to_string()))
+        let id = selection::resolve_file_id(&state, None, Some("unique.mkv".to_string()))
             .expect("unique name should resolve");
         assert_eq!(id, "one");
 
-        let missing = resolve_file_id(&state, None, None).expect_err("missing selector");
+        let missing = selection::resolve_file_id(&state, None, None).expect_err("missing selector");
         assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
 
-        let not_found =
-            resolve_file_id(&state, None, Some("missing.mkv".to_string())).expect_err("not found");
+        let not_found = selection::resolve_file_id(&state, None, Some("missing.mkv".to_string()))
+            .expect_err("not found");
         assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
 
-        let duplicate =
-            resolve_file_id(&state, None, Some("dup.mkv".to_string())).expect_err("duplicate");
+        let duplicate = selection::resolve_file_id(&state, None, Some("dup.mkv".to_string()))
+            .expect_err("duplicate");
         assert_eq!(duplicate.status(), StatusCode::CONFLICT);
     }
 
@@ -677,12 +447,12 @@ mod tests {
             r#"{"packages":[{"id":"pkg","source_url":"https://mega.nz/folder/pkg","display_name":"Package"},{"id":"other","source_url":"https://mega.nz/folder/other","display_name":"Other"}],"files":[]}"#,
         );
 
-        let by_id = resolve_package_id(&state, Some("pkg"), None)
+        let by_id = selection::resolve_package_id(&state, Some("pkg"), None)
             .expect("package lookup should succeed")
             .expect("package should resolve");
         assert_eq!(by_id, "pkg");
 
-        let by_name = resolve_package_id(&state, None, Some("Package"))
+        let by_name = selection::resolve_package_id(&state, None, Some("Package"))
             .expect("package lookup should succeed")
             .expect("package should resolve");
         assert_eq!(by_name, "pkg");
@@ -735,13 +505,13 @@ mod tests {
     #[test]
     fn resolve_file_id_by_name_requires_valid_shared_state() {
         let (state, _rx) = state_without_shared();
-        let unavailable =
-            resolve_file_id(&state, None, Some("file.mkv".to_string())).expect_err("no dashboard");
+        let unavailable = selection::resolve_file_id(&state, None, Some("file.mkv".to_string()))
+            .expect_err("no dashboard");
         assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         let (state, _rx) = state_with_snapshot("{not-json");
-        let invalid =
-            resolve_file_id(&state, None, Some("file.mkv".to_string())).expect_err("bad state");
+        let invalid = selection::resolve_file_id(&state, None, Some("file.mkv".to_string()))
+            .expect_err("bad state");
         assert_eq!(invalid.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
