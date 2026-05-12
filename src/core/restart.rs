@@ -5,7 +5,7 @@ use chrono::Utc;
 use indexmap::IndexMap;
 use crate::core::model::{
     DesiredState, DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
-    PackageState, PackageStatus, RuntimeState, SessionMeta, UrlId,
+    PackageState, PackageStatus, SessionMeta, UrlId,
 };
 use crate::core::session::SessionSnapshotV3;
 
@@ -252,96 +252,6 @@ pub fn reconcile_restart(
         }
     }
 
-    for (file_id, size) in complete_map {
-        if files.contains_key(&file_id) {
-            continue;
-        }
-        let package_id = state
-            .url_order
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "local".to_string());
-        packages
-            .entry(package_id.clone())
-            .or_insert_with(|| PackageState {
-                id: package_id.clone(),
-                source_url: package_id.clone(),
-                display_name: package_id.clone(),
-                status: PackageStatus::Pending,
-                error: None,
-            });
-        files.insert(
-            file_id.clone(),
-            FileState {
-                id: file_id.clone(),
-                package_id: package_id.clone(),
-                source_url: Some(package_id.clone()),
-                path: file_id.clone(),
-                size,
-                lifecycle: FileLifecycle::Complete,
-                progress: FileProgressState {
-                    verified_existing_bytes: size,
-                    downloaded_network_bytes: 0,
-                    visible_completed_bytes: size,
-                },
-                desired: DesiredState::Present,
-                runtime: RuntimeState {
-                    counts_in_run_totals: false,
-                    active: false,
-                    preexisting_complete: true,
-                    reused_chunks: 0,
-                },
-                message: None,
-            },
-        );
-        preexisting_complete_file_ids.push(file_id);
-    }
-
-    for partial in partial_map.into_values() {
-        if files.contains_key(&partial.file_id) {
-            continue;
-        }
-        let package_id = state
-            .url_order
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "local".to_string());
-        packages
-            .entry(package_id.clone())
-            .or_insert_with(|| PackageState {
-                id: package_id.clone(),
-                source_url: package_id.clone(),
-                display_name: package_id.clone(),
-                status: PackageStatus::Pending,
-                error: None,
-            });
-        files.insert(
-            partial.file_id.clone(),
-            FileState {
-                id: partial.file_id.clone(),
-                package_id: package_id.clone(),
-                source_url: Some(package_id.clone()),
-                path: partial.file_id.clone(),
-                size: partial.bytes,
-                lifecycle: FileLifecycle::Queued,
-                progress: FileProgressState {
-                    verified_existing_bytes: 0,
-                    downloaded_network_bytes: 0,
-                    visible_completed_bytes: partial.bytes,
-                },
-                desired: DesiredState::Present,
-                runtime: RuntimeState {
-                    counts_in_run_totals: true,
-                    active: false,
-                    preexisting_complete: false,
-                    reused_chunks: 0,
-                },
-                message: None,
-            },
-        );
-        resume_file_ids.push(partial.file_id);
-    }
-
     state.packages = packages;
     state.files = files;
     super::reducer::reduce(
@@ -366,6 +276,7 @@ mod tests {
     use crate::core::session::{
         FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
     };
+    use crate::core::RuntimeState;
 
     fn sample_snapshot() -> SessionSnapshotV3 {
         SessionSnapshotV3 {
@@ -597,6 +508,68 @@ mod tests {
         });
         snapshot.files.clear();
         assert!(crate::core::session::validate_snapshot(&snapshot).is_err());
+    }
+
+    #[test]
+    fn restart_does_not_synthesize_complete_files_missing_from_session() {
+        let mut snapshot = SessionSnapshotV3::new(
+            crate::config::DownloadConfig::default(),
+            SavedCredentials::encrypt("u", "p", None),
+        );
+        snapshot.urls.push(SessionUrlSnapshot {
+            url: "https://mega.nz/file/test".to_string(),
+            error: None,
+        });
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot {
+                complete_files: vec![FilesystemFile {
+                    file_id: "orphan.bin".to_string(),
+                    size: 100,
+                }],
+                partial_files: Vec::new(),
+            },
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        assert!(!restart.state.files.contains_key("orphan.bin"));
+        assert!(restart.preexisting_complete_file_ids.is_empty());
+        assert_eq!(
+            restart.resumable_urls(),
+            vec!["https://mega.nz/file/test".to_string()]
+        );
+    }
+
+    #[test]
+    fn restart_does_not_synthesize_partial_files_missing_from_session() {
+        let mut snapshot = SessionSnapshotV3::new(
+            crate::config::DownloadConfig::default(),
+            SavedCredentials::encrypt("u", "p", None),
+        );
+        snapshot.urls.push(SessionUrlSnapshot {
+            url: "https://mega.nz/file/test".to_string(),
+            error: None,
+        });
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot {
+                complete_files: Vec::new(),
+                partial_files: vec![PartialFileSnapshot {
+                    file_id: "orphan.bin".to_string(),
+                    bytes: 40,
+                    has_sidecar: true,
+                    verified_bytes: 40,
+                }],
+            },
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        assert!(!restart.state.files.contains_key("orphan.bin"));
+        assert!(restart.resume_file_ids.is_empty());
+        assert_eq!(
+            restart.resumable_urls(),
+            vec!["https://mega.nz/file/test".to_string()]
+        );
     }
 
     #[test]
