@@ -3,7 +3,7 @@ use std::collections::HashSet;
 
 use indexmap::IndexMap;
 
-use crate::core::{DownloadState, FileLifecycle, PackageStatus};
+use crate::core::{DownloadState, FileLifecycle, PackageId, PackageStatus};
 
 use super::TuiRow;
 use crate::tui::app::{FileEntry, FileStatus, OverlayFile, SortDirection, SortKey, SortState};
@@ -22,7 +22,7 @@ fn package_sort_key_for(
             .packages
             .get(&core_file.package_id)
             .map(|package| package.display_name.clone())
-            .unwrap_or_else(|| core_file.package_id.clone());
+            .unwrap_or_else(|| core_file.package_id.to_string());
         return (package_order, display_name);
     }
 
@@ -80,7 +80,7 @@ fn file_name_for_sort(core_state: &DownloadState, file_id: &str) -> String {
         .unwrap_or_else(|| file_id.to_string())
 }
 
-fn package_percent(core_state: &DownloadState, package_id: &str) -> u64 {
+fn package_percent(core_state: &DownloadState, package_id: &PackageId) -> u64 {
     if !core_state.packages.contains_key(package_id) {
         return 0;
     }
@@ -120,9 +120,9 @@ fn package_status_rank(status: PackageStatus) -> u8 {
 fn package_is_auto_expanded_for(
     expanded_packages: &HashSet<String>,
     core_state: &DownloadState,
-    package_id: &str,
+    package_id: &PackageId,
 ) -> bool {
-    expanded_packages.contains(package_id)
+    expanded_packages.contains(&package_id.to_string())
         || core_state
             .packages
             .get(package_id)
@@ -148,7 +148,7 @@ fn overlay_row_is_hidden_placeholder(file: &FileEntry, overlay: Option<&OverlayF
 fn package_has_visible_content(
     core_state: &DownloadState,
     overlay_files: &IndexMap<String, OverlayFile>,
-    package_id: &str,
+    package_id: &PackageId,
 ) -> bool {
     let Some(package) = core_state.packages.get(package_id) else {
         return false;
@@ -159,10 +159,10 @@ fn package_has_visible_content(
         || file_ids
             .iter()
             .any(|file_id| file_is_visible_in_package(core_state, file_id))
-        || (package.error.is_some() && !overlay_files.contains_key(package_id))
+        || (package.error.is_some() && !overlay_files.contains_key(&package_id.to_string()))
 }
 
-fn package_has_visible_children(core_state: &DownloadState, package_id: &str) -> bool {
+fn package_has_visible_children(core_state: &DownloadState, package_id: &PackageId) -> bool {
     core_state.packages.contains_key(package_id) && core_state
             .package_file_ids(package_id)
             .iter()
@@ -216,7 +216,7 @@ pub(super) fn visible_rows_for(
         if !package_has_visible_content(core_state, overlay_files, &package_id) {
             continue;
         }
-        rows.push(TuiRow::Package(package_id.clone()));
+        rows.push(TuiRow::Package(package_id.to_string()));
         if package_is_auto_expanded_for(expanded_packages, core_state, &package_id)
             && package_has_visible_children(core_state, &package_id)
         {
@@ -234,7 +234,7 @@ pub(super) fn visible_rows_for(
                     .into_iter()
                     .filter(|file_id| file_is_visible_in_package(core_state, file_id))
                     .map(|file_id| TuiRow::File {
-                        package_id: package_id.clone(),
+                        package_id: package_id.to_string(),
                         file_id,
                     }),
             );

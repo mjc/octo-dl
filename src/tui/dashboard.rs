@@ -270,7 +270,7 @@ impl App {
                     .core_state
                     .files
                     .get(&file.id)
-                    .map(|core_file| core_file.package_id.clone())
+                    .map(|core_file| core_file.package_id.to_string())
                     .or_else(|| {
                         self.overlay_files
                             .get(&file.id)
@@ -392,7 +392,7 @@ impl App {
                             },
                         );
                     DashboardPackageRow {
-                        id: package.id.clone(),
+                        id: package.id.to_string(),
                         source_url: package.source_url.clone(),
                         display_name: package.display_name.clone(),
                         status: package.status,
@@ -402,7 +402,7 @@ impl App {
                         downloaded_bytes: downloaded,
                         total_bytes: size,
                         percent: percent(downloaded, size),
-                        expanded: self.expanded_packages.contains(&package.id)
+                        expanded: self.expanded_packages.contains(&package.id.to_string())
                             || matches!(package.status, PackageStatus::Failed),
                         folder_label: self.folder_label_from_package_files(&package.id),
                         error: package.error.clone(),
@@ -454,7 +454,10 @@ impl App {
             .collect()
     }
 
-    fn folder_label_from_package_files(&self, package_id: &str) -> Option<String> {
+    fn folder_label_from_package_files(
+        &self,
+        package_id: &crate::core::PackageId,
+    ) -> Option<String> {
         let mut common: Option<&str> = None;
         for file_id in &self.core_state.package_file_ids(package_id) {
             let file = self.core_state.files.get(file_id)?;
@@ -569,6 +572,7 @@ fn progress_bar(downloaded: u64, total: u64, width: usize) -> String {
 mod tests {
     use super::*;
     use crate::core::{CoreEvent, ResolvedFile, ResolvedPackage};
+    use crate::test_support::package_id;
     use tokio::sync::mpsc;
 
     #[test]
@@ -577,7 +581,7 @@ mod tests {
         let mut app = App::new(9723, tx, true);
         app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
-                id: "pkg".to_string(),
+                id: package_id("pkg", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
                 display_name: "Package".to_string(),
                 files: vec![ResolvedFile {

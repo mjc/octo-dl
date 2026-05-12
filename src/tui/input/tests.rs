@@ -2,7 +2,8 @@ use super::super::app::{App, ConfirmAction, FileEntry, FileStatus, Popup, QuitPo
 use super::*;
 use crate::core::{CoreEvent, PackageCollision, ResolvedFile, ResolvedPackage};
 use crate::test_support::{
-    FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, push_file, session_snapshot,
+    FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id, push_file,
+    session_snapshot,
 };
 use crate::tui::event::DownloadRequest;
 use crate::tui::visible::TuiRow;
@@ -234,7 +235,7 @@ fn handle_main_input_delete_core_backed_entry() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "https://mega.nz/file/core".to_string(),
+            id: package_id("https://mega.nz/file/core", "https://mega.nz/file/core"),
             source_url: "https://mega.nz/file/core".to_string(),
             display_name: "Core".to_string(),
             files: vec![ResolvedFile {
@@ -254,7 +255,7 @@ fn handle_main_input_delete_core_backed_entry() {
     assert_eq!(
         app.pending_confirmation,
         Some(ConfirmAction::DeletePackage(
-            "https://mega.nz/file/core".to_string()
+            package_id("https://mega.nz/file/core", "https://mega.nz/file/core").to_string()
         ))
     );
     confirm(&mut app);
@@ -267,7 +268,7 @@ fn handle_main_input_expands_package_and_file_action_targets_child() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "pkg".to_string(),
+            id: package_id("pkg", "https://mega.nz/folder/pkg"),
             source_url: "https://mega.nz/folder/pkg".to_string(),
             display_name: "Package".to_string(),
             files: vec![
@@ -304,7 +305,7 @@ fn handle_main_input_reset_package_targets_package_row() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "pkg".to_string(),
+            id: package_id("pkg", "https://mega.nz/folder/pkg"),
             source_url: "https://mega.nz/folder/pkg".to_string(),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
@@ -321,7 +322,9 @@ fn handle_main_input_reset_package_targets_package_row() {
 
     assert_eq!(
         app.pending_confirmation,
-        Some(ConfirmAction::ResetPackage("pkg".to_string()))
+        Some(ConfirmAction::ResetPackage(
+            package_id("pkg", "https://mega.nz/folder/pkg").to_string()
+        ))
     );
 }
 
@@ -348,15 +351,18 @@ fn handle_sort_popup_selects_key_and_direction() {
 #[test]
 fn handle_sort_popup_keeps_selected_row_identity_when_order_changes() {
     let mut app = test_app();
-    for (package_id, display_name) in [("pkg-z", "Zulu"), ("pkg-a", "Alpha")] {
+    for (raw_package_id, display_name) in [("pkg-z", "Zulu"), ("pkg-a", "Alpha")] {
         app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
-                id: package_id.to_string(),
-                source_url: format!("https://mega.nz/folder/{package_id}"),
+                id: package_id(
+                    raw_package_id,
+                    &format!("https://mega.nz/folder/{raw_package_id}"),
+                ),
+                source_url: format!("https://mega.nz/folder/{raw_package_id}"),
                 display_name: display_name.to_string(),
                 files: vec![ResolvedFile {
-                    file_id: format!("{package_id}.bin"),
-                    path: format!("{package_id}.bin"),
+                    file_id: format!("{raw_package_id}.bin"),
+                    path: format!("{raw_package_id}.bin"),
                     size: 10,
                 }],
                 collision: None,
@@ -367,7 +373,9 @@ fn handle_sort_popup_keeps_selected_row_identity_when_order_changes() {
     app.file_list_state.select(Some(0));
     assert_eq!(
         app.selected_row(),
-        Some(TuiRow::Package("pkg-z".to_string()))
+        Some(TuiRow::Package(
+            package_id("pkg-z", "https://mega.nz/folder/pkg-z").to_string()
+        ))
     );
 
     handle_input(&mut app, key(KeyCode::Char('s')));
@@ -378,7 +386,9 @@ fn handle_sort_popup_keeps_selected_row_identity_when_order_changes() {
     assert_eq!(app.sort.key, SortKey::Name);
     assert_eq!(
         app.selected_row(),
-        Some(TuiRow::Package("pkg-z".to_string()))
+        Some(TuiRow::Package(
+            package_id("pkg-z", "https://mega.nz/folder/pkg-z").to_string()
+        ))
     );
     assert_eq!(app.file_list_state.selected(), Some(1));
 }
@@ -512,19 +522,26 @@ fn handle_main_input_delete_does_not_surface_failed_package_without_files() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "failed-pkg".to_string(),
+            id: package_id("failed-pkg", "https://mega.nz/folder/failed"),
             source_url: "https://mega.nz/folder/failed".to_string(),
             display_name: "Failed package".to_string(),
             files: Vec::new(),
             collision: Some(PackageCollision {
                 file_id: "duplicate.bin".to_string(),
-                existing_package_id: "existing".to_string(),
-                incoming_package_id: "failed-pkg".to_string(),
+                existing_package_id: package_id("existing", "https://mega.nz/folder/failed"),
+                incoming_package_id: package_id("failed-pkg", "https://mega.nz/folder/failed"),
             }),
         },
     });
     assert!(app.visible_rows().is_empty());
-    assert!(!app.core_state.packages.contains_key("https://mega.nz/folder/failed"));
+    assert!(
+        !app.core_state
+            .packages
+            .contains_key(&package_id(
+                "https://mega.nz/folder/failed",
+                "https://mega.nz/folder/failed"
+            ))
+    );
     handle_input(&mut app, key(KeyCode::Delete));
     assert_eq!(app.pending_confirmation, None);
 }
@@ -589,19 +606,26 @@ fn handle_main_input_shift_d_does_not_surface_failed_package_without_files() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "failed-pkg".to_string(),
+            id: package_id("failed-pkg", "https://mega.nz/folder/failed"),
             source_url: "https://mega.nz/folder/failed".to_string(),
             display_name: "Failed package".to_string(),
             files: Vec::new(),
             collision: Some(PackageCollision {
                 file_id: "duplicate.bin".to_string(),
-                existing_package_id: "existing".to_string(),
-                incoming_package_id: "failed-pkg".to_string(),
+                existing_package_id: package_id("existing", "https://mega.nz/folder/failed"),
+                incoming_package_id: package_id("failed-pkg", "https://mega.nz/folder/failed"),
             }),
         },
     });
     assert!(app.visible_rows().is_empty());
-    assert!(!app.core_state.packages.contains_key("https://mega.nz/folder/failed"));
+    assert!(
+        !app.core_state
+            .packages
+            .contains_key(&package_id(
+                "https://mega.nz/folder/failed",
+                "https://mega.nz/folder/failed"
+            ))
+    );
     handle_input(&mut app, key(KeyCode::Char('D')));
     assert!(app.visible_rows().is_empty());
 }

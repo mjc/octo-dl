@@ -1,7 +1,7 @@
 use crate::config::DownloadConfig;
 use crate::core::{
-    DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageSnapshot, RuntimeState,
-    SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
+    DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageSnapshot,
+    RuntimeState, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -64,6 +64,10 @@ pub fn test_credentials() -> SavedCredentials {
     SavedCredentials::encrypt("test@example.com", "hunter2", None)
 }
 
+pub fn package_id(raw: &str, source_url: &str) -> PackageId {
+    PackageId::parse_or_source_url(raw, source_url)
+}
+
 pub fn session_snapshot(urls: Vec<(&str, UrlFixtureStatus)>) -> SessionSnapshotV3 {
     let mut session = SessionSnapshotV3::new(DownloadConfig::default(), test_credentials());
     session.urls = urls
@@ -99,7 +103,7 @@ pub fn push_file(
         index
     } else {
         session.packages.push(PackageSnapshot {
-            id: source_url.clone(),
+            id: package_id(&source_url, &source_url),
             source_url: source_url.clone(),
             display_name: source_url.clone(),
             file_ids: Vec::new(),

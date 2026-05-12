@@ -1,11 +1,88 @@
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 use crate::config::DownloadConfig;
 use crate::core::session::SavedCredentials;
 
-pub type PackageId = String;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PackageId(uuid::Uuid);
+
+impl PackageId {
+    #[must_use]
+    pub fn new_v4() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    #[must_use]
+    pub fn for_source_url(source_url: &str) -> Self {
+        Self(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, source_url.as_bytes()))
+    }
+
+    #[must_use]
+    pub fn parse_or_source_url(raw: &str, source_url: &str) -> Self {
+        raw.parse().unwrap_or_else(|_| {
+            let scope = format!("{source_url}\0{raw}");
+            Self(uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                scope.as_bytes(),
+            ))
+        })
+    }
+
+    #[must_use]
+    pub const fn as_uuid(self) -> uuid::Uuid {
+        self.0
+    }
+}
+
+impl Default for PackageId {
+    fn default() -> Self {
+        Self::new_v4()
+    }
+}
+
+impl fmt::Display for PackageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<uuid::Uuid> for PackageId {
+    fn from(value: uuid::Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl From<PackageId> for uuid::Uuid {
+    fn from(value: PackageId) -> Self {
+        value.0
+    }
+}
+
+impl FromStr for PackageId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        uuid::Uuid::parse_str(s).map(Self)
+    }
+}
+
+impl PartialEq<&str> for PackageId {
+    fn eq(&self, other: &&str) -> bool {
+        self.to_string() == *other
+    }
+}
+
+impl PartialEq<String> for PackageId {
+    fn eq(&self, other: &String) -> bool {
+        self.to_string() == *other
+    }
+}
+
 pub type FileId = String;
 pub type UrlId = String;
 
@@ -155,11 +232,18 @@ impl DownloadState {
     }
 
     #[must_use]
-    pub fn package_file_ids(&self, package_id: &str) -> Vec<FileId> {
+    pub fn package_file_ids(&self, package_id: &PackageId) -> Vec<FileId> {
         self.files
             .values()
-            .filter(|file| file.package_id == package_id)
+            .filter(|file| &file.package_id == package_id)
             .map(|file| file.id.clone())
             .collect()
+    }
+
+    #[must_use]
+    pub fn package_for_source_url(&self, source_url: &str) -> Option<&PackageState> {
+        self.packages
+            .values()
+            .find(|package| package.source_url == source_url)
     }
 }

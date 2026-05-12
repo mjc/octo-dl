@@ -164,14 +164,18 @@ impl SessionSnapshotV3 {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        validate_snapshot(self).map_err(|error| {
+        let mut normalized = self.clone();
+        normalize_snapshot(&mut normalized).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+        })?;
+        validate_snapshot(&normalized).map_err(|error| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, error)
         })?;
         let dir = Self::state_dir();
         std::fs::create_dir_all(&dir)?;
         let path = self.state_path();
         let tmp = path.with_extension("toml.tmp");
-        let toml = toml::to_string(self)
+        let toml = toml::to_string(&normalized)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(&tmp, toml)?;
         #[cfg(unix)]
@@ -185,7 +189,7 @@ impl SessionSnapshotV3 {
 
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let contents = std::fs::read_to_string(path)?;
-        let snapshot: Self = toml::from_str(&contents)
+        let mut snapshot: Self = toml::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         if snapshot.version != 4 {
             return Err(std::io::Error::new(
@@ -193,6 +197,8 @@ impl SessionSnapshotV3 {
                 "session is not canonical version 4",
             ));
         }
+        normalize_snapshot(&mut snapshot)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         validate_snapshot(&snapshot)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         Ok(snapshot)
@@ -274,6 +280,74 @@ impl SessionSnapshotV3 {
     }
 }
 
+pub fn normalize_snapshot(snapshot: &mut SessionSnapshotV3) -> Result<(), String> {
+    if snapshot.version != 4 {
+        return Err(format!("unsupported session version {}", snapshot.version));
+    }
+
+    let existing_packages: IndexMap<_, _> = snapshot
+        .packages
+        .iter()
+        .cloned()
+        .map(|package| (package.id.clone(), package))
+        .collect();
+    let mut grouped_files = IndexMap::<PackageId, Vec<FileId>>::new();
+    let mut derived_source_urls = IndexMap::<PackageId, UrlId>::new();
+
+    for file in &snapshot.files {
+        grouped_files
+            .entry(file.package_id.clone())
+            .or_default()
+            .push(file.id.clone());
+        if let Some(source_url) = &file.source_url {
+            derived_source_urls
+                .entry(file.package_id.clone())
+                .or_insert_with(|| source_url.clone());
+        }
+    }
+
+    let mut normalized_packages = Vec::new();
+    let mut emitted_package_ids = std::collections::HashSet::new();
+    for package in &snapshot.packages {
+        let Some(file_ids) = grouped_files.get(&package.id) else {
+            continue;
+        };
+        let mut normalized = package.clone();
+        normalized.file_ids = file_ids.clone();
+        emitted_package_ids.insert(normalized.id.clone());
+        normalized_packages.push(normalized);
+    }
+
+    for (package_id, file_ids) in grouped_files {
+        if emitted_package_ids.contains(&package_id) {
+            continue;
+        }
+        let Some(source_url) = derived_source_urls.get(&package_id).cloned() else {
+            return Err(format!(
+                "file group {} has no package metadata or source_url",
+                package_id
+            ));
+        };
+        let display_name = existing_packages
+            .get(&package_id)
+            .map(|package| package.display_name.clone())
+            .unwrap_or_else(|| source_url.to_string());
+        let error = existing_packages
+            .get(&package_id)
+            .and_then(|package| package.error.clone());
+        normalized_packages.push(PackageSnapshot {
+            id: package_id,
+            source_url,
+            display_name,
+            file_ids,
+            error,
+        });
+    }
+
+    snapshot.packages = normalized_packages;
+    Ok(())
+}
+
 pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
     if snapshot.version != 4 {
         return Err(format!("unsupported session version {}", snapshot.version));
@@ -309,7 +383,7 @@ pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
         }
     }
 
-    let mut grouped_files = IndexMap::<String, Vec<String>>::new();
+    let mut grouped_files = IndexMap::<PackageId, Vec<FileId>>::new();
     let mut file_ids = std::collections::HashSet::new();
     for file in &snapshot.files {
         if !file_ids.insert(file.id.clone()) {

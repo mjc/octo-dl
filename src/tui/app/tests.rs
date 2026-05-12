@@ -10,7 +10,8 @@ use crate::{
         CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus,
     },
     test_support::{
-        FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, push_file, session_snapshot,
+        FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id, push_file,
+        session_snapshot,
     },
     tui::{DashboardUiMode, visible::TuiRow},
 };
@@ -284,7 +285,7 @@ fn progress_event_updates_visible_file_without_full_visible_sync() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "pkg".to_string(),
+            id: package_id("pkg", "https://mega.nz/file/root"),
             source_url: "https://mega.nz/file/root".to_string(),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
@@ -398,12 +399,72 @@ fn register_session_queued_file_preserves_explicit_package_identity() {
     assert!(should_queue);
     let session = app.session.as_ref().unwrap();
     assert_eq!(session.packages.len(), 1);
-    assert_eq!(session.packages[0].id, "batch-folder");
+    assert_eq!(
+        session.packages[0].id,
+        package_id("batch-folder", "https://mega.nz/folder/root")
+    );
     assert_eq!(session.packages[0].source_url, "https://mega.nz/folder/root");
     assert_eq!(session.packages[0].display_name, "Batch Folder");
     assert_eq!(session.packages[0].file_ids, vec!["episode-1.mkv".to_string()]);
     assert_eq!(session.files.len(), 1);
-    assert_eq!(session.files[0].package_id, "batch-folder");
+    assert_eq!(
+        session.files[0].package_id,
+        package_id("batch-folder", "https://mega.nz/folder/root")
+    );
+}
+
+#[test]
+fn file_queued_without_explicit_package_id_reuses_existing_package_for_url() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    app.session = Some(session_snapshot(vec![(
+        "https://mega.nz/folder/root",
+        UrlFixtureStatus::Fetched,
+    )]));
+
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id("batch-folder", "https://mega.nz/folder/root"),
+            source_url: "https://mega.nz/folder/root".to_string(),
+            display_name: "Batch Folder".to_string(),
+            files: vec![ResolvedFile {
+                file_id: "episode-1.mkv".to_string(),
+                path: "episode-1.mkv".to_string(),
+                size: 128,
+            }],
+            collision: None,
+        },
+    });
+
+    app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
+        id: "episode-1.mkv".to_string(),
+        size: 128,
+        count_toward_progress: true,
+        origin: crate::tui::event::FileOrigin {
+            package_id: None,
+            package_display_name: None,
+            source_url: "https://mega.nz/folder/root".to_string(),
+            submitted_url: "https://mega.nz/folder/root".to_string(),
+        },
+    }));
+
+    let file = app
+        .core_state
+        .files
+        .get("episode-1.mkv")
+        .expect("queued file should be present");
+    assert_eq!(
+        file.package_id,
+        package_id("batch-folder", "https://mega.nz/folder/root")
+    );
+
+    let session = app.session.as_ref().expect("session should be present");
+    assert_eq!(session.packages.len(), 1);
+    assert_eq!(
+        session.packages[0].id,
+        package_id("batch-folder", "https://mega.nz/folder/root")
+    );
 }
 
 #[test]
@@ -455,7 +516,7 @@ fn deleted_package_with_no_remaining_visible_files_is_hidden() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "pkg".to_string(),
+            id: package_id("pkg", "https://mega.nz/folder/root"),
             source_url: "https://mega.nz/folder/root".to_string(),
             display_name: "https://mega.nz/folder/root".to_string(),
             files: vec![ResolvedFile {
@@ -479,7 +540,7 @@ fn overlay_error_remains_visible_alongside_core_package_rows() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "pkg".to_string(),
+            id: package_id("pkg", "https://mega.nz/folder/good"),
             source_url: "https://mega.nz/folder/good".to_string(),
             display_name: "Good Package".to_string(),
             files: vec![ResolvedFile {
@@ -497,7 +558,9 @@ fn overlay_error_remains_visible_alongside_core_package_rows() {
     });
 
     let rows = app.visible_rows();
-    assert!(rows.contains(&TuiRow::Package("pkg".to_string())));
+    assert!(rows.contains(&TuiRow::Package(
+        package_id("pkg", "https://mega.nz/folder/good").to_string()
+    )));
     assert!(rows.contains(&TuiRow::File {
         package_id: String::new(),
         file_id: "https://mega.nz/folder/bad".to_string(),
@@ -689,7 +752,7 @@ fn session_adapter_replace_state_discards_stale_unmatched_entries() {
 fn session_adapter_replace_state_replaces_stale_package_rows() {
     let mut session = session_snapshot(vec![("https://mega.nz/file/a", UrlFixtureStatus::Pending)]);
     session.packages.push(crate::core::PackageSnapshot {
-        id: "batch-stale".to_string(),
+        id: package_id("batch-stale", "https://mega.nz/file/a"),
         source_url: "https://mega.nz/file/a".to_string(),
         display_name: "Stale Batch".to_string(),
         file_ids: vec!["old.bin".to_string()],
@@ -710,7 +773,7 @@ fn sorted_file_indices_group_by_package_before_status() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "pkg-a".to_string(),
+            id: package_id("pkg-a", "https://mega.nz/folder/a"),
             source_url: "https://mega.nz/folder/a".to_string(),
             display_name: "Package A".to_string(),
             files: vec![
@@ -730,7 +793,7 @@ fn sorted_file_indices_group_by_package_before_status() {
     });
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "pkg-b".to_string(),
+            id: package_id("pkg-b", "https://mega.nz/folder/b"),
             source_url: "https://mega.nz/folder/b".to_string(),
             display_name: "Package B".to_string(),
             files: vec![ResolvedFile {
@@ -773,7 +836,7 @@ fn pause_downloads_queues_core_backed_active_files() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "pkg".to_string(),
+            id: package_id("pkg", "https://mega.nz/folder/root"),
             source_url: "https://mega.nz/folder/root".to_string(),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
@@ -815,7 +878,7 @@ fn sync_visible_files_prunes_stale_file_ui_state() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "pkg".to_string(),
+            id: package_id("pkg", "https://mega.nz/file/test"),
             source_url: "https://mega.nz/file/test".to_string(),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
@@ -852,7 +915,7 @@ fn sync_visible_files_keeps_package_row_selected_when_failed_package_auto_expand
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "pkg".to_string(),
+            id: package_id("pkg", "https://mega.nz/folder/test"),
             source_url: "https://mega.nz/folder/test".to_string(),
             display_name: "Package".to_string(),
             files: vec![
@@ -871,7 +934,12 @@ fn sync_visible_files_keeps_package_row_selected_when_failed_package_auto_expand
         },
     });
     app.file_list_state.select(Some(0));
-    assert_eq!(app.selected_row(), Some(TuiRow::Package("pkg".to_string())));
+    assert_eq!(
+        app.selected_row(),
+        Some(TuiRow::Package(
+            package_id("pkg", "https://mega.nz/folder/test").to_string()
+        ))
+    );
 
     app.apply_core_event(CoreEvent::FileFailed {
         file_id: "episode-1.bin".to_string(),
@@ -879,6 +947,11 @@ fn sync_visible_files_keeps_package_row_selected_when_failed_package_auto_expand
     });
 
     assert_eq!(app.file_list_state.selected(), Some(0));
-    assert_eq!(app.selected_row(), Some(TuiRow::Package("pkg".to_string())));
+    assert_eq!(
+        app.selected_row(),
+        Some(TuiRow::Package(
+            package_id("pkg", "https://mega.nz/folder/test").to_string()
+        ))
+    );
     assert_eq!(app.visible_rows().len(), 3);
 }

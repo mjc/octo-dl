@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::core::{
-    CoreCommand, CoreEffect, CoreEvent, ResolvedFile, ResolvedPackage, RestartSnapshot,
+    CoreCommand, CoreEffect, CoreEvent, PackageId, ResolvedFile, ResolvedPackage, RestartSnapshot,
     SavedCredentials, SessionSnapshotV3, reconcile_restart, reduce, scan_filesystem,
     snapshot_from_state,
 };
@@ -206,7 +206,7 @@ impl App {
     ) {
         self.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
-                id: package_id.to_string(),
+                id: PackageId::parse_or_source_url(package_id, source_url),
                 source_url: source_url.to_string(),
                 display_name: package_display_name.to_string(),
                 files: vec![ResolvedFile {

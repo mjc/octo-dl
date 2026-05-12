@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::core::{
-    DesiredState, FileLifecycle, FileProgressState, FileSnapshot, RuntimeState, SessionMeta,
-    SessionRunStatus, SessionSnapshotV3, SessionUrlSnapshot,
+    DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, RuntimeState,
+    SessionMeta, SessionRunStatus, SessionSnapshotV3, SessionUrlSnapshot,
 };
 
 pub(super) enum SessionFileUpdate<'a> {
@@ -54,7 +54,7 @@ impl SessionAdapter {
         let removed_package_ids: HashSet<_> = session
             .packages
             .iter()
-            .filter(|package| package.source_url == url || package.id == url)
+            .filter(|package| package.source_url == url || package.id.to_string() == url)
             .map(|package| package.id.clone())
             .collect();
         if removed_package_ids.is_empty() {
@@ -335,6 +335,7 @@ impl SessionAdapter {
         display_name: &str,
         source_url: &str,
     ) -> &'a mut crate::core::PackageSnapshot {
+        let package_id = PackageId::parse_or_source_url(package_id, source_url);
         if let Some(index) = session
             .packages
             .iter()
@@ -344,7 +345,7 @@ impl SessionAdapter {
         }
 
         session.packages.push(crate::core::PackageSnapshot {
-            id: package_id.to_string(),
+            id: package_id,
             source_url: source_url.to_string(),
             display_name: display_name.to_string(),
             file_ids: Vec::new(),

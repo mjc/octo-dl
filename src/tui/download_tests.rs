@@ -332,7 +332,7 @@ fn same_batch_folder_package_ids_groups_matching_folders_from_distinct_sources()
 
     let group = groups.get("folder").expect("folder should be grouped");
     assert_eq!(group.display_name, "folder");
-    assert!(group.id.starts_with("batch-"));
+    assert_eq!(group.id.to_string().len(), 36);
     assert_ne!(group.id, "folder");
     assert_eq!(group.id, groups_again["folder"].id);
     assert!(!groups.contains_key("other"));
