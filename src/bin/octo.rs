@@ -359,9 +359,18 @@ async fn main() -> octo_dl::Result<()> {
 mod tests {
     use super::*;
     use std::env;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn log_env_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("log env test mutex should not be poisoned")
+    }
 
     #[test]
     fn log_pipe_writer_handles_missing_and_invalid_values() {
+        let _guard = log_env_guard();
         unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
         assert!(log_pipe_writer().is_none());
 
@@ -394,6 +403,7 @@ mod tests {
 
     #[test]
     fn native_tui_log_detachment_only_applies_to_unforwarded_tui() {
+        let _guard = log_env_guard();
         unsafe {
             env::remove_var("OCTO_TUI_LOG_ADDR");
             env::remove_var("OCTO_TUI_LOG_FD");
