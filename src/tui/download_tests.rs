@@ -348,8 +348,6 @@ fn queued_events_keep_distinct_source_urls_in_distinct_packages() {
 #[test]
 fn remote_files_match_prefers_sparse_checksum_then_size_and_date() {
     let left = BatchItemSnapshot {
-        package_id: "folder".to_string(),
-        path: "folder/file.mkv".to_string(),
         size: 100,
         modified_at: Some(123),
         sparse_checksum: Some([7; 16]),

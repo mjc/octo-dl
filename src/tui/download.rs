@@ -862,8 +862,6 @@ async fn collect_node_set(
 
 #[derive(Clone, Debug)]
 struct BatchItemSnapshot {
-    package_id: String,
-    path: String,
     size: u64,
     modified_at: Option<i64>,
     sparse_checksum: Option<[u8; 16]>,
@@ -1024,8 +1022,6 @@ fn batch_item_package_id(item: &QueuedDownload) -> String {
 
 fn batch_item_snapshot(item: &QueuedDownload) -> BatchItemSnapshot {
     BatchItemSnapshot {
-        package_id: batch_item_package_id(item),
-        path: item.item.path.clone(),
         size: item.item.node.size(),
         modified_at: item.item.node.modified_at().map(|date| date.timestamp()),
         sparse_checksum: item.item.node.sparse_checksum().copied(),
