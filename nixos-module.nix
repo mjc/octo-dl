@@ -201,6 +201,8 @@ in {
 
         umask 077
         mkdir -p "$(dirname "$OCTO_CONFIG_PATH")"
+        had_config=false
+        [ -f "$OCTO_CONFIG_PATH" ] && had_config=true
 
         encrypted="$(read_toml_value credentials encrypted "$OCTO_CONFIG_PATH" || true)"
         email="$(read_toml_value credentials email "$OCTO_CONFIG_PATH" || true)"
@@ -224,6 +226,13 @@ in {
 
         email=''${email:-\"\"}
         password=''${password:-\"\"}
+
+        if $had_config && { [ "$email" = '""' ] || [ "$password" = '""' ]; } \
+          && [ -z "''${MEGA_EMAIL:-}" ] && [ -z "''${MEGA_PASSWORD:-}" ]; then
+          echo "Refusing to rewrite $OCTO_CONFIG_PATH with empty credentials." >&2
+          echo "Set MEGA_EMAIL/MEGA_PASSWORD, or restore the existing [credentials] block first." >&2
+          exit 1
+        fi
 
         if [ -n "$OCTO_API_KEY_FILE" ] && [ -f "$OCTO_API_KEY_FILE" ]; then
           api_key="$(toml_quote "$(tr -d '\n' < "$OCTO_API_KEY_FILE")")"
