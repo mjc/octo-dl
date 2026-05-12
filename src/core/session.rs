@@ -205,31 +205,34 @@ impl SessionSnapshotV3 {
             Err(_) => return None,
         };
 
-        let mut v3_sessions = Vec::new();
+        let mut canonical_sessions = Vec::new();
         for entry in read_dir.filter_map(Result::ok) {
             let path = entry.path();
             if path.extension().is_none_or(|ext| ext != "toml") {
                 continue;
             }
             match Self::load(&path) {
-                Ok(snapshot) => v3_sessions.push((path, snapshot)),
+                Ok(snapshot) => canonical_sessions.push((path, snapshot)),
                 Err(_) => {
                     let _ = std::fs::remove_file(&path);
                 }
             }
         }
 
-        v3_sessions.sort_by(|a, b| b.1.created.cmp(&a.1.created));
-        for (path, snapshot) in v3_sessions.iter() {
+        canonical_sessions.sort_by(|a, b| b.1.created.cmp(&a.1.created));
+        for (path, snapshot) in canonical_sessions.iter() {
             if snapshot.status == SessionRunStatus::Completed {
                 let _ = std::fs::remove_file(path);
             }
         }
-        for (path, _) in v3_sessions.iter().skip(1) {
+        for (path, _) in canonical_sessions.iter().skip(1) {
             let _ = std::fs::remove_file(path);
         }
 
-        v3_sessions.into_iter().next().map(|(_, session)| session)
+        canonical_sessions
+            .into_iter()
+            .next()
+            .map(|(_, session)| session)
     }
 
     pub fn mark_file_complete(&mut self, file_id: &str) {
@@ -443,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_deletes_non_v3_sessions() {
+    fn latest_deletes_non_canonical_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
         let old_path = SessionSnapshotV3::state_dir().join("legacy.toml");
@@ -455,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_prefers_newest_v3_session() {
+    fn latest_prefers_newest_canonical_session() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
         let mut first = SessionSnapshotV3::new(
