@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use crate::{DownloadProgress, FileStats, core::ProgressDelta};
+use crate::{DownloadProgress, FileStats, core::{PackageId, ProgressDelta}};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -15,7 +15,7 @@ pub struct TokenMessage {
 
 #[derive(Debug, Clone)]
 pub struct FileOrigin {
-    pub package_id: Option<String>,
+    pub package_id: Option<PackageId>,
     pub package_display_name: Option<String>,
     pub source_url: String,
     pub submitted_url: String,

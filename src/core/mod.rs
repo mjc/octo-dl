@@ -8,7 +8,8 @@ pub mod session;
 pub use commands::CoreCommand;
 pub use model::{
     DesiredState, DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
-    PackageState, PackageStatus, RuntimeState, SessionMeta, SessionRunStatus, TotalsState, UrlId,
+    PackageKey, PackageState, PackageStatus, RuntimeState, SessionMeta, SessionRunStatus,
+    TotalsState, UrlId,
 };
 pub use progress::{DownloadProgressSink, ProgressDelta, RateEstimator};
 pub use reducer::{

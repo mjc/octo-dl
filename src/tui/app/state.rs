@@ -105,14 +105,12 @@ impl App {
                     self.status = message;
                 }
                 CoreEffect::EnqueueFileDownload { file_id } => {
-                    let Some(source_url) = self.core_state.files.get(&file_id).and_then(|file| {
-                        file.source_url.clone().or_else(|| {
-                            self.core_state
-                                .packages
-                                .get(&file.package_id)
-                                .map(|package| package.source_url.clone())
-                        })
-                    }) else {
+                    let Some(source_url) = self
+                        .core_state
+                        .files
+                        .get(&file_id)
+                        .and_then(|file| file.source_url.clone())
+                    else {
                         continue;
                     };
                     queued_file_map
@@ -206,7 +204,11 @@ impl App {
     ) {
         self.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
-                id: PackageId::parse_or_source_url(package_id, source_url),
+                id: PackageId::parse_or_key(
+                    package_id,
+                    &crate::core::PackageKey::new(package_display_name),
+                ),
+                key: crate::core::PackageKey::new(package_display_name),
                 source_url: source_url.to_string(),
                 display_name: package_display_name.to_string(),
                 files: vec![ResolvedFile {
@@ -339,13 +341,12 @@ impl App {
         let resumed_urls = SessionAdapter::apply_restart(&mut session, restart);
         self.urls.clone_from(&resumed_urls);
         for url in resumed_urls {
-            let package = restart
+            let has_files_for_url = restart
                 .state
-                .packages
+                .files
                 .values()
-                .find(|package| package.source_url == url);
-            if package.is_none_or(|package| restart.state.package_file_ids(&package.id).is_empty())
-            {
+                .any(|file| file.source_url.as_deref() == Some(url.as_str()));
+            if !has_files_for_url {
                 self.queue_url_placeholder(url.clone());
                 let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
             }

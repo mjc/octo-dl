@@ -237,6 +237,7 @@ fn handle_main_input_delete_core_backed_entry() {
         package: ResolvedPackage {
             id: package_id("https://mega.nz/file/core", "https://mega.nz/file/core"),
             source_url: "https://mega.nz/file/core".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/core".to_string().clone()),
             display_name: "Core".to_string(),
             files: vec![ResolvedFile {
                 file_id: "core.bin".to_string(),
@@ -270,6 +271,7 @@ fn handle_main_input_expands_package_and_file_action_targets_child() {
         package: ResolvedPackage {
             id: package_id("pkg", "https://mega.nz/folder/pkg"),
             source_url: "https://mega.nz/folder/pkg".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
             display_name: "Package".to_string(),
             files: vec![
                 ResolvedFile {
@@ -307,6 +309,7 @@ fn handle_main_input_reset_package_targets_package_row() {
         package: ResolvedPackage {
             id: package_id("pkg", "https://mega.nz/folder/pkg"),
             source_url: "https://mega.nz/folder/pkg".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
                 file_id: "file.bin".to_string(),
@@ -360,6 +363,7 @@ fn handle_sort_popup_keeps_selected_row_identity_when_order_changes() {
                     &format!("https://mega.nz/folder/{raw_package_id}"),
                 ),
                 source_url: format!("https://mega.nz/folder/{raw_package_id}"),
+                key: crate::core::PackageKey::new(format!("https://mega.nz/folder/{raw_package_id}").clone()),
                 display_name: display_name.to_string(),
                 files: vec![ResolvedFile {
                     file_id: format!("{raw_package_id}.bin"),
@@ -527,6 +531,7 @@ fn handle_main_input_delete_does_not_surface_failed_package_without_files() {
         package: ResolvedPackage {
             id: package_id("failed-pkg", "https://mega.nz/folder/failed"),
             source_url: "https://mega.nz/folder/failed".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/failed".to_string().clone()),
             display_name: "Failed package".to_string(),
             files: Vec::new(),
             collision: Some(PackageCollision {
@@ -611,6 +616,7 @@ fn handle_main_input_shift_d_does_not_surface_failed_package_without_files() {
         package: ResolvedPackage {
             id: package_id("failed-pkg", "https://mega.nz/folder/failed"),
             source_url: "https://mega.nz/folder/failed".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/failed".to_string().clone()),
             display_name: "Failed package".to_string(),
             files: Vec::new(),
             collision: Some(PackageCollision {

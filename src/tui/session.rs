@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::core::{
-    DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, RuntimeState,
-    SessionMeta, SessionRunStatus, SessionSnapshotV3, SessionUrlSnapshot,
+    DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
+    RuntimeState, SessionMeta, SessionRunStatus, SessionSnapshotV3, SessionUrlSnapshot,
 };
 
 pub(super) enum SessionFileUpdate<'a> {
@@ -59,23 +59,13 @@ impl SessionAdapter {
     }
 
     pub(super) fn remove_url(session: &mut SessionSnapshotV3, url: &str) {
-        let removed_package_ids: HashSet<_> = session
-            .packages
-            .iter()
-            .filter(|package| package.source_url == url || package.id.to_string() == url)
-            .map(|package| package.id.clone())
-            .collect();
-        if removed_package_ids.is_empty() {
-            return;
-        }
-
         session
             .urls
             .retain(|entry| entry.url != url);
-        session.packages.retain(|package| package.source_url != url);
         session
             .files
-            .retain(|file| !removed_package_ids.contains(&file.package_id));
+            .retain(|file| file.source_url.as_deref() != Some(url) && file.id != url);
+        prune_empty_packages(session);
     }
 
     pub(super) fn update_file(
@@ -123,21 +113,12 @@ impl SessionAdapter {
     pub(super) fn skipped_paths_by_url(
         session: &SessionSnapshotV3,
     ) -> HashMap<String, HashSet<String>> {
-        let package_urls: HashMap<_, _> = session
-            .packages
-            .iter()
-            .map(|package| (package.id.clone(), package.source_url.clone()))
-            .collect();
         let mut skipped = HashMap::<String, HashSet<String>>::new();
         for file in &session.files {
             if !matches!(file.lifecycle, FileLifecycle::Skipped) {
                 continue;
             }
-            let Some(url) = file
-                .source_url
-                .as_ref()
-                .or_else(|| package_urls.get(&file.package_id))
-            else {
+            let Some(url) = file.source_url.as_ref() else {
                 continue;
             };
             skipped
@@ -187,13 +168,13 @@ impl SessionAdapter {
                 .find(|entry| entry.id == package.id)
             {
                 existing.display_name = package.display_name.clone();
-                existing.source_url = package.source_url.clone();
+                existing.key = package.key.clone();
                 existing.file_ids = restart.state.package_file_ids(&package.id);
                 existing.error = package.error.clone();
             } else {
                 session.packages.push(crate::core::PackageSnapshot {
                     id: package.id.clone(),
-                    source_url: package.source_url.clone(),
+                    key: package.key.clone(),
                     display_name: package.display_name.clone(),
                     file_ids: restart.state.package_file_ids(&package.id),
                     error: package.error.clone(),
@@ -239,21 +220,19 @@ impl SessionAdapter {
         session.packages.retain(|package| !package.file_ids.is_empty());
 
         let has_pending_urls = session.urls.iter().any(|tracked_url| {
-            if let Some(package) = session
-                .packages
-                .iter()
-                .find(|package| package.source_url == tracked_url.url)
-            {
-                session.files.iter().any(|file| {
-                    file.package_id == package.id
-                        && !matches!(
-                            file.lifecycle,
-                            FileLifecycle::Complete | FileLifecycle::Skipped | FileLifecycle::Deleted
-                        )
-                })
-            } else {
-                true
-            }
+            !session.files.iter().any(|file| {
+                file.source_url.as_deref() == Some(tracked_url.url.as_str())
+                    && matches!(
+                        file.lifecycle,
+                        FileLifecycle::Complete | FileLifecycle::Skipped | FileLifecycle::Deleted
+                    )
+            }) || session.files.iter().any(|file| {
+                file.source_url.as_deref() == Some(tracked_url.url.as_str())
+                    && !matches!(
+                        file.lifecycle,
+                        FileLifecycle::Complete | FileLifecycle::Skipped | FileLifecycle::Deleted
+                    )
+            })
         });
 
         if session.files.is_empty() && !has_pending_urls {
@@ -280,13 +259,8 @@ impl SessionAdapter {
             Self::ensure_url(session, submitted_url);
         }
         let package_id = {
-            let package = Self::ensure_package(
-                session,
-                package_id,
-                package_display_name,
-                source_url,
-            );
-            package.id.clone()
+            let package = Self::ensure_package(session, package_id, package_display_name);
+            package.id
         };
         if let Some(file) = session
             .files
@@ -355,13 +329,13 @@ impl SessionAdapter {
         session: &'a mut SessionSnapshotV3,
         package_id: &str,
         display_name: &str,
-        source_url: &str,
     ) -> &'a mut crate::core::PackageSnapshot {
-        let package_id = PackageId::parse_or_source_url(package_id, source_url);
+        let package_key = PackageKey::new(display_name);
+        let package_id = PackageId::parse_or_key(package_id, &package_key);
         if let Some(index) = session
             .packages
             .iter()
-            .position(|package| package.source_url == source_url)
+            .position(|package| package.id == package_id || package.key == package_key)
         {
             let previous_id = session.packages[index].id;
             if previous_id != package_id {
@@ -372,23 +346,14 @@ impl SessionAdapter {
                 }
             }
             session.packages[index].id = package_id;
-            session.packages[index].source_url = source_url.to_string();
-            session.packages[index].display_name = display_name.to_string();
-            return &mut session.packages[index];
-        }
-        if let Some(index) = session
-            .packages
-            .iter()
-            .position(|package| package.id == package_id)
-        {
-            session.packages[index].source_url = source_url.to_string();
+            session.packages[index].key = package_key;
             session.packages[index].display_name = display_name.to_string();
             return &mut session.packages[index];
         }
 
         session.packages.push(crate::core::PackageSnapshot {
             id: package_id,
-            source_url: source_url.to_string(),
+            key: package_key,
             display_name: display_name.to_string(),
             file_ids: Vec::new(),
             error: None,
@@ -413,4 +378,11 @@ impl SessionAdapter {
             message: file.message.clone(),
         }
     }
+}
+
+fn prune_empty_packages(session: &mut SessionSnapshotV3) {
+    let active_package_ids: HashSet<_> = session.files.iter().map(|file| file.package_id).collect();
+    session
+        .packages
+        .retain(|package| active_package_ids.contains(&package.id));
 }

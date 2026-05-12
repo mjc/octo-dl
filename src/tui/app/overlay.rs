@@ -80,14 +80,7 @@ impl App {
                 .core_state
                 .files
                 .get(id)
-                .and_then(|core_file| {
-                    core_file.source_url.clone().or_else(|| {
-                        self.core_state
-                            .packages
-                            .get(&core_file.package_id)
-                            .map(|package| package.source_url.clone())
-                    })
-                })
+                .and_then(|core_file| core_file.source_url.clone())
                 .or_else(|| {
                     self.overlay_files
                         .get(id)

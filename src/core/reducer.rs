@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::core::model::{
     DesiredState, DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
-    PackageState, PackageStatus, RuntimeState, SessionRunStatus, UrlId,
+    PackageKey, PackageState, PackageStatus, RuntimeState, SessionRunStatus, UrlId,
 };
 use crate::core::restart::RestartSnapshot;
 use crate::core::session::{FileSnapshot, PackageSnapshot, SessionSnapshotV3};
@@ -24,6 +24,7 @@ pub struct PackageCollision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPackage {
     pub id: PackageId,
+    pub key: PackageKey,
     pub source_url: UrlId,
     pub display_name: String,
     pub files: Vec<ResolvedFile>,
@@ -129,7 +130,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 }
                 state
                     .packages
-                    .retain(|_, existing| existing.source_url != package.source_url);
+                    .retain(|_, existing| existing.key != package.key);
                 recompute_derived(state);
                 if persist_session {
                     effects.push(CoreEffect::PersistSession(snapshot_from_state(state)));
@@ -142,7 +143,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             let previous_package = state
                 .packages
                 .iter()
-                .find(|(_, existing)| existing.source_url == package.source_url)
+                .find(|(_, existing)| existing.key == package.key)
                 .map(|(id, existing)| (id.clone(), existing.clone()));
 
             if let Some((previous_package_id, _)) = previous_package.as_ref()
@@ -160,7 +161,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 .as_ref()
                 .map(|(_, existing)| existing)
                 .is_some_and(|existing| {
-                    existing.display_name != existing.source_url
+                    existing.display_name != existing.key.as_str()
                         && package.display_name == package.source_url
                 });
             let package_display_name = if preserve_display_name {
@@ -177,12 +178,12 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 .entry(incoming_package_id.clone())
                 .or_insert_with(|| PackageState {
                     id: incoming_package_id.clone(),
-                    source_url: package.source_url.clone(),
+                    key: package.key.clone(),
                     display_name: package_display_name.clone(),
                     status: PackageStatus::Pending,
                     error: None,
                 });
-            package_entry.source_url = package.source_url.clone();
+            package_entry.key = package.key.clone();
             if !preserve_display_name {
                 package_entry.display_name = package_display_name;
             }
@@ -422,7 +423,7 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
             }
             Some(PackageSnapshot {
                 id: package.id.clone(),
-                source_url: package.source_url.clone(),
+                key: package.key.clone(),
                 display_name: package.display_name.clone(),
                 file_ids,
                 error: package.error.clone(),
@@ -442,14 +443,8 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
                 error: state
                     .packages
                     .values()
-                    .find(|package| package.source_url == *url)
-                    .and_then(|package| {
-                        state
-                            .package_file_ids(&package.id)
-                            .is_empty()
-                            .then(|| package.error.clone())
-                            .flatten()
-                    }),
+                    .find(|package| package_has_source_url(state, &package.id, url))
+                    .and_then(|package| package.error.clone()),
             })
             .collect(),
         packages,
@@ -472,6 +467,12 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
         config: state.session_meta.config.clone(),
         credentials: state.session_meta.credentials.clone(),
     }
+}
+
+fn package_has_source_url(state: &DownloadState, package_id: &PackageId, source_url: &str) -> bool {
+    state.files.values().any(|file| {
+        &file.package_id == package_id && file.source_url.as_deref() == Some(source_url)
+    })
 }
 
 fn recompute_derived(state: &mut DownloadState) {
@@ -571,12 +572,12 @@ fn recompute_derived(state: &mut DownloadState) {
 }
 
 fn debug_assert_invariants(state: &DownloadState) {
-    let mut package_urls = std::collections::HashSet::new();
+    let mut package_keys = std::collections::HashSet::new();
     for (package_id, package) in &state.packages {
         debug_assert_eq!(package_id, &package.id, "package map key must equal package.id");
         debug_assert!(
-            package_urls.insert(package.source_url.clone()),
-            "only one package may exist per source_url"
+            package_keys.insert(package.key.clone()),
+            "only one package may exist per package key"
         );
         let file_ids = state.package_file_ids(package_id);
         debug_assert!(
@@ -622,7 +623,7 @@ mod tests {
             pkg_id,
             PackageState {
                 id: pkg_id,
-                source_url: "pkg".to_string(),
+                key: crate::core::PackageKey::new("pkg".to_string().clone()),
                 display_name: "pkg".to_string(),
                 status: PackageStatus::Pending,
                 error: None,
@@ -658,6 +659,7 @@ mod tests {
                 package: ResolvedPackage {
                     id: package_id("pkg", "pkg"),
                     source_url: "pkg".to_string(),
+                    key: crate::core::PackageKey::new("pkg".to_string().clone()),
                     display_name: "pkg".to_string(),
                     files: vec![
                         ResolvedFile {
@@ -698,6 +700,7 @@ mod tests {
                 package: ResolvedPackage {
                     id: package_id("resolved-folder", "https://mega.nz/folder/test"),
                     source_url: "https://mega.nz/folder/test".to_string(),
+                    key: crate::core::PackageKey::new("https://mega.nz/folder/test".to_string().clone()),
                     display_name: "Resolved Folder".to_string(),
                     files: vec![ResolvedFile {
                         file_id: "a.bin".to_string(),
@@ -720,7 +723,7 @@ mod tests {
         assert_eq!(state.packages.len(), 1);
         let resolved_id = package_id("resolved-folder", "https://mega.nz/folder/test");
         assert_eq!(
-            state.packages[&resolved_id].source_url,
+            state.packages[&resolved_id].key.as_str(),
             "https://mega.nz/folder/test"
         );
         assert_eq!(state.package_file_ids(&resolved_id), vec!["a.bin".to_string()]);
@@ -737,6 +740,7 @@ mod tests {
                 package: ResolvedPackage {
                     id: package_id("pkg", "https://mega.nz/folder/persist"),
                     source_url: "https://mega.nz/folder/persist".to_string(),
+                    key: crate::core::PackageKey::new("https://mega.nz/folder/persist".to_string().clone()),
                     display_name: "Persist".to_string(),
                     files: vec![ResolvedFile {
                         file_id: "episode-1.mkv".to_string(),
@@ -760,6 +764,7 @@ mod tests {
                 package: ResolvedPackage {
                     id: package_id("failed-pkg", "https://mega.nz/folder/failed"),
                     source_url: "https://mega.nz/folder/failed".to_string(),
+                    key: crate::core::PackageKey::new("https://mega.nz/folder/failed".to_string().clone()),
                     display_name: "Failed package".to_string(),
                     files: Vec::new(),
                     collision: Some(PackageCollision {
@@ -791,7 +796,7 @@ mod tests {
             existing_id,
             PackageState {
                 id: existing_id,
-                source_url: "https://mega.nz/folder/test".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/test".to_string().clone()),
                 display_name: "Folder".to_string(),
                 status: PackageStatus::Queued,
                 error: None,
@@ -825,6 +830,7 @@ mod tests {
                         "https://mega.nz/folder/test",
                     ),
                     source_url: "https://mega.nz/folder/test".to_string(),
+                    key: crate::core::PackageKey::new("https://mega.nz/folder/test".to_string().clone()),
                     display_name: "Folder".to_string(),
                     files: vec![ResolvedFile {
                         file_id: "b.bin".to_string(),
@@ -842,7 +848,7 @@ mod tests {
             "https://mega.nz/folder/test",
         );
         let package = &state.packages[&canonical_id];
-        assert_eq!(package.source_url, "https://mega.nz/folder/test");
+        assert_eq!(package.key.as_str(), "https://mega.nz/folder/test");
         assert_eq!(
             state.package_file_ids(&canonical_id),
             vec!["a.bin".to_string(), "b.bin".to_string()]
@@ -860,7 +866,7 @@ mod tests {
             existing_id,
             PackageState {
                 id: existing_id,
-                source_url: "https://mega.nz/folder/pkg-a".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg-a".to_string().clone()),
                 display_name: "Package A".to_string(),
                 status: PackageStatus::Queued,
                 error: None,
@@ -894,6 +900,7 @@ mod tests {
                         "https://mega.nz/folder/pkg-a",
                     ),
                     source_url: "https://mega.nz/folder/pkg-a".to_string(),
+                    key: crate::core::PackageKey::new("https://mega.nz/folder/pkg-a".to_string().clone()),
                     display_name: "https://mega.nz/folder/pkg-a".to_string(),
                     files: vec![ResolvedFile {
                         file_id: "a.bin".to_string(),
@@ -911,7 +918,7 @@ mod tests {
             "https://mega.nz/folder/pkg-a",
         );
         let package = &state.packages[&canonical_id];
-        assert_eq!(package.source_url, "https://mega.nz/folder/pkg-a");
+        assert_eq!(package.key.as_str(), "https://mega.nz/folder/pkg-a");
         assert_eq!(package.display_name, "Package A");
         assert_eq!(state.package_file_ids(&canonical_id), vec!["a.bin".to_string()]);
     }
@@ -927,7 +934,7 @@ mod tests {
             old_id,
             PackageState {
                 id: old_id,
-                source_url: "https://mega.nz/folder/test".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/test".to_string().clone()),
                 display_name: "https://mega.nz/folder/test".to_string(),
                 status: PackageStatus::Queued,
                 error: None,
@@ -958,6 +965,7 @@ mod tests {
                 package: ResolvedPackage {
                     id: package_id("batch-folder", "https://mega.nz/folder/test"),
                     source_url: "https://mega.nz/folder/test".to_string(),
+                    key: crate::core::PackageKey::new("https://mega.nz/folder/test".to_string().clone()),
                     display_name: "Folder".to_string(),
                     files: vec![ResolvedFile {
                         file_id: "b.bin".to_string(),
@@ -973,7 +981,7 @@ mod tests {
         assert!(!state.packages.contains_key(&old_id));
         let batch_id = package_id("batch-folder", "https://mega.nz/folder/test");
         let package = &state.packages[&batch_id];
-        assert_eq!(package.source_url, "https://mega.nz/folder/test");
+        assert_eq!(package.key.as_str(), "https://mega.nz/folder/test");
         assert_eq!(package.display_name, "Folder");
         assert_eq!(
             state.package_file_ids(&batch_id),
@@ -1030,6 +1038,7 @@ mod tests {
                 package: ResolvedPackage {
                     id: package_id("pkg", "pkg"),
                     source_url: "pkg".to_string(),
+                    key: crate::core::PackageKey::new("pkg".to_string().clone()),
                     display_name: "pkg".to_string(),
                     files: vec![
                         ResolvedFile {
