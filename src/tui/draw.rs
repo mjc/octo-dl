@@ -11,13 +11,11 @@ use ratatui::widgets::{Block, Borders, Gauge, List, Paragraph};
 use crate::format_bytes;
 
 use self::dashboard::{
-    controls_label_from_snapshot, dashboard_aggregate_progress_label, dashboard_row_item,
+    controls_label_from_snapshot, dashboard_aggregate_progress_label, dashboard_row_items,
     dashboard_status_line, focused_url_input_view, truncate_end,
 };
 use super::app::{App, Popup};
-use super::dashboard::{
-    DashboardChrome, DashboardUiMode, DownloadDashboardState, clamp_selection,
-};
+use super::dashboard::{DashboardChrome, DashboardUiMode, DownloadDashboardState, clamp_selection};
 
 pub fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     let state = app.dashboard_state(DashboardUiMode::Tui, false);
@@ -192,12 +190,7 @@ fn draw_dashboard_file_list(
     clamp_selection(list_state, state.rows.len());
     let content_width = usize::from(area.width.saturating_sub(4));
     let selected = list_state.selected();
-    let items = state
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| dashboard_row_item(state, row, selected == Some(index), content_width))
-        .collect::<Vec<_>>();
+    let items = dashboard_row_items(state, selected, content_width);
     let file_list = List::new(items)
         .block(Block::default().borders(Borders::ALL))
         .highlight_symbol("")

@@ -369,6 +369,8 @@ fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
 
 #[test]
 fn ui_add_urls_enqueues_each_unique_url_once() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
     let mut url_rx = app.url_rx.take().expect("url_rx should exist");

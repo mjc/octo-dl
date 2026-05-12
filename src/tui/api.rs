@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 
-use self::helpers::{infer_host, require_api_key, send_ui_action};
+use self::helpers::{infer_host, infer_origin, require_api_key, send_ui_action};
 use self::selection::{resolve_file_id, resolve_package_id};
 use super::app::{SharedAppState, UiAction};
 use super::bookmarklet;
@@ -134,6 +134,9 @@ async fn api_parse_page(
     }
 
     let mut urls = crate::extract_urls(&payload.page);
+    if urls.is_empty() {
+        urls = helpers::extract_and_dispatch_urls_from_html(&payload.page);
+    }
     if urls.is_empty() && !payload.fallback.is_empty() {
         urls = crate::extract_urls(&payload.fallback);
     }
@@ -144,6 +147,7 @@ async fn api_parse_page(
 
 async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
     let fallback_host = infer_host(&headers, &state);
+    let fallback_origin = infer_origin(&headers, &state);
     let api_key_header = state.api_key.as_ref().map_or_else(
         || "{}".to_string(),
         |key| {
@@ -155,6 +159,7 @@ async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> 
     );
 
     Html(bookmarklet::bookmarklet_html(
+        &fallback_origin,
         &fallback_host,
         &api_key_header,
     ))

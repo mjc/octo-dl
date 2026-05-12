@@ -4,6 +4,7 @@ use super::helpers::{self, infer_host, require_api_key};
 use super::selection;
 use super::*;
 use axum::http::{HeaderValue, StatusCode};
+use tempfile::tempdir;
 use tokio::sync::watch;
 
 fn state_without_shared() -> (ApiState, mpsc::UnboundedReceiver<DownloadEvent>) {
@@ -166,6 +167,35 @@ async fn dashboard_url_submission_still_requires_configured_api_key() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn parse_api_extracts_url_from_syntax_highlighted_code_html() {
+    let dir = tempdir().unwrap();
+    let _guard = crate::test_support::StateDirectoryGuard::set(dir.path());
+    let (state, mut rx) = state_with_snapshot(r#"{"files":[]}"#);
+
+    let response = api_parse_page(
+        State(state),
+        HeaderMap::new(),
+        axum::Json(ParseRequest {
+            page: r#"<pre><code><span>https://mega.nz/</span><span>file/abc123#key</span></code></pre>"#.to_string(),
+            fallback: String::new(),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    match rx.try_recv().expect("UI action should be sent") {
+        UiAction::AddUrls(received) => {
+            assert_eq!(
+                received,
+                vec!["https://mega.nz/file/abc123#key".to_string()]
+            )
+        }
+        other => panic!("unexpected UI action: {other:?}"),
+    }
 }
 
 #[test]

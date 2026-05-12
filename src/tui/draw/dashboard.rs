@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
@@ -11,36 +13,49 @@ use crate::tui::dashboard::{
     file_detail as dashboard_file_detail,
 };
 
-pub(super) fn dashboard_row_item(
+pub(super) fn dashboard_row_items(
     state: &DownloadDashboardState,
-    row: &DashboardRow,
-    selected: bool,
+    selected: Option<usize>,
     content_width: usize,
-) -> ListItem<'static> {
-    match row {
-        DashboardRow::Package { package_id } => state
-            .packages
-            .iter()
-            .find(|package| package.id == *package_id)
-            .map(|package| dashboard_package_item(package, selected, content_width))
-            .unwrap_or_else(|| ListItem::new(Line::from(""))),
-        DashboardRow::File {
-            package_id,
-            file_id,
-        } => state
-            .files
-            .iter()
-            .find(|file| file.id == *file_id)
-            .map(|file| {
-                dashboard_file_item(
-                    file,
-                    package_id.is_empty() && !file.package_id.is_empty(),
-                    selected,
-                    content_width,
-                )
-            })
-            .unwrap_or_else(|| ListItem::new(Line::from(""))),
-    }
+) -> Vec<ListItem<'static>> {
+    let packages: HashMap<&str, &DashboardPackageRow> = state
+        .packages
+        .iter()
+        .map(|package| (package.id.as_str(), package))
+        .collect();
+    let files: HashMap<&str, &DashboardFileRow> = state
+        .files
+        .iter()
+        .map(|file| (file.id.as_str(), file))
+        .collect();
+
+    state
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| match row {
+            DashboardRow::Package { package_id } => packages
+                .get(package_id.as_str())
+                .map(|package| {
+                    dashboard_package_item(package, selected == Some(index), content_width)
+                })
+                .unwrap_or_else(|| ListItem::new(Line::from(""))),
+            DashboardRow::File {
+                package_id,
+                file_id,
+            } => files
+                .get(file_id.as_str())
+                .map(|file| {
+                    dashboard_file_item(
+                        file,
+                        package_id.is_empty() && !file.package_id.is_empty(),
+                        selected == Some(index),
+                        content_width,
+                    )
+                })
+                .unwrap_or_else(|| ListItem::new(Line::from(""))),
+        })
+        .collect()
 }
 
 fn dashboard_file_item(
@@ -65,21 +80,23 @@ fn dashboard_file_item(
     };
     let detail = dashboard_file_detail(file);
     let prefix = format!("   {icon} ");
-    let prefix_width = prefix.chars().count();
-    let detail_width = detail.chars().count().min(content_width / 2);
+    let prefix_width = text_width(&prefix);
+    let detail_width = text_width(&detail).min(content_width / 2);
     let detail = truncate_end(&detail, detail_width);
+    let detail_width = text_width(&detail);
     let name = truncate_end(
         &format!("{prefix_label}{}", file.name),
         content_width
             .saturating_sub(prefix_width)
-            .saturating_sub(detail.chars().count())
+            .saturating_sub(detail_width)
             .saturating_sub(1),
     );
+    let name_width = text_width(&name);
     let filler = " ".repeat(
         content_width
             .saturating_sub(prefix_width)
-            .saturating_sub(name.chars().count())
-            .saturating_sub(detail.chars().count()),
+            .saturating_sub(name_width)
+            .saturating_sub(detail_width),
     );
     let mut row_style = Style::default().fg(color);
     if selected {
@@ -110,21 +127,23 @@ fn dashboard_package_item(
     };
     let detail = dashboard_package_detail(package, speed_label, content_width);
     let prefix = format!(" {marker} {icon} ");
-    let prefix_width = prefix.chars().count();
-    let detail_width = detail.chars().count().min(content_width / 2);
+    let prefix_width = text_width(&prefix);
+    let detail_width = text_width(&detail).min(content_width / 2);
     let detail = truncate_end(&detail, detail_width);
+    let detail_width = text_width(&detail);
     let name = truncate_end(
         &display_dashboard_package_name(package),
         content_width
             .saturating_sub(prefix_width)
-            .saturating_sub(detail.chars().count())
+            .saturating_sub(detail_width)
             .saturating_sub(1),
     );
+    let name_width = text_width(&name);
     let filler = " ".repeat(
         content_width
             .saturating_sub(prefix_width)
-            .saturating_sub(name.chars().count())
-            .saturating_sub(detail.chars().count()),
+            .saturating_sub(name_width)
+            .saturating_sub(detail_width),
     );
     let mut row_style = Style::default().fg(color);
     if selected {
@@ -150,7 +169,7 @@ fn dashboard_package_detail(
         format_bytes(package.total_bytes),
         package.percent
     );
-    if full.chars().count() <= content_width / 2 {
+    if text_width(&full) <= content_width / 2 {
         return full;
     }
     let compact = format!(
@@ -403,7 +422,11 @@ fn compact_label(value: &str) -> String {
 }
 
 fn take_last_chars(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
+    if value.is_ascii() {
+        let start = value.len().saturating_sub(max_chars);
+        return value[start..].to_string();
+    }
+    if text_width(value) <= max_chars {
         return value.to_string();
     }
 
@@ -421,7 +444,18 @@ pub(super) fn truncate_end(value: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
     }
-    if value.chars().count() <= max_chars {
+    if value.is_ascii() {
+        if value.len() <= max_chars {
+            return value.to_string();
+        }
+        if max_chars <= 1 {
+            return "\u{2026}".to_string();
+        }
+        let mut truncated = value[..max_chars.saturating_sub(1)].to_string();
+        truncated.push('\u{2026}');
+        return truncated;
+    }
+    if text_width(value) <= max_chars {
         return value.to_string();
     }
     if max_chars <= 1 {
@@ -433,4 +467,12 @@ pub(super) fn truncate_end(value: &str, max_chars: usize) -> String {
         .collect::<String>();
     truncated.push('\u{2026}');
     truncated
+}
+
+fn text_width(value: &str) -> usize {
+    if value.is_ascii() {
+        value.len()
+    } else {
+        value.chars().count()
+    }
 }
