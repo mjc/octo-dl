@@ -2,7 +2,11 @@
 
 /// Returns the bookmarklet helper page.
 #[must_use]
-pub fn bookmarklet_html(fallback_host: &str, api_key_header: &str) -> String {
+pub fn bookmarklet_html(
+    fallback_origin: &str,
+    fallback_host: &str,
+    api_key_header: &str,
+) -> String {
     r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -25,11 +29,12 @@ pub fn bookmarklet_html(fallback_host: &str, api_key_header: &str) -> String {
 <body>
 <h1>octo-dl bookmarklet</h1>
 <p>Drag this link to your bookmarks bar:</p>
-<a class="bookmarklet" href="javascript:void(function(){var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var proto=window.location.protocol;var h=proto+'//__FALLBACK_HOST__';var headers=Object.assign({'Content-Type':'application/json'},__API_KEY_HEADER__);fetch(h+'/api/parse',{method:'POST',headers:headers,body:JSON.stringify({page:page,fallback:selected})}).then(function(r){return r.json()}).then(function(d){if(d.count>0){alert('Sent '+d.count+' URL(s) to octo-dl')}else{alert('No URLs found on this page')}}).catch(function(e){alert('Error: '+e)})})()">Send to octo-dl</a>
+<a class="bookmarklet" href="javascript:void(function(){var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var h='__FALLBACK_ORIGIN__';var headers=Object.assign({'Content-Type':'application/json'},__API_KEY_HEADER__);fetch(h+'/api/parse',{method:'POST',headers:headers,body:JSON.stringify({page:page,fallback:selected})}).then(function(r){if(!r.ok){return r.text().then(function(t){throw new Error('HTTP '+r.status+(t?': '+t:''))})}return r.json()}).then(function(d){if(d.count>0){alert('Sent '+d.count+' URL(s) to octo-dl')}else{alert('No URLs found on this page')}}).catch(function(e){alert('Error: '+e)})})()">Send to octo-dl</a>
 <p>Click it on any page to send the page HTML (with selected text as fallback) to octo-dl for download.</p>
 <p>Configured to use <code>__FALLBACK_HOST__</code></p>
 </body>
 </html>"#
+        .replace("__FALLBACK_ORIGIN__", fallback_origin)
         .replace("__FALLBACK_HOST__", fallback_host)
         .replace("__API_KEY_HEADER__", api_key_header)
 }
@@ -42,11 +47,18 @@ mod tests {
 
     #[test]
     fn bookmarklet_mentions_fallback_host_and_api_key_header() {
-        let html = bookmarklet_html("proxy.host", r#"{"x-api-key":"secret"}"#);
+        let html = bookmarklet_html(
+            "https://proxy.host",
+            "proxy.host",
+            r#"{"x-api-key":"secret"}"#,
+        );
         assert!(html.contains("proxy.host"));
         assert!(html.contains("bookmarklet"));
         assert!(html.contains(r#""x-api-key":"secret""#));
+        assert!(html.contains("https://proxy.host"));
+        assert!(html.contains("HTTP '+r.status"));
         assert!(!html.contains("__FALLBACK_HOST__"));
+        assert!(!html.contains("__FALLBACK_ORIGIN__"));
         assert!(!html.contains("__API_KEY_HEADER__"));
     }
 

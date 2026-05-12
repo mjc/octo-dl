@@ -44,6 +44,10 @@ pub(super) fn extract_and_dispatch_urls(state: &ApiState, text: &str) -> (Vec<St
     (urls, count)
 }
 
+pub(super) fn extract_and_dispatch_urls_from_html(html: &str) -> Vec<String> {
+    extract_urls(&html_to_text(html))
+}
+
 pub(super) fn provided_api_key(headers: &HeaderMap) -> Option<&str> {
     if let Some(key) = headers
         .get("x-api-key")
@@ -102,6 +106,49 @@ fn parse_forwarded_param(value: &str, key: &str) -> Option<String> {
     None
 }
 
+fn html_to_text(html: &str) -> String {
+    let mut text = String::with_capacity(html.len());
+    let mut in_tag = false;
+    let mut chars = html.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '<' => {
+                in_tag = true;
+            }
+            '>' => {
+                in_tag = false;
+            }
+            '&' if !in_tag => {
+                let mut entity = String::new();
+                while let Some(&next) = chars.peek() {
+                    entity.push(next);
+                    chars.next();
+                    if next == ';' || entity.len() > 10 {
+                        break;
+                    }
+                }
+                text.push(decode_html_entity(&entity));
+            }
+            _ if !in_tag => text.push(ch),
+            _ => {}
+        }
+    }
+
+    text
+}
+
+fn decode_html_entity(entity: &str) -> char {
+    match entity {
+        "amp;" => '&',
+        "lt;" => '<',
+        "gt;" => '>',
+        "quot;" => '"',
+        "#39;" | "apos;" => '\'',
+        _ => ' ',
+    }
+}
+
 pub(super) fn infer_host(headers: &HeaderMap, state: &ApiState) -> String {
     if let Some(host) = header_to_str(headers, "x-forwarded-host") {
         return host.split(',').next().unwrap_or(host).trim().to_string();
@@ -118,4 +165,21 @@ pub(super) fn infer_host(headers: &HeaderMap, state: &ApiState) -> String {
         .bookmarklet_host
         .clone()
         .unwrap_or_else(|| state.host.clone())
+}
+
+pub(super) fn infer_origin(headers: &HeaderMap, state: &ApiState) -> String {
+    let host = infer_host(headers, state);
+    if host.contains("://") {
+        return host;
+    }
+
+    let proto = header_to_str(headers, "x-forwarded-proto")
+        .map(str::to_string)
+        .or_else(|| {
+            header_to_str(headers, "forwarded")
+                .and_then(|forwarded| parse_forwarded_param(forwarded, "proto"))
+        })
+        .unwrap_or_else(|| "http".to_string());
+
+    format!("{proto}://{host}")
 }
