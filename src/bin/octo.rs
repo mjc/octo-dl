@@ -83,6 +83,7 @@ fn print_usage() {
     eprintln!("  --tui-listen ADDR   Publish remote TUI attach stream on loopback ADDR");
     eprintln!("  --host <HOST>       Bind address for API server when enabled");
     eprintln!("  --config <PATH>     Config file override for TUI/headless mode");
+    eprintln!("                      (default: ./config.toml when present)");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
     eprintln!("Run 'octo --tui --help' or 'octo --help' for mode-specific options.");
