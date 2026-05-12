@@ -40,29 +40,30 @@ pub struct RestartSnapshot {
 impl RestartSnapshot {
     #[must_use]
     pub fn resumable_urls(&self) -> Vec<UrlId> {
-        let mut seen = HashSet::new();
         self.state
-            .packages
-            .values()
-            .filter(|package| {
-                let file_ids = self.state.package_file_ids(&package.id);
-                file_ids.is_empty()
-                    || (package.error.is_none()
-                        && file_ids.iter().any(|file_id| {
-                            self.state.files.get(file_id).is_some_and(|file| {
-                                !matches!(
-                                    file.lifecycle,
-                                    FileLifecycle::Complete
-                                        | FileLifecycle::Skipped
-                                        | FileLifecycle::Deleted
-                                )
-                            })
-                        }))
+            .url_order
+            .iter()
+            .filter(|url| {
+                let package = self
+                    .state
+                    .packages
+                    .values()
+                    .find(|package| &package.source_url == *url);
+                match package {
+                    None => true,
+                    Some(package) => self.state.package_file_ids(&package.id).iter().any(|file_id| {
+                        self.state.files.get(file_id).is_some_and(|file| {
+                            !matches!(
+                                file.lifecycle,
+                                FileLifecycle::Complete
+                                    | FileLifecycle::Skipped
+                                    | FileLifecycle::Deleted
+                            )
+                        })
+                    }),
+                }
             })
-            .filter_map(|package| {
-                seen.insert(package.source_url.clone())
-                    .then_some(package.source_url.clone())
-            })
+            .cloned()
             .collect()
     }
 }
@@ -151,12 +152,12 @@ pub fn reconcile_restart(
         .collect();
 
     if let Some(snapshot) = session {
+        for tracked_url in snapshot.urls {
+            if !state.url_order.iter().any(|existing| existing == &tracked_url.url) {
+                state.url_order.push(tracked_url.url);
+            }
+        }
         for package in snapshot.packages {
-            let package_error = if package.file_ids.is_empty() {
-                None
-            } else {
-                package.error.clone()
-            };
             packages.insert(
                 package.id.clone(),
                 PackageState {
@@ -164,7 +165,7 @@ pub fn reconcile_restart(
                     source_url: package.source_url.clone(),
                     display_name: package.display_name.clone(),
                     status: PackageStatus::Pending,
-                    error: package_error,
+                    error: package.error.clone(),
                 },
             );
         }
@@ -245,16 +246,9 @@ pub fn reconcile_restart(
     let mut seen_urls: HashSet<String> = HashSet::new();
     for url in urls {
         if seen_urls.insert(url.clone()) {
-            state.url_order.push(url.clone());
-        }
-        if !packages.values().any(|package| package.source_url == url) {
-            packages.entry(url.clone()).or_insert_with(|| PackageState {
-                id: url.clone(),
-                source_url: url.clone(),
-                display_name: url.clone(),
-                status: PackageStatus::Pending,
-                error: None,
-            });
+            if !state.url_order.iter().any(|existing| existing == &url) {
+                state.url_order.push(url);
+            }
         }
     }
 
@@ -370,15 +364,19 @@ mod tests {
     use super::*;
     use crate::core::model::SessionRunStatus;
     use crate::core::session::{
-        FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3,
+        FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
     };
 
     fn sample_snapshot() -> SessionSnapshotV3 {
         SessionSnapshotV3 {
-            version: 3,
+            version: 4,
             id: "session".to_string(),
             created: Utc::now(),
             status: SessionRunStatus::InProgress,
+            urls: vec![SessionUrlSnapshot {
+                url: "https://mega.nz/file/test".to_string(),
+                error: None,
+            }],
             packages: vec![PackageSnapshot {
                 id: "pkg".to_string(),
                 source_url: "https://mega.nz/file/test".to_string(),

@@ -20,6 +20,6 @@ pub use restart::{
     scan_filesystem,
 };
 pub use session::{
-    FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3, decrypt_credential,
-    encrypt_credential,
+    FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
+    decrypt_credential, encrypt_credential,
 };

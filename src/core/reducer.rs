@@ -110,16 +110,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             if !state.url_order.iter().any(|existing| existing == &url) {
                 state.url_order.push(url.clone());
             }
-            state
-                .packages
-                .entry(url.clone())
-                .or_insert_with(|| PackageState {
-                    id: url.clone(),
-                    source_url: url.clone(),
-                    display_name: url.clone(),
-                    status: PackageStatus::Pending,
-                    error: None,
-                });
             effects.push(CoreEffect::EnqueueUrlResolution { url });
         }
         CoreEvent::PackageResolved { package } => {
@@ -420,7 +410,7 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
         .values()
         .filter_map(|package| {
             let file_ids = state.package_file_ids(&package.id);
-            if file_ids.is_empty() && package.id != package.source_url {
+            if file_ids.is_empty() {
                 return None;
             }
             Some(PackageSnapshot {
@@ -437,6 +427,24 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
         id: state.session_meta.session_id.clone(),
         created: state.session_meta.created,
         status: state.session_meta.status,
+        urls: state
+            .url_order
+            .iter()
+            .map(|url| crate::core::SessionUrlSnapshot {
+                url: url.clone(),
+                error: state
+                    .packages
+                    .values()
+                    .find(|package| package.source_url == *url)
+                    .and_then(|package| {
+                        state
+                            .package_file_ids(&package.id)
+                            .is_empty()
+                            .then(|| package.error.clone())
+                            .flatten()
+                    }),
+            })
+            .collect(),
         packages,
         files: state
             .files

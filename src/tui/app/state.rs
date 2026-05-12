@@ -319,11 +319,7 @@ impl App {
         let restart = reconcile_restart(
             Some(session.clone()),
             scan_filesystem(file_ids),
-            session
-                .packages
-                .iter()
-                .map(|package| package.source_url.clone())
-                .collect(),
+            session.urls.iter().map(|entry| entry.url.clone()).collect(),
         );
 
         self.resume_from_restart(session, &restart);
@@ -340,18 +336,16 @@ impl App {
         let resumed_urls = SessionAdapter::apply_restart(&mut session, restart);
         self.urls.clone_from(&resumed_urls);
         for url in resumed_urls {
-            let Some(package) = restart
+            let package = restart
                 .state
                 .packages
                 .values()
-                .find(|package| package.source_url == url)
-            else {
-                continue;
-            };
-            if !restart.state.package_file_ids(&package.id).is_empty() {
-                continue;
+                .find(|package| package.source_url == url);
+            if package.is_none_or(|package| restart.state.package_file_ids(&package.id).is_empty())
+            {
+                self.queue_url_placeholder(url.clone());
+                let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
             }
-            let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
         }
         self.save_and_install_session(session);
     }

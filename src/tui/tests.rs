@@ -46,8 +46,14 @@ fn resume_session_requeues_urls() {
     assert_eq!(
         app.visible_rows(),
         vec![
-            TuiRow::Package(expected_urls[0].clone()),
-            TuiRow::Package(expected_urls[1].clone()),
+            TuiRow::File {
+                package_id: String::new(),
+                file_id: expected_urls[0].clone(),
+            },
+            TuiRow::File {
+                package_id: String::new(),
+                file_id: expected_urls[1].clone(),
+            },
         ]
     );
 
@@ -67,11 +73,12 @@ fn resume_session_requeues_urls() {
     assert!(url_rx.try_recv().is_err());
 
     let session_state = app.session.as_ref().expect("session should be present");
+    assert!(session_state.packages.is_empty());
     assert!(
         session_state
-            .packages
+            .urls
             .iter()
-            .all(|package| package.error.is_none() && package.file_ids.is_empty())
+            .all(|entry| entry.error.is_none())
     );
 }
 
@@ -97,17 +104,16 @@ fn resume_session_clears_empty_failed_package_errors_and_requeues_urls() {
     );
     assert_eq!(
         app.visible_rows(),
-        vec![TuiRow::Package(
-            "https://mega.nz/file/stale-error".to_string()
-        )]
+        vec![TuiRow::File {
+            package_id: String::new(),
+            file_id: "https://mega.nz/file/stale-error".to_string(),
+        }]
     );
-    let package = app
-        .core_state
-        .packages
-        .get("https://mega.nz/file/stale-error")
-        .expect("package should be restored");
-    assert_eq!(package.status, PackageStatus::Pending);
-    assert!(package.error.is_none());
+    assert!(
+        !app.core_state
+            .packages
+            .contains_key("https://mega.nz/file/stale-error")
+    );
 
     let mut url_rx = app.url_rx.take().expect("url_rx should exist");
     assert_eq!(
@@ -480,10 +486,7 @@ fn submitted_url_bootstraps_session_for_shutdown_persistence() {
     let session = crate::core::SessionSnapshotV3::latest().expect("session should be saved");
     assert_eq!(session.status, SessionRunStatus::Paused);
     assert!(
-        session
-            .packages
-            .iter()
-            .any(|package| package.source_url == "https://mega.nz/file/pending")
+        session.urls.iter().any(|entry| entry.url == "https://mega.nz/file/pending")
     );
 }
 
@@ -583,12 +586,12 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
         }
     );
     let session = app.session.as_ref().expect("session should remain");
-    let package = session
-        .packages
+    let tracked_url = session
+        .urls
         .iter()
-        .find(|package| package.source_url == source_url)
-        .expect("source URL package should remain tracked");
-    assert!(package.error.is_none());
+        .find(|entry| entry.url == source_url)
+        .expect("source URL should remain tracked");
+    assert!(tracked_url.error.is_none());
     assert!(
         session
             .packages

@@ -84,6 +84,13 @@ pub struct PackageSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionUrlSnapshot {
+    pub url: UrlId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileSnapshot {
     pub id: FileId,
     pub package_id: PackageId,
@@ -105,6 +112,8 @@ pub struct SessionSnapshotV3 {
     pub id: String,
     pub created: DateTime<Utc>,
     pub status: SessionRunStatus,
+    #[serde(default)]
+    pub urls: Vec<SessionUrlSnapshot>,
     pub packages: Vec<PackageSnapshot>,
     pub files: Vec<FileSnapshot>,
     pub config: DownloadConfig,
@@ -119,6 +128,7 @@ impl SessionSnapshotV3 {
             id: uuid::Uuid::new_v4().to_string(),
             created: Utc::now(),
             status: SessionRunStatus::InProgress,
+            urls: Vec::new(),
             packages: Vec::new(),
             files: Vec::new(),
             config,
@@ -267,7 +277,14 @@ pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
     }
 
     let mut packages_by_id = IndexMap::new();
-    let mut source_urls = std::collections::HashSet::new();
+    let mut tracked_urls = std::collections::HashSet::new();
+    for url in &snapshot.urls {
+        if !tracked_urls.insert(url.url.clone()) {
+            return Err(format!("duplicate tracked url {}", url.url));
+        }
+    }
+
+    let mut package_source_urls = std::collections::HashSet::new();
     for package in &snapshot.packages {
         if packages_by_id
             .insert(package.id.clone(), package)
@@ -275,7 +292,13 @@ pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
         {
             return Err(format!("duplicate package id {}", package.id));
         }
-        if !source_urls.insert(package.source_url.clone()) {
+        if !tracked_urls.contains(&package.source_url) {
+            return Err(format!(
+                "package {} references untracked source_url {}",
+                package.id, package.source_url
+            ));
+        }
+        if !package_source_urls.insert(package.source_url.clone()) {
             return Err(format!(
                 "duplicate package source_url {}",
                 package.source_url
@@ -317,11 +340,8 @@ pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
                 package.id
             ));
         }
-        if grouped.is_empty() && package.id != package.source_url {
-            return Err(format!(
-                "empty non-placeholder package {} is unsupported",
-                package.id
-            ));
+        if grouped.is_empty() {
+            return Err(format!("empty package {} is unsupported", package.id));
         }
     }
 
