@@ -57,11 +57,43 @@ async fn run_attached_dashboard_loop(addr: SocketAddr) -> io::Result<()> {
         status: format!("Connecting to {addr}"),
         ..AttachedDashboard::default()
     };
-    let mut render_tick = tokio::time::interval(Duration::from_millis(100));
     let mut input = terminal_input_channel();
     let mut dashboard_rx = spawn_dashboard_reader(addr);
+    terminal.draw(|frame| {
+        if let Some(state) = &app.state {
+            draw_dashboard(
+                frame,
+                state,
+                &DashboardChrome::read_only(),
+                &mut app.list_state,
+            );
+        } else {
+            let mut state = DownloadDashboardState::empty(
+                DashboardUiMode::Attached,
+                true,
+                &app.status,
+                addr.port(),
+            );
+            state.status.clone_from(&app.status);
+            draw_dashboard(
+                frame,
+                &state,
+                &DashboardChrome::read_only(),
+                &mut app.list_state,
+            );
+        }
+    })?;
 
     loop {
+        tokio::select! {
+            Some(event) = input.recv() => handle_attached_input(&mut app, event),
+            Some(message) = dashboard_rx.recv() => handle_dashboard_reader_message(&mut app, message),
+        }
+
+        if app.should_quit {
+            break;
+        }
+
         terminal.draw(|frame| {
             if let Some(state) = &app.state {
                 draw_dashboard(
@@ -86,16 +118,6 @@ async fn run_attached_dashboard_loop(addr: SocketAddr) -> io::Result<()> {
                 );
             }
         })?;
-
-        tokio::select! {
-            Some(event) = input.recv() => handle_attached_input(&mut app, event),
-            Some(message) = dashboard_rx.recv() => handle_dashboard_reader_message(&mut app, message),
-            _ = render_tick.tick() => {}
-        }
-
-        if app.should_quit {
-            break;
-        }
     }
 
     terminal.show_cursor()?;

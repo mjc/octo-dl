@@ -71,9 +71,14 @@ async fn run_interactive_tui_loop(
     let mut input_rx = terminal_input_channel();
     let mut sys = System::new();
     let pid = sysinfo::get_current_pid().ok();
+    let mut needs_draw = true;
+    let mut download_state_dirty = false;
 
     loop {
-        terminal.draw(|f| draw(f, app))?;
+        if needs_draw {
+            terminal.draw(|f| draw(f, app))?;
+            needs_draw = false;
+        }
 
         tokio::select! {
             Some(event) = input_rx.recv() => {
@@ -82,23 +87,32 @@ async fn run_interactive_tui_loop(
                     Event::Paste(text) => handle_paste(app, &text),
                     _ => {}
                 }
+                needs_draw = true;
             }
             Some(event) = download_rx.recv() => {
                 app.handle_download_event(event);
                 let _ = app.drain_download_events(download_rx);
+                download_state_dirty = true;
             }
             Some(action) = action_rx.recv() => {
                 app.handle_ui_action(action);
                 let _ = app.drain_ui_actions(action_rx);
+                needs_draw = true;
             }
             _ = tick.tick() => {
                 tick_count = tick_count.saturating_add(1);
                 app.handle_terminal_tick(download_rx, action_rx, tick_count, &mut sys, pid);
+                needs_draw = true;
+                download_state_dirty = false;
             }
         }
 
         if state_sync_enabled {
             let _ = app.publish_snapshot_if_observed(state_tx);
+        }
+
+        if download_state_dirty {
+            continue;
         }
 
         if app.should_quit {

@@ -390,15 +390,21 @@ fn url_resolved_updates_session_status_and_clears_overlay() {
 }
 
 #[test]
-fn pending_empty_package_placeholder_is_not_visible() {
+fn pending_empty_package_placeholder_is_visible() {
     let mut app = test_app();
 
     app.apply_core_command(CoreCommand::SubmitUrl {
         url: "https://mega.nz/folder/root".to_string(),
     });
 
-    assert!(app.visible_rows().is_empty());
-    assert!(app.file_list_state.selected().is_none());
+    assert_eq!(
+        app.visible_rows(),
+        vec![TuiRow::Package("https://mega.nz/folder/root".to_string())]
+    );
+    assert_eq!(
+        app.selected_row(),
+        Some(TuiRow::Package("https://mega.nz/folder/root".to_string()))
+    );
 }
 
 #[test]

@@ -154,10 +154,11 @@ fn package_has_visible_content(
         return false;
     };
 
-    package
-        .file_ids
-        .iter()
-        .any(|file_id| file_is_visible_in_package(core_state, file_id))
+    package.file_ids.is_empty()
+        || package
+            .file_ids
+            .iter()
+            .any(|file_id| file_is_visible_in_package(core_state, file_id))
         || (package.error.is_some() && !overlay_files.contains_key(package_id))
 }
 
