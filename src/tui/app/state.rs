@@ -148,15 +148,7 @@ impl App {
     }
 
     fn persist_core_session_snapshot(&mut self, snapshot: SessionSnapshotV3) {
-        match snapshot.save() {
-            Ok(()) => {
-                let _ = self.mutate_session(|session| SessionAdapter::replace_state(session, snapshot));
-            }
-            Err(error) => {
-                log::error!("Failed to save session snapshot {}: {error}", snapshot.id);
-                self.status = format!("Failed to save session: {error}");
-            }
-        }
+        self.persist_session(snapshot);
     }
 
     pub(crate) fn ensure_session_for_pending_urls(&mut self) {
@@ -275,23 +267,13 @@ impl App {
         .unwrap_or(true)
     }
 
-    pub(crate) fn mutate_session<R>(
-        &mut self,
-        f: impl FnOnce(&mut SessionSnapshotV3) -> R,
-    ) -> Option<R> {
-        self.session.as_mut().map(f)
-    }
-
     pub(crate) fn mutate_session_and_save<R>(
         &mut self,
         f: impl FnOnce(&mut SessionSnapshotV3) -> R,
     ) -> Option<R> {
-        self.session.as_mut().map(|session| {
-            let result = f(session);
-            if let Err(error) = session.save() {
-                log::error!("Failed to save session {}: {error}", session.id);
-                self.status = format!("Failed to save session: {error}");
-            }
+        self.session.clone().map(|mut session| {
+            let result = f(&mut session);
+            let _ = self.persist_session(session);
             result
         })
     }
@@ -311,13 +293,7 @@ impl App {
     }
 
     pub(crate) fn save_and_install_session(&mut self, session: SessionSnapshotV3) {
-        match session.save() {
-            Ok(()) => self.install_session(session),
-            Err(error) => {
-                log::error!("Failed to save session {}: {error}", session.id);
-                self.status = format!("Failed to save session: {error}");
-            }
-        }
+        let _ = self.persist_session(session);
     }
 
     pub(crate) fn restore_restart_snapshot(&mut self, snapshot: &RestartSnapshot) {
@@ -398,6 +374,29 @@ impl App {
                 "Downloading ({}/{})",
                 self.files_completed, self.files_total
             );
+        }
+    }
+
+    fn persist_session(&mut self, session: SessionSnapshotV3) -> bool {
+        if let Err(error) = session.save() {
+            log::error!("Failed to save session {}: {error}", session.id);
+            self.status = format!("Failed to save session: {error}");
+            return false;
+        }
+
+        match SessionSnapshotV3::load(&session.state_path()) {
+            Ok(saved) => {
+                self.install_session(saved);
+                true
+            }
+            Err(error) => {
+                log::error!(
+                    "Failed to reload canonical session {} after save: {error}",
+                    session.id
+                );
+                self.status = format!("Failed to save session: {error}");
+                false
+            }
         }
     }
 }

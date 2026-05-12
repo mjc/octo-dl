@@ -815,6 +815,55 @@ fn session_adapter_replace_state_replaces_stale_package_rows() {
 }
 
 #[test]
+fn mutate_session_and_save_reloads_canonical_snapshot() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/root",
+        UrlFixtureStatus::Fetched,
+    )]);
+    push_file(&mut session, 0, "episode-1.mkv", 128, FileFixtureStatus::Pending);
+    session.save().unwrap();
+    app.install_session(session);
+
+    let _ = app.mutate_session_and_save(|session| {
+        session.packages[0].file_ids.clear();
+    });
+
+    let session = app.session.as_ref().expect("session should remain");
+    assert_eq!(session.packages[0].file_ids, vec!["episode-1.mkv".to_string()]);
+}
+
+#[test]
+fn mutate_session_and_save_preserves_in_memory_state_on_failed_save() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/root",
+        UrlFixtureStatus::Fetched,
+    )]);
+    push_file(&mut session, 0, "episode-1.mkv", 128, FileFixtureStatus::Pending);
+    session.save().unwrap();
+    app.install_session(session.clone());
+
+    let _ = app.mutate_session_and_save(|session| {
+        session.files[0].source_url = Some("https://mega.nz/file/other".to_string());
+    });
+
+    assert_eq!(
+        app.status,
+        format!(
+            "Failed to save session: file {} source_url does not match package {}",
+            session.files[0].id, session.files[0].package_id
+        )
+    );
+    let saved = app.session.as_ref().expect("session should remain");
+    assert_eq!(saved, &session);
+}
+
+#[test]
 fn sorted_file_indices_group_by_package_before_status() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
