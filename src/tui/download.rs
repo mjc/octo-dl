@@ -749,7 +749,6 @@ async fn collect_batch(
         queued_items.extend(collected.queued_items);
         completed_items.extend(collected.completed_items);
     }
-    combine_same_batch_folder_packages(&mut queued_items, &mut completed_items);
     CollectedBatch {
         queued_items,
         completed_items,
@@ -852,84 +851,14 @@ async fn collect_node_set(
     }
 }
 
-fn combine_same_batch_folder_packages(
-    queued_items: &mut Vec<QueuedDownload>,
-    completed_items: &mut Vec<QueuedDownload>,
-) {
-    let groups = same_batch_folder_package_ids(
-        queued_items
-            .iter()
-            .chain(completed_items.iter())
-            .map(|item| (item.item.path.as_str(), item.resolved.source_url.as_str())),
-    );
-    if groups.is_empty() {
-        return;
-    }
-
-    for item in queued_items.iter_mut().chain(completed_items.iter_mut()) {
-        if let Some(folder) = folder_component(&item.item.path)
-            && let Some(package_id) = groups.get(folder)
-        {
-            item.resolved.package_id = Some(package_id.id.to_string());
-            item.resolved.package_display_name = Some(package_id.display_name.clone());
-        }
-    }
-
-    resolve_same_package_path_duplicates(queued_items, completed_items);
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BatchPackageIdentity {
-    id: crate::core::PackageId,
-    display_name: String,
-}
-
-fn same_batch_folder_package_ids<'a>(
-    items: impl IntoIterator<Item = (&'a str, &'a str)>,
-) -> HashMap<String, BatchPackageIdentity> {
-    let mut sources_by_folder = HashMap::<&str, HashSet<&str>>::new();
-    for (path, source_url) in items {
-        let Some(folder) = folder_component(path) else {
-            continue;
-        };
-        sources_by_folder
-            .entry(folder)
-            .or_default()
-            .insert(source_url);
-    }
-
-    sources_by_folder
-        .into_iter()
-        .filter_map(|(folder, sources)| {
-            if sources.len() > 1 {
-                Some((
-                    folder.to_string(),
-                    BatchPackageIdentity {
-                        id: crate::download::stable_batch_package_id(folder, &sources),
-                        display_name: folder.to_string(),
-                    },
-                ))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn folder_component(path: &str) -> Option<&str> {
-    let (folder, file) = path.split_once('/')?;
-    if folder.is_empty() || file.is_empty() {
-        return None;
-    }
-    Some(folder)
-}
-
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum BatchItemLocation {
     Queued(usize),
     Completed(usize),
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct BatchItemSnapshot {
     location: BatchItemLocation,
@@ -940,6 +869,7 @@ struct BatchItemSnapshot {
     sparse_checksum: Option<[u8; 16]>,
 }
 
+#[cfg(test)]
 fn resolve_same_package_path_duplicates(
     queued_items: &mut Vec<QueuedDownload>,
     completed_items: &mut Vec<QueuedDownload>,
@@ -983,6 +913,7 @@ fn resolve_same_package_path_duplicates(
     apply_duplicate_resolution(completed_items, &drop_locations, &renamed_paths, false);
 }
 
+#[cfg(test)]
 fn batch_item_snapshots(
     queued_items: &[QueuedDownload],
     completed_items: &[QueuedDownload],
@@ -999,6 +930,7 @@ fn batch_item_snapshots(
         .collect()
 }
 
+#[cfg(test)]
 fn batch_item_snapshot(item: &QueuedDownload, location: BatchItemLocation) -> BatchItemSnapshot {
     BatchItemSnapshot {
         location,
@@ -1014,6 +946,7 @@ fn batch_item_snapshot(item: &QueuedDownload, location: BatchItemLocation) -> Ba
     }
 }
 
+#[cfg(test)]
 fn same_remote_file(items: &[BatchItemSnapshot]) -> bool {
     let Some(first) = items.first() else {
         return true;
@@ -1024,6 +957,7 @@ fn same_remote_file(items: &[BatchItemSnapshot]) -> bool {
         .all(|item| remote_files_match(first, item))
 }
 
+#[cfg(test)]
 fn remote_files_match(left: &BatchItemSnapshot, right: &BatchItemSnapshot) -> bool {
     if let (Some(left_checksum), Some(right_checksum)) =
         (left.sparse_checksum, right.sparse_checksum)
@@ -1033,6 +967,7 @@ fn remote_files_match(left: &BatchItemSnapshot, right: &BatchItemSnapshot) -> bo
     left.size == right.size && left.modified_at.is_some() && left.modified_at == right.modified_at
 }
 
+#[cfg(test)]
 fn next_available_duplicate_path(
     package_id: &str,
     path: &str,
@@ -1047,6 +982,7 @@ fn next_available_duplicate_path(
     unreachable!("unbounded duplicate suffix search should always find a path")
 }
 
+#[cfg(test)]
 fn duplicate_path(path: &str, ordinal: usize) -> String {
     let (parent, file_name) = path
         .rsplit_once('/')
@@ -1067,6 +1003,7 @@ fn duplicate_path(path: &str, ordinal: usize) -> String {
     }
 }
 
+#[cfg(test)]
 fn apply_duplicate_resolution(
     items: &mut Vec<QueuedDownload>,
     drop_locations: &HashSet<BatchItemLocation>,
