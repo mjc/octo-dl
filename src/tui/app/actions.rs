@@ -227,12 +227,18 @@ impl App {
     }
 
     pub(crate) fn handle_file_queued_event(&mut self, file: QueuedFile) {
+        if self.deleted_files.contains(&file.origin.submitted_url)
+            || self.deleted_files.contains(&file.origin.source_url)
+        {
+            log::info!(
+                "Ignoring queued file {} from deleted url/source {} / {}",
+                file.id,
+                file.origin.submitted_url,
+                file.origin.source_url
+            );
+            return;
+        }
         if self.deleted_files.contains(&file.id) {
-            if self.deleted_files.contains(&file.origin.submitted_url)
-                || self.deleted_files.contains(&file.origin.source_url)
-            {
-                return;
-            }
             self.deleted_files.remove(&file.id);
         }
         if !self.register_queued_file(&file) {

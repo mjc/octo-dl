@@ -508,7 +508,7 @@ fn handle_main_input_delete_removes_failed_file() {
 }
 
 #[test]
-fn handle_main_input_delete_removes_failed_package_without_files() {
+fn handle_main_input_delete_does_not_surface_failed_package_without_files() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
@@ -523,20 +523,10 @@ fn handle_main_input_delete_removes_failed_package_without_files() {
             }),
         },
     });
-    app.file_list_state.select(Some(0));
-
-    handle_input(&mut app, key(KeyCode::Delete));
-    assert_eq!(
-        app.pending_confirmation,
-        Some(ConfirmAction::DeletePackage(
-            "https://mega.nz/folder/failed".to_string()
-        ))
-    );
-    confirm(&mut app);
-
     assert!(app.visible_rows().is_empty());
     assert!(!app.core_state.packages.contains_key("https://mega.nz/folder/failed"));
-    assert!(app.deleted_files.contains("https://mega.nz/folder/failed"));
+    handle_input(&mut app, key(KeyCode::Delete));
+    assert_eq!(app.pending_confirmation, None);
 }
 
 #[test]
@@ -595,7 +585,7 @@ fn handle_main_input_shift_d_removes_completed_file_and_artifacts() {
 }
 
 #[test]
-fn handle_main_input_shift_d_removes_failed_package_without_files() {
+fn handle_main_input_shift_d_does_not_surface_failed_package_without_files() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
@@ -610,19 +600,10 @@ fn handle_main_input_shift_d_removes_failed_package_without_files() {
             }),
         },
     });
-    app.file_list_state.select(Some(0));
-    assert_eq!(
-        app.visible_rows(),
-        vec![TuiRow::Package(
-            "https://mega.nz/folder/failed".to_string()
-        )]
-    );
-
-    handle_input(&mut app, key(KeyCode::Char('D')));
-
     assert!(app.visible_rows().is_empty());
     assert!(!app.core_state.packages.contains_key("https://mega.nz/folder/failed"));
-    assert!(app.deleted_files.contains("https://mega.nz/folder/failed"));
+    handle_input(&mut app, key(KeyCode::Char('D')));
+    assert!(app.visible_rows().is_empty());
 }
 
 #[test]

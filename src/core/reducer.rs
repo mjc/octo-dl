@@ -123,11 +123,25 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             effects.push(CoreEffect::EnqueueUrlResolution { url });
         }
         CoreEvent::PackageResolved { package } => {
-            let incoming_package_id = if package.files.is_empty() {
-                package.source_url.clone()
-            } else {
-                package.id.clone()
-            };
+            if package.files.is_empty() {
+                if let Some(collision) = package.collision {
+                    effects.push(CoreEffect::PublishStatusMessage(format!(
+                        "Package {} rejected file {} because it collides with {}",
+                        collision.incoming_package_id, collision.file_id, collision.existing_package_id
+                    )));
+                }
+                state
+                    .packages
+                    .retain(|_, existing| existing.source_url != package.source_url);
+                recompute_derived(state);
+                if persist_session {
+                    effects.push(CoreEffect::PersistSession(snapshot_from_state(state)));
+                }
+                effects.push(CoreEffect::PublishViewSnapshot);
+                debug_assert_invariants(state);
+                return effects;
+            }
+            let incoming_package_id = package.id.clone();
             let previous_package = state
                 .packages
                 .iter()
@@ -680,6 +694,35 @@ mod tests {
         );
         assert_eq!(state.package_file_ids("resolved-folder"), vec!["a.bin".to_string()]);
         assert_eq!(state.url_order, vec!["https://mega.nz/folder/test".to_string()]);
+    }
+
+    #[test]
+    fn package_resolved_with_no_files_does_not_create_package_state() {
+        let mut state = DownloadState::default();
+        let effects = reduce(
+            &mut state,
+            CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: "failed-pkg".to_string(),
+                    source_url: "https://mega.nz/folder/failed".to_string(),
+                    display_name: "Failed package".to_string(),
+                    files: Vec::new(),
+                    collision: Some(PackageCollision {
+                        file_id: "duplicate.bin".to_string(),
+                        existing_package_id: "existing".to_string(),
+                        incoming_package_id: "failed-pkg".to_string(),
+                    }),
+                },
+            },
+        );
+
+        assert!(state.packages.is_empty());
+        assert!(state.files.is_empty());
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            CoreEffect::PublishStatusMessage(message)
+                if message.contains("duplicate.bin")
+        )));
     }
 
     #[test]
