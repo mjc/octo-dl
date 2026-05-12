@@ -1,4 +1,4 @@
-use super::super::app::{App, FileEntry, FileStatus, Popup, QuitPolicy};
+use super::super::app::{App, ConfirmAction, FileEntry, FileStatus, Popup, QuitPolicy, SortKey};
 use super::*;
 use crate::core::{CoreEvent, PackageCollision, ResolvedFile, ResolvedPackage};
 use crate::test_support::{
