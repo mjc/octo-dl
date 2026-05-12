@@ -148,7 +148,15 @@ impl App {
     }
 
     fn persist_core_session_snapshot(&mut self, snapshot: SessionSnapshotV3) {
-        let _ = self.mutate_session(|session| SessionAdapter::replace_state(session, snapshot));
+        match snapshot.save() {
+            Ok(()) => {
+                let _ = self.mutate_session(|session| SessionAdapter::replace_state(session, snapshot));
+            }
+            Err(error) => {
+                log::error!("Failed to save session snapshot {}: {error}", snapshot.id);
+                self.status = format!("Failed to save session: {error}");
+            }
+        }
     }
 
     pub(crate) fn ensure_session_for_pending_urls(&mut self) {
@@ -280,7 +288,10 @@ impl App {
     ) -> Option<R> {
         self.session.as_mut().map(|session| {
             let result = f(session);
-            let _ = session.save();
+            if let Err(error) = session.save() {
+                log::error!("Failed to save session {}: {error}", session.id);
+                self.status = format!("Failed to save session: {error}");
+            }
             result
         })
     }
@@ -300,8 +311,13 @@ impl App {
     }
 
     pub(crate) fn save_and_install_session(&mut self, session: SessionSnapshotV3) {
-        let _ = session.save();
-        self.install_session(session);
+        match session.save() {
+            Ok(()) => self.install_session(session),
+            Err(error) => {
+                log::error!("Failed to save session {}: {error}", session.id);
+                self.status = format!("Failed to save session: {error}");
+            }
+        }
     }
 
     pub(crate) fn restore_restart_snapshot(&mut self, snapshot: &RestartSnapshot) {

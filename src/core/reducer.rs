@@ -113,6 +113,13 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             effects.push(CoreEffect::EnqueueUrlResolution { url });
         }
         CoreEvent::PackageResolved { package } => {
+            if !state
+                .url_order
+                .iter()
+                .any(|existing| existing == &package.source_url)
+            {
+                state.url_order.push(package.source_url.clone());
+            }
             if package.files.is_empty() {
                 if let Some(collision) = package.collision {
                     effects.push(CoreEffect::PublishStatusMessage(format!(
@@ -718,6 +725,30 @@ mod tests {
         );
         assert_eq!(state.package_file_ids(&resolved_id), vec!["a.bin".to_string()]);
         assert_eq!(state.url_order, vec!["https://mega.nz/folder/test".to_string()]);
+    }
+
+    #[test]
+    fn package_resolved_tracks_source_url_without_prior_submit() {
+        let mut state = DownloadState::default();
+
+        reduce(
+            &mut state,
+            CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: package_id("pkg", "https://mega.nz/folder/persist"),
+                    source_url: "https://mega.nz/folder/persist".to_string(),
+                    display_name: "Persist".to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: "episode-1.mkv".to_string(),
+                        path: "episode-1.mkv".to_string(),
+                        size: 128,
+                    }],
+                    collision: None,
+                },
+            },
+        );
+
+        assert_eq!(state.url_order, vec!["https://mega.nz/folder/persist".to_string()]);
     }
 
     #[test]

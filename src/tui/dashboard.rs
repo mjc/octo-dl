@@ -364,8 +364,11 @@ impl App {
                 .core_state
                 .packages
                 .values()
-                .map(|package| {
+                .filter_map(|package| {
                     let file_ids = self.core_state.package_file_ids(&package.id);
+                    if file_ids.is_empty() {
+                        return None;
+                    }
                     let (present, complete, downloaded, size) = file_ids
                         .iter()
                         .filter_map(|id| self.core_state.files.get(id))
@@ -393,7 +396,7 @@ impl App {
                                 )
                             },
                         );
-                    DashboardPackageRow {
+                    Some(DashboardPackageRow {
                         id: package.id.to_string(),
                         source_url: package.source_url.clone(),
                         display_name: package.display_name.clone(),
@@ -408,7 +411,7 @@ impl App {
                             || matches!(package.status, PackageStatus::Failed),
                         folder_label: self.folder_label_from_package_files(&package.id),
                         error: package.error.clone(),
-                    }
+                    })
                 })
                 .collect();
         }
@@ -611,6 +614,28 @@ mod tests {
         assert_eq!(state.packages[0].downloaded_bytes, 40);
         assert_eq!(state.packages[0].percent, 40);
         assert_eq!(state.files[0].status, DashboardFileStatus::Downloading);
+    }
+
+    #[test]
+    fn dashboard_projection_hides_empty_failed_packages() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx, true);
+        let package_id = package_id("failed", "https://mega.nz/folder/failed");
+        app.core_state.packages.insert(
+            package_id,
+            crate::core::PackageState {
+                id: package_id,
+                source_url: "https://mega.nz/folder/failed".to_string(),
+                display_name: "Failed".to_string(),
+                status: PackageStatus::Failed,
+                error: Some("boom".to_string()),
+            },
+        );
+
+        let state = app.dashboard_state(DashboardUiMode::Tui, false);
+
+        assert!(state.packages.is_empty());
+        assert!(state.rows.is_empty());
     }
 
     #[test]

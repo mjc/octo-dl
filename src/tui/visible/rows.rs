@@ -155,11 +155,10 @@ fn package_has_visible_content(
     };
     let file_ids = core_state.package_file_ids(package_id);
 
-    file_ids.is_empty()
-        || file_ids
-            .iter()
-            .any(|file_id| file_is_visible_in_package(core_state, file_id))
-        || (package.error.is_some() && !overlay_files.contains_key(&package_id.to_string()))
+    file_ids
+        .iter()
+        .any(|file_id| file_is_visible_in_package(core_state, file_id))
+        || (package.error.is_some() && !file_ids.is_empty() && !overlay_files.contains_key(&package_id.to_string()))
 }
 
 fn package_has_visible_children(core_state: &DownloadState, package_id: &PackageId) -> bool {

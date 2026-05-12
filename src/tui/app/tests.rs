@@ -512,6 +512,51 @@ fn pending_empty_package_placeholder_is_visible() {
 }
 
 #[test]
+fn core_persisted_session_snapshot_is_saved_to_disk() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    app.ensure_session_for_pending_urls();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id("pkg", "https://mega.nz/folder/root"),
+            source_url: "https://mega.nz/folder/root".to_string(),
+            display_name: "Root".to_string(),
+            files: vec![ResolvedFile {
+                file_id: "episode-1.mkv".to_string(),
+                path: "episode-1.mkv".to_string(),
+                size: 128,
+            }],
+            collision: None,
+        },
+    });
+
+    let session = crate::core::SessionSnapshotV3::latest().expect("session should be saved");
+    assert_eq!(session.packages.len(), 1);
+    assert_eq!(session.packages[0].source_url, "https://mega.nz/folder/root");
+    assert_eq!(session.files.len(), 1);
+    assert_eq!(session.files[0].path, "episode-1.mkv");
+}
+
+#[test]
+fn visible_rows_hide_empty_failed_packages() {
+    let mut app = test_app();
+    let package_id = package_id("failed", "https://mega.nz/folder/failed");
+    app.core_state.packages.insert(
+        package_id,
+        crate::core::PackageState {
+            id: package_id,
+            source_url: "https://mega.nz/folder/failed".to_string(),
+            display_name: "Failed".to_string(),
+            status: crate::core::PackageStatus::Failed,
+            error: Some("boom".to_string()),
+        },
+    );
+
+    assert!(app.visible_rows().is_empty());
+}
+
+#[test]
 fn deleted_package_with_no_remaining_visible_files_is_hidden() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {

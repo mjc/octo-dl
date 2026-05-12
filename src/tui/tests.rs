@@ -578,10 +578,7 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
     );
     app.sync_visible_files();
 
-    assert_eq!(
-        app.visible_rows(),
-        vec![TuiRow::Package(package_id)]
-    );
+    assert!(app.visible_rows().is_empty());
 
     app.handle_ui_action(UiAction::RetryPackage(package_id));
 

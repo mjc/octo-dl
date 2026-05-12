@@ -25,6 +25,9 @@ impl PackageId {
     #[must_use]
     pub fn parse_or_source_url(raw: &str, source_url: &str) -> Self {
         raw.parse().unwrap_or_else(|_| {
+            if raw == source_url {
+                return Self::for_source_url(source_url);
+            }
             let scope = format!("{source_url}\0{raw}");
             Self(uuid::Uuid::new_v5(
                 &uuid::Uuid::NAMESPACE_URL,
@@ -85,6 +88,20 @@ impl PartialEq<String> for PackageId {
 
 pub type FileId = String;
 pub type UrlId = String;
+
+#[cfg(test)]
+mod tests {
+    use super::PackageId;
+
+    #[test]
+    fn source_url_ids_are_stable_across_derivation_paths() {
+        let source_url = "https://mega.nz/folder/example";
+        assert_eq!(
+            PackageId::for_source_url(source_url),
+            PackageId::parse_or_source_url(source_url, source_url)
+        );
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
