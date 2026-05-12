@@ -32,7 +32,7 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
     handle_main_input(app, key);
 }
 
-const fn request_quit(app: &mut App) {
+pub(crate) const fn request_quit(app: &mut App) {
     if app.quit_policy.is_enabled() {
         app.should_quit = true;
     }

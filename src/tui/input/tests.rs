@@ -11,6 +11,10 @@ use tempfile::tempdir;
 use tokio::sync::mpsc;
 
 fn test_app() -> App {
+    let path = tempdir()
+        .expect("test state directory should exist")
+        .into_path();
+    std::mem::forget(StateDirectoryGuard::set(&path));
     let (tx, _rx) = mpsc::unbounded_channel();
     App::new(9723, tx, true)
 }
@@ -19,6 +23,15 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent {
         code,
         modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
+}
+
+fn ctrl_key(code: KeyCode) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers: KeyModifiers::CONTROL,
         kind: KeyEventKind::Press,
         state: KeyEventState::NONE,
     }
@@ -46,6 +59,18 @@ fn handle_main_input_quit_disabled_via_flag() {
     assert!(!app.should_quit);
     handle_input(&mut app, key(KeyCode::Char('q')));
     assert!(!app.should_quit);
+}
+
+#[test]
+fn handle_main_input_ctrl_c_matches_quit_policy() {
+    let mut app = test_app();
+    handle_input(&mut app, ctrl_key(KeyCode::Char('c')));
+    assert!(app.should_quit);
+
+    let mut disabled = test_app();
+    disabled.quit_policy = QuitPolicy::Disabled;
+    handle_input(&mut disabled, ctrl_key(KeyCode::Char('c')));
+    assert!(!disabled.should_quit);
 }
 
 #[test]

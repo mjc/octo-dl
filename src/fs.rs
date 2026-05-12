@@ -33,6 +33,9 @@ pub trait FileSystem: Send + Sync {
     /// Renames a file from one path to another.
     async fn rename_file(&self, from: &Path, to: &Path) -> std::io::Result<()>;
 
+    /// Flushes a file's contents and metadata to stable storage.
+    async fn sync_file(&self, path: &Path) -> std::io::Result<()>;
+
     /// Removes a file at the given path. Ignores `NotFound` errors.
     async fn remove_file(&self, path: &Path) -> std::io::Result<()>;
 }
@@ -95,6 +98,11 @@ impl FileSystem for TokioFileSystem {
 
     async fn rename_file(&self, from: &Path, to: &Path) -> std::io::Result<()> {
         tokio::fs::rename(from, to).await
+    }
+
+    async fn sync_file(&self, path: &Path) -> std::io::Result<()> {
+        let file = tokio::fs::OpenOptions::new().read(true).open(path).await?;
+        file.sync_all().await
     }
 
     async fn remove_file(&self, path: &Path) -> std::io::Result<()> {

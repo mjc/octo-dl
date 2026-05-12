@@ -312,6 +312,10 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 file.progress.downloaded_network_bytes = 0;
                 file.progress.verified_existing_bytes = 0;
                 file.message = None;
+                effects.push(CoreEffect::DeleteResumeArtifacts {
+                    file_id: file.id.clone(),
+                    path: file.path.clone(),
+                });
                 effects.push(CoreEffect::EnqueueFileDownload { file_id });
             }
         }
@@ -672,6 +676,35 @@ mod tests {
             },
         );
         assert_eq!(state.files["file.bin"].lifecycle, FileLifecycle::Queued);
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            CoreEffect::EnqueueFileDownload { file_id } if file_id == "file.bin"
+        )));
+    }
+
+    #[test]
+    fn retry_failed_file_discards_resume_artifacts_before_requeue() {
+        let mut state = sample_state();
+        reduce(
+            &mut state,
+            CoreEvent::FileFailed {
+                file_id: "file.bin".to_string(),
+                message: "corrupt".to_string(),
+            },
+        );
+
+        let effects = reduce(
+            &mut state,
+            CoreEvent::FileRetryRequested {
+                file_id: "file.bin".to_string(),
+            },
+        );
+
+        assert_eq!(state.files["file.bin"].lifecycle, FileLifecycle::Queued);
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            CoreEffect::DeleteResumeArtifacts { file_id, .. } if file_id == "file.bin"
+        )));
         assert!(effects.iter().any(|effect| matches!(
             effect,
             CoreEffect::EnqueueFileDownload { file_id } if file_id == "file.bin"

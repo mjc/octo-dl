@@ -16,6 +16,10 @@ use crate::{
 };
 
 fn test_app() -> App {
+    let path = tempdir()
+        .expect("test state directory should exist")
+        .into_path();
+    std::mem::forget(StateDirectoryGuard::set(&path));
     let (tx, _rx) = mpsc::unbounded_channel();
     App::new(9723, tx, true)
 }

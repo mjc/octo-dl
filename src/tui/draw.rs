@@ -163,8 +163,12 @@ pub fn draw_dashboard(
 
     draw_dashboard_file_list(frame, state, list_state, chunks[2]);
 
-    let status_line = Paragraph::new(Line::from(dashboard_status_line(state, chunks[3].width)))
-        .style(Style::default().fg(Color::White));
+    let status_line = Paragraph::new(Line::from(dashboard_status_line(
+        state,
+        chunks[3].width,
+        list_state.selected(),
+    )))
+    .style(Style::default().fg(Color::White));
     frame.render_widget(status_line, chunks[3]);
 
     let controls = if state.read_only {
