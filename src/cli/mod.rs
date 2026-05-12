@@ -14,7 +14,7 @@ use crate::{
     DlcKeyCache, DownloadConfig, DownloadItem, DownloadProgress, FileStats, NoProgress,
     SessionStats, SessionStatsBuilder,
     core::{
-        DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageSnapshot,
+        DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageSnapshot,
         ProgressDelta, RestartSnapshot, RuntimeState, SavedCredentials, SessionRunStatus,
         SessionSnapshotV3, SessionUrlSnapshot, reconcile_restart, scan_filesystem,
     },
@@ -296,7 +296,7 @@ fn ensure_session_package<'a>(
         return &mut session.packages[index];
     }
     session.packages.push(PackageSnapshot {
-        id: source_url.to_string(),
+        id: PackageId::for_source_url(source_url),
         source_url: source_url.to_string(),
         display_name: source_url.to_string(),
         file_ids: Vec::new(),

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::{
-    core::{CoreCommand, CoreEvent},
+    core::{CoreCommand, CoreEvent, PackageId},
     format_bytes,
 };
 
@@ -203,19 +203,22 @@ impl App {
     }
 
     fn register_queued_file(&mut self, file: &QueuedFile) -> bool {
+        let existing_package = self.core_state.package_for_source_url(&file.origin.source_url);
         let package_id = file
             .origin
             .package_id
-            .as_deref()
-            .unwrap_or(&file.origin.source_url);
+            .clone()
+            .or_else(|| existing_package.map(|package| package.id.to_string()))
+            .unwrap_or_else(|| file.origin.source_url.clone());
         let package_display_name = file
             .origin
             .package_display_name
-            .as_deref()
-            .unwrap_or(package_id);
+            .clone()
+            .or_else(|| existing_package.map(|package| package.display_name.clone()))
+            .unwrap_or_else(|| package_id.clone());
         if !self.register_session_queued_file(
-            package_id,
-            package_display_name,
+            &package_id,
+            &package_display_name,
             &file.origin.submitted_url,
             &file.id,
             file.size,
@@ -224,8 +227,8 @@ impl App {
         }
         self.ensure_core_file_in_package(
             &file.id,
-            package_id,
-            package_display_name,
+            &package_id,
+            &package_display_name,
             &file.origin.source_url,
             &file.id,
             file.size,
@@ -424,18 +427,22 @@ impl App {
     pub(crate) fn perform_delete_package_action(&mut self, package_id: &str) {
         let file_ids = self.package_file_ids(package_id);
         if file_ids.is_empty() {
-            let source_url = self
-                .core_state
-                .packages
-                .get(package_id)
-                .map(|package| package.source_url.clone());
+            let parsed_package_id = package_id.parse::<PackageId>().ok();
+            let source_url = parsed_package_id.as_ref().and_then(|package_id| {
+                self.core_state
+                    .packages
+                    .get(package_id)
+                    .map(|package| package.source_url.clone())
+            });
             self.deleted_files.insert(package_id.to_string());
             if let Some(source_url) = source_url.as_ref() {
                 self.deleted_files.insert(source_url.clone());
                 self.remove_session_url(source_url);
                 self.urls.retain(|url| url != source_url);
             }
-            self.core_state.packages.shift_remove(package_id);
+            if let Some(package_id) = parsed_package_id.as_ref() {
+                self.core_state.packages.shift_remove(package_id);
+            }
             self.sync_visible_files();
             self.recompute_totals();
             return;
@@ -478,7 +485,10 @@ impl App {
     }
 
     pub(crate) fn perform_retry_package_action(&mut self, package_id: &str) {
-        let Some(package) = self.core_state.packages.get(package_id) else {
+        let Ok(parsed_package_id) = package_id.parse::<PackageId>() else {
+            return;
+        };
+        let Some(package) = self.core_state.packages.get(&parsed_package_id) else {
             return;
         };
         let source_url = package.source_url.clone();
@@ -502,9 +512,9 @@ impl App {
 
         if !retried_file && package_failed {
             let _ = self.mutate_session_and_save(|session| {
-                session.packages.retain(|package| package.id != package_id);
+                session.packages.retain(|package| package.id != parsed_package_id);
             });
-            self.core_state.packages.shift_remove(package_id);
+            self.core_state.packages.shift_remove(&parsed_package_id);
             self.retry_source_url(&source_url);
             self.sync_visible_files();
             self.recompute_totals();

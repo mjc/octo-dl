@@ -278,6 +278,10 @@ mod tests {
     };
     use crate::core::RuntimeState;
 
+    fn package_id(raw: &str, source_url: &str) -> PackageId {
+        PackageId::parse_or_source_url(raw, source_url)
+    }
+
     fn sample_snapshot() -> SessionSnapshotV3 {
         SessionSnapshotV3 {
             version: 4,
@@ -289,7 +293,7 @@ mod tests {
                 error: None,
             }],
             packages: vec![PackageSnapshot {
-                id: "pkg".to_string(),
+                id: package_id("pkg", "https://mega.nz/file/test"),
                 source_url: "https://mega.nz/file/test".to_string(),
                 display_name: "pkg".to_string(),
                 file_ids: vec!["a.bin".to_string()],
@@ -297,7 +301,7 @@ mod tests {
             }],
             files: vec![FileSnapshot {
                 id: "a.bin".to_string(),
-                package_id: "pkg".to_string(),
+                package_id: package_id("pkg", "https://mega.nz/file/test"),
                 source_url: Some("https://mega.nz/file/test".to_string()),
                 path: "a.bin".to_string(),
                 size: 100,
@@ -453,14 +457,14 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.packages = vec![
             PackageSnapshot {
-                id: source_url.clone(),
+                id: package_id(&source_url, &source_url),
                 source_url: source_url.clone(),
                 display_name: source_url.clone(),
                 file_ids: vec!["a.bin".to_string()],
                 error: None,
             },
             PackageSnapshot {
-                id: "batch-dup".to_string(),
+                id: package_id("batch-dup", &source_url),
                 source_url: source_url.clone(),
                 display_name: "Folder".to_string(),
                 file_ids: vec!["b.bin".to_string()],
@@ -470,7 +474,7 @@ mod tests {
         snapshot.files = vec![
             FileSnapshot {
                 id: "a.bin".to_string(),
-                package_id: source_url.clone(),
+                package_id: package_id(&source_url, &source_url),
                 source_url: Some(source_url.clone()),
                 path: "folder/a.bin".to_string(),
                 size: 10,
@@ -482,7 +486,7 @@ mod tests {
             },
             FileSnapshot {
                 id: "b.bin".to_string(),
-                package_id: "batch-dup".to_string(),
+                package_id: package_id("batch-dup", &source_url),
                 source_url: Some(source_url.clone()),
                 path: "folder/b.bin".to_string(),
                 size: 20,
@@ -500,7 +504,7 @@ mod tests {
     fn restart_rejects_empty_synthetic_packages_without_files() {
         let mut snapshot = sample_snapshot();
         snapshot.packages.push(PackageSnapshot {
-            id: "batch-folder".to_string(),
+            id: package_id("batch-folder", "https://mega.nz/file/test"),
             source_url: "https://mega.nz/file/test".to_string(),
             display_name: "Batch Folder".to_string(),
             file_ids: Vec::new(),
@@ -577,7 +581,7 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.files = vec![FileSnapshot {
             id: "a.bin".to_string(),
-            package_id: "pkg".to_string(),
+            package_id: package_id("pkg", "https://mega.nz/file/test"),
             source_url: Some("https://mega.nz/file/test".to_string()),
             path: "a.bin".to_string(),
             size: 100,
@@ -601,7 +605,7 @@ mod tests {
         snapshot.files = vec![
             FileSnapshot {
                 id: "a.bin".to_string(),
-                package_id: "pkg".to_string(),
+                package_id: package_id("pkg", "https://mega.nz/file/test"),
                 source_url: Some("https://mega.nz/file/test".to_string()),
                 path: "a.bin".to_string(),
                 size: 100,
@@ -613,7 +617,7 @@ mod tests {
             },
             FileSnapshot {
                 id: "a.bin".to_string(),
-                package_id: "pkg".to_string(),
+                package_id: package_id("pkg", "https://mega.nz/file/test"),
                 source_url: Some("https://mega.nz/file/test".to_string()),
                 path: "a.bin".to_string(),
                 size: 100,

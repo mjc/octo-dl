@@ -2,10 +2,11 @@ use super::*;
 use crate::{
     core::{
         CoreEvent, FileLifecycle, PackageSnapshot, PackageState, PackageStatus, ResolvedFile,
-        ResolvedPackage, SessionRunStatus,
+        ResolvedPackage, SessionRunStatus, SessionSnapshotV3,
     },
     test_support::{
-        FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, push_file, session_snapshot,
+        FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id, push_file,
+        session_snapshot,
     },
     tui::{
         draw::draw,
@@ -112,7 +113,10 @@ fn resume_session_clears_empty_failed_package_errors_and_requeues_urls() {
     assert!(
         !app.core_state
             .packages
-            .contains_key("https://mega.nz/file/stale-error")
+            .contains_key(&package_id(
+                "https://mega.nz/file/stale-error",
+                "https://mega.nz/file/stale-error"
+            ))
     );
 
     let mut url_rx = app.url_rx.take().expect("url_rx should exist");
@@ -135,13 +139,16 @@ fn save_rejects_empty_synthetic_package_placeholders() {
         UrlFixtureStatus::Pending,
     )]);
     session.packages.push(PackageSnapshot {
-        id: "batch-folder".to_string(),
+        id: package_id("batch-folder", "https://mega.nz/file/stale-error"),
         source_url: "https://mega.nz/file/stale-error".to_string(),
         display_name: "Batch Folder".to_string(),
         file_ids: Vec::new(),
         error: Some("boom".to_string()),
     });
-    assert!(session.save().is_err());
+    session.save().unwrap();
+
+    let reloaded = SessionSnapshotV3::latest().expect("canonical session should persist");
+    assert!(reloaded.packages.is_empty());
 }
 
 #[test]
@@ -538,7 +545,7 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
     app.url_tx = url_tx;
 
     let source_url = "https://mega.nz/folder/retry".to_string();
-    let package_id = "batch-folder".to_string();
+    let package_id = package_id("batch-folder", &source_url);
     app.session = Some(session_snapshot(vec![(
         source_url.as_str(),
         UrlFixtureStatus::Pending,
@@ -573,10 +580,10 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
 
     assert_eq!(
         app.visible_rows(),
-        vec![TuiRow::Package(package_id.clone())]
+        vec![TuiRow::Package(package_id.to_string())]
     );
 
-    app.handle_ui_action(UiAction::RetryPackage(package_id.clone()));
+    app.handle_ui_action(UiAction::RetryPackage(package_id.to_string()));
 
     assert!(!app.core_state.packages.contains_key(&package_id));
     assert_eq!(
@@ -643,7 +650,10 @@ fn ui_delete_core_backed_file_removes_output_and_resume_artifacts() {
     let file_id = file_path.to_string_lossy().into_owned();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "https://mega.nz/file/core-delete".to_string(),
+            id: package_id(
+                "https://mega.nz/file/core-delete",
+                "https://mega.nz/file/core-delete",
+            ),
             source_url: "https://mega.nz/file/core-delete".to_string(),
             display_name: "Core Delete".to_string(),
             files: vec![ResolvedFile {
@@ -680,7 +690,10 @@ fn deleted_file_completion_event_redeletes_output_artifacts() {
     let file_id = file_path.to_string_lossy().into_owned();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "https://mega.nz/file/late-complete".to_string(),
+            id: package_id(
+                "https://mega.nz/file/late-complete",
+                "https://mega.nz/file/late-complete",
+            ),
             source_url: "https://mega.nz/file/late-complete".to_string(),
             display_name: "Late Complete".to_string(),
             files: vec![ResolvedFile {
@@ -726,7 +739,10 @@ fn deleted_file_stays_deleted_after_cancel_then_completion_events() {
     let file_id = file_path.to_string_lossy().into_owned();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "https://mega.nz/file/late-cancel-complete".to_string(),
+            id: package_id(
+                "https://mega.nz/file/late-cancel-complete",
+                "https://mega.nz/file/late-cancel-complete",
+            ),
             source_url: "https://mega.nz/file/late-cancel-complete".to_string(),
             display_name: "Late Cancel Complete".to_string(),
             files: vec![ResolvedFile {
@@ -778,7 +794,10 @@ fn deleted_file_error_event_redeletes_output_artifacts() {
     let file_id = file_path.to_string_lossy().into_owned();
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "https://mega.nz/file/late-error".to_string(),
+            id: package_id(
+                "https://mega.nz/file/late-error",
+                "https://mega.nz/file/late-error",
+            ),
             source_url: "https://mega.nz/file/late-error".to_string(),
             display_name: "Late Error".to_string(),
             files: vec![ResolvedFile {
@@ -1106,14 +1125,17 @@ fn scenario_add_mode_keeps_cursor_visible_during_live_updates() {
 fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers() {
     let mut harness = ScenarioHarness::new(80, 18);
 
-    for (package_id, file_id, name) in [
+    for (raw_package_id, file_id, name) in [
         ("pkg-a", "a.bin", "Package A"),
         ("pkg-b", "b.bin", "Package B"),
     ] {
         harness.app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
-                id: package_id.to_string(),
-                source_url: format!("https://mega.nz/folder/{package_id}"),
+                id: package_id(
+                    raw_package_id,
+                    &format!("https://mega.nz/folder/{raw_package_id}"),
+                ),
+                source_url: format!("https://mega.nz/folder/{raw_package_id}"),
                 display_name: name.to_string(),
                 files: vec![ResolvedFile {
                     file_id: file_id.to_string(),
@@ -1139,7 +1161,7 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
     assert_eq!(
         harness.render().selected_row,
         Some(TuiRow::File {
-            package_id: "pkg-a".to_string(),
+            package_id: package_id("pkg-a", "https://mega.nz/folder/pkg-a").to_string(),
             file_id: "a.bin".to_string(),
         })
     );
@@ -1160,7 +1182,9 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
     let snapshot = harness.render();
     assert_eq!(
         snapshot.selected_row,
-        Some(TuiRow::Package("https://mega.nz/folder/pkg-a".to_string()))
+        Some(TuiRow::Package(
+            package_id("pkg-a", "https://mega.nz/folder/pkg-a").to_string()
+        ))
     );
     assert!(snapshot.text.contains("Package A"));
     assert!(snapshot.text.contains("Package B"));
@@ -1172,7 +1196,7 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
 
     harness.app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
-            id: "pkg-a".to_string(),
+            id: package_id("pkg-a", "https://mega.nz/file/reset"),
             source_url: "https://mega.nz/file/reset".to_string(),
             display_name: "Package A".to_string(),
             files: vec![ResolvedFile {

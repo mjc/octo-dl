@@ -5,7 +5,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use sha2::{Digest, Sha256};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -17,7 +16,7 @@ use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::DownloadConfig;
-use crate::core::ProgressDelta;
+use crate::core::{PackageId, ProgressDelta};
 use crate::error::{Error, Result};
 use crate::fs::{FileSystem, TokioFileSystem};
 use crate::progress::CumulativeProgress;
@@ -398,19 +397,20 @@ fn encode_expected_mac(node: &mega::Node) -> Result<String> {
     Ok(STANDARD.encode(mac))
 }
 
-pub(crate) fn stable_batch_package_id(folder: &str, sources: &HashSet<&str>) -> String {
+pub(crate) fn stable_batch_package_id(folder: &str, sources: &HashSet<&str>) -> PackageId {
     let mut sorted_sources = sources.iter().copied().collect::<Vec<_>>();
     sorted_sources.sort_unstable();
 
-    let mut hasher = Sha256::new();
-    hasher.update(folder.as_bytes());
-    hasher.update([0]);
+    let mut key = String::from(folder);
+    key.push('\0');
     for source in sorted_sources {
-        hasher.update(source.as_bytes());
-        hasher.update([0]);
+        key.push_str(source);
+        key.push('\0');
     }
-    let digest = hasher.finalize();
-    format!("batch-{folder}-{:08x}", u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]))
+    PackageId::from(uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        key.as_bytes(),
+    ))
 }
 
 const fn should_reuse_resume_state(force_overwrite: bool, trust_resume_state: bool) -> bool {

@@ -27,7 +27,7 @@ use ratatui::widgets::ListState;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::{DownloadState, ProgressDelta, SessionSnapshotV3};
+use crate::core::{DownloadState, PackageId, ProgressDelta, SessionSnapshotV3};
 use crate::tui::dashboard::DashboardUiMode;
 
 pub(crate) use self::progress::FileUiState;
@@ -127,13 +127,18 @@ impl App {
     }
 
     pub fn package_file_ids(&self, package_id: &str) -> Vec<String> {
-        self.core_state.package_file_ids(package_id)
+        package_id
+            .parse::<PackageId>()
+            .map_or_else(|_| Vec::new(), |package_id| self.core_state.package_file_ids(&package_id))
     }
 
     pub fn package_display_name(&self, package_id: &str) -> String {
+        let Ok(package_id) = package_id.parse::<PackageId>() else {
+            return package_id.to_string();
+        };
         self.core_state
             .packages
-            .get(package_id)
+            .get(&package_id)
             .map(|package| package.display_name.clone())
             .unwrap_or_else(|| package_id.to_string())
     }

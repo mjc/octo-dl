@@ -214,6 +214,7 @@ mod tests {
 
     use super::*;
     use crate::core::{CoreEvent, ResolvedFile, ResolvedPackage};
+    use crate::test_support::package_id;
     use crate::tui::app::{App, ConfirmAction, FileEntry, FileStatus};
     use crate::tui::event::DownloadEvent;
 
@@ -437,7 +438,7 @@ mod tests {
         let mut app = test_app();
         app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
-                id: "pkg-1".to_string(),
+                id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
                 display_name: "Mega Package".to_string(),
                 files: vec![
@@ -477,7 +478,7 @@ mod tests {
         let mut app = test_app();
         app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
-                id: "pkg-1".to_string(),
+                id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
                 display_name: "Mega Package".to_string(),
                 files: vec![
@@ -495,7 +496,8 @@ mod tests {
                 collision: None,
             },
         });
-        app.expanded_packages.insert("pkg-1".to_string());
+        app.expanded_packages
+            .insert(package_id("pkg-1", "https://mega.nz/folder/pkg").to_string());
 
         let rendered = render_text(&mut app);
 
@@ -513,7 +515,10 @@ mod tests {
         let mut app = test_app();
         app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
-                id: "https://mega.nz/folder/abc#secret".to_string(),
+                id: package_id(
+                    "https://mega.nz/folder/abc#secret",
+                    "https://mega.nz/folder/abc#secret",
+                ),
                 source_url: "https://mega.nz/folder/abc#secret".to_string(),
                 display_name: "https://mega.nz/folder/abc#secret".to_string(),
                 files: vec![ResolvedFile {
@@ -537,7 +542,7 @@ mod tests {
         let mut app = test_app();
         app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
-                id: "pkg-1".to_string(),
+                id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
                 display_name: "Mega Package".to_string(),
                 files: vec![ResolvedFile {
@@ -564,7 +569,7 @@ mod tests {
         let mut app = test_app();
         app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
-                id: "pkg-1".to_string(),
+                id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
                 display_name: "Mega Package".to_string(),
                 files: vec![ResolvedFile {

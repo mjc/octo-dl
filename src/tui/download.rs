@@ -870,7 +870,7 @@ fn combine_same_batch_folder_packages(
         if let Some(folder) = folder_component(&item.item.path)
             && let Some(package_id) = groups.get(folder)
         {
-            item.resolved.package_id = Some(package_id.id.clone());
+            item.resolved.package_id = Some(package_id.id.to_string());
             item.resolved.package_display_name = Some(package_id.display_name.clone());
         }
     }
@@ -880,7 +880,7 @@ fn combine_same_batch_folder_packages(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BatchPackageIdentity {
-    id: String,
+    id: crate::core::PackageId,
     display_name: String,
 }
 

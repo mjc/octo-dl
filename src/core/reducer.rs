@@ -604,12 +604,17 @@ fn debug_assert_invariants(state: &DownloadState) {
 mod tests {
     use super::*;
 
+    fn package_id(raw: &str, source_url: &str) -> PackageId {
+        PackageId::parse_or_source_url(raw, source_url)
+    }
+
     fn sample_state() -> DownloadState {
+        let pkg_id = package_id("pkg", "pkg");
         let mut state = DownloadState::new(crate::core::SessionMeta::default());
         state.packages.insert(
-            "pkg".to_string(),
+            pkg_id,
             PackageState {
-                id: "pkg".to_string(),
+                id: pkg_id,
                 source_url: "pkg".to_string(),
                 display_name: "pkg".to_string(),
                 status: PackageStatus::Pending,
@@ -620,7 +625,7 @@ mod tests {
             "file.bin".to_string(),
             FileState {
                 id: "file.bin".to_string(),
-                package_id: "pkg".to_string(),
+                package_id: pkg_id,
                 source_url: Some("pkg".to_string()),
                 path: "file.bin".to_string(),
                 size: 100,
@@ -644,7 +649,7 @@ mod tests {
             &mut state,
             CoreEvent::PackageResolved {
                 package: ResolvedPackage {
-                    id: "pkg".to_string(),
+                    id: package_id("pkg", "pkg"),
                     source_url: "pkg".to_string(),
                     display_name: "pkg".to_string(),
                     files: vec![
@@ -664,7 +669,10 @@ mod tests {
             },
         );
         assert_eq!(state.files.len(), 1);
-        assert_eq!(state.package_file_ids("pkg"), vec!["a.bin".to_string()]);
+        assert_eq!(
+            state.package_file_ids(&package_id("pkg", "pkg")),
+            vec!["a.bin".to_string()]
+        );
     }
 
     #[test]
@@ -681,7 +689,7 @@ mod tests {
             &mut state,
             CoreEvent::PackageResolved {
                 package: ResolvedPackage {
-                    id: "resolved-folder".to_string(),
+                    id: package_id("resolved-folder", "https://mega.nz/folder/test"),
                     source_url: "https://mega.nz/folder/test".to_string(),
                     display_name: "Resolved Folder".to_string(),
                     files: vec![ResolvedFile {
@@ -694,13 +702,21 @@ mod tests {
             },
         );
 
-        assert!(!state.packages.contains_key("https://mega.nz/folder/test"));
+        assert!(
+            !state
+                .packages
+                .contains_key(&package_id(
+                    "https://mega.nz/folder/test",
+                    "https://mega.nz/folder/test"
+                ))
+        );
         assert_eq!(state.packages.len(), 1);
+        let resolved_id = package_id("resolved-folder", "https://mega.nz/folder/test");
         assert_eq!(
-            state.packages["resolved-folder"].source_url,
+            state.packages[&resolved_id].source_url,
             "https://mega.nz/folder/test"
         );
-        assert_eq!(state.package_file_ids("resolved-folder"), vec!["a.bin".to_string()]);
+        assert_eq!(state.package_file_ids(&resolved_id), vec!["a.bin".to_string()]);
         assert_eq!(state.url_order, vec!["https://mega.nz/folder/test".to_string()]);
     }
 
@@ -711,14 +727,17 @@ mod tests {
             &mut state,
             CoreEvent::PackageResolved {
                 package: ResolvedPackage {
-                    id: "failed-pkg".to_string(),
+                    id: package_id("failed-pkg", "https://mega.nz/folder/failed"),
                     source_url: "https://mega.nz/folder/failed".to_string(),
                     display_name: "Failed package".to_string(),
                     files: Vec::new(),
                     collision: Some(PackageCollision {
                         file_id: "duplicate.bin".to_string(),
-                        existing_package_id: "existing".to_string(),
-                        incoming_package_id: "failed-pkg".to_string(),
+                        existing_package_id: package_id("existing", "https://mega.nz/folder/failed"),
+                        incoming_package_id: package_id(
+                            "failed-pkg",
+                            "https://mega.nz/folder/failed",
+                        ),
                     }),
                 },
             },
@@ -736,10 +755,11 @@ mod tests {
     #[test]
     fn package_resolved_reuses_existing_nonempty_package_for_same_source_url() {
         let mut state = DownloadState::default();
+        let existing_id = package_id("batch-existing", "https://mega.nz/folder/test");
         state.packages.insert(
-            "batch-existing".to_string(),
+            existing_id,
             PackageState {
-                id: "batch-existing".to_string(),
+                id: existing_id,
                 source_url: "https://mega.nz/folder/test".to_string(),
                 display_name: "Folder".to_string(),
                 status: PackageStatus::Queued,
@@ -750,7 +770,7 @@ mod tests {
             "a.bin".to_string(),
             FileState {
                 id: "a.bin".to_string(),
-                package_id: "batch-existing".to_string(),
+                package_id: existing_id,
                 source_url: Some("https://mega.nz/folder/test".to_string()),
                 path: "folder/a.bin".to_string(),
                 size: 10,
@@ -769,7 +789,10 @@ mod tests {
             &mut state,
             CoreEvent::PackageResolved {
                 package: ResolvedPackage {
-                    id: "https://mega.nz/folder/test".to_string(),
+                    id: package_id(
+                        "https://mega.nz/folder/test",
+                        "https://mega.nz/folder/test",
+                    ),
                     source_url: "https://mega.nz/folder/test".to_string(),
                     display_name: "Folder".to_string(),
                     files: vec![ResolvedFile {
@@ -783,24 +806,29 @@ mod tests {
         );
 
         assert_eq!(state.packages.len(), 1);
-        let package = &state.packages["https://mega.nz/folder/test"];
+        let canonical_id = package_id(
+            "https://mega.nz/folder/test",
+            "https://mega.nz/folder/test",
+        );
+        let package = &state.packages[&canonical_id];
         assert_eq!(package.source_url, "https://mega.nz/folder/test");
         assert_eq!(
-            state.package_file_ids("https://mega.nz/folder/test"),
+            state.package_file_ids(&canonical_id),
             vec!["a.bin".to_string(), "b.bin".to_string()]
         );
         assert_eq!(package.display_name, "Folder");
-        assert_eq!(state.files["a.bin"].package_id, "https://mega.nz/folder/test");
-        assert_eq!(state.files["b.bin"].package_id, "https://mega.nz/folder/test");
+        assert_eq!(state.files["a.bin"].package_id, canonical_id);
+        assert_eq!(state.files["b.bin"].package_id, canonical_id);
     }
 
     #[test]
     fn package_resolved_placeholder_refresh_does_not_clobber_resolved_display_name() {
         let mut state = DownloadState::default();
+        let existing_id = package_id("pkg-a", "https://mega.nz/folder/pkg-a");
         state.packages.insert(
-            "pkg-a".to_string(),
+            existing_id,
             PackageState {
-                id: "pkg-a".to_string(),
+                id: existing_id,
                 source_url: "https://mega.nz/folder/pkg-a".to_string(),
                 display_name: "Package A".to_string(),
                 status: PackageStatus::Queued,
@@ -811,7 +839,7 @@ mod tests {
             "a.bin".to_string(),
             FileState {
                 id: "a.bin".to_string(),
-                package_id: "pkg-a".to_string(),
+                package_id: existing_id,
                 source_url: Some("https://mega.nz/folder/pkg-a".to_string()),
                 path: "a.bin".to_string(),
                 size: 10,
@@ -830,7 +858,10 @@ mod tests {
             &mut state,
             CoreEvent::PackageResolved {
                 package: ResolvedPackage {
-                    id: "https://mega.nz/folder/pkg-a".to_string(),
+                    id: package_id(
+                        "https://mega.nz/folder/pkg-a",
+                        "https://mega.nz/folder/pkg-a",
+                    ),
                     source_url: "https://mega.nz/folder/pkg-a".to_string(),
                     display_name: "https://mega.nz/folder/pkg-a".to_string(),
                     files: vec![ResolvedFile {
@@ -844,22 +875,27 @@ mod tests {
         );
 
         assert_eq!(state.packages.len(), 1);
-        let package = &state.packages["https://mega.nz/folder/pkg-a"];
+        let canonical_id = package_id(
+            "https://mega.nz/folder/pkg-a",
+            "https://mega.nz/folder/pkg-a",
+        );
+        let package = &state.packages[&canonical_id];
         assert_eq!(package.source_url, "https://mega.nz/folder/pkg-a");
         assert_eq!(package.display_name, "Package A");
-        assert_eq!(
-            state.package_file_ids("https://mega.nz/folder/pkg-a"),
-            vec!["a.bin".to_string()]
-        );
+        assert_eq!(state.package_file_ids(&canonical_id), vec!["a.bin".to_string()]);
     }
 
     #[test]
     fn package_resolved_reassigns_existing_files_to_new_package_id_for_same_url() {
         let mut state = DownloadState::default();
+        let old_id = package_id(
+            "https://mega.nz/folder/test",
+            "https://mega.nz/folder/test",
+        );
         state.packages.insert(
-            "https://mega.nz/folder/test".to_string(),
+            old_id,
             PackageState {
-                id: "https://mega.nz/folder/test".to_string(),
+                id: old_id,
                 source_url: "https://mega.nz/folder/test".to_string(),
                 display_name: "https://mega.nz/folder/test".to_string(),
                 status: PackageStatus::Queued,
@@ -870,7 +906,7 @@ mod tests {
             "a.bin".to_string(),
             FileState {
                 id: "a.bin".to_string(),
-                package_id: "https://mega.nz/folder/test".to_string(),
+                package_id: old_id,
                 source_url: Some("https://mega.nz/folder/test".to_string()),
                 path: "folder/a.bin".to_string(),
                 size: 10,
@@ -889,7 +925,7 @@ mod tests {
             &mut state,
             CoreEvent::PackageResolved {
                 package: ResolvedPackage {
-                    id: "batch-folder".to_string(),
+                    id: package_id("batch-folder", "https://mega.nz/folder/test"),
                     source_url: "https://mega.nz/folder/test".to_string(),
                     display_name: "Folder".to_string(),
                     files: vec![ResolvedFile {
@@ -903,16 +939,17 @@ mod tests {
         );
 
         assert_eq!(state.packages.len(), 1);
-        assert!(!state.packages.contains_key("https://mega.nz/folder/test"));
-        let package = &state.packages["batch-folder"];
+        assert!(!state.packages.contains_key(&old_id));
+        let batch_id = package_id("batch-folder", "https://mega.nz/folder/test");
+        let package = &state.packages[&batch_id];
         assert_eq!(package.source_url, "https://mega.nz/folder/test");
         assert_eq!(package.display_name, "Folder");
         assert_eq!(
-            state.package_file_ids("batch-folder"),
+            state.package_file_ids(&batch_id),
             vec!["a.bin".to_string(), "b.bin".to_string()]
         );
-        assert_eq!(state.files["a.bin"].package_id, "batch-folder");
-        assert_eq!(state.files["b.bin"].package_id, "batch-folder");
+        assert_eq!(state.files["a.bin"].package_id, batch_id);
+        assert_eq!(state.files["b.bin"].package_id, batch_id);
     }
 
     #[test]
@@ -960,7 +997,7 @@ mod tests {
             &mut state,
             CoreEvent::PackageResolved {
                 package: ResolvedPackage {
-                    id: "pkg".to_string(),
+                    id: package_id("pkg", "pkg"),
                     source_url: "pkg".to_string(),
                     display_name: "pkg".to_string(),
                     files: vec![
@@ -991,7 +1028,10 @@ mod tests {
                 file_id: "todo.bin".to_string(),
             },
         );
-        assert_eq!(state.packages["pkg"].status, PackageStatus::Partial);
+        assert_eq!(
+            state.packages[&package_id("pkg", "pkg")].status,
+            PackageStatus::Partial
+        );
     }
 
     #[test]
