@@ -4,17 +4,25 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table};
-use std::collections::HashSet;
 
-use crate::core::{FileLifecycle, PackageStatus};
-use crate::{format_bytes, format_duration};
-use std::time::Duration;
+use crate::core::PackageStatus;
+use crate::format_bytes;
 
-use super::app::{App, ConfigField, ConfirmAction, FileStatus, Popup, SortKey};
-use super::visible::TuiRow;
+use super::app::{App, ConfigField, ConfirmAction, Popup, SortKey};
+use super::dashboard::{
+    DashboardChrome, DashboardFileRow, DashboardFileStatus, DashboardPackageRow, DashboardRow,
+    DashboardUiMode, DownloadDashboardState, aggregate_transfer_label as dashboard_transfer_label,
+    clamp_selection, file_detail as dashboard_file_detail,
+};
 
 pub fn draw(frame: &mut ratatui::Frame, app: &mut App) {
-    draw_main(frame, app);
+    let state = app.dashboard_state(DashboardUiMode::Tui, false);
+    draw_dashboard(
+        frame,
+        &state,
+        &DashboardChrome::new(&app.url_input, app.url_input_active),
+        &mut app.file_list_state,
+    );
     match app.popup {
         Popup::None => {}
         Popup::Login => draw_login_popup(frame, app),
@@ -24,26 +32,33 @@ pub fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     }
 }
 
-#[allow(clippy::too_many_lines)]
-fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
+pub fn draw_dashboard(
+    frame: &mut ratatui::Frame,
+    state: &DownloadDashboardState,
+    chrome: &DashboardChrome<'_>,
+    list_state: &mut ratatui::widgets::ListState,
+) {
     let area = frame.area();
-
-    // Outer block with title bar
-    let title = " octo-dl ".to_string();
+    let title = match state.ui_mode {
+        DashboardUiMode::Headless => " octo-dl headless ",
+        DashboardUiMode::Tui => " octo-dl ",
+        DashboardUiMode::Attached => " octo-dl attached ",
+    };
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let title_right = format!(
-        " {}% CPU | {} RAM | API: {}{}",
-        (app.cpu_usage as u16).min(999),
-        format_bytes(app.memory_rss),
-        app.api_port,
-        if app.paused { " | PAUSED" } else { "" }
+        " {}% CPU | {} RAM | API: {}{}{}",
+        (state.metrics.cpu_usage as u16).min(999),
+        format_bytes(state.metrics.memory_rss),
+        state.metrics.api_port,
+        if state.paused { " | PAUSED" } else { "" },
+        if state.read_only { " | READ-ONLY" } else { "" }
     );
 
     let outer = Block::default()
         .title(title)
         .title_alignment(Alignment::Left)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if app.paused {
+        .border_style(Style::default().fg(if state.paused {
             Color::Yellow
         } else {
             Color::Cyan
@@ -51,14 +66,13 @@ fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    // Render title-right manually in the top border
     let right_x = area
         .x
         .saturating_add(area.width)
         .saturating_sub(u16::try_from(title_right.len()).unwrap_or(u16::MAX) + 1);
     if right_x > area.x + 1 {
         frame.render_widget(
-            Paragraph::new(title_right).style(Style::default().fg(if app.paused {
+            Paragraph::new(title_right).style(Style::default().fg(if state.paused {
                 Color::Yellow
             } else {
                 Color::Cyan
@@ -75,21 +89,22 @@ fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // URL input bar
-            Constraint::Length(3), // Aggregate progress
-            Constraint::Min(5),    // File list
-            Constraint::Length(1), // Status line
-            Constraint::Length(1), // Controls bar
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(inner);
 
-    // --- URL input bar ---
-    let url_style = if app.popup == Popup::None && app.url_input_active {
+    let url_style = if !state.read_only && state.popup == Popup::None && chrome.url_input_active {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let url_title = if app.url_input_active {
+    let url_title = if state.read_only {
+        " Attached dashboard "
+    } else if chrome.url_input_active {
         " Add URL(s): editing "
     } else {
         " Add URL(s): press a "
@@ -99,272 +114,373 @@ fn draw_main(frame: &mut ratatui::Frame, app: &mut App) {
         .borders(Borders::ALL)
         .border_style(url_style);
     let url_inner = url_block.inner(chunks[0]);
-    let (url_value, cursor_col) = if app.popup == Popup::None && app.url_input_active {
-        focused_url_input_view(&app.url_input, url_inner.width)
-    } else {
-        (
-            truncate_end(&app.url_input, usize::from(url_inner.width)),
-            None,
-        )
-    };
-    let url_input = Paragraph::new(url_value)
-        .block(url_block)
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(url_input, chunks[0]);
+    let (url_value, cursor_col) =
+        if !state.read_only && state.popup == Popup::None && chrome.url_input_active {
+            focused_url_input_view(chrome.url_input, url_inner.width)
+        } else {
+            (
+                truncate_end(chrome.url_input, usize::from(url_inner.width)),
+                None,
+            )
+        };
+    frame.render_widget(
+        Paragraph::new(url_value)
+            .block(url_block)
+            .style(Style::default().fg(Color::White)),
+        chunks[0],
+    );
     if let Some(cursor_col) = cursor_col
         && url_inner.height > 0
     {
         frame.set_cursor_position(Position::new(url_inner.x + cursor_col, url_inner.y));
     }
 
-    // --- Aggregate progress ---
-    let ratio = if app.total_size > 0 {
+    let ratio = if state.totals.total_size > 0 {
         #[allow(clippy::cast_precision_loss)]
-        let r = app.total_downloaded as f64 / app.total_size as f64;
+        let r = state.totals.total_downloaded as f64 / state.totals.total_size as f64;
         r.min(1.0)
     } else {
         0.0
     };
-
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_precision_loss
     )]
     let pct = (ratio * 100.0) as u16;
-    let gauge_label = aggregate_progress_label(app, pct, chunks[1].width);
     let gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL))
         .gauge_style(Style::default().fg(Color::Green))
         .ratio(ratio)
-        .label(gauge_label);
+        .label(dashboard_aggregate_progress_label(
+            state,
+            pct,
+            chunks[1].width,
+        ));
     frame.render_widget(gauge, chunks[1]);
 
-    // --- File list ---
-    draw_file_list(frame, app, chunks[2]);
+    draw_dashboard_file_list(frame, state, list_state, chunks[2]);
 
-    // --- Status line ---
-    let status_spans = build_status_line(app, chunks[3].width);
-    let status_line =
-        Paragraph::new(Line::from(status_spans)).style(Style::default().fg(Color::White));
+    let status_line = Paragraph::new(Line::from(dashboard_status_line(state, chunks[3].width)))
+        .style(Style::default().fg(Color::White));
     frame.render_widget(status_line, chunks[3]);
 
-    // --- Controls bar ---
-    let controls = controls_label(app, chunks[4].width);
+    let controls = if state.read_only {
+        truncate_end(
+            "up/down:select  q:quit  read-only",
+            usize::from(chunks[4].width),
+        )
+    } else {
+        controls_label_from_snapshot(state, chrome, chunks[4].width)
+    };
     let controls_bar = Paragraph::new(controls)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
     frame.render_widget(controls_bar, chunks[4]);
 }
 
-fn build_status_line(app: &App, width: u16) -> Vec<Span<'static>> {
-    #[derive(Clone)]
-    struct StatusPart {
-        variants: Vec<String>,
-        style: Style,
-        weight: usize,
-    }
+fn draw_dashboard_file_list(
+    frame: &mut ratatui::Frame,
+    state: &DownloadDashboardState,
+    list_state: &mut ratatui::widgets::ListState,
+    area: Rect,
+) {
+    clamp_selection(list_state, state.rows.len());
+    let content_width = usize::from(area.width.saturating_sub(4));
+    let selected = list_state.selected();
+    let items = state
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| dashboard_row_item(state, row, selected == Some(index), content_width))
+        .collect::<Vec<_>>();
+    let file_list = List::new(items)
+        .block(Block::default().borders(Borders::ALL))
+        .highlight_symbol("")
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_stateful_widget(file_list, area, list_state);
+}
 
-    fn parts_length(parts: &[StatusPart], chosen: &[usize]) -> usize {
-        let labels = parts
+fn dashboard_row_item(
+    state: &DownloadDashboardState,
+    row: &DashboardRow,
+    selected: bool,
+    content_width: usize,
+) -> ListItem<'static> {
+    match row {
+        DashboardRow::Package { package_id } => state
+            .packages
             .iter()
-            .zip(chosen.iter())
-            .filter_map(|(part, index)| {
-                let label = &part.variants[*index];
-                (!label.is_empty()).then_some(label)
+            .find(|package| package.id == *package_id)
+            .map(|package| dashboard_package_item(package, selected, content_width))
+            .unwrap_or_else(|| ListItem::new(Line::from(""))),
+        DashboardRow::File {
+            package_id,
+            file_id,
+        } => state
+            .files
+            .iter()
+            .find(|file| file.id == *file_id)
+            .map(|file| {
+                dashboard_file_item(
+                    file,
+                    package_id.is_empty() && !file.package_id.is_empty(),
+                    selected,
+                    content_width,
+                )
             })
-            .collect::<Vec<_>>();
-        if labels.is_empty() {
-            0
-        } else {
-            labels
-                .iter()
-                .map(|label| label.chars().count())
-                .sum::<usize>()
-                + 3 * labels.len().saturating_sub(1)
-        }
+            .unwrap_or_else(|| ListItem::new(Line::from(""))),
+    }
+}
+
+fn dashboard_file_item(
+    file: &DashboardFileRow,
+    include_package: bool,
+    selected: bool,
+    content_width: usize,
+) -> ListItem<'static> {
+    let (icon, color) = match &file.status {
+        DashboardFileStatus::Downloading => ("\u{25cf}", Color::Yellow),
+        DashboardFileStatus::Queued => ("\u{25cb}", Color::DarkGray),
+        DashboardFileStatus::Complete => ("\u{2713}", Color::Green),
+        DashboardFileStatus::Error { .. } => ("\u{2717}", Color::Red),
+    };
+    let prefix_label = if include_package {
+        file.package_label
+            .as_deref()
+            .map(|label| format!("[{}] ", compact_label(label)))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let detail = dashboard_file_detail(file);
+    let prefix = format!("   {icon} ");
+    let prefix_width = prefix.chars().count();
+    let detail_width = detail.chars().count().min(content_width / 2);
+    let detail = truncate_end(&detail, detail_width);
+    let name = truncate_end(
+        &format!("{prefix_label}{}", file.name),
+        content_width
+            .saturating_sub(prefix_width)
+            .saturating_sub(detail.chars().count())
+            .saturating_sub(1),
+    );
+    let filler = " ".repeat(
+        content_width
+            .saturating_sub(prefix_width)
+            .saturating_sub(name.chars().count())
+            .saturating_sub(detail.chars().count()),
+    );
+    let mut row_style = Style::default().fg(color);
+    if selected {
+        row_style = row_style.add_modifier(Modifier::BOLD);
+    }
+    ListItem::new(Line::from(vec![
+        Span::styled(format!("{prefix}{name}"), row_style),
+        Span::raw(filler),
+        Span::styled(detail, Style::default().fg(Color::DarkGray)),
+    ]))
+}
+
+fn dashboard_package_item(
+    package: &DashboardPackageRow,
+    selected: bool,
+    content_width: usize,
+) -> ListItem<'static> {
+    let (icon, color) = package_status_style(package.status);
+    let marker = if package.present_files > 1 {
+        if package.expanded { "-" } else { "+" }
+    } else {
+        " "
+    };
+    let speed_label = if matches!(package.status, PackageStatus::Downloading) {
+        "active"
+    } else {
+        ""
+    };
+    let detail = dashboard_package_detail(package, speed_label, content_width);
+    let prefix = format!(" {marker} {icon} ");
+    let prefix_width = prefix.chars().count();
+    let detail_width = detail.chars().count().min(content_width / 2);
+    let detail = truncate_end(&detail, detail_width);
+    let name = truncate_end(
+        &display_dashboard_package_name(package),
+        content_width
+            .saturating_sub(prefix_width)
+            .saturating_sub(detail.chars().count())
+            .saturating_sub(1),
+    );
+    let filler = " ".repeat(
+        content_width
+            .saturating_sub(prefix_width)
+            .saturating_sub(name.chars().count())
+            .saturating_sub(detail.chars().count()),
+    );
+    let mut row_style = Style::default().fg(color);
+    if selected {
+        row_style = row_style.add_modifier(Modifier::BOLD);
+    }
+    ListItem::new(Line::from(vec![
+        Span::styled(format!("{prefix}{name}"), row_style),
+        Span::raw(filler),
+        Span::styled(detail, Style::default().fg(Color::DarkGray)),
+    ]))
+}
+
+fn dashboard_package_detail(
+    package: &DashboardPackageRow,
+    speed_label: &str,
+    content_width: usize,
+) -> String {
+    let full = format!(
+        "{}/{} files  {} / {}  {:>3}%  {speed_label}",
+        package.completed_files,
+        package.present_files,
+        format_bytes(package.downloaded_bytes),
+        format_bytes(package.total_bytes),
+        package.percent
+    );
+    if full.chars().count() <= content_width / 2 {
+        return full;
+    }
+    let compact = format!(
+        "{}/{}  {}  {:>3}%  {speed_label}",
+        package.completed_files,
+        package.present_files,
+        format_bytes(package.total_bytes),
+        package.percent
+    );
+    truncate_end(&compact, content_width / 2)
+}
+
+fn display_dashboard_package_name(package: &DashboardPackageRow) -> String {
+    if !package.display_name.starts_with("http://") && !package.display_name.starts_with("https://")
+    {
+        return compact_label(&package.display_name);
+    }
+    if let Some(label) = &package.folder_label {
+        return label.clone();
+    }
+    if let Some(label) = mega_url_label(&package.display_name) {
+        return label;
+    }
+    compact_label(
+        package
+            .display_name
+            .split('#')
+            .next()
+            .unwrap_or(&package.display_name),
+    )
+}
+
+fn dashboard_status_line(state: &DownloadDashboardState, width: u16) -> Vec<Span<'static>> {
+    let status = dashboard_effective_status(state);
+    let error_count = state
+        .files
+        .iter()
+        .filter(|file| file.status.is_error())
+        .count();
+    let downloading = state
+        .files
+        .iter()
+        .filter(|file| file.status.is_downloading())
+        .count();
+    let queued = state
+        .files
+        .iter()
+        .filter(|file| file.status.is_queued())
+        .count();
+    let width = usize::from(width);
+
+    if width <= 16 && error_count > 0 {
+        return vec![Span::styled(
+            format!("{error_count} failed"),
+            Style::default().fg(Color::Red),
+        )];
     }
 
-    fn variant_score(part: &StatusPart, variant_index: usize) -> usize {
-        let label = &part.variants[variant_index];
-        if label.is_empty() {
-            return 0;
+    if width <= 32 && downloading > 0 {
+        let activity = format!("Dl {downloading}, {queued} q");
+        let failure = (error_count > 0).then(|| format!("{error_count} failed"));
+        if let Some(failure) = failure {
+            return vec![
+                Span::styled(activity, Style::default().fg(Color::Cyan)),
+                Span::styled(" | ", Style::default().fg(Color::DarkGray)),
+                Span::styled(failure, Style::default().fg(Color::Red)),
+            ];
         }
-        part.weight * (part.variants.len().saturating_sub(variant_index))
-    }
-
-    fn choose_variants(
-        parts: &[StatusPart],
-        width: usize,
-        chosen: &mut Vec<usize>,
-        best: &mut Option<(usize, Vec<usize>)>,
-    ) {
-        let index = chosen.len();
-        if index == parts.len() {
-            if parts_length(parts, chosen) <= width {
-                let score = parts
-                    .iter()
-                    .zip(chosen.iter())
-                    .map(|(part, variant_index)| variant_score(part, *variant_index))
-                    .sum::<usize>();
-                if best
-                    .as_ref()
-                    .is_none_or(|(best_score, _)| score > *best_score)
-                {
-                    *best = Some((score, chosen.clone()));
-                }
-            }
-            return;
-        }
-
-        for variant_index in 0..parts[index].variants.len() {
-            chosen.push(variant_index);
-            if parts_length(parts, chosen) <= width {
-                choose_variants(parts, width, chosen, best);
-            }
-            chosen.pop();
-        }
+        return vec![Span::styled(activity, Style::default().fg(Color::Cyan))];
     }
 
     let mut parts = Vec::new();
-    if app.authenticated {
-        parts.push(StatusPart {
-            variants: vec![
-                "Logged in \u{2713}".to_string(),
-                "Auth\u{2713}".to_string(),
-                "\u{2713}".to_string(),
-                String::new(),
-            ],
-            style: Style::default().fg(Color::Green),
-            weight: 1,
-        });
-    } else if app.login.logging_in {
-        parts.push(StatusPart {
-            variants: vec![
-                "Logging in...".to_string(),
-                "Login...".to_string(),
-                String::new(),
-            ],
-            style: Style::default().fg(Color::Yellow),
-            weight: 1,
-        });
-    } else if app.popup == Popup::Login {
-        parts.push(StatusPart {
-            variants: vec![
-                "Awaiting login".to_string(),
-                "Login".to_string(),
-                String::new(),
-            ],
-            style: Style::default().fg(Color::DarkGray),
-            weight: 1,
-        });
+    if state.authenticated {
+        parts.push(Span::styled(
+            "Logged in \u{2713}",
+            Style::default().fg(Color::Green),
+        ));
+    } else if state.logging_in {
+        parts.push(Span::styled(
+            "Logging in...",
+            Style::default().fg(Color::Yellow),
+        ));
     }
-
-    let status = effective_status(app);
-    if !status.is_empty() && !is_stale_login_status(app, &status) {
-        parts.push(StatusPart {
-            variants: status_variants(app, &status),
-            style: Style::default().fg(Color::Cyan),
-            weight: 3,
-        });
+    if !status.is_empty() {
+        if !parts.is_empty() {
+            parts.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        }
+        parts.push(Span::styled(
+            truncate_end(&status, width.saturating_sub(12)),
+            Style::default().fg(Color::Cyan),
+        ));
     }
-
-    let error_count = app
-        .files
-        .iter()
-        .filter(|f| matches!(f.status, FileStatus::Error(_)))
-        .count();
     if error_count > 0 {
-        parts.push(StatusPart {
-            variants: vec![format!("{error_count} failed"), format!("!{error_count}")],
-            style: Style::default().fg(Color::Red),
-            weight: 4,
-        });
-    }
-
-    let mut best = None;
-    choose_variants(&parts, usize::from(width), &mut Vec::new(), &mut best);
-    let chosen = best.map(|(_, chosen)| chosen).unwrap_or_default();
-    let mut spans = Vec::new();
-    for (index, (part, variant_index)) in parts.iter().zip(chosen.iter()).enumerate() {
-        let label = &part.variants[*variant_index];
-        if label.is_empty() {
-            continue;
+        if !parts.is_empty() {
+            parts.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
         }
-        if !spans.is_empty() && index > 0 {
-            spans.push(Span::styled(
-                " | ".to_string(),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        spans.push(Span::styled(label.clone(), part.style));
+        parts.push(Span::styled(
+            format!("{error_count} failed"),
+            Style::default().fg(Color::Red),
+        ));
     }
-    spans
+    parts
 }
 
-fn status_variants(app: &App, status: &str) -> Vec<String> {
-    let downloading = app
-        .files
-        .iter()
-        .filter(|file| matches!(file.status, FileStatus::Downloading))
-        .count();
-    let queued = app
-        .files
-        .iter()
-        .filter(|file| matches!(file.status, FileStatus::Queued))
-        .count();
-
-    let mut variants = vec![status.to_string()];
-    if downloading > 0 {
-        variants.push(format!("Dl {downloading}, {queued} q"));
-    } else if app.files_total > 0 {
-        variants.push(format!("{}/{} done", app.files_completed, app.files_total));
-        if queued > 0 {
-            variants.push(format!("Q {queued}"));
-        }
-    } else if queued > 0 {
-        variants.push(format!("Q {queued}"));
+fn dashboard_effective_status(state: &DownloadDashboardState) -> String {
+    if !is_processing_status(&state.status) || state.files.is_empty() {
+        return state.status.clone();
     }
-    variants.push(truncate_end(status, 12));
-    variants.push(String::new());
-    variants.dedup();
-    variants
-}
-
-fn is_stale_login_status(app: &App, status: &str) -> bool {
-    status == "Logging in..." && (app.authenticated || app.login.logging_in)
-}
-
-fn effective_status(app: &App) -> String {
-    if !is_processing_status(&app.status) || app.files.is_empty() {
-        return app.status.clone();
-    }
-
-    let downloading = app
+    let downloading = state
         .files
         .iter()
-        .filter(|file| matches!(file.status, FileStatus::Downloading))
+        .filter(|file| file.status.is_downloading())
         .count();
-    let queued = app
+    let queued = state
         .files
         .iter()
-        .filter(|file| matches!(file.status, FileStatus::Queued))
+        .filter(|file| file.status.is_queued())
         .count();
-
     if downloading > 0 {
         return format!("Downloading {downloading} file(s), {queued} queued");
     }
-    if app.files_total > 0 {
+    if state.totals.files_total > 0 {
         return format!(
             "Queued {} file(s), {}/{} complete",
-            queued, app.files_completed, app.files_total
+            queued, state.totals.files_completed, state.totals.files_total
         );
     }
-    format!("Queued {} file(s)", app.files.len())
+    format!("Queued {} file(s)", state.files.len())
 }
 
-fn controls_label(app: &App, width: u16) -> String {
-    let text = if app.url_input_active {
+fn controls_label_from_snapshot(
+    state: &DownloadDashboardState,
+    chrome: &DashboardChrome<'_>,
+    width: u16,
+) -> String {
+    let text = if chrome.url_input_active {
         if width >= 34 {
             "enter:add  esc:cancel  paste:ok"
         } else if width >= 24 {
@@ -374,20 +490,51 @@ fn controls_label(app: &App, width: u16) -> String {
         } else {
             "esc"
         }
+    } else if state.popup != Popup::None {
+        "esc:close"
+    } else if width >= 86 {
+        "a:add  up/down:select  enter:open  s:sort  d:del  r:retry  R:reset  c:cfg  q:quit"
+    } else if width >= 58 {
+        "a:add  enter:open  s:sort  d:del  r:retry  q:quit"
+    } else if width >= 40 {
+        "a:add  enter:open  d:del  q:quit"
+    } else if width >= 18 {
+        "a:add  q:quit"
     } else {
-        if width >= 86 {
-            "a:add  up/down:select  enter:open  s:sort  d:del  r:retry  R:reset  c:cfg  q:quit"
-        } else if width >= 58 {
-            "a:add  enter:open  s:sort  d:del  r:retry  q:quit"
-        } else if width >= 40 {
-            "a:add  enter:open  d:del  q:quit"
-        } else if width >= 18 {
-            "a:add  q:quit"
-        } else {
-            "q:quit"
-        }
+        "q:quit"
     };
     truncate_end(text, usize::from(width))
+}
+
+fn dashboard_aggregate_progress_label(
+    state: &DownloadDashboardState,
+    pct: u16,
+    width: u16,
+) -> String {
+    let bytes = format!(
+        "{} / {}",
+        format_bytes(state.totals.total_downloaded),
+        format_bytes(state.totals.total_size)
+    );
+    let transfer = dashboard_transfer_label(state);
+    let full = format!(
+        "{pct}%  {}/{} files  {bytes}  {transfer}",
+        state.totals.files_completed, state.totals.files_total
+    );
+    if full.chars().count() <= usize::from(width.saturating_sub(2)) {
+        return full;
+    }
+    let compact = format!(
+        "{pct}%  {}/{}  {transfer}",
+        state.totals.files_completed, state.totals.files_total
+    );
+    if compact.chars().count() <= usize::from(width.saturating_sub(2)) {
+        return compact;
+    }
+    truncate_end(
+        &format!("{pct}%  {transfer}"),
+        usize::from(width.saturating_sub(2)),
+    )
 }
 
 fn focused_url_input_view(value: &str, width: u16) -> (String, Option<u16>) {
@@ -415,182 +562,6 @@ fn is_processing_status(status: &str) -> bool {
     status.starts_with("Processing ")
 }
 
-struct FileListRow {
-    icon: &'static str,
-    color: Color,
-    name: String,
-    detail: String,
-}
-
-impl FileListRow {
-    fn from_file(app: &App, file: &super::app::FileEntry, include_package: bool) -> Self {
-        let package_label = app.package_label_for_file(&file.id);
-        let (icon, color) = match &file.status {
-            FileStatus::Downloading => ("\u{25cf}", Color::Yellow),
-            FileStatus::Queued => ("\u{25cb}", Color::DarkGray),
-            FileStatus::Complete => ("\u{2713}", Color::Green),
-            FileStatus::Error(_) => ("\u{2717}", Color::Red),
-        };
-        let detail = file_detail(app, file);
-        let prefix = if include_package {
-            package_label
-                .as_deref()
-                .map(|label| format!("[{}] ", compact_label(label)))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-
-        Self {
-            icon,
-            color,
-            name: format!("{prefix}{}", file.name),
-            detail,
-        }
-    }
-
-    fn into_child_item(self, selected: bool, content_width: usize) -> ListItem<'static> {
-        let prefix = format!("   {} ", self.icon);
-        let prefix_width = prefix.chars().count();
-        let detail_width = self.detail.chars().count().min(content_width / 2);
-        let detail = truncate_end(&self.detail, detail_width);
-        let name_width = content_width
-            .saturating_sub(prefix_width)
-            .saturating_sub(detail.chars().count())
-            .saturating_sub(1);
-        let name = truncate_end(&self.name, name_width);
-        let filler = " ".repeat(
-            content_width
-                .saturating_sub(prefix_width)
-                .saturating_sub(name.chars().count())
-                .saturating_sub(detail.chars().count()),
-        );
-        let mut row_style = Style::default().fg(self.color);
-        if selected {
-            row_style = row_style.add_modifier(Modifier::BOLD);
-        }
-
-        ListItem::new(Line::from(vec![
-            Span::styled(format!("{prefix}{name}"), row_style),
-            Span::raw(filler),
-            Span::styled(detail, Style::default().fg(Color::DarkGray)),
-        ]))
-    }
-}
-
-fn draw_file_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let rows = app.visible_rows();
-    let expanded_packages: HashSet<_> = rows
-        .iter()
-        .filter_map(|row| match row {
-            TuiRow::File { package_id, .. } if !package_id.is_empty() => Some(package_id.as_str()),
-            _ => None,
-        })
-        .collect();
-    let content_width = usize::from(area.width.saturating_sub(4));
-    if app.file_list_state.selected().is_none() && !rows.is_empty() {
-        app.file_list_state.select(Some(0));
-    } else if let Some(selected) = app.file_list_state.selected()
-        && selected >= rows.len()
-    {
-        app.file_list_state.select(rows.len().checked_sub(1));
-    }
-
-    let selected = app.file_list_state.selected();
-    let items: Vec<ListItem> = rows
-        .iter()
-        .enumerate()
-        .map(|(display_index, row)| {
-            row_item(
-                app,
-                row,
-                &expanded_packages,
-                selected == Some(display_index),
-                content_width,
-            )
-        })
-        .collect();
-
-    let file_list = List::new(items)
-        .block(Block::default().borders(Borders::ALL))
-        .highlight_symbol("")
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        );
-    frame.render_stateful_widget(file_list, area, &mut app.file_list_state);
-}
-
-fn row_item(
-    app: &App,
-    row: &TuiRow,
-    expanded_packages: &HashSet<&str>,
-    selected: bool,
-    content_width: usize,
-) -> ListItem<'static> {
-    match row {
-        TuiRow::Package(package_id) => package_row_item(
-            app,
-            package_id,
-            expanded_packages.contains(package_id.as_str()),
-            selected,
-            content_width,
-        ),
-        TuiRow::File {
-            package_id,
-            file_id,
-        } => app
-            .files
-            .iter()
-            .find(|file| file.id == *file_id)
-            .map(|file| {
-                let include_package =
-                    package_id.is_empty() && !app.core_state.files.contains_key(file_id);
-                FileListRow::from_file(app, file, include_package)
-                    .into_child_item(selected, content_width)
-            })
-            .unwrap_or_else(|| ListItem::new(Line::from(""))),
-    }
-}
-
-#[derive(Default)]
-struct PackageCounts {
-    present: usize,
-    complete: usize,
-    downloaded: u64,
-    size: u64,
-}
-
-fn package_counts(app: &App, package_id: &str) -> PackageCounts {
-    let mut counts = PackageCounts::default();
-    let Some(package) = app.core_state.packages.get(package_id) else {
-        return counts;
-    };
-    for file_id in &package.file_ids {
-        let Some(file) = app.core_state.files.get(file_id) else {
-            continue;
-        };
-        if matches!(
-            file.lifecycle,
-            FileLifecycle::Skipped | FileLifecycle::Deleted
-        ) {
-            continue;
-        }
-        counts.present += 1;
-        if matches!(file.lifecycle, FileLifecycle::Complete) {
-            counts.complete += 1;
-            counts.downloaded = counts.downloaded.saturating_add(file.size);
-        } else {
-            counts.downloaded = counts
-                .downloaded
-                .saturating_add(file.progress.visible_completed_bytes.min(file.size));
-        }
-        counts.size = counts.size.saturating_add(file.size);
-    }
-    counts
-}
-
 fn package_status_style(status: PackageStatus) -> (&'static str, Color) {
     match status {
         PackageStatus::Downloading => ("\u{25cf}", Color::Yellow),
@@ -600,127 +571,6 @@ fn package_status_style(status: PackageStatus) -> (&'static str, Color) {
         PackageStatus::Queued | PackageStatus::Pending => ("\u{25cb}", Color::DarkGray),
         PackageStatus::Skipped | PackageStatus::Deleted => ("\u{2715}", Color::DarkGray),
     }
-}
-
-fn package_row_item(
-    app: &App,
-    package_id: &str,
-    expanded: bool,
-    selected: bool,
-    content_width: usize,
-) -> ListItem<'static> {
-    let Some(package) = app.core_state.packages.get(package_id) else {
-        return ListItem::new(Line::from(""));
-    };
-    let counts = package_counts(app, package_id);
-    let percent = if counts.size == 0 {
-        0
-    } else {
-        counts
-            .downloaded
-            .saturating_mul(100)
-            .saturating_div(counts.size)
-            .min(100)
-    };
-    let speed_label = if matches!(package.status, PackageStatus::Downloading) {
-        "active".to_string()
-    } else {
-        String::new()
-    };
-    let detail = package_detail(&counts, percent, &speed_label, content_width);
-    let (icon, color) = package_status_style(package.status);
-    let marker = if counts.present > 1 {
-        if expanded { "-" } else { "+" }
-    } else {
-        " "
-    };
-    let prefix = format!(" {marker} {icon} ");
-    let prefix_width = prefix.chars().count();
-    let detail_width = detail.chars().count().min(content_width / 2);
-    let detail = truncate_end(&detail, detail_width);
-    let name_width = content_width
-        .saturating_sub(prefix_width)
-        .saturating_sub(detail.chars().count())
-        .saturating_sub(1);
-    let name = truncate_end(
-        &display_package_name(app, package_id, &package.display_name),
-        name_width,
-    );
-    let filler = " ".repeat(
-        content_width
-            .saturating_sub(prefix_width)
-            .saturating_sub(name.chars().count())
-            .saturating_sub(detail.chars().count()),
-    );
-    let mut row_style = Style::default().fg(color);
-    if selected {
-        row_style = row_style.add_modifier(Modifier::BOLD);
-    }
-    ListItem::new(Line::from(vec![
-        Span::styled(format!("{prefix}{name}"), row_style),
-        Span::raw(filler),
-        Span::styled(detail, Style::default().fg(Color::DarkGray)),
-    ]))
-}
-
-fn package_detail(
-    counts: &PackageCounts,
-    percent: u64,
-    speed_label: &str,
-    content_width: usize,
-) -> String {
-    let full = format!(
-        "{}/{} files  {} / {}  {percent:>3}%  {speed_label}",
-        counts.complete,
-        counts.present,
-        format_bytes(counts.downloaded),
-        format_bytes(counts.size)
-    );
-    if full.chars().count() <= content_width / 2 {
-        return full;
-    }
-
-    let compact = format!(
-        "{}/{}  {}  {percent:>3}%  {speed_label}",
-        counts.complete,
-        counts.present,
-        format_bytes(counts.size)
-    );
-    truncate_end(&compact, content_width / 2)
-}
-
-fn display_package_name(app: &App, package_id: &str, value: &str) -> String {
-    if !value.starts_with("http://") && !value.starts_with("https://") {
-        return compact_label(value);
-    }
-
-    if let Some(label) = folder_name_from_package_files(app, package_id) {
-        return label;
-    }
-
-    if let Some(label) = mega_url_label(value) {
-        return label;
-    }
-    compact_label(value.split('#').next().unwrap_or(value))
-}
-
-fn folder_name_from_package_files(app: &App, package_id: &str) -> Option<String> {
-    let package = app.core_state.packages.get(package_id)?;
-    let mut common: Option<&str> = None;
-    for file_id in &package.file_ids {
-        let file = app.core_state.files.get(file_id)?;
-        let folder = file
-            .path
-            .split('/')
-            .next()
-            .filter(|part| !part.is_empty())?;
-        match common {
-            None => common = Some(folder),
-            Some(existing) if existing == folder => {}
-            Some(_) => return None,
-        }
-    }
-    common.map(str::to_string)
 }
 
 fn mega_url_label(value: &str) -> Option<String> {
@@ -733,100 +583,6 @@ fn mega_url_label(value: &str) -> Option<String> {
         (Some("file"), Some(id)) if !id.is_empty() => Some(format!("File {id}")),
         _ => None,
     }
-}
-
-fn file_detail(_app: &App, file: &super::app::FileEntry) -> String {
-    match &file.status {
-        FileStatus::Downloading => {
-            #[allow(
-                clippy::cast_precision_loss,
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss
-            )]
-            let pct = if file.size > 0 {
-                ((file.downloaded as f64 / file.size as f64 * 100.0) as u64).min(100)
-            } else {
-                0
-            };
-            let bar = progress_bar(file.downloaded, file.size, 10);
-            format!("[{bar}] {pct}%  active")
-        }
-        FileStatus::Queued => "queued".to_string(),
-        FileStatus::Complete => {
-            format!("{}  done", format_bytes(file.size))
-        }
-        FileStatus::Error(msg) => msg.clone(),
-    }
-}
-
-fn aggregate_progress_label(app: &App, pct: u16, width: u16) -> String {
-    let bytes = format!(
-        "{} / {}",
-        format_bytes(app.total_downloaded),
-        format_bytes(app.total_size)
-    );
-    let transfer = aggregate_transfer_label(app);
-    let full = format!(
-        "{pct}%  {}/{} files  {bytes}  {transfer}",
-        app.files_completed, app.files_total
-    );
-    if full.chars().count() <= usize::from(width.saturating_sub(2)) {
-        return full;
-    }
-
-    let compact = format!(
-        "{pct}%  {}/{}  {transfer}",
-        app.files_completed, app.files_total
-    );
-    if compact.chars().count() <= usize::from(width.saturating_sub(2)) {
-        return compact;
-    }
-
-    let minimal = format!("{pct}%  {transfer}");
-    truncate_end(&minimal, usize::from(width.saturating_sub(2)))
-}
-
-fn aggregate_activity_label(app: &App) -> String {
-    if app.current_speed > 0 {
-        return "active".to_string();
-    }
-
-    if app
-        .files
-        .iter()
-        .any(|file| matches!(file.status, FileStatus::Downloading))
-    {
-        return "active".to_string();
-    }
-
-    let queued = app
-        .files
-        .iter()
-        .filter(|file| matches!(file.status, FileStatus::Queued))
-        .count();
-    if queued > 0 {
-        return format!("{queued} queued");
-    }
-
-    "idle".to_string()
-}
-
-fn aggregate_transfer_label(app: &App) -> String {
-    if app.current_speed == 0 {
-        return aggregate_activity_label(app);
-    }
-
-    let speed = format!("{}/s", format_bytes(app.current_speed));
-    let remaining = app.total_size.saturating_sub(app.total_downloaded);
-    if remaining == 0 {
-        return speed;
-    }
-
-    let eta_secs = remaining.div_ceil(app.current_speed).max(1);
-    format!(
-        "{speed}  eta {}",
-        format_duration(Duration::from_secs(eta_secs))
-    )
 }
 
 fn compact_label(value: &str) -> String {
@@ -868,21 +624,6 @@ fn truncate_end(value: &str, max_chars: usize) -> String {
         .collect::<String>();
     truncated.push('\u{2026}');
     truncated
-}
-
-fn progress_bar(downloaded: u64, total: u64, width: usize) -> String {
-    if total == 0 {
-        return "\u{2591}".repeat(width);
-    }
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    let filled = ((downloaded as f64 / total as f64) * width as f64) as usize;
-    let filled = filled.min(width);
-    let empty = width - filled;
-    format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty))
 }
 
 fn draw_login_popup(frame: &mut ratatui::Frame, app: &App) {

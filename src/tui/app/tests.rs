@@ -12,7 +12,7 @@ use crate::{
     test_support::{
         FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, push_file, session_snapshot,
     },
-    tui::visible::TuiRow,
+    tui::{DashboardUiMode, visible::TuiRow},
 };
 
 fn test_app() -> App {
@@ -137,7 +137,7 @@ fn quit_policy_converts_from_bool() {
 }
 
 #[test]
-fn to_json_contains_visible_file_state_without_internal_fields() {
+fn dashboard_json_contains_visible_file_state_without_internal_fields() {
     let mut app = test_app();
     app.upsert_overlay_file(
         FileEntry {
@@ -162,23 +162,31 @@ fn to_json_contains_visible_file_state_without_internal_fields() {
     app.recompute_totals();
 
     let snapshot: serde_json::Value =
-        serde_json::from_str(&app.to_json()).expect("snapshot should be valid JSON");
+        serde_json::from_str(&app.dashboard_json(DashboardUiMode::Tui, false))
+            .expect("snapshot should be valid JSON");
     let file = &snapshot["files"][0];
 
     assert_eq!(file["id"], "stable/file.bin");
-    assert_eq!(file["status"], "downloading");
+    assert_eq!(file["status"]["kind"], "downloading");
     assert_eq!(
         snapshot["packages"][0]["source_url"],
         "https://mega.nz/file/abc"
     );
-    assert_eq!(snapshot["total_downloaded"], 64);
-    assert_eq!(snapshot["total_size"], 128);
-    assert_eq!(snapshot["run_totals"]["run_total_bytes"], 128);
-    assert_eq!(snapshot["displayed_network_rate_bps"], 0);
+    assert_eq!(snapshot["totals"]["total_downloaded"], 64);
+    assert_eq!(snapshot["totals"]["total_size"], 128);
+    assert_eq!(snapshot["totals"]["run_total_bytes"], 128);
     assert!(file.get("rate").is_none());
     assert!(file.get("source_url").is_none());
-    assert_eq!(snapshot["cpu_usage"], 12.5);
-    assert_eq!(snapshot["memory_rss"], 4096);
+    assert_eq!(snapshot["metrics"]["cpu_usage"], 12.5);
+    assert_eq!(snapshot["metrics"]["memory_rss"], 4096);
+    assert!(snapshot.get("total_downloaded").is_none());
+    assert!(snapshot.get("run_totals").is_none());
+    assert!(snapshot.get("cpu_usage").is_none());
+    assert!(
+        snapshot["totals"]
+            .get("displayed_network_rate_bps")
+            .is_none()
+    );
 }
 
 #[test]

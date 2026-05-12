@@ -10,8 +10,6 @@ mod overlay;
 mod progress;
 #[path = "app/runtime.rs"]
 mod runtime;
-#[path = "app/snapshot.rs"]
-mod snapshot;
 #[path = "app/state.rs"]
 mod state;
 #[cfg(test)]
@@ -30,6 +28,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::{DownloadState, ProgressDelta, SessionSnapshotV3};
+use crate::tui::dashboard::DashboardUiMode;
 
 pub(crate) use self::progress::FileUiState;
 use self::progress::TransferRate;
@@ -165,11 +164,8 @@ impl App {
         );
     }
 
-    /// Serialises UI-visible state to a JSON string.
-    ///
-    /// Called by the event loop *only* when state has changed and at least
-    /// one SSE/API client is connected — never on a blind timer.
-    pub fn to_json(&self) -> String {
-        snapshot::to_json(self)
+    pub fn dashboard_json(&self, ui_mode: DashboardUiMode, read_only: bool) -> String {
+        serde_json::to_string(&self.dashboard_state(ui_mode, read_only))
+            .expect("dashboard state should serialize")
     }
 }

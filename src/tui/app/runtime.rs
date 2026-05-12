@@ -8,6 +8,7 @@ use crate::{
     DownloadConfig,
     core::{PackageSnapshot, SavedCredentials, SessionSnapshotV3},
     format_bytes,
+    tui::dashboard::DashboardUiMode,
 };
 
 use super::{App, DownloadEvent, FileEntry, FileStatus, UiAction};
@@ -275,8 +276,17 @@ impl App {
     }
 
     pub(crate) fn publish_snapshot_if_observed(&self, state_tx: &watch::Sender<String>) -> bool {
-        if state_tx.receiver_count() > 1 {
-            state_tx.send_replace(self.to_json());
+        self.publish_dashboard_snapshot_if_observed(state_tx, DashboardUiMode::Tui, false)
+    }
+
+    pub(crate) fn publish_dashboard_snapshot_if_observed(
+        &self,
+        state_tx: &watch::Sender<String>,
+        ui_mode: DashboardUiMode,
+        read_only: bool,
+    ) -> bool {
+        if state_tx.receiver_count() > 0 {
+            state_tx.send_replace(self.dashboard_json(ui_mode, read_only));
             return true;
         }
         false
@@ -306,12 +316,16 @@ impl App {
     pub(crate) async fn run_headless_until_shutdown<F>(
         &mut self,
         download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
+        action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
+        state_tx: Option<&watch::Sender<String>>,
         shutdown: F,
     ) where
         F: Future<Output = ()>,
     {
         let mut progress_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut publish_interval = tokio::time::interval(Duration::from_millis(250));
         progress_interval.tick().await;
+        publish_interval.tick().await;
 
         tokio::pin!(shutdown);
 
@@ -329,10 +343,27 @@ impl App {
                 _ = progress_interval.tick() => {
                     self.log_progress_summary();
                 }
+                _ = publish_interval.tick(), if state_tx.is_some() => {
+                    if let Some(state_tx) = state_tx {
+                        let _ = self.publish_dashboard_snapshot_if_observed(
+                            state_tx,
+                            DashboardUiMode::Headless,
+                            false,
+                        );
+                    }
+                }
             }
 
             let _ = self.drain_download_events(download_rx);
+            let _ = self.drain_ui_actions(action_rx);
             self.drain_token_messages();
+            if let Some(state_tx) = state_tx {
+                let _ = self.publish_dashboard_snapshot_if_observed(
+                    state_tx,
+                    DashboardUiMode::Headless,
+                    false,
+                );
+            }
         }
     }
 }
@@ -371,6 +402,31 @@ mod tests {
         assert_eq!(email, "fresh@example.com");
         assert_eq!(password, "fresh-pass");
         assert!(mfa.is_none());
+    }
+
+    #[test]
+    fn publish_dashboard_snapshot_updates_single_shared_receiver() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let crate::tui::app::SharedStateChannels {
+            state_tx,
+            shared_state,
+            ..
+        } = app.shared_state_channels(true, DashboardUiMode::Headless);
+        let shared_state = shared_state.expect("shared state should be enabled");
+
+        app.status = "updated from runtime".to_string();
+
+        assert!(app.publish_dashboard_snapshot_if_observed(
+            &state_tx,
+            DashboardUiMode::Headless,
+            false,
+        ));
+
+        let snapshot: serde_json::Value =
+            serde_json::from_str(shared_state.state_rx.borrow().as_str())
+                .expect("shared state should contain valid JSON");
+        assert_eq!(snapshot["status"], "updated from runtime");
     }
 
     #[test]
