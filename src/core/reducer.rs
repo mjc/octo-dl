@@ -573,8 +573,8 @@ fn debug_assert_invariants(state: &DownloadState) {
         );
         let file_ids = state.package_file_ids(package_id);
         debug_assert!(
-            !file_ids.is_empty() || package.id == package.source_url,
-            "empty packages must remain unresolved placeholders"
+            !file_ids.is_empty(),
+            "packages without files are invalid in canonical state"
         );
     }
     for (file_id, file) in &state.files {
@@ -668,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn package_resolved_replaces_empty_url_placeholder_for_same_source_url() {
+    fn package_resolved_creates_only_resolved_package_for_submitted_url() {
         let mut state = DownloadState::default();
         reduce(
             &mut state,

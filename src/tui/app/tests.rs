@@ -359,7 +359,13 @@ fn register_session_queued_file_does_not_revive_skipped_entry() {
     push_file(&mut session, 0, "skip-a.bin", 1, FileFixtureStatus::Skipped);
     app.session = Some(session);
 
-    let should_queue = app.register_session_queued_file("https://mega.nz/file/a", "skip-a.bin", 1);
+    let should_queue = app.register_session_queued_file(
+        "https://mega.nz/file/a",
+        "https://mega.nz/file/a",
+        "https://mega.nz/file/a",
+        "skip-a.bin",
+        1,
+    );
 
     assert!(!should_queue);
     let session = app.session.as_ref().unwrap();
@@ -369,6 +375,35 @@ fn register_session_queued_file_does_not_revive_skipped_entry() {
         crate::core::FileLifecycle::Skipped
     ));
     assert_eq!(session.files[0].id, "skip-a.bin");
+}
+
+#[test]
+fn register_session_queued_file_preserves_explicit_package_identity() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    app.session = Some(session_snapshot(vec![(
+        "https://mega.nz/folder/root",
+        UrlFixtureStatus::Fetched,
+    )]));
+
+    let should_queue = app.register_session_queued_file(
+        "batch-folder",
+        "Batch Folder",
+        "https://mega.nz/folder/root",
+        "episode-1.mkv",
+        128,
+    );
+
+    assert!(should_queue);
+    let session = app.session.as_ref().unwrap();
+    assert_eq!(session.packages.len(), 1);
+    assert_eq!(session.packages[0].id, "batch-folder");
+    assert_eq!(session.packages[0].source_url, "https://mega.nz/folder/root");
+    assert_eq!(session.packages[0].display_name, "Batch Folder");
+    assert_eq!(session.packages[0].file_ids, vec!["episode-1.mkv".to_string()]);
+    assert_eq!(session.files.len(), 1);
+    assert_eq!(session.files[0].package_id, "batch-folder");
 }
 
 #[test]
