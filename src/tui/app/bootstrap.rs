@@ -40,6 +40,11 @@ fn default_service_config_path() -> PathBuf {
         .unwrap_or_else(|_| state_dir_service_config_path())
 }
 
+fn distinct_fallback_service_config_path(primary: &Path) -> Option<PathBuf> {
+    let fallback = state_dir_service_config_path();
+    (fallback != primary).then_some(fallback)
+}
+
 impl App {
     pub fn new(
         api_port: u16,
@@ -120,11 +125,29 @@ impl App {
             .and_then(|p| p.parse().ok())
             .unwrap_or(default_api_port);
         let config_path = default_service_config_path();
+        let fallback_config_path = distinct_fallback_service_config_path(&config_path);
         let mut app = Self::new(env_api_port, event_tx, quit_enabled);
         app.persist_config_path = Some(config_path.clone());
 
         if config_path.exists() {
             let (host, mut port) = app.apply_service_config(&config_path)?;
+            if !app.login.has_credentials()
+                && let Some(fallback) = fallback_config_path.as_deref()
+            {
+                app.load_missing_credentials_from_config(fallback)?;
+            }
+            if env::var_os("OCTO_API_PORT").is_some() {
+                port = env_api_port;
+            }
+            app.api_port = port;
+            return Ok((app, host, port));
+        }
+
+        if let Some(fallback) = fallback_config_path
+            && fallback.exists()
+        {
+            app.persist_config_path = Some(fallback.clone());
+            let (host, mut port) = app.apply_service_config(&fallback)?;
             if env::var_os("OCTO_API_PORT").is_some() {
                 port = env_api_port;
             }
@@ -287,6 +310,32 @@ impl App {
         }
         self.login
             .set_credentials_if_missing(&email, &password, &mfa);
+    }
+
+    fn load_missing_credentials_from_config(&mut self, config_path: &Path) -> io::Result<()> {
+        if self.login.has_credentials() || !config_path.exists() {
+            return Ok(());
+        }
+
+        let service_config = ServiceConfig::load(config_path)?;
+        if !service_config.credentials.has_credentials() {
+            return Ok(());
+        }
+
+        if let Some((email, password, _mfa)) = service_config.credentials.decrypt_if_needed() {
+            log::info!("Loaded fallback credentials from {}", config_path.display());
+            self.login.set_credentials_if_missing(&email, &password, "");
+            if self.api_key.is_none() {
+                self.api_key.clone_from(&service_config.api.api_key);
+            }
+        } else {
+            log::warn!(
+                "Failed to decrypt fallback credentials from {}",
+                config_path.display()
+            );
+        }
+
+        Ok(())
     }
 
     pub(crate) fn apply_service_config(&mut self, config_path: &Path) -> io::Result<(String, u16)> {
@@ -482,6 +531,44 @@ mod tests {
         assert_eq!(
             app.persist_config_path.as_deref(),
             Some(config_path.as_path())
+        );
+    }
+
+    #[test]
+    fn implicit_cwd_template_falls_back_to_state_config_credentials() {
+        let state_dir = tempdir().expect("state dir should exist");
+        let cwd_dir = tempdir().expect("cwd should exist");
+        let _guard = StateDirectoryGuard::set(state_dir.path());
+        let _cwd = CurrentDirGuard::set(cwd_dir.path());
+
+        let state_config_path = state_dir.path().join("config.toml");
+        let mut state_config =
+            ServiceConfig::load_or_create(&state_config_path).expect("state config should exist");
+        state_config.credentials = crate::ServiceCredentials {
+            encrypted: false,
+            email: "saved@example.com".to_string(),
+            password: "saved-secret".to_string(),
+            mfa: "654321".to_string(),
+        };
+        state_config.credentials.encrypt_in_place();
+        state_config.api.api_key = Some("state-api-key".to_string());
+        state_config
+            .save(&state_config_path)
+            .expect("state config should save");
+
+        let cwd_config_path = cwd_dir.path().join("config.toml");
+        ServiceConfig::load_or_create(&cwd_config_path).expect("cwd config should exist");
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (app, _host, _port) = App::new_with_optional_service_config(tx, true, None, 9723)
+            .expect("app should initialize");
+
+        assert_eq!(app.login.email(), "saved@example.com");
+        assert_eq!(app.login.password(), "saved-secret");
+        assert!(app.api_key.is_some());
+        assert_eq!(
+            app.persist_config_path.as_deref(),
+            Some(cwd_config_path.as_path())
         );
     }
 }
