@@ -140,7 +140,7 @@ fn save_rejects_empty_synthetic_package_placeholders() {
     )]);
     session.packages.push(PackageSnapshot {
         id: package_id("batch-folder", "https://mega.nz/file/stale-error"),
-        source_url: "https://mega.nz/file/stale-error".to_string(),
+        key: crate::core::PackageKey::new("https://mega.nz/file/stale-error".to_string().clone()),
         display_name: "Batch Folder".to_string(),
         file_ids: Vec::new(),
         error: Some("boom".to_string()),
@@ -560,7 +560,7 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
         .packages
         .push(PackageSnapshot {
             id: package_id.clone(),
-            source_url: source_url.clone(),
+            key: crate::core::PackageKey::new(source_url.clone().clone()),
             display_name: "Retry Folder".to_string(),
             file_ids: Vec::new(),
             error: Some("boom".to_string()),
@@ -570,7 +570,7 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
         package_id.clone(),
         PackageState {
             id: package_id.clone(),
-            source_url: source_url.clone(),
+            key: crate::core::PackageKey::new(source_url.clone().clone()),
             display_name: "Retry Folder".to_string(),
             status: PackageStatus::Failed,
             error: Some("boom".to_string()),
@@ -652,6 +652,7 @@ fn ui_delete_core_backed_file_removes_output_and_resume_artifacts() {
                 "https://mega.nz/file/core-delete",
             ),
             source_url: "https://mega.nz/file/core-delete".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/core-delete".to_string().clone()),
             display_name: "Core Delete".to_string(),
             files: vec![ResolvedFile {
                 file_id: file_id.clone(),
@@ -692,6 +693,7 @@ fn deleted_file_completion_event_redeletes_output_artifacts() {
                 "https://mega.nz/file/late-complete",
             ),
             source_url: "https://mega.nz/file/late-complete".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/late-complete".to_string().clone()),
             display_name: "Late Complete".to_string(),
             files: vec![ResolvedFile {
                 file_id: file_id.clone(),
@@ -741,6 +743,7 @@ fn deleted_file_stays_deleted_after_cancel_then_completion_events() {
                 "https://mega.nz/file/late-cancel-complete",
             ),
             source_url: "https://mega.nz/file/late-cancel-complete".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/late-cancel-complete".to_string().clone()),
             display_name: "Late Cancel Complete".to_string(),
             files: vec![ResolvedFile {
                 file_id: file_id.clone(),
@@ -796,6 +799,7 @@ fn deleted_file_error_event_redeletes_output_artifacts() {
                 "https://mega.nz/file/late-error",
             ),
             source_url: "https://mega.nz/file/late-error".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/late-error".to_string().clone()),
             display_name: "Late Error".to_string(),
             files: vec![ResolvedFile {
                 file_id: file_id.clone(),
@@ -1133,6 +1137,7 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
                     &format!("https://mega.nz/folder/{raw_package_id}"),
                 ),
                 source_url: format!("https://mega.nz/folder/{raw_package_id}"),
+                key: crate::core::PackageKey::new(format!("https://mega.nz/folder/{raw_package_id}").clone()),
                 display_name: name.to_string(),
                 files: vec![ResolvedFile {
                     file_id: file_id.to_string(),
@@ -1196,6 +1201,7 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
         package: ResolvedPackage {
             id: package_id("pkg-a", "https://mega.nz/file/reset"),
             source_url: "https://mega.nz/file/reset".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/reset".to_string().clone()),
             display_name: "Package A".to_string(),
             files: vec![ResolvedFile {
                 file_id: "active.bin".to_string(),

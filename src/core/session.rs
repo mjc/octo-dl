@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::DownloadConfig;
 use crate::core::model::{
-    DesiredState, FileId, FileLifecycle, FileProgressState, PackageId, RuntimeState,
+    DesiredState, FileId, FileLifecycle, FileProgressState, PackageId, PackageKey, RuntimeState,
     SessionRunStatus, UrlId,
 };
 
@@ -76,7 +76,7 @@ pub struct SavedCredentials {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackageSnapshot {
     pub id: PackageId,
-    pub source_url: UrlId,
+    pub key: PackageKey,
     pub display_name: String,
     pub file_ids: Vec<FileId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -292,18 +292,17 @@ pub fn normalize_snapshot(snapshot: &mut SessionSnapshotV3) -> Result<(), String
         .map(|package| (package.id.clone(), package))
         .collect();
     let mut grouped_files = IndexMap::<PackageId, Vec<FileId>>::new();
-    let mut derived_source_urls = IndexMap::<PackageId, UrlId>::new();
+    let mut grouped_paths = IndexMap::<PackageId, Vec<String>>::new();
 
     for file in &snapshot.files {
         grouped_files
             .entry(file.package_id.clone())
             .or_default()
             .push(file.id.clone());
-        if let Some(source_url) = &file.source_url {
-            derived_source_urls
-                .entry(file.package_id.clone())
-                .or_insert_with(|| source_url.clone());
-        }
+        grouped_paths
+            .entry(file.package_id.clone())
+            .or_default()
+            .push(file.path.clone());
     }
 
     let mut normalized_packages = Vec::new();
@@ -313,6 +312,9 @@ pub fn normalize_snapshot(snapshot: &mut SessionSnapshotV3) -> Result<(), String
             continue;
         };
         let mut normalized = package.clone();
+        let paths = grouped_paths.get(&package.id).cloned().unwrap_or_default();
+        normalized.display_name = canonical_package_display_name(&package.display_name, &paths);
+        normalized.key = PackageKey::new(normalized.display_name.clone());
         normalized.file_ids = file_ids.clone();
         emitted_package_ids.insert(normalized.id.clone());
         normalized_packages.push(normalized);
@@ -322,22 +324,21 @@ pub fn normalize_snapshot(snapshot: &mut SessionSnapshotV3) -> Result<(), String
         if emitted_package_ids.contains(&package_id) {
             continue;
         }
-        let Some(source_url) = derived_source_urls.get(&package_id).cloned() else {
-            return Err(format!(
-                "file group {} has no package metadata or source_url",
-                package_id
-            ));
-        };
-        let display_name = existing_packages
+        let paths = grouped_paths.get(&package_id).cloned().unwrap_or_default();
+        let display_name = canonical_package_display_name(
+            existing_packages
             .get(&package_id)
             .map(|package| package.display_name.clone())
-            .unwrap_or_else(|| source_url.to_string());
+            .as_deref()
+            .unwrap_or(""),
+            &paths,
+        );
         let error = existing_packages
             .get(&package_id)
             .and_then(|package| package.error.clone());
         normalized_packages.push(PackageSnapshot {
             id: package_id,
-            source_url,
+            key: PackageKey::new(display_name.clone()),
             display_name,
             file_ids,
             error,
@@ -361,7 +362,7 @@ pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
         }
     }
 
-    let mut package_source_urls = std::collections::HashSet::new();
+    let mut package_keys = std::collections::HashSet::new();
     for package in &snapshot.packages {
         if packages_by_id
             .insert(package.id.clone(), package)
@@ -369,17 +370,8 @@ pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
         {
             return Err(format!("duplicate package id {}", package.id));
         }
-        if !tracked_urls.contains(&package.source_url) {
-            return Err(format!(
-                "package {} references untracked source_url {}",
-                package.id, package.source_url
-            ));
-        }
-        if !package_source_urls.insert(package.source_url.clone()) {
-            return Err(format!(
-                "duplicate package source_url {}",
-                package.source_url
-            ));
+        if !package_keys.insert(package.key.clone()) {
+            return Err(format!("duplicate package key {}", package.key));
         }
     }
 
@@ -389,18 +381,18 @@ pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
         if !file_ids.insert(file.id.clone()) {
             return Err(format!("duplicate file id {}", file.id));
         }
-        let Some(package) = packages_by_id.get(&file.package_id) else {
+        let Some(_package) = packages_by_id.get(&file.package_id) else {
             return Err(format!(
                 "file {} references unknown package {}",
                 file.id, file.package_id
             ));
         };
         if let Some(source_url) = &file.source_url
-            && source_url != &package.source_url
+            && !tracked_urls.contains(source_url)
         {
             return Err(format!(
-                "file {} source_url does not match package {}",
-                file.id, file.package_id
+                "file {} references untracked source_url {}",
+                file.id, source_url
             ));
         }
         grouped_files
@@ -423,6 +415,26 @@ pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn canonical_package_display_name(raw_display_name: &str, paths: &[String]) -> String {
+    if !raw_display_name.is_empty() && !looks_like_source_url(raw_display_name) {
+        return raw_display_name.to_string();
+    }
+    common_path_root(paths).unwrap_or_else(|| raw_display_name.to_string())
+}
+
+fn common_path_root(paths: &[String]) -> Option<String> {
+    let mut roots = paths.iter().filter_map(|path| {
+        let root = path.split('/').next()?;
+        (!root.is_empty()).then(|| root.to_string())
+    });
+    let first = roots.next()?;
+    roots.all(|root| root == first).then_some(first)
+}
+
+fn looks_like_source_url(value: &str) -> bool {
+    value.starts_with("https://") || value.starts_with("http://")
 }
 
 fn derive_machine_key() -> [u8; 16] {

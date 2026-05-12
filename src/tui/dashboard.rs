@@ -398,7 +398,17 @@ impl App {
                         );
                     Some(DashboardPackageRow {
                         id: package.id.to_string(),
-                        source_url: package.source_url.clone(),
+                        source_url: self
+                            .core_state
+                            .package_file_ids(&package.id)
+                            .into_iter()
+                            .find_map(|file_id| {
+                                self.core_state
+                                    .files
+                                    .get(&file_id)
+                                    .and_then(|file| file.source_url.clone())
+                            })
+                            .unwrap_or_default(),
                         display_name: package.display_name.clone(),
                         status: package.status,
                         file_ids,
@@ -588,6 +598,7 @@ mod tests {
             package: ResolvedPackage {
                 id: package_id("pkg", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
                 display_name: "Package".to_string(),
                 files: vec![ResolvedFile {
                     file_id: "file.bin".to_string(),
@@ -625,7 +636,7 @@ mod tests {
             package_id,
             crate::core::PackageState {
                 id: package_id,
-                source_url: "https://mega.nz/folder/failed".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/failed".to_string().clone()),
                 display_name: "Failed".to_string(),
                 status: PackageStatus::Failed,
                 error: Some("boom".to_string()),

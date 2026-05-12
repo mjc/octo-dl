@@ -203,19 +203,19 @@ impl App {
     }
 
     fn register_queued_file(&mut self, file: &QueuedFile) -> bool {
-        let existing_package = self.core_state.package_for_source_url(&file.origin.source_url);
-        let package_id = file
-            .origin
-            .package_id
-            .clone()
-            .or_else(|| existing_package.map(|package| package.id.to_string()))
-            .unwrap_or_else(|| file.origin.source_url.clone());
         let package_display_name = file
             .origin
             .package_display_name
             .clone()
-            .or_else(|| existing_package.map(|package| package.display_name.clone()))
-            .unwrap_or_else(|| package_id.clone());
+            .unwrap_or_else(|| file.origin.source_url.clone());
+        let package_key = crate::core::PackageKey::new(package_display_name.clone());
+        let existing_package = self.core_state.package_for_key(&package_key);
+        let package_id = file
+            .origin
+            .package_id
+            .clone()
+            .or_else(|| existing_package.map(|package| package.id))
+            .unwrap_or_else(|| PackageId::for_package_key(&package_key));
         if file.origin.submitted_url != file.origin.source_url {
             self.urls.retain(|url| url != &file.origin.submitted_url);
             if !self.urls.iter().any(|url| url == &file.origin.source_url) {
@@ -227,7 +227,7 @@ impl App {
             let _ = self.drop_overlay_file(&file.origin.submitted_url);
         }
         if !self.register_session_queued_file(
-            &package_id,
+            &package_id.to_string(),
             &package_display_name,
             &file.origin.submitted_url,
             &file.origin.source_url,
@@ -238,7 +238,7 @@ impl App {
         }
         self.ensure_core_file_in_package(
             &file.id,
-            &package_id,
+            &package_id.to_string(),
             &package_display_name,
             &file.origin.source_url,
             &file.id,
@@ -438,16 +438,18 @@ impl App {
     pub(crate) fn perform_delete_package_action(&mut self, package_id: PackageId) {
         let file_ids = self.core_state.package_file_ids(&package_id);
         if file_ids.is_empty() {
-            let source_url = self
+            let source_urls: Vec<_> = self
                 .core_state
-                .packages
-                .get(&package_id)
-                .map(|package| package.source_url.clone());
+                .files
+                .values()
+                .filter(|file| file.package_id == package_id)
+                .filter_map(|file| file.source_url.clone())
+                .collect();
             self.deleted_files.insert(package_id.to_string());
-            if let Some(source_url) = source_url.as_ref() {
+            for source_url in source_urls {
                 self.deleted_files.insert(source_url.clone());
-                self.remove_session_url(source_url);
-                self.urls.retain(|url| url != source_url);
+                self.remove_session_url(&source_url);
+                self.urls.retain(|url| url != &source_url);
             }
             self.core_state.packages.shift_remove(&package_id);
             self.sync_visible_files();
@@ -495,13 +497,19 @@ impl App {
         let Some(package) = self.core_state.packages.get(&package_id) else {
             return;
         };
-        let source_url = package.source_url.clone();
+        let package_key = package.key.clone();
         let package_failed =
             package.error.is_some() || matches!(package.status, crate::core::PackageStatus::Failed);
         let file_ids = self.core_state.package_file_ids(&package_id);
+        let mut source_urls = std::collections::BTreeSet::new();
         let mut retried_file = false;
 
         for file_id in file_ids {
+            if let Some(file) = self.core_state.files.get(&file_id)
+                && let Some(source_url) = file.source_url.clone()
+            {
+                source_urls.insert(source_url);
+            }
             let retryable =
                 self.core_state.files.get(&file_id).is_some_and(|file| {
                     matches!(file.lifecycle, crate::core::FileLifecycle::Failed)
@@ -515,11 +523,21 @@ impl App {
         }
 
         if !retried_file && package_failed {
+            if source_urls.is_empty()
+                && self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.urls.iter().any(|url| url.url == package_key.as_str()))
+            {
+                source_urls.insert(package_key.to_string());
+            }
             let _ = self.mutate_session_and_save(|session| {
                 session.packages.retain(|package| package.id != package_id);
             });
             self.core_state.packages.shift_remove(&package_id);
-            self.retry_source_url(&source_url);
+            for source_url in source_urls {
+                self.retry_source_url(&source_url);
+            }
             self.sync_visible_files();
             self.recompute_totals();
         }

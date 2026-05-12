@@ -44,24 +44,22 @@ impl RestartSnapshot {
             .url_order
             .iter()
             .filter(|url| {
-                let package = self
-                    .state
-                    .packages
-                    .values()
-                    .find(|package| &package.source_url == *url);
-                match package {
-                    None => true,
-                    Some(package) => self.state.package_file_ids(&package.id).iter().any(|file_id| {
-                        self.state.files.get(file_id).is_some_and(|file| {
-                            !matches!(
-                                file.lifecycle,
-                                FileLifecycle::Complete
-                                    | FileLifecycle::Skipped
-                                    | FileLifecycle::Deleted
-                            )
-                        })
-                    }),
+                let mut saw_file_for_url = false;
+                let mut has_remaining = false;
+                for file in self.state.files.values() {
+                    if file.source_url.as_deref() != Some(url.as_str()) {
+                        continue;
+                    }
+                    saw_file_for_url = true;
+                    if !matches!(
+                        file.lifecycle,
+                        FileLifecycle::Complete | FileLifecycle::Skipped | FileLifecycle::Deleted
+                    ) {
+                        has_remaining = true;
+                        break;
+                    }
                 }
+                !saw_file_for_url || has_remaining
             })
             .cloned()
             .collect()
@@ -162,7 +160,7 @@ pub fn reconcile_restart(
                 package.id.clone(),
                 PackageState {
                     id: package.id.clone(),
-                    source_url: package.source_url.clone(),
+                    key: package.key.clone(),
                     display_name: package.display_name.clone(),
                     status: PackageStatus::Pending,
                     error: package.error.clone(),
@@ -294,7 +292,7 @@ mod tests {
             }],
             packages: vec![PackageSnapshot {
                 id: package_id("pkg", "https://mega.nz/file/test"),
-                source_url: "https://mega.nz/file/test".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/file/test".to_string().clone()),
                 display_name: "pkg".to_string(),
                 file_ids: vec!["a.bin".to_string()],
                 error: None,
@@ -458,14 +456,14 @@ mod tests {
         snapshot.packages = vec![
             PackageSnapshot {
                 id: package_id(&source_url, &source_url),
-                source_url: source_url.clone(),
+                key: crate::core::PackageKey::new(source_url.clone().clone()),
                 display_name: source_url.clone(),
                 file_ids: vec!["a.bin".to_string()],
                 error: None,
             },
             PackageSnapshot {
                 id: package_id("batch-dup", &source_url),
-                source_url: source_url.clone(),
+                key: crate::core::PackageKey::new(source_url.clone().clone()),
                 display_name: "Folder".to_string(),
                 file_ids: vec!["b.bin".to_string()],
                 error: None,
@@ -505,7 +503,7 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.packages.push(PackageSnapshot {
             id: package_id("batch-folder", "https://mega.nz/file/test"),
-            source_url: "https://mega.nz/file/test".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/test".to_string().clone()),
             display_name: "Batch Folder".to_string(),
             file_ids: Vec::new(),
             error: Some("boom".to_string()),

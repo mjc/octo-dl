@@ -21,12 +21,12 @@ impl App {
         let duplicate_package_urls = {
             let mut counts = std::collections::HashMap::<&str, usize>::new();
             for package in self.core_state.packages.values() {
-                *counts.entry(package.source_url.as_str()).or_default() += 1;
+                *counts.entry(package.key.as_str()).or_default() += 1;
             }
             counts
                 .into_iter()
                 .filter(|(_, count)| *count > 1)
-                .map(|(url, count)| format!("{url} x{count}"))
+                .map(|(key, count)| format!("{key} x{count}"))
                 .collect::<Vec<_>>()
         };
         let failed_empty_packages = self
@@ -42,7 +42,7 @@ impl App {
                 format!(
                     "{} [{}] err={}",
                     package.display_name,
-                    package.source_url,
+                    package.key,
                     package.error.as_deref().unwrap_or("<none>")
                 )
             })

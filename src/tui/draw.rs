@@ -440,6 +440,7 @@ mod tests {
             package: ResolvedPackage {
                 id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
                 display_name: "Mega Package".to_string(),
                 files: vec![
                     ResolvedFile {
@@ -480,6 +481,7 @@ mod tests {
             package: ResolvedPackage {
                 id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
                 display_name: "Mega Package".to_string(),
                 files: vec![
                     ResolvedFile {
@@ -520,6 +522,7 @@ mod tests {
                     "https://mega.nz/folder/abc#secret",
                 ),
                 source_url: "https://mega.nz/folder/abc#secret".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/abc#secret".to_string().clone()),
                 display_name: "https://mega.nz/folder/abc#secret".to_string(),
                 files: vec![ResolvedFile {
                     file_id: "file.bin".to_string(),
@@ -544,6 +547,7 @@ mod tests {
             package: ResolvedPackage {
                 id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
                 display_name: "Mega Package".to_string(),
                 files: vec![ResolvedFile {
                     file_id: "active.bin".to_string(),
@@ -571,6 +575,7 @@ mod tests {
             package: ResolvedPackage {
                 id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
                 display_name: "Mega Package".to_string(),
                 files: vec![ResolvedFile {
                     file_id: "active.bin".to_string(),

@@ -12,6 +12,7 @@ use futures_util::FutureExt;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::core::{PackageId, PackageKey};
 use crate::download::part_path;
 use crate::{DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, is_dlc_path};
 use dirs;
@@ -94,7 +95,7 @@ fn describe_panic(panic: &(dyn std::any::Any + Send)) -> String {
 struct ResolvedUrl {
     source_url: String,
     submitted_url: String,
-    package_id: Option<String>,
+    package_id: Option<PackageId>,
     package_display_name: Option<String>,
 }
 
@@ -784,6 +785,10 @@ async fn collect_node_set(
 
     let skipped_for_url = skipped_paths.get(&node_set.resolved.submitted_url);
     let collected = downloader.collect_files(nodes, progress).await;
+    let mut resolved = node_set.resolved.clone();
+    let (package_id, package_display_name) = package_identity_for_nodes(nodes, &collected);
+    resolved.package_id = Some(package_id);
+    resolved.package_display_name = Some(package_display_name);
     let mut skipped_count = 0;
     let keep_file = |path: &str| -> bool {
         node_set
@@ -837,7 +842,7 @@ async fn collect_node_set(
 
     let queued_items = visible_downloads(
         to_download,
-        &node_set.resolved,
+        &resolved,
         skipped_for_url,
         &mut skipped_count,
         node_set.requested_file_ids.as_ref(),
@@ -845,7 +850,7 @@ async fn collect_node_set(
     );
     let completed_items = visible_downloads(
         completed,
-        &node_set.resolved,
+        &resolved,
         skipped_for_url,
         &mut skipped_count,
         node_set.requested_file_ids.as_ref(),
@@ -1016,8 +1021,34 @@ impl BatchDuplicateResolver {
 fn batch_item_package_id(item: &QueuedDownload) -> String {
     item.resolved
         .package_id
-        .clone()
+        .map(|package_id| package_id.to_string())
         .unwrap_or_else(|| item.resolved.source_url.clone())
+}
+
+fn package_identity_for_nodes(
+    nodes: &mega::Nodes,
+    collected: &crate::CollectedFiles<'_>,
+) -> (PackageId, String) {
+    let display_name = nodes
+        .roots()
+        .find(|root| root.kind().is_folder())
+        .map(|root| root.name().to_string())
+        .or_else(|| common_collected_root(collected))
+        .unwrap_or_else(|| "root".to_string());
+    let key = PackageKey::new(display_name.clone());
+    (PackageId::for_package_key(&key), display_name)
+}
+
+fn common_collected_root(collected: &crate::CollectedFiles<'_>) -> Option<String> {
+    let mut roots = collected
+        .to_download
+        .iter()
+        .chain(collected.completed.iter())
+        .filter_map(|item| item.path.split('/').next())
+        .filter(|root| !root.is_empty())
+        .map(str::to_string);
+    let first = roots.next()?;
+    roots.all(|root| root == first).then_some(first)
 }
 
 fn batch_item_snapshot(item: &QueuedDownload) -> BatchItemSnapshot {

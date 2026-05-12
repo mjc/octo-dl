@@ -1,7 +1,7 @@
 use crate::config::DownloadConfig;
 use crate::core::{
-    DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageSnapshot,
-    RuntimeState, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
+    DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
+    PackageSnapshot, RuntimeState, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -65,7 +65,7 @@ pub fn test_credentials() -> SavedCredentials {
 }
 
 pub fn package_id(raw: &str, source_url: &str) -> PackageId {
-    PackageId::parse_or_source_url(raw, source_url)
+    PackageId::parse_or_key(raw, &PackageKey::new(source_url))
 }
 
 pub fn session_snapshot(urls: Vec<(&str, UrlFixtureStatus)>) -> SessionSnapshotV3 {
@@ -95,17 +95,22 @@ pub fn push_file(
         .get(package_index)
         .map(|entry| entry.url.clone())
         .expect("package_index should map to a tracked url");
+    let package_display_name = path
+        .split('/')
+        .next()
+        .unwrap_or(source_url.as_str())
+        .to_string();
     let package_index = if let Some(index) = session
         .packages
         .iter()
-        .position(|package| package.source_url == source_url)
+        .position(|package| package.display_name == package_display_name)
     {
         index
     } else {
         session.packages.push(PackageSnapshot {
-            id: package_id(&source_url, &source_url),
-            source_url: source_url.clone(),
-            display_name: source_url.clone(),
+            id: package_id(&package_display_name, &package_display_name),
+            key: PackageKey::new(package_display_name.clone()),
+            display_name: package_display_name.clone(),
             file_ids: Vec::new(),
             error: None,
         });
@@ -158,7 +163,7 @@ pub fn push_file(
     session.files.push(FileSnapshot {
         id: path.to_string(),
         package_id: package.id.clone(),
-        source_url: Some(package.source_url.clone()),
+        source_url: Some(source_url.clone()),
         path: path.to_string(),
         size,
         lifecycle,

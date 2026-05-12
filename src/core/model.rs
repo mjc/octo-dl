@@ -7,6 +7,40 @@ use std::str::FromStr;
 use crate::config::DownloadConfig;
 use crate::core::session::SavedCredentials;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PackageKey(String);
+
+impl PackageKey {
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for PackageKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<String> for PackageKey {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for PackageKey {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PackageId(uuid::Uuid);
@@ -18,22 +52,35 @@ impl PackageId {
     }
 
     #[must_use]
+    pub fn for_package_key(package_key: &PackageKey) -> Self {
+        Self(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            package_key.as_str().as_bytes(),
+        ))
+    }
+
+    #[must_use]
     pub fn for_source_url(source_url: &str) -> Self {
-        Self(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, source_url.as_bytes()))
+        Self::for_package_key(&PackageKey::new(source_url))
+    }
+
+    #[must_use]
+    pub fn parse_or_key(raw: &str, package_key: &PackageKey) -> Self {
+        raw.parse().unwrap_or_else(|_| {
+            if raw == package_key.as_str() {
+                return Self::for_package_key(package_key);
+            }
+            let scope = format!("{}\0{raw}", package_key.as_str());
+            Self(uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_OID,
+                scope.as_bytes(),
+            ))
+        })
     }
 
     #[must_use]
     pub fn parse_or_source_url(raw: &str, source_url: &str) -> Self {
-        raw.parse().unwrap_or_else(|_| {
-            if raw == source_url {
-                return Self::for_source_url(source_url);
-            }
-            let scope = format!("{source_url}\0{raw}");
-            Self(uuid::Uuid::new_v5(
-                &uuid::Uuid::NAMESPACE_URL,
-                scope.as_bytes(),
-            ))
-        })
+        Self::parse_or_key(raw, &PackageKey::new(source_url))
     }
 
     #[must_use]
@@ -91,14 +138,14 @@ pub type UrlId = String;
 
 #[cfg(test)]
 mod tests {
-    use super::PackageId;
+    use super::{PackageId, PackageKey};
 
     #[test]
-    fn source_url_ids_are_stable_across_derivation_paths() {
-        let source_url = "https://mega.nz/folder/example";
+    fn package_key_ids_are_stable_across_derivation_paths() {
+        let package_key = PackageKey::new("folder/example");
         assert_eq!(
-            PackageId::for_source_url(source_url),
-            PackageId::parse_or_source_url(source_url, source_url)
+            PackageId::for_package_key(&package_key),
+            PackageId::parse_or_key(package_key.as_str(), &package_key)
         );
     }
 }
@@ -195,7 +242,7 @@ pub struct FileProgressState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageState {
     pub id: PackageId,
-    pub source_url: UrlId,
+    pub key: PackageKey,
     pub display_name: String,
     pub status: PackageStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -258,9 +305,9 @@ impl DownloadState {
     }
 
     #[must_use]
-    pub fn package_for_source_url(&self, source_url: &str) -> Option<&PackageState> {
+    pub fn package_for_key(&self, package_key: &PackageKey) -> Option<&PackageState> {
         self.packages
             .values()
-            .find(|package| package.source_url == source_url)
+            .find(|package| &package.key == package_key)
     }
 }
