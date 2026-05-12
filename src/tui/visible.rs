@@ -7,13 +7,16 @@ use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 
 use super::app::App;
-use crate::core::DownloadState;
+use crate::core::{DownloadState, PackageId};
 use crate::tui::app::{FileEntry, FileUiState, OverlayFile, SortState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TuiRow {
-    Package(String),
-    File { package_id: String, file_id: String },
+    Package(PackageId),
+    File {
+        package_id: Option<PackageId>,
+        file_id: String,
+    },
 }
 
 pub(super) fn visible_rows(app: &App) -> Vec<TuiRow> {
@@ -50,7 +53,7 @@ pub(super) fn sync_visible_files(
     file_ui: &mut HashMap<String, FileUiState>,
     file_list_state: &mut ListState,
     core_state: &DownloadState,
-    expanded_packages: &HashSet<String>,
+    expanded_packages: &HashSet<PackageId>,
     sort: &SortState,
     deleted_files: &HashSet<String>,
     selected_row_identity: Option<TuiRow>,

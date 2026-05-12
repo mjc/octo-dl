@@ -497,7 +497,7 @@ mod tests {
             },
         });
         app.expanded_packages
-            .insert(package_id("pkg-1", "https://mega.nz/folder/pkg").to_string());
+            .insert(package_id("pkg-1", "https://mega.nz/folder/pkg"));
 
         let rendered = render_text(&mut app);
 

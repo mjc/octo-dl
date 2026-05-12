@@ -255,7 +255,7 @@ fn handle_main_input_delete_core_backed_entry() {
     assert_eq!(
         app.pending_confirmation,
         Some(ConfirmAction::DeletePackage(
-            package_id("https://mega.nz/file/core", "https://mega.nz/file/core").to_string()
+            package_id("https://mega.nz/file/core", "https://mega.nz/file/core")
         ))
     );
     confirm(&mut app);
@@ -322,9 +322,10 @@ fn handle_main_input_reset_package_targets_package_row() {
 
     assert_eq!(
         app.pending_confirmation,
-        Some(ConfirmAction::ResetPackage(
-            package_id("pkg", "https://mega.nz/folder/pkg").to_string()
-        ))
+        Some(ConfirmAction::ResetPackage(package_id(
+            "pkg",
+            "https://mega.nz/folder/pkg"
+        )))
     );
 }
 
@@ -373,9 +374,10 @@ fn handle_sort_popup_keeps_selected_row_identity_when_order_changes() {
     app.file_list_state.select(Some(0));
     assert_eq!(
         app.selected_row(),
-        Some(TuiRow::Package(
-            package_id("pkg-z", "https://mega.nz/folder/pkg-z").to_string()
-        ))
+        Some(TuiRow::Package(package_id(
+            "pkg-z",
+            "https://mega.nz/folder/pkg-z"
+        )))
     );
 
     handle_input(&mut app, key(KeyCode::Char('s')));
@@ -386,9 +388,10 @@ fn handle_sort_popup_keeps_selected_row_identity_when_order_changes() {
     assert_eq!(app.sort.key, SortKey::Name);
     assert_eq!(
         app.selected_row(),
-        Some(TuiRow::Package(
-            package_id("pkg-z", "https://mega.nz/folder/pkg-z").to_string()
-        ))
+        Some(TuiRow::Package(package_id(
+            "pkg-z",
+            "https://mega.nz/folder/pkg-z"
+        )))
     );
     assert_eq!(app.file_list_state.selected(), Some(1));
 }

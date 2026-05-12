@@ -118,11 +118,11 @@ fn package_status_rank(status: PackageStatus) -> u8 {
 }
 
 fn package_is_auto_expanded_for(
-    expanded_packages: &HashSet<String>,
+    expanded_packages: &HashSet<PackageId>,
     core_state: &DownloadState,
     package_id: &PackageId,
 ) -> bool {
-    expanded_packages.contains(&package_id.to_string())
+    expanded_packages.contains(package_id)
         || core_state
             .packages
             .get(package_id)
@@ -173,14 +173,14 @@ pub(super) fn visible_rows_for(
     files: &[FileEntry],
     core_state: &DownloadState,
     overlay_files: &IndexMap<String, OverlayFile>,
-    expanded_packages: &HashSet<String>,
+    expanded_packages: &HashSet<PackageId>,
     sort: &SortState,
 ) -> Vec<TuiRow> {
     if core_state.packages.is_empty() {
         return sorted_file_indices(files, core_state, overlay_files)
             .into_iter()
             .map(|index| TuiRow::File {
-                package_id: String::new(),
+                package_id: None,
                 file_id: files[index].id.clone(),
             })
             .collect();
@@ -216,7 +216,7 @@ pub(super) fn visible_rows_for(
         if !package_has_visible_content(core_state, overlay_files, &package_id) {
             continue;
         }
-        rows.push(TuiRow::Package(package_id.to_string()));
+        rows.push(TuiRow::Package(package_id));
         if package_is_auto_expanded_for(expanded_packages, core_state, &package_id)
             && package_has_visible_children(core_state, &package_id)
         {
@@ -234,7 +234,7 @@ pub(super) fn visible_rows_for(
                     .into_iter()
                     .filter(|file_id| file_is_visible_in_package(core_state, file_id))
                     .map(|file_id| TuiRow::File {
-                        package_id: package_id.to_string(),
+                        package_id: Some(package_id),
                         file_id,
                     }),
             );
@@ -253,7 +253,7 @@ pub(super) fn visible_rows_for(
                 }
 
                 Some(TuiRow::File {
-                    package_id: String::new(),
+                    package_id: None,
                     file_id: file.id.clone(),
                 })
             }),

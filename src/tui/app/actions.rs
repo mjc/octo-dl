@@ -424,25 +424,21 @@ impl App {
         }
     }
 
-    pub(crate) fn perform_delete_package_action(&mut self, package_id: &str) {
-        let file_ids = self.package_file_ids(package_id);
+    pub(crate) fn perform_delete_package_action(&mut self, package_id: PackageId) {
+        let file_ids = self.core_state.package_file_ids(&package_id);
         if file_ids.is_empty() {
-            let parsed_package_id = package_id.parse::<PackageId>().ok();
-            let source_url = parsed_package_id.as_ref().and_then(|package_id| {
-                self.core_state
-                    .packages
-                    .get(package_id)
-                    .map(|package| package.source_url.clone())
-            });
+            let source_url = self
+                .core_state
+                .packages
+                .get(&package_id)
+                .map(|package| package.source_url.clone());
             self.deleted_files.insert(package_id.to_string());
             if let Some(source_url) = source_url.as_ref() {
                 self.deleted_files.insert(source_url.clone());
                 self.remove_session_url(source_url);
                 self.urls.retain(|url| url != source_url);
             }
-            if let Some(package_id) = parsed_package_id.as_ref() {
-                self.core_state.packages.shift_remove(package_id);
-            }
+            self.core_state.packages.shift_remove(&package_id);
             self.sync_visible_files();
             self.recompute_totals();
             return;
@@ -484,17 +480,14 @@ impl App {
         }
     }
 
-    pub(crate) fn perform_retry_package_action(&mut self, package_id: &str) {
-        let Ok(parsed_package_id) = package_id.parse::<PackageId>() else {
-            return;
-        };
-        let Some(package) = self.core_state.packages.get(&parsed_package_id) else {
+    pub(crate) fn perform_retry_package_action(&mut self, package_id: PackageId) {
+        let Some(package) = self.core_state.packages.get(&package_id) else {
             return;
         };
         let source_url = package.source_url.clone();
         let package_failed =
             package.error.is_some() || matches!(package.status, crate::core::PackageStatus::Failed);
-        let file_ids = self.package_file_ids(package_id);
+        let file_ids = self.core_state.package_file_ids(&package_id);
         let mut retried_file = false;
 
         for file_id in file_ids {
@@ -512,9 +505,9 @@ impl App {
 
         if !retried_file && package_failed {
             let _ = self.mutate_session_and_save(|session| {
-                session.packages.retain(|package| package.id != parsed_package_id);
+                session.packages.retain(|package| package.id != package_id);
             });
-            self.core_state.packages.shift_remove(&parsed_package_id);
+            self.core_state.packages.shift_remove(&package_id);
             self.retry_source_url(&source_url);
             self.sync_visible_files();
             self.recompute_totals();
@@ -544,8 +537,8 @@ impl App {
         self.reset_file_ui_rate(id);
     }
 
-    pub(crate) fn perform_reset_package_action(&mut self, package_id: &str) {
-        for file_id in self.package_file_ids(package_id) {
+    pub(crate) fn perform_reset_package_action(&mut self, package_id: PackageId) {
+        for file_id in self.core_state.package_file_ids(&package_id) {
             self.perform_reset_file_action(&file_id);
         }
     }
@@ -597,11 +590,11 @@ impl App {
                 }
             }
             UiAction::DeleteFile(id) => self.perform_delete_file_action(&id),
-            UiAction::DeletePackage(id) => self.perform_delete_package_action(&id),
+            UiAction::DeletePackage(id) => self.perform_delete_package_action(id),
             UiAction::RetryFile(id) => self.perform_retry_file_action(&id),
-            UiAction::RetryPackage(id) => self.perform_retry_package_action(&id),
+            UiAction::RetryPackage(id) => self.perform_retry_package_action(id),
             UiAction::ResetFile(id) => self.perform_reset_file_action(&id),
-            UiAction::ResetPackage(id) => self.perform_reset_package_action(&id),
+            UiAction::ResetPackage(id) => self.perform_reset_package_action(id),
             UiAction::UpdateConfig {
                 chunks_per_file,
                 concurrent_files,

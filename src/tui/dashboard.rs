@@ -310,12 +310,14 @@ impl App {
                 .visible_rows()
                 .into_iter()
                 .map(|row| match row {
-                    TuiRow::Package(package_id) => DashboardRow::Package { package_id },
+                    TuiRow::Package(package_id) => DashboardRow::Package {
+                        package_id: package_id.to_string(),
+                    },
                     TuiRow::File {
                         package_id,
                         file_id,
                     } => DashboardRow::File {
-                        package_id,
+                        package_id: package_id.map_or_else(String::new, |id| id.to_string()),
                         file_id,
                     },
                 })
@@ -402,7 +404,7 @@ impl App {
                         downloaded_bytes: downloaded,
                         total_bytes: size,
                         percent: percent(downloaded, size),
-                        expanded: self.expanded_packages.contains(&package.id.to_string())
+                        expanded: self.expanded_packages.contains(&package.id)
                             || matches!(package.status, PackageStatus::Failed),
                         folder_label: self.folder_label_from_package_files(&package.id),
                         error: package.error.clone(),

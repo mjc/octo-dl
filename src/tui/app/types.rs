@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
+use crate::core::PackageId;
 use crate::DownloadConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,9 +17,9 @@ pub enum Popup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmAction {
     DeleteFile(String),
-    DeletePackage(String),
+    DeletePackage(PackageId),
     ResetFile(String),
-    ResetPackage(String),
+    ResetPackage(PackageId),
 }
 
 /// What to do when `auto_login` finds no credentials.
@@ -274,11 +275,11 @@ pub enum UiAction {
     },
     TogglePause,
     DeleteFile(String),
-    DeletePackage(String),
+    DeletePackage(PackageId),
     RetryFile(String),
-    RetryPackage(String),
+    RetryPackage(PackageId),
     ResetFile(String),
-    ResetPackage(String),
+    ResetPackage(PackageId),
     UpdateConfig {
         chunks_per_file: Option<usize>,
         concurrent_files: Option<usize>,

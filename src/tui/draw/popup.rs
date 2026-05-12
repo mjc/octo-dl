@@ -219,19 +219,19 @@ pub(super) fn draw_confirm_popup(frame: &mut ratatui::Frame, app: &App) {
     frame.render_widget(block, area);
 
     let (action, target, id) = match app.pending_confirmation.as_ref() {
-        Some(ConfirmAction::DeleteFile(id)) => ("Delete", "file", id.as_str()),
-        Some(ConfirmAction::DeletePackage(id)) => ("Delete", "package", id.as_str()),
-        Some(ConfirmAction::ResetFile(id)) => ("Reset", "file", id.as_str()),
-        Some(ConfirmAction::ResetPackage(id)) => ("Reset", "package", id.as_str()),
-        None => ("Confirm", "item", ""),
+        Some(ConfirmAction::DeleteFile(id)) => ("Delete", "file", id.clone()),
+        Some(ConfirmAction::DeletePackage(id)) => ("Delete", "package", id.to_string()),
+        Some(ConfirmAction::ResetFile(id)) => ("Reset", "file", id.clone()),
+        Some(ConfirmAction::ResetPackage(id)) => ("Reset", "package", id.to_string()),
+        None => ("Confirm", "item", String::new()),
     };
     let name = if target == "package" {
-        app.package_display_name(id)
+        app.package_display_name(&id)
     } else {
         app.files
             .iter()
             .find(|file| file.id == id)
-            .map_or_else(|| id.to_string(), |file| file.name.clone())
+            .map_or_else(|| id.clone(), |file| file.name.clone())
     };
 
     let lines = vec![

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 
-use crate::core::{DownloadState, FileLifecycle, FileState, PackageState};
+use crate::core::{DownloadState, FileLifecycle, FileState, PackageId, PackageState};
 
 use super::TuiRow;
 use super::rows::visible_rows_for;
@@ -70,7 +70,7 @@ pub(super) fn sync_visible_files(
     file_ui: &mut HashMap<String, FileUiState>,
     file_list_state: &mut ListState,
     core_state: &DownloadState,
-    expanded_packages: &HashSet<String>,
+    expanded_packages: &HashSet<PackageId>,
     sort: &SortState,
     deleted_files: &HashSet<String>,
     selected_row_identity: Option<TuiRow>,
@@ -139,7 +139,11 @@ fn fallback_selection_row(
     selected_row_identity: &TuiRow,
     visible_rows: &[TuiRow],
 ) -> Option<usize> {
-    let TuiRow::File { package_id, .. } = selected_row_identity else {
+    let TuiRow::File {
+        package_id: Some(package_id),
+        ..
+    } = selected_row_identity
+    else {
         return None;
     };
 

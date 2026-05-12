@@ -1,5 +1,8 @@
 use axum::response::IntoResponse;
 use serde::Deserialize;
+use std::str::FromStr;
+
+use crate::core::PackageId;
 
 use super::ApiState;
 
@@ -52,7 +55,7 @@ pub(super) fn resolve_package_id(
     state: &ApiState,
     id: Option<&str>,
     name: Option<&str>,
-) -> Result<Option<String>, Box<axum::response::Response>> {
+) -> Result<Option<PackageId>, Box<axum::response::Response>> {
     let Some(selector) = id.or(name) else {
         return Ok(None);
     };
@@ -72,7 +75,15 @@ pub(super) fn resolve_package_id(
         .collect();
     match matches.as_slice() {
         [] => Ok(None),
-        [package] => Ok(Some(package.id.clone())),
+        [package] => PackageId::from_str(&package.id).map(Some).map_err(|_| {
+            Box::new(
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({"error": "invalid package id in app state"})),
+                )
+                    .into_response(),
+            )
+        }),
         _ => Err(Box::new(
             (
                 axum::http::StatusCode::CONFLICT,

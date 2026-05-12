@@ -498,14 +498,14 @@ fn pending_empty_package_placeholder_is_visible() {
     assert_eq!(
         app.visible_rows(),
         vec![TuiRow::File {
-            package_id: String::new(),
+            package_id: None,
             file_id: "https://mega.nz/folder/root".to_string(),
         }]
     );
     assert_eq!(
         app.selected_row(),
         Some(TuiRow::File {
-            package_id: String::new(),
+            package_id: None,
             file_id: "https://mega.nz/folder/root".to_string(),
         })
     );
@@ -558,11 +558,12 @@ fn overlay_error_remains_visible_alongside_core_package_rows() {
     });
 
     let rows = app.visible_rows();
-    assert!(rows.contains(&TuiRow::Package(
-        package_id("pkg", "https://mega.nz/folder/good").to_string()
-    )));
+    assert!(rows.contains(&TuiRow::Package(package_id(
+        "pkg",
+        "https://mega.nz/folder/good"
+    ))));
     assert!(rows.contains(&TuiRow::File {
-        package_id: String::new(),
+        package_id: None,
         file_id: "https://mega.nz/folder/bad".to_string(),
     }));
 }
@@ -586,7 +587,7 @@ fn url_level_overlay_error_does_not_also_render_empty_package_row() {
     assert_eq!(
         app.visible_rows(),
         vec![TuiRow::File {
-            package_id: String::new(),
+            package_id: None,
             file_id: url,
         }]
     );
@@ -936,9 +937,10 @@ fn sync_visible_files_keeps_package_row_selected_when_failed_package_auto_expand
     app.file_list_state.select(Some(0));
     assert_eq!(
         app.selected_row(),
-        Some(TuiRow::Package(
-            package_id("pkg", "https://mega.nz/folder/test").to_string()
-        ))
+        Some(TuiRow::Package(package_id(
+            "pkg",
+            "https://mega.nz/folder/test"
+        )))
     );
 
     app.apply_core_event(CoreEvent::FileFailed {
@@ -949,9 +951,10 @@ fn sync_visible_files_keeps_package_row_selected_when_failed_package_auto_expand
     assert_eq!(app.file_list_state.selected(), Some(0));
     assert_eq!(
         app.selected_row(),
-        Some(TuiRow::Package(
-            package_id("pkg", "https://mega.nz/folder/test").to_string()
-        ))
+        Some(TuiRow::Package(package_id(
+            "pkg",
+            "https://mega.nz/folder/test"
+        )))
     );
     assert_eq!(app.visible_rows().len(), 3);
 }

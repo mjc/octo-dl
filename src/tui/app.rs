@@ -62,7 +62,7 @@ pub struct App {
     pub(crate) overlay_files: IndexMap<String, OverlayFile>,
     pub(crate) file_ui: HashMap<String, FileUiState>,
     pub file_list_state: ListState,
-    pub expanded_packages: HashSet<String>,
+    pub expanded_packages: HashSet<PackageId>,
     pub sort: SortState,
     // Aggregate stats
     pub total_downloaded: u64,
@@ -124,12 +124,6 @@ impl App {
     pub fn selected_row(&self) -> Option<visible::TuiRow> {
         let selected = self.file_list_state.selected()?;
         self.visible_rows().get(selected).cloned()
-    }
-
-    pub fn package_file_ids(&self, package_id: &str) -> Vec<String> {
-        package_id
-            .parse::<PackageId>()
-            .map_or_else(|_| Vec::new(), |package_id| self.core_state.package_file_ids(&package_id))
     }
 
     pub fn package_display_name(&self, package_id: &str) -> String {
