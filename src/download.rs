@@ -1,9 +1,11 @@
 //! Core download logic and abstractions.
 
 use std::io;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use sha2::{Digest, Sha256};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -186,6 +188,22 @@ pub(crate) fn part_path(path: &str) -> PathBuf {
 
 pub(crate) fn sidecar_path(path: &str) -> PathBuf {
     PathBuf::from(format!("{path}.part.meta.json"))
+}
+
+pub(crate) fn resume_sidecar_verified_bytes(path: &str) -> Option<u64> {
+    let sidecar = std::fs::read(sidecar_path(path)).ok()?;
+    let sidecar: ResumeSidecar = serde_json::from_slice(&sidecar).ok()?;
+    if sidecar.version != CURRENT_RESUME_SIDECAR_VERSION {
+        return Some(0);
+    }
+    let boundaries = mega::mega_chunk_boundaries(sidecar.file_size);
+    Some(
+        sidecar
+            .verified_chunks
+            .iter()
+            .filter_map(|record| boundaries.get(record.index as usize))
+            .fold(0u64, |sum, chunk| sum.saturating_add(chunk.length)),
+    )
 }
 
 /// Deletes resumable download artifacts for a final output path.
@@ -378,6 +396,21 @@ fn encode_expected_mac(node: &mega::Node) -> Result<String> {
         .condensed_mac()
         .ok_or(mega::Error::MissingCondensedMac)?;
     Ok(STANDARD.encode(mac))
+}
+
+pub(crate) fn stable_batch_package_id(folder: &str, sources: &HashSet<&str>) -> String {
+    let mut sorted_sources = sources.iter().copied().collect::<Vec<_>>();
+    sorted_sources.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    hasher.update(folder.as_bytes());
+    hasher.update([0]);
+    for source in sorted_sources {
+        hasher.update(source.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    format!("batch-{folder}-{:08x}", u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]))
 }
 
 const fn is_condensed_mac_mismatch(error: &Error) -> bool {
@@ -1526,6 +1559,67 @@ mod tests {
 
         delete_sidecar(&sidecar_path).await.unwrap();
         assert!(load_sidecar(&sidecar_path).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resume_sidecar_verified_bytes_sums_verified_chunk_lengths() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_path = dir.path().join("file.bin");
+        let file_path = base_path.to_string_lossy().into_owned();
+        let sidecar_path = sidecar_path(&file_path);
+        let file_size = 300_000_u64;
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+
+        save_sidecar_atomic(
+            &sidecar_path,
+            &ResumeSidecar {
+                version: CURRENT_RESUME_SIDECAR_VERSION,
+                file_size,
+                expected_condensed_mac_b64: STANDARD.encode([9u8; 8]),
+                verified_chunks: vec![
+                    VerifiedChunkRecord {
+                        index: boundaries[0].index,
+                        mac_b64: STANDARD.encode([1u8; 16]),
+                    },
+                    VerifiedChunkRecord {
+                        index: boundaries[1].index,
+                        mac_b64: STANDARD.encode([2u8; 16]),
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            resume_sidecar_verified_bytes(&file_path),
+            Some(boundaries[0].length + boundaries[1].length)
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_sidecar_verified_bytes_ignores_legacy_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_path = dir.path().join("file.bin");
+        let file_path = base_path.to_string_lossy().into_owned();
+        let sidecar_path = sidecar_path(&file_path);
+
+        save_sidecar_atomic(
+            &sidecar_path,
+            &ResumeSidecar {
+                version: 1,
+                file_size: 300_000,
+                expected_condensed_mac_b64: STANDARD.encode([9u8; 8]),
+                verified_chunks: vec![VerifiedChunkRecord {
+                    index: 0,
+                    mac_b64: STANDARD.encode([1u8; 16]),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resume_sidecar_verified_bytes(&file_path), Some(0));
     }
 
     #[tokio::test]

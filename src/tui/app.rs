@@ -127,11 +127,7 @@ impl App {
     }
 
     pub fn package_file_ids(&self, package_id: &str) -> Vec<String> {
-        self.core_state
-            .packages
-            .get(package_id)
-            .map(|package| package.file_ids.clone())
-            .unwrap_or_default()
+        self.core_state.package_file_ids(package_id)
     }
 
     pub fn package_display_name(&self, package_id: &str) -> String {

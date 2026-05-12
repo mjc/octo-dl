@@ -363,8 +363,8 @@ impl App {
                 .packages
                 .values()
                 .map(|package| {
-                    let (present, complete, downloaded, size) = package
-                        .file_ids
+                    let file_ids = self.core_state.package_file_ids(&package.id);
+                    let (present, complete, downloaded, size) = file_ids
                         .iter()
                         .filter_map(|id| self.core_state.files.get(id))
                         .fold(
@@ -396,7 +396,7 @@ impl App {
                         source_url: package.source_url.clone(),
                         display_name: package.display_name.clone(),
                         status: package.status,
-                        file_ids: package.file_ids.clone(),
+                        file_ids,
                         present_files: present,
                         completed_files: complete,
                         downloaded_bytes: downloaded,
@@ -455,9 +455,8 @@ impl App {
     }
 
     fn folder_label_from_package_files(&self, package_id: &str) -> Option<String> {
-        let package = self.core_state.packages.get(package_id)?;
         let mut common: Option<&str> = None;
-        for file_id in &package.file_ids {
+        for file_id in &self.core_state.package_file_ids(package_id) {
             let file = self.core_state.files.get(file_id)?;
             let folder = file
                 .path

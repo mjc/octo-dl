@@ -299,16 +299,19 @@ fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
 
 #[test]
 fn same_batch_folder_package_ids_groups_matching_folders_from_distinct_sources() {
-    let groups = same_batch_folder_package_ids([
+    let inputs = [
         ("folder/file1.mkv", "https://mega.nz/folder/one"),
         ("folder/file2.mkv", "https://mega.nz/folder/two"),
         ("other/file3.mkv", "https://mega.nz/folder/three"),
-    ]);
+    ];
+    let groups = same_batch_folder_package_ids(inputs);
+    let groups_again = same_batch_folder_package_ids(inputs);
 
     let group = groups.get("folder").expect("folder should be grouped");
     assert_eq!(group.display_name, "folder");
     assert!(group.id.starts_with("batch-"));
     assert_ne!(group.id, "folder");
+    assert_eq!(group.id, groups_again["folder"].id);
     assert!(!groups.contains_key("other"));
 }
 

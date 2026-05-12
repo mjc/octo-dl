@@ -118,27 +118,63 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                     source_url: url.clone(),
                     display_name: url.clone(),
                     status: PackageStatus::Pending,
-                    file_ids: Vec::new(),
                     error: None,
                 });
             effects.push(CoreEffect::EnqueueUrlResolution { url });
         }
         CoreEvent::PackageResolved { package } => {
-            let package_id = package.id.clone();
-            let package_entry =
-                state
-                    .packages
-                    .entry(package_id.clone())
-                    .or_insert_with(|| PackageState {
-                        id: package_id.clone(),
-                        source_url: package.source_url.clone(),
-                        display_name: package.display_name.clone(),
-                        status: PackageStatus::Pending,
-                        file_ids: Vec::new(),
-                        error: None,
-                    });
+            let incoming_package_id = if package.files.is_empty() {
+                package.source_url.clone()
+            } else {
+                package.id.clone()
+            };
+            let previous_package = state
+                .packages
+                .iter()
+                .find(|(_, existing)| existing.source_url == package.source_url)
+                .map(|(id, existing)| (id.clone(), existing.clone()));
+
+            if let Some((previous_package_id, _)) = previous_package.as_ref()
+                && previous_package_id != &incoming_package_id
+            {
+                state.packages.shift_remove(previous_package_id);
+                for file in state.files.values_mut() {
+                    if &file.package_id == previous_package_id {
+                        file.package_id = incoming_package_id.clone();
+                    }
+                }
+            }
+
+            let preserve_display_name = previous_package
+                .as_ref()
+                .map(|(_, existing)| existing)
+                .is_some_and(|existing| {
+                    existing.display_name != existing.source_url
+                        && package.display_name == package.source_url
+                });
+            let package_display_name = if preserve_display_name {
+                previous_package
+                    .as_ref()
+                    .map(|(_, existing)| existing.display_name.clone())
+                    .unwrap_or_else(|| package.display_name.clone())
+            } else {
+                package.display_name.clone()
+            };
+
+            let package_entry = state
+                .packages
+                .entry(incoming_package_id.clone())
+                .or_insert_with(|| PackageState {
+                    id: incoming_package_id.clone(),
+                    source_url: package.source_url.clone(),
+                    display_name: package_display_name.clone(),
+                    status: PackageStatus::Pending,
+                    error: None,
+                });
             package_entry.source_url = package.source_url.clone();
-            package_entry.display_name = package.display_name.clone();
+            if !preserve_display_name {
+                package_entry.display_name = package_display_name;
+            }
             package_entry.error = package
                 .collision
                 .as_ref()
@@ -152,22 +188,28 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             }
 
             for resolved in package.files {
-                match state.files.get(&resolved.file_id) {
-                    Some(existing) if existing.package_id != package_id => {
+                let existing_package_id = state
+                    .files
+                    .get(&resolved.file_id)
+                    .map(|existing| existing.package_id.clone());
+                match existing_package_id {
+                    Some(existing_package_id) if existing_package_id != incoming_package_id => {
                         package_entry.error = Some(format!(
                             "path collision on {} with package {}",
-                            resolved.file_id, existing.package_id
+                            resolved.file_id, existing_package_id
                         ));
                     }
-                    Some(existing) => {
-                        if !package_entry.file_ids.iter().any(|id| id == &existing.id) {
-                            package_entry.file_ids.push(existing.id.clone());
+                    Some(_) => {
+                        if let Some(file) = state.files.get_mut(&resolved.file_id) {
+                            file.source_url = Some(package.source_url.clone());
+                            file.path = resolved.path.clone();
+                            file.size = resolved.size;
                         }
                     }
                     None => {
                         let file = FileState {
                             id: resolved.file_id.clone(),
-                            package_id: package_id.clone(),
+                            package_id: incoming_package_id.clone(),
                             source_url: Some(package.source_url.clone()),
                             path: resolved.path,
                             size: resolved.size,
@@ -180,7 +222,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                             },
                             message: None,
                         };
-                        package_entry.file_ids.push(resolved.file_id.clone());
                         state.files.insert(resolved.file_id, file);
                     }
                 }
@@ -360,22 +401,29 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
 }
 
 pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
-    SessionSnapshotV3 {
-        version: 3,
-        id: state.session_meta.session_id.clone(),
-        created: state.session_meta.created,
-        status: state.session_meta.status,
-        packages: state
-            .packages
-            .values()
-            .map(|package| PackageSnapshot {
+    let packages = state
+        .packages
+        .values()
+        .filter_map(|package| {
+            let file_ids = state.package_file_ids(&package.id);
+            if file_ids.is_empty() && package.id != package.source_url {
+                return None;
+            }
+            Some(PackageSnapshot {
                 id: package.id.clone(),
                 source_url: package.source_url.clone(),
                 display_name: package.display_name.clone(),
-                file_ids: package.file_ids.clone(),
+                file_ids,
                 error: package.error.clone(),
             })
-            .collect(),
+        })
+        .collect();
+    SessionSnapshotV3 {
+        version: 4,
+        id: state.session_meta.session_id.clone(),
+        created: state.session_meta.created,
+        status: state.session_meta.status,
+        packages,
         files: state
             .files
             .values()
@@ -398,16 +446,21 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
 }
 
 fn recompute_derived(state: &mut DownloadState) {
-    for package in state.packages.values_mut() {
+    let package_ids: Vec<_> = state.packages.keys().cloned().collect();
+    for package_id in package_ids {
+        let file_ids = state.package_file_ids(&package_id);
+        let Some(package) = state.packages.get_mut(&package_id) else {
+            continue;
+        };
         let mut has_downloading = false;
         let mut has_failed = false;
         let mut has_queued = false;
         let mut has_complete = false;
         let mut has_present = false;
-        let mut all_skipped = !package.file_ids.is_empty();
-        let mut all_deleted = !package.file_ids.is_empty();
+        let mut all_skipped = !file_ids.is_empty();
+        let mut all_deleted = !file_ids.is_empty();
 
-        for file_id in &package.file_ids {
+        for file_id in &file_ids {
             let Some(file) = state.files.get(file_id) else {
                 continue;
             };
@@ -437,13 +490,12 @@ fn recompute_derived(state: &mut DownloadState) {
         } else if all_skipped && has_present {
             PackageStatus::Skipped
         } else if has_complete
-            && (has_queued
-                || package.file_ids.iter().any(|file_id| {
-                    state
-                        .files
-                        .get(file_id)
-                        .is_some_and(|file| matches!(file.lifecycle, FileLifecycle::Downloading))
-                }))
+            && (has_queued || file_ids.iter().any(|file_id| {
+                state
+                    .files
+                    .get(file_id)
+                    .is_some_and(|file| matches!(file.lifecycle, FileLifecycle::Downloading))
+            }))
         {
             PackageStatus::Partial
         } else if has_complete && has_present {
@@ -490,6 +542,19 @@ fn recompute_derived(state: &mut DownloadState) {
 }
 
 fn debug_assert_invariants(state: &DownloadState) {
+    let mut package_urls = std::collections::HashSet::new();
+    for (package_id, package) in &state.packages {
+        debug_assert_eq!(package_id, &package.id, "package map key must equal package.id");
+        debug_assert!(
+            package_urls.insert(package.source_url.clone()),
+            "only one package may exist per source_url"
+        );
+        let file_ids = state.package_file_ids(package_id);
+        debug_assert!(
+            !file_ids.is_empty() || package.id == package.source_url,
+            "empty packages must remain unresolved placeholders"
+        );
+    }
     for (file_id, file) in &state.files {
         debug_assert_eq!(file_id, &file.id, "file map key must equal file.id");
         debug_assert!(
@@ -526,7 +591,6 @@ mod tests {
                 source_url: "pkg".to_string(),
                 display_name: "pkg".to_string(),
                 status: PackageStatus::Pending,
-                file_ids: vec!["file.bin".to_string()],
                 error: None,
             },
         );
@@ -578,7 +642,226 @@ mod tests {
             },
         );
         assert_eq!(state.files.len(), 1);
-        assert_eq!(state.packages["pkg"].file_ids, vec!["a.bin".to_string()]);
+        assert_eq!(state.package_file_ids("pkg"), vec!["a.bin".to_string()]);
+    }
+
+    #[test]
+    fn package_resolved_replaces_empty_url_placeholder_for_same_source_url() {
+        let mut state = DownloadState::default();
+        reduce(
+            &mut state,
+            CoreEvent::UrlSubmitted {
+                url: "https://mega.nz/folder/test".to_string(),
+            },
+        );
+
+        reduce(
+            &mut state,
+            CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: "resolved-folder".to_string(),
+                    source_url: "https://mega.nz/folder/test".to_string(),
+                    display_name: "Resolved Folder".to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: "a.bin".to_string(),
+                        path: "a.bin".to_string(),
+                        size: 10,
+                    }],
+                    collision: None,
+                },
+            },
+        );
+
+        assert!(!state.packages.contains_key("https://mega.nz/folder/test"));
+        assert_eq!(state.packages.len(), 1);
+        assert_eq!(
+            state.packages["resolved-folder"].source_url,
+            "https://mega.nz/folder/test"
+        );
+        assert_eq!(state.package_file_ids("resolved-folder"), vec!["a.bin".to_string()]);
+        assert_eq!(state.url_order, vec!["https://mega.nz/folder/test".to_string()]);
+    }
+
+    #[test]
+    fn package_resolved_reuses_existing_nonempty_package_for_same_source_url() {
+        let mut state = DownloadState::default();
+        state.packages.insert(
+            "batch-existing".to_string(),
+            PackageState {
+                id: "batch-existing".to_string(),
+                source_url: "https://mega.nz/folder/test".to_string(),
+                display_name: "Folder".to_string(),
+                status: PackageStatus::Queued,
+                error: None,
+            },
+        );
+        state.files.insert(
+            "a.bin".to_string(),
+            FileState {
+                id: "a.bin".to_string(),
+                package_id: "batch-existing".to_string(),
+                source_url: Some("https://mega.nz/folder/test".to_string()),
+                path: "folder/a.bin".to_string(),
+                size: 10,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState::default(),
+                desired: DesiredState::Present,
+                runtime: RuntimeState {
+                    counts_in_run_totals: true,
+                    ..RuntimeState::default()
+                },
+                message: None,
+            },
+        );
+
+        reduce(
+            &mut state,
+            CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: "https://mega.nz/folder/test".to_string(),
+                    source_url: "https://mega.nz/folder/test".to_string(),
+                    display_name: "Folder".to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: "b.bin".to_string(),
+                        path: "folder/b.bin".to_string(),
+                        size: 20,
+                    }],
+                    collision: None,
+                },
+            },
+        );
+
+        assert_eq!(state.packages.len(), 1);
+        let package = &state.packages["https://mega.nz/folder/test"];
+        assert_eq!(package.source_url, "https://mega.nz/folder/test");
+        assert_eq!(
+            state.package_file_ids("https://mega.nz/folder/test"),
+            vec!["a.bin".to_string(), "b.bin".to_string()]
+        );
+        assert_eq!(package.display_name, "Folder");
+        assert_eq!(state.files["a.bin"].package_id, "https://mega.nz/folder/test");
+        assert_eq!(state.files["b.bin"].package_id, "https://mega.nz/folder/test");
+    }
+
+    #[test]
+    fn package_resolved_placeholder_refresh_does_not_clobber_resolved_display_name() {
+        let mut state = DownloadState::default();
+        state.packages.insert(
+            "pkg-a".to_string(),
+            PackageState {
+                id: "pkg-a".to_string(),
+                source_url: "https://mega.nz/folder/pkg-a".to_string(),
+                display_name: "Package A".to_string(),
+                status: PackageStatus::Queued,
+                error: None,
+            },
+        );
+        state.files.insert(
+            "a.bin".to_string(),
+            FileState {
+                id: "a.bin".to_string(),
+                package_id: "pkg-a".to_string(),
+                source_url: Some("https://mega.nz/folder/pkg-a".to_string()),
+                path: "a.bin".to_string(),
+                size: 10,
+                lifecycle: FileLifecycle::Failed,
+                progress: FileProgressState::default(),
+                desired: DesiredState::Present,
+                runtime: RuntimeState {
+                    counts_in_run_totals: true,
+                    ..RuntimeState::default()
+                },
+                message: Some("boom".to_string()),
+            },
+        );
+
+        reduce(
+            &mut state,
+            CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: "https://mega.nz/folder/pkg-a".to_string(),
+                    source_url: "https://mega.nz/folder/pkg-a".to_string(),
+                    display_name: "https://mega.nz/folder/pkg-a".to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: "a.bin".to_string(),
+                        path: "a.bin".to_string(),
+                        size: 10,
+                    }],
+                    collision: None,
+                },
+            },
+        );
+
+        assert_eq!(state.packages.len(), 1);
+        let package = &state.packages["https://mega.nz/folder/pkg-a"];
+        assert_eq!(package.source_url, "https://mega.nz/folder/pkg-a");
+        assert_eq!(package.display_name, "Package A");
+        assert_eq!(
+            state.package_file_ids("https://mega.nz/folder/pkg-a"),
+            vec!["a.bin".to_string()]
+        );
+    }
+
+    #[test]
+    fn package_resolved_promotes_nonempty_url_package_to_resolved_package_id() {
+        let mut state = DownloadState::default();
+        state.packages.insert(
+            "https://mega.nz/folder/test".to_string(),
+            PackageState {
+                id: "https://mega.nz/folder/test".to_string(),
+                source_url: "https://mega.nz/folder/test".to_string(),
+                display_name: "https://mega.nz/folder/test".to_string(),
+                status: PackageStatus::Queued,
+                error: None,
+            },
+        );
+        state.files.insert(
+            "a.bin".to_string(),
+            FileState {
+                id: "a.bin".to_string(),
+                package_id: "https://mega.nz/folder/test".to_string(),
+                source_url: Some("https://mega.nz/folder/test".to_string()),
+                path: "folder/a.bin".to_string(),
+                size: 10,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState::default(),
+                desired: DesiredState::Present,
+                runtime: RuntimeState {
+                    counts_in_run_totals: true,
+                    ..RuntimeState::default()
+                },
+                message: None,
+            },
+        );
+
+        reduce(
+            &mut state,
+            CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: "batch-folder".to_string(),
+                    source_url: "https://mega.nz/folder/test".to_string(),
+                    display_name: "Folder".to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: "b.bin".to_string(),
+                        path: "folder/b.bin".to_string(),
+                        size: 20,
+                    }],
+                    collision: None,
+                },
+            },
+        );
+
+        assert_eq!(state.packages.len(), 1);
+        assert!(!state.packages.contains_key("https://mega.nz/folder/test"));
+        let package = &state.packages["batch-folder"];
+        assert_eq!(package.source_url, "https://mega.nz/folder/test");
+        assert_eq!(package.display_name, "Folder");
+        assert_eq!(
+            state.package_file_ids("batch-folder"),
+            vec!["a.bin".to_string(), "b.bin".to_string()]
+        );
+        assert_eq!(state.files["a.bin"].package_id, "batch-folder");
+        assert_eq!(state.files["b.bin"].package_id, "batch-folder");
     }
 
     #[test]

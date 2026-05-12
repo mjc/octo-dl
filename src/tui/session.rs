@@ -33,37 +33,8 @@ impl SessionAdapter {
             .any(|package| package.source_url == url)
     }
 
-    pub(super) fn merge_state(session: &mut SessionSnapshotV3, next: SessionSnapshotV3) {
-        session.id = next.id;
-        session.created = next.created;
-        session.status = next.status;
-        session.config = next.config;
-        session.credentials = next.credentials;
-
-        for next_package in next.packages {
-            if let Some(existing) = session
-                .packages
-                .iter_mut()
-                .find(|package| package.id == next_package.id)
-            {
-                *existing = next_package;
-            } else {
-                session.packages.push(next_package);
-            }
-        }
-
-        let mut merged_files = session.files.clone();
-        for next_file in next.files {
-            if let Some(existing) = merged_files
-                .iter_mut()
-                .find(|file| file.id == next_file.id || file.path == next_file.path)
-            {
-                *existing = next_file;
-            } else {
-                merged_files.push(next_file);
-            }
-        }
-        session.files = merged_files;
+    pub(super) fn replace_state(session: &mut SessionSnapshotV3, next: SessionSnapshotV3) {
+        *session = next;
     }
 
     pub(super) fn update_url(
@@ -188,6 +159,11 @@ impl SessionAdapter {
     ) -> Vec<String> {
         let resumed_urls = restart.resumable_urls();
         let resumed_url_set: HashSet<_> = resumed_urls.iter().cloned().collect();
+        let active_package_ids: HashSet<_> = restart.state.packages.keys().cloned().collect();
+
+        session
+            .packages
+            .retain(|package| active_package_ids.contains(&package.id));
 
         for package in &mut session.packages {
             if resumed_url_set.contains(&package.source_url) {
@@ -203,7 +179,7 @@ impl SessionAdapter {
             {
                 existing.display_name = package.display_name.clone();
                 existing.source_url = package.source_url.clone();
-                existing.file_ids = package.file_ids.clone();
+                existing.file_ids = restart.state.package_file_ids(&package.id);
                 if resumed_url_set.contains(&existing.source_url) {
                     existing.error = None;
                 }
@@ -212,7 +188,7 @@ impl SessionAdapter {
                     id: package.id.clone(),
                     source_url: package.source_url.clone(),
                     display_name: package.display_name.clone(),
-                    file_ids: package.file_ids.clone(),
+                    file_ids: restart.state.package_file_ids(&package.id),
                     error: None,
                 });
             }
@@ -239,9 +215,12 @@ impl SessionAdapter {
         });
 
         for package in &mut session.packages {
-            package
-                .file_ids
-                .retain(|file_id| session.files.iter().any(|file| &file.id == file_id));
+            package.file_ids = session
+                .files
+                .iter()
+                .filter(|file| file.package_id == package.id)
+                .map(|file| file.id.clone())
+                .collect();
         }
 
         let has_pending_package_urls = !session.packages.is_empty();

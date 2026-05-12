@@ -210,6 +210,16 @@ impl App {
                 self.files_total = self.files_total.saturating_add(1);
             }
         }
+
+        if self.total_downloaded > self.total_size || self.files_completed > self.files_total {
+            self.log_state_diagnostics("recompute_totals_impossible");
+        } else if self.files.iter().any(|file| {
+            file.size > 0
+                && file.downloaded >= file.size
+                && !matches!(file.status, FileStatus::Complete)
+        }) {
+            self.log_state_diagnostics("recompute_totals_full_not_complete");
+        }
     }
 
     pub(crate) fn reset_aggregate_rate(&mut self) {

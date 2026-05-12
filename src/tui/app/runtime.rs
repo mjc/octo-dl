@@ -17,6 +17,74 @@ const MAX_DOWNLOAD_EVENTS_PER_TICK: usize = 256;
 const MAX_TOKEN_MESSAGES_PER_TICK: usize = 256;
 
 impl App {
+    pub(crate) fn log_state_diagnostics(&self, reason: &str) {
+        let duplicate_package_urls = {
+            let mut counts = std::collections::HashMap::<&str, usize>::new();
+            for package in self.core_state.packages.values() {
+                *counts.entry(package.source_url.as_str()).or_default() += 1;
+            }
+            counts
+                .into_iter()
+                .filter(|(_, count)| *count > 1)
+                .map(|(url, count)| format!("{url} x{count}"))
+                .collect::<Vec<_>>()
+        };
+        let failed_empty_packages = self
+            .core_state
+            .packages
+            .values()
+            .filter(|package| {
+                self.core_state.package_file_ids(&package.id).is_empty()
+                    && (package.error.is_some()
+                        || matches!(package.status, crate::core::PackageStatus::Failed))
+            })
+            .map(|package| {
+                format!(
+                    "{} [{}] err={}",
+                    package.display_name,
+                    package.source_url,
+                    package.error.as_deref().unwrap_or("<none>")
+                )
+            })
+            .collect::<Vec<_>>();
+        let full_but_not_complete = self
+            .files
+            .iter()
+            .filter(|file| {
+                file.size > 0
+                    && file.downloaded >= file.size
+                    && !matches!(file.status, FileStatus::Complete)
+            })
+            .map(|file| format!("{} status={:?}", file.id, file.status))
+            .collect::<Vec<_>>();
+        let counted_overlay_files = self
+            .files
+            .iter()
+            .filter(|file| {
+                !self.core_state.files.contains_key(&file.id)
+                    && self.overlay_counts_toward_progress(&file.id)
+            })
+            .map(|file| format!("{} {} / {}", file.id, file.downloaded, file.size))
+            .collect::<Vec<_>>();
+
+        log::warn!(
+            "[diag/{reason}] urls={} core_packages={} core_files={} visible_files={} overlay_files={} totals={}/{} files={}/{} dup_urls={:?} failed_empty={:?} full_not_complete={:?} counted_overlay={:?}",
+            self.urls.len(),
+            self.core_state.packages.len(),
+            self.core_state.files.len(),
+            self.files.len(),
+            self.overlay_files.len(),
+            self.total_downloaded,
+            self.total_size,
+            self.files_completed,
+            self.files_total,
+            duplicate_package_urls,
+            failed_empty_packages,
+            full_but_not_complete,
+            counted_overlay_files,
+        );
+    }
+
     fn saved_login_credentials(&self) -> SavedCredentials {
         SavedCredentials::encrypt(self.login.email(), self.login.password(), None)
     }
@@ -130,6 +198,7 @@ impl App {
             );
         }
         self.recompute_totals();
+        self.log_state_diagnostics("queue_url_placeholder");
     }
 
     pub(crate) fn set_status_message(&mut self, message: String) {
@@ -195,6 +264,7 @@ impl App {
             }
             DownloadEvent::ScopeError { scope, error } => {
                 self.handle_scope_error_event(scope, error);
+                self.log_state_diagnostics("scope_error");
             }
             DownloadEvent::UrlQueued { url } => {
                 if self.deleted_files.contains(&url) {
@@ -204,9 +274,11 @@ impl App {
             }
             DownloadEvent::FileQueued(file) => {
                 self.handle_file_queued_event(file);
+                self.log_state_diagnostics("file_queued");
             }
             DownloadEvent::UrlResolved { url } => {
                 self.handle_url_resolved_event(url);
+                self.log_state_diagnostics("url_resolved");
             }
             DownloadEvent::StatusMessage(message) => {
                 log::info!("Status: {message}");
