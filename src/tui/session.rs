@@ -30,6 +30,7 @@ impl SessionAdapter {
         session.urls.iter().any(|entry| entry.url == url)
     }
 
+    #[cfg(test)]
     pub(super) fn replace_state(session: &mut SessionSnapshotV3, next: SessionSnapshotV3) {
         *session = next;
     }
