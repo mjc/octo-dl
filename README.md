@@ -21,7 +21,7 @@ chunks, octo-dl scans the existing `.part` file by MEGA chunk boundaries and
 writes a fresh sidecar for any full chunks it can salvage. `--force` ignores
 resume state and starts fresh.
 
-Explicit delete in the TUI, API, or web UI removes the queued/downloading/error
+Explicit delete in the TUI or API removes the queued/downloading/error
 entry and deletes `{output}.part` plus `{output}.part.meta.json`. It does not
 delete completed output files.
 
@@ -34,6 +34,26 @@ Session summaries distinguish completed file size, bytes fetched from the
 network during the current run, and bytes reused from partial files. Speed
 metrics are based on network bytes only.
 
+## Runtime modes
+
+Run the local terminal UI:
+
+```sh
+octo --tui
+```
+
+Run a headless service with the loopback remote TUI attach stream:
+
+```sh
+octo --headless --config config.toml --tui-listen 127.0.0.1:9723
+```
+
+Attach a read-only terminal UI to a running service:
+
+```sh
+octo --tui --tui-attach 127.0.0.1:9723
+```
+
 ## NixOS module
 
 The flake exports `nixosModules.default`.
@@ -41,6 +61,10 @@ The flake exports `nixosModules.default`.
 The module now manages the `config.toml` it points at by default, so these
 NixOS options actually control the running service instead of drifting behind
 whatever the binary auto-created on first boot:
+
+The option namespace is still `services.octo-dl.web.*` for compatibility, but
+it now configures the API bind/listen settings, bookmarklet helper host, and
+optional loopback remote-TUI attach stream.
 
 - `services.octo-dl.web.host`
 - `services.octo-dl.web.port`
