@@ -324,13 +324,24 @@ async fn download_all(
     }
 
     let progress_trait: Arc<dyn DownloadProgress> = progress.clone();
+    let known_session_file_ids = session_state
+        .as_ref()
+        .map(|session| {
+            session
+                .files
+                .iter()
+                .map(|file| file.id.clone())
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
 
     let results: Vec<_> = stream::iter(files)
         .map(|item| {
             let progress = Arc::clone(&progress_trait);
+            let trust_resume_state = known_session_file_ids.contains(&item.path);
             async move {
                 let result = downloader
-                    .download_file(item.node, &item.path, &progress, None)
+                    .download_file(item.node, &item.path, &progress, trust_resume_state, None)
                     .await;
                 (item.path.clone(), result)
             }
