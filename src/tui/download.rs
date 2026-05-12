@@ -749,6 +749,7 @@ async fn collect_batch(
         queued_items.extend(collected.queued_items);
         completed_items.extend(collected.completed_items);
     }
+    resolve_same_package_path_duplicates(&mut queued_items, &mut completed_items);
     CollectedBatch {
         queued_items,
         completed_items,
@@ -851,14 +852,12 @@ async fn collect_node_set(
     }
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum BatchItemLocation {
     Queued(usize),
     Completed(usize),
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug)]
 struct BatchItemSnapshot {
     location: BatchItemLocation,
@@ -869,7 +868,6 @@ struct BatchItemSnapshot {
     sparse_checksum: Option<[u8; 16]>,
 }
 
-#[cfg(test)]
 fn resolve_same_package_path_duplicates(
     queued_items: &mut Vec<QueuedDownload>,
     completed_items: &mut Vec<QueuedDownload>,
@@ -913,7 +911,6 @@ fn resolve_same_package_path_duplicates(
     apply_duplicate_resolution(completed_items, &drop_locations, &renamed_paths, false);
 }
 
-#[cfg(test)]
 fn batch_item_snapshots(
     queued_items: &[QueuedDownload],
     completed_items: &[QueuedDownload],
@@ -930,7 +927,6 @@ fn batch_item_snapshots(
         .collect()
 }
 
-#[cfg(test)]
 fn batch_item_snapshot(item: &QueuedDownload, location: BatchItemLocation) -> BatchItemSnapshot {
     BatchItemSnapshot {
         location,
@@ -946,7 +942,6 @@ fn batch_item_snapshot(item: &QueuedDownload, location: BatchItemLocation) -> Ba
     }
 }
 
-#[cfg(test)]
 fn same_remote_file(items: &[BatchItemSnapshot]) -> bool {
     let Some(first) = items.first() else {
         return true;
@@ -957,7 +952,6 @@ fn same_remote_file(items: &[BatchItemSnapshot]) -> bool {
         .all(|item| remote_files_match(first, item))
 }
 
-#[cfg(test)]
 fn remote_files_match(left: &BatchItemSnapshot, right: &BatchItemSnapshot) -> bool {
     if let (Some(left_checksum), Some(right_checksum)) =
         (left.sparse_checksum, right.sparse_checksum)
@@ -967,7 +961,6 @@ fn remote_files_match(left: &BatchItemSnapshot, right: &BatchItemSnapshot) -> bo
     left.size == right.size && left.modified_at.is_some() && left.modified_at == right.modified_at
 }
 
-#[cfg(test)]
 fn next_available_duplicate_path(
     package_id: &str,
     path: &str,
@@ -982,7 +975,6 @@ fn next_available_duplicate_path(
     unreachable!("unbounded duplicate suffix search should always find a path")
 }
 
-#[cfg(test)]
 fn duplicate_path(path: &str, ordinal: usize) -> String {
     let (parent, file_name) = path
         .rsplit_once('/')
@@ -1003,7 +995,6 @@ fn duplicate_path(path: &str, ordinal: usize) -> String {
     }
 }
 
-#[cfg(test)]
 fn apply_duplicate_resolution(
     items: &mut Vec<QueuedDownload>,
     drop_locations: &HashSet<BatchItemLocation>,
