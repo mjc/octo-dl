@@ -205,6 +205,7 @@ fn display_dashboard_package_name(package: &DashboardPackageRow) -> String {
 pub(super) fn dashboard_status_line(
     state: &DownloadDashboardState,
     width: u16,
+    selected: Option<usize>,
 ) -> Vec<Span<'static>> {
     let status = dashboard_effective_status(state);
     let error_count = state
@@ -212,6 +213,7 @@ pub(super) fn dashboard_status_line(
         .iter()
         .filter(|file| file.status.is_error())
         .count();
+    let selected_error = selected.and_then(|index| selected_error_message(state, index));
     let downloading = state
         .files
         .iter()
@@ -269,12 +271,32 @@ pub(super) fn dashboard_status_line(
         if !parts.is_empty() {
             parts.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
         }
+        let error_text = selected_error.unwrap_or_else(|| format!("{error_count} failed"));
         parts.push(Span::styled(
-            format!("{error_count} failed"),
+            truncate_end(&error_text, width.saturating_sub(12)),
             Style::default().fg(Color::Red),
         ));
     }
     parts
+}
+
+fn selected_error_message(state: &DownloadDashboardState, index: usize) -> Option<String> {
+    let row = state.rows.get(index)?;
+    match row {
+        DashboardRow::File { file_id, .. } => state
+            .files
+            .iter()
+            .find(|file| file.id == *file_id)
+            .and_then(|file| match &file.status {
+                DashboardFileStatus::Error { message } => Some(message.clone()),
+                _ => None,
+            }),
+        DashboardRow::Package { package_id } => state
+            .packages
+            .iter()
+            .find(|package| package.id == *package_id)
+            .and_then(|package| package.error.clone()),
+    }
 }
 
 fn dashboard_effective_status(state: &DownloadDashboardState) -> String {

@@ -1,6 +1,8 @@
 #[cfg(test)]
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::OnceLock;
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes128Gcm, Nonce};
@@ -49,6 +51,18 @@ pub(crate) fn set_state_directory_for_test(path: &Path) -> StateDirectoryTestGua
 #[cfg(test)]
 fn test_state_dir() -> Option<PathBuf> {
     TEST_STATE_DIRECTORY.with(|state_dir| state_dir.borrow().clone())
+}
+
+#[cfg(test)]
+fn default_test_state_dir() -> PathBuf {
+    static DEFAULT_TEST_STATE_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+    DEFAULT_TEST_STATE_DIRECTORY
+        .get_or_init(|| {
+            let path = std::env::temp_dir().join(format!("octo-dl-tests-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&path);
+            path
+        })
+        .clone()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -114,8 +128,11 @@ impl SessionSnapshotV3 {
     #[must_use]
     pub fn state_dir() -> PathBuf {
         #[cfg(test)]
-        if let Some(state_dir) = test_state_dir() {
-            return state_dir.join("sessions");
+        {
+            if let Some(state_dir) = test_state_dir() {
+                return state_dir.join("sessions");
+            }
+            return default_test_state_dir().join("sessions");
         }
 
         std::env::var("STATE_DIRECTORY").map_or_else(

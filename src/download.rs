@@ -10,7 +10,7 @@ use base64::engine::general_purpose::STANDARD;
 use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tokio_util::sync::CancellationToken;
 
@@ -175,8 +175,9 @@ pub struct ResumeReuse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumeReuseSource {
     Sidecar,
-    SalvagedScan,
 }
+
+const CURRENT_RESUME_SIDECAR_VERSION: u32 = 2;
 
 /// Returns the `.part` file path for a given final path.
 pub(crate) fn part_path(path: &str) -> PathBuf {
@@ -199,7 +200,7 @@ pub async fn delete_download_artifacts(path: &str) -> io::Result<()> {
     delete_resume_artifacts(path).await
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct VerifiedChunkRecord {
     index: u32,
     mac_b64: String,
@@ -246,14 +247,10 @@ impl ResumeTracker {
         }
     }
 
-    const fn has_dirty_chunks(&self) -> bool {
-        self.dirty_chunks > 0
-    }
-
     fn snapshot(&mut self) -> ResumeSidecar {
         self.dirty_chunks = 0;
         ResumeSidecar {
-            version: 1,
+            version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size: self.file_size,
             expected_condensed_mac_b64: self.expected_condensed_mac_b64.clone(),
             verified_chunks: self
@@ -347,6 +344,35 @@ async fn delete_sidecar(path: &Path) -> io::Result<()> {
     remove_file_if_exists(path).await
 }
 
+fn spawn_sidecar_writer(
+    path: PathBuf,
+) -> (
+    tokio::sync::mpsc::UnboundedSender<ResumeSidecar>,
+    JoinHandle<()>,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ResumeSidecar>();
+    let handle = tokio::spawn(async move {
+        while let Some(snapshot) = rx.recv().await {
+            if let Err(err) = save_sidecar_atomic(&path, &snapshot).await {
+                log::warn!(
+                    "Failed to persist resume sidecar {} after verified chunk sync: {err}",
+                    path.display()
+                );
+            }
+        }
+    });
+    (tx, handle)
+}
+
+async fn finish_sidecar_writer(path: &Path, handle: JoinHandle<()>) {
+    if let Err(err) = handle.await {
+        log::warn!(
+            "Resume sidecar writer task failed for {}: {err}",
+            path.display()
+        );
+    }
+}
+
 fn encode_expected_mac(node: &mega::Node) -> Result<String> {
     let mac = node
         .condensed_mac()
@@ -380,41 +406,6 @@ fn consume_reused_bytes(remaining: &AtomicU64, delta: u64) -> u64 {
             Err(next) => current = next,
         }
     }
-}
-
-fn spawn_sidecar_flusher(
-    tracker: Arc<Mutex<ResumeTracker>>,
-    sidecar_path: PathBuf,
-) -> (oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
-    let (flush_stop_tx, mut flush_stop_rx) = oneshot::channel::<()>();
-    let flush_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    let snapshot = {
-                        let mut guard = tracker.lock().unwrap();
-                        if guard.has_dirty_chunks() {
-                            Some(guard.snapshot())
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some(snapshot) = snapshot {
-                        if let Err(e) = save_sidecar_atomic(&sidecar_path, &snapshot).await {
-                            log::warn!(
-                                "Failed to save resume sidecar {}: {e}",
-                                sidecar_path.display()
-                            );
-                        }
-                    }
-                }
-                _ = &mut flush_stop_rx => break,
-            }
-        }
-    });
-
-    (flush_stop_tx, flush_handle)
 }
 
 struct DownloadFinishContext<'a> {
@@ -626,7 +617,7 @@ impl<F: FileSystem> Downloader<F> {
             ..ResumeValidation::empty(input.boundaries.len())
         };
 
-        if input.sidecar.version != 1
+        if input.sidecar.version != CURRENT_RESUME_SIDECAR_VERSION
             || input.sidecar.file_size != input.file_size
             || input.sidecar.expected_condensed_mac_b64 != input.expected_condensed_mac_b64
         {
@@ -686,70 +677,6 @@ impl<F: FileSystem> Downloader<F> {
         validation
     }
 
-    async fn salvage_resume_chunks(
-        &self,
-        boundaries: &[mega::MegaChunk],
-        part_path: &Path,
-        sidecar_path: &Path,
-        file_size: u64,
-        aes_key: &[u8; 16],
-        aes_iv: &[u8; 8],
-        expected_condensed_mac_b64: &str,
-    ) -> ResumeValidation {
-        let mut validation = ResumeValidation::empty(boundaries.len());
-        let part_size = self.fs.file_size(part_path).await.unwrap_or(0);
-        if part_size == 0 {
-            return validation;
-        }
-
-        let max_chunk_len = boundaries
-            .iter()
-            .filter_map(|chunk| usize::try_from(chunk.length).ok())
-            .max()
-            .unwrap_or(0);
-        let mut scratch = vec![0u8; max_chunk_len];
-
-        for boundary in boundaries {
-            if boundary.offset.saturating_add(boundary.length) > part_size {
-                continue;
-            }
-            let Ok(chunk_len) = usize::try_from(boundary.length) else {
-                continue;
-            };
-            let buf = &mut scratch[..chunk_len];
-            if self
-                .fs
-                .read_exact_at(part_path, boundary.offset, buf)
-                .await
-                .is_err()
-            {
-                continue;
-            }
-            let mac = mega::compute_mega_chunk_mac(buf, aes_key, aes_iv);
-            validation.trusted_chunks[boundary.index as usize] = Some(mac);
-            validation.trusted_count = validation.trusted_count.saturating_add(1);
-            validation.trusted_bytes = validation.trusted_bytes.saturating_add(boundary.length);
-        }
-
-        if validation.trusted_count > 0 {
-            validation.source = Some(ResumeReuseSource::SalvagedScan);
-            let mut tracker = ResumeTracker::new(
-                file_size,
-                expected_condensed_mac_b64.to_string(),
-                validation.trusted_chunks.clone(),
-            );
-            let snapshot = tracker.snapshot();
-            if let Err(e) = save_sidecar_atomic(sidecar_path, &snapshot).await {
-                log::warn!(
-                    "Failed to save salvaged resume sidecar {}: {e}",
-                    sidecar_path.display()
-                );
-            }
-        }
-
-        validation
-    }
-
     /// Downloads a single file using atomic `.part` file semantics.
     ///
     /// Writes to `{path}.part` during download, then renames to `{path}` on success.
@@ -785,29 +712,12 @@ impl<F: FileSystem> Downloader<F> {
         let sp = sidecar_path(path);
         let expected_condensed_mac_b64 = encode_expected_mac(node)?;
         let boundaries = mega::mega_chunk_boundaries(node.size());
-        let mut resume_validation = if self.config.force_overwrite {
+        let resume_validation = if self.config.force_overwrite {
             ResumeValidation::empty(boundaries.len())
         } else {
             self.revalidate_resume_chunks(node, &boundaries, &pp, &sp, &expected_condensed_mac_b64)
                 .await?
         };
-        if !self.config.force_overwrite
-            && resume_validation.trusted_count == 0
-            && self.fs.file_exists(&pp).await
-            && let Some(aes_iv) = node.aes_iv()
-        {
-            resume_validation = self
-                .salvage_resume_chunks(
-                    &boundaries,
-                    &pp,
-                    &sp,
-                    node.size(),
-                    node.aes_key(),
-                    aes_iv,
-                    &expected_condensed_mac_b64,
-                )
-                .await;
-        }
         let preserve_existing = resume_validation.trusted_count > 0;
         if !preserve_existing {
             let _ = delete_sidecar(&sp).await;
@@ -823,15 +733,6 @@ impl<F: FileSystem> Downloader<F> {
 
         if trusted_bytes > 0 {
             progress.on_resume_reused(&name, resume_validation.trusted_count, trusted_bytes);
-            if matches!(
-                resume_validation.source,
-                Some(ResumeReuseSource::SalvagedScan)
-            ) {
-                log::info!(
-                    "Salvaged {} verified chunk(s) for {path} by scanning partial data",
-                    resume_validation.trusted_count
-                );
-            }
         }
 
         // Open the plaintext .part file, preserving only locally revalidated chunks.
@@ -847,8 +748,7 @@ impl<F: FileSystem> Downloader<F> {
             resume_validation.trusted_chunks,
         )));
         let trusted_for_download = tracker.lock().unwrap().trusted_chunks();
-        let (flush_stop_tx, flush_handle) = spawn_sidecar_flusher(Arc::clone(&tracker), sp.clone());
-
+        let (sidecar_updates_tx, sidecar_writer) = spawn_sidecar_writer(sp.clone());
         // Wrap tokio file for futures::AsyncWrite/AsyncSeek compatibility
         let file = file.compat_write();
 
@@ -879,9 +779,14 @@ impl<F: FileSystem> Downloader<F> {
             }
         };
         let verify_tracker = Arc::clone(&tracker);
+        let sidecar_updates_tx_for_cb = sidecar_updates_tx.clone();
         let chunk_verified_cb = move |index: u32, mac: [u8; 16]| {
-            let mut guard = verify_tracker.lock().unwrap();
-            guard.mark_verified(index, mac);
+            let snapshot = {
+                let mut guard = verify_tracker.lock().unwrap();
+                guard.mark_verified(index, mac);
+                guard.snapshot()
+            };
+            let _ = sidecar_updates_tx_for_cb.send(snapshot);
         };
 
         // Download with progress callback, optionally with cancellation support
@@ -913,9 +818,8 @@ impl<F: FileSystem> Downloader<F> {
                 .await
                 .map_err(Error::Mega)
         };
-        let _ = flush_stop_tx.send(());
-        let _ = flush_handle.await;
-
+        drop(sidecar_updates_tx);
+        finish_sidecar_writer(&sp, sidecar_writer).await;
         self.finish_download_result(
             DownloadFinishContext {
                 node,
@@ -967,12 +871,24 @@ impl<F: FileSystem> Downloader<F> {
                     let _ = self.fs.remove_file(ctx.part_path).await;
                     let _ = delete_sidecar(ctx.sidecar_path).await;
                 } else {
-                    let snapshot = ctx.tracker.lock().unwrap().snapshot();
-                    if let Err(save_err) = save_sidecar_atomic(ctx.sidecar_path, &snapshot).await {
-                        log::warn!(
-                            "Failed to save final resume sidecar {}: {save_err}",
-                            ctx.sidecar_path.display()
-                        );
+                    match self.fs.sync_file(ctx.part_path).await {
+                        Ok(()) => {
+                            let snapshot = ctx.tracker.lock().unwrap().snapshot();
+                            if let Err(save_err) =
+                                save_sidecar_atomic(ctx.sidecar_path, &snapshot).await
+                            {
+                                log::warn!(
+                                    "Failed to save final resume sidecar {}: {save_err}",
+                                    ctx.sidecar_path.display()
+                                );
+                            }
+                        }
+                        Err(sync_err) => {
+                            log::warn!(
+                                "Failed to sync partial file {} before saving resume sidecar: {sync_err}",
+                                ctx.part_path.display()
+                            );
+                        }
                     }
                 }
                 if !matches!(e, Error::Cancelled) {
@@ -1250,6 +1166,10 @@ mod tests {
             Ok(())
         }
 
+        async fn sync_file(&self, _path: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
+
         async fn remove_file(&self, _path: &Path) -> std::io::Result<()> {
             Ok(())
         }
@@ -1296,7 +1216,7 @@ mod tests {
         mac: [u8; 16],
     ) -> ResumeSidecar {
         ResumeSidecar {
-            version: 1,
+            version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size,
             expected_condensed_mac_b64: expected_condensed_mac_b64.to_string(),
             verified_chunks: vec![VerifiedChunkRecord {
@@ -1490,40 +1410,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_sidecar_scan_salvages_full_chunks_and_writes_sidecar() {
-        let dir = tempfile::tempdir().unwrap();
-        let part = dir.path().join("file.bin.part");
-        let sidecar = dir.path().join("file.bin.part.meta.json");
-        let file_size = 300_000_u64;
-        let data = test_plaintext(usize_from_u64(file_size));
-        tokio::fs::write(&part, &data).await.unwrap();
-
-        let aes_key = [7u8; 16];
-        let aes_iv = [3u8; 8];
-        let expected = STANDARD.encode([9u8; 8]);
-        let boundaries = mega::mega_chunk_boundaries(file_size);
-        let validation = tokio_downloader()
-            .salvage_resume_chunks(
-                &boundaries,
-                &part,
-                &sidecar,
-                file_size,
-                &aes_key,
-                &aes_iv,
-                &expected,
-            )
-            .await;
-
-        assert_eq!(validation.source, Some(ResumeReuseSource::SalvagedScan));
-        assert_eq!(validation.trusted_count, boundaries.len());
-        assert_eq!(validation.trusted_bytes, file_size);
-        assert!(sidecar.exists());
-        let loaded = load_sidecar(&sidecar).await.unwrap();
-        assert_eq!(loaded.verified_chunks.len(), boundaries.len());
-    }
-
-    #[tokio::test]
-    async fn scan_salvage_ignores_incomplete_tail_chunk() {
+    async fn stale_sidecar_without_matching_metadata_trusts_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let part = dir.path().join("file.bin.part");
         let sidecar = dir.path().join("file.bin.part.meta.json");
@@ -1531,26 +1418,91 @@ mod tests {
         let data = test_plaintext(200_000);
         tokio::fs::write(&part, &data).await.unwrap();
 
+        let expected = STANDARD.encode([9u8; 8]);
         let aes_key = [7u8; 16];
         let aes_iv = [3u8; 8];
-        let expected = STANDARD.encode([9u8; 8]);
         let boundaries = mega::mega_chunk_boundaries(file_size);
-        let validation = tokio_downloader()
-            .salvage_resume_chunks(
-                &boundaries,
-                &part,
-                &sidecar,
+        save_sidecar_atomic(
+            &sidecar,
+            &ResumeSidecar {
+                version: CURRENT_RESUME_SIDECAR_VERSION,
                 file_size,
-                &aes_key,
-                &aes_iv,
-                &expected,
-            )
+                expected_condensed_mac_b64: "wrong".to_string(),
+                verified_chunks: vec![VerifiedChunkRecord {
+                    index: 0,
+                    mac_b64: STANDARD.encode([1u8; 16]),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        let loaded_sidecar = load_sidecar(&sidecar).await.unwrap();
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(SidecarValidationInput {
+                boundaries: &boundaries,
+                part_path: &part,
+                sidecar: &loaded_sidecar,
+                file_size,
+                aes_key: &aes_key,
+                aes_iv: &aes_iv,
+                expected_condensed_mac_b64: &expected,
+            })
             .await;
 
-        assert_eq!(validation.trusted_count, 1);
-        assert_eq!(validation.trusted_bytes, boundaries[0].length);
-        assert!(validation.trusted_chunks[0].is_some());
-        assert!(validation.trusted_chunks[1].is_none());
+        assert!(validation.sidecar_loaded);
+        assert_eq!(validation.trusted_count, 0);
+        assert_eq!(validation.trusted_bytes, 0);
+        assert!(validation.trusted_chunks.iter().all(Option::is_none));
+    }
+
+    #[tokio::test]
+    async fn legacy_v1_sidecar_trusts_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let sidecar = dir.path().join("file.bin.part.meta.json");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let expected = STANDARD.encode([9u8; 8]);
+        let aes_key = [7u8; 16];
+        let aes_iv = [3u8; 8];
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let first = &boundaries[0];
+        let first_data = chunk_data(&data, first);
+        let mac = mega::compute_mega_chunk_mac(first_data, &aes_key, &aes_iv);
+        save_sidecar_atomic(
+            &sidecar,
+            &ResumeSidecar {
+                version: 1,
+                file_size,
+                expected_condensed_mac_b64: expected.clone(),
+                verified_chunks: vec![VerifiedChunkRecord {
+                    index: first.index,
+                    mac_b64: STANDARD.encode(mac),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let loaded_sidecar = load_sidecar(&sidecar).await.unwrap();
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(SidecarValidationInput {
+                boundaries: &boundaries,
+                part_path: &part,
+                sidecar: &loaded_sidecar,
+                file_size,
+                aes_key: &aes_key,
+                aes_iv: &aes_iv,
+                expected_condensed_mac_b64: &expected,
+            })
+            .await;
+
+        assert!(validation.sidecar_loaded);
+        assert_eq!(validation.trusted_count, 0);
+        assert_eq!(validation.trusted_bytes, 0);
+        assert!(validation.trusted_chunks.iter().all(Option::is_none));
     }
 
     #[tokio::test]
@@ -1558,7 +1510,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sidecar_path = dir.path().join("file.bin.part.meta.json");
         let sidecar = ResumeSidecar {
-            version: 1,
+            version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size: 42,
             expected_condensed_mac_b64: STANDARD.encode([9u8; 8]),
             verified_chunks: vec![VerifiedChunkRecord {
@@ -1574,6 +1526,43 @@ mod tests {
 
         delete_sidecar(&sidecar_path).await.unwrap();
         assert!(load_sidecar(&sidecar_path).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn sidecar_writer_persists_verified_snapshots_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar_path = dir.path().join("file.bin.part.meta.json");
+        let first = ResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size: 42,
+            expected_condensed_mac_b64: STANDARD.encode([9u8; 8]),
+            verified_chunks: vec![VerifiedChunkRecord {
+                index: 0,
+                mac_b64: STANDARD.encode([1u8; 16]),
+            }],
+        };
+        let second = ResumeSidecar {
+            verified_chunks: vec![
+                VerifiedChunkRecord {
+                    index: 0,
+                    mac_b64: STANDARD.encode([1u8; 16]),
+                },
+                VerifiedChunkRecord {
+                    index: 1,
+                    mac_b64: STANDARD.encode([2u8; 16]),
+                },
+            ],
+            ..first.clone()
+        };
+
+        let (tx, handle) = spawn_sidecar_writer(sidecar_path.clone());
+        tx.send(first).unwrap();
+        tx.send(second.clone()).unwrap();
+        drop(tx);
+        finish_sidecar_writer(&sidecar_path, handle).await;
+
+        let loaded = load_sidecar(&sidecar_path).await.unwrap();
+        assert_eq!(loaded.verified_chunks, second.verified_chunks);
     }
 
     #[tokio::test]

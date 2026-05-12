@@ -12,6 +12,7 @@ use super::dashboard::{
     AttachedDashboard, DashboardChrome, DashboardUiMode, DownloadDashboardState,
 };
 use super::draw::draw_dashboard;
+use super::terminal::wait_for_shutdown_signal;
 use super::terminal_support::{TerminalGuard, TerminalPanicHookGuard, terminal_input_channel};
 
 const DASHBOARD_RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -59,6 +60,8 @@ async fn run_attached_dashboard_loop(addr: SocketAddr) -> io::Result<()> {
     };
     let mut input = terminal_input_channel();
     let mut dashboard_rx = spawn_dashboard_reader(addr);
+    let shutdown = wait_for_shutdown_signal();
+    tokio::pin!(shutdown);
     terminal.draw(|frame| {
         if let Some(state) = &app.state {
             draw_dashboard(
@@ -86,6 +89,7 @@ async fn run_attached_dashboard_loop(addr: SocketAddr) -> io::Result<()> {
 
     loop {
         tokio::select! {
+            () = &mut shutdown => app.should_quit = true,
             Some(event) = input.recv() => handle_attached_input(&mut app, event),
             Some(message) = dashboard_rx.recv() => handle_dashboard_reader_message(&mut app, message),
         }

@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, watch};
 use super::app::{App, UiAction};
 use super::draw::draw;
 use super::event::DownloadEvent;
-use super::input::{handle_input, handle_paste};
+use super::input::{handle_input, handle_paste, request_quit};
 use super::terminal_support::{TerminalGuard, TerminalPanicHookGuard, terminal_input_channel};
 
 pub async fn wait_for_shutdown_signal() {
@@ -69,6 +69,8 @@ async fn run_interactive_tui_loop(
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.tick().await;
     let mut input_rx = terminal_input_channel();
+    let shutdown = wait_for_shutdown_signal();
+    tokio::pin!(shutdown);
     let mut sys = System::new();
     let pid = sysinfo::get_current_pid().ok();
     let mut needs_draw = true;
@@ -81,6 +83,10 @@ async fn run_interactive_tui_loop(
         }
 
         tokio::select! {
+            () = &mut shutdown => {
+                request_quit(app);
+                needs_draw = true;
+            }
             Some(event) = input_rx.recv() => {
                 match event {
                     Event::Key(key) => handle_input(app, key),
