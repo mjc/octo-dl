@@ -42,6 +42,9 @@ Run the local terminal UI:
 octo --tui
 ```
 
+`--tui` and `--headless` look for `./config.toml` by default. Pass
+`--config /path/to/config.toml` to override that.
+
 Run a headless service with the loopback remote TUI attach stream:
 
 ```sh
