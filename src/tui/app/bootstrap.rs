@@ -27,11 +27,17 @@ fn path_io_error(action: &str, path: &Path, error: io::Error) -> io::Error {
     )
 }
 
-fn default_service_config_path() -> PathBuf {
+fn state_dir_service_config_path() -> PathBuf {
     let mut path = SessionSnapshotV3::state_dir();
     path.pop();
     path.push("config.toml");
     path
+}
+
+fn default_service_config_path() -> PathBuf {
+    env::current_dir()
+        .map(|dir| dir.join("config.toml"))
+        .unwrap_or_else(|_| state_dir_service_config_path())
 }
 
 impl App {
@@ -150,9 +156,13 @@ impl App {
         self.auto_login(NoCredentialsFallback::ShowPopup);
     }
 
-    pub(crate) fn prepare_headless_startup(&mut self, config_path: &Path) -> io::Result<()> {
+    pub(crate) fn prepare_headless_startup(&mut self) -> io::Result<()> {
         self.load_credentials_from_env();
-        self.require_credentials(config_path)?;
+        let config_path = self
+            .persist_config_path
+            .clone()
+            .unwrap_or_else(default_service_config_path);
+        self.require_credentials(&config_path)?;
         self.resume_latest_session();
         self.auto_login(NoCredentialsFallback::Silent);
         Ok(())
@@ -370,7 +380,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::StateDirectoryGuard;
+    use crate::test_support::{CurrentDirGuard, StateDirectoryGuard};
     use std::fs;
     use tempfile::tempdir;
 
@@ -414,6 +424,7 @@ mod tests {
     fn persist_login_credentials_creates_default_config_file() {
         let dir = tempdir().expect("temp dir should exist");
         let _guard = StateDirectoryGuard::set(dir.path());
+        let _cwd = CurrentDirGuard::set(dir.path());
         let config_path = dir.path().join("config.toml");
         let mut config = ServiceConfig::load_or_create(&config_path).expect("config should exist");
         config.download.path = Some(dir.path().join("downloads").to_string_lossy().into_owned());
@@ -448,6 +459,7 @@ mod tests {
     fn new_without_explicit_config_loads_default_saved_credentials() {
         let dir = tempdir().expect("temp dir should exist");
         let _guard = StateDirectoryGuard::set(dir.path());
+        let _cwd = CurrentDirGuard::set(dir.path());
         let config_path = dir.path().join("config.toml");
         let mut config = ServiceConfig::load_or_create(&config_path).expect("config should exist");
         config.credentials = crate::ServiceCredentials {

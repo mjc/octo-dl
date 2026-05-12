@@ -94,15 +94,14 @@ pub async fn run(
 /// # Errors
 /// Returns an error if configuration loading fails, server startup fails, or I/O operations fail.
 ///
-pub async fn run_api_only(config_path: &Path, tui_listen: Option<SocketAddr>) -> io::Result<()> {
+pub async fn run_api_only(
+    config_path: Option<&Path>,
+    tui_listen: Option<SocketAddr>,
+) -> io::Result<()> {
     let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
-    let (mut app, api_host, api_port) = App::new_with_optional_service_config(
-        download_tx,
-        true,
-        Some(config_path),
-        DEFAULT_API_PORT,
-    )?;
-    app.prepare_headless_startup(config_path)?;
+    let (mut app, api_host, api_port) =
+        App::new_with_optional_service_config(download_tx, true, config_path, DEFAULT_API_PORT)?;
+    app.prepare_headless_startup()?;
     let app::SharedStateChannels {
         mut action_rx,
         state_tx,

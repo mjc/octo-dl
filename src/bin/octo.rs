@@ -73,7 +73,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("Modes:");
     eprintln!("  --tui               Launch interactive terminal TUI");
-    eprintln!("  --headless          Start headless API service (requires --config)");
+    eprintln!("  --headless          Start headless API service");
     eprintln!("  --tui --tui-attach ADDR");
     eprintln!("                      Attach a read-only terminal UI to ADDR");
     eprintln!("  --ui tui|headless   Equivalent explicit form for mode selection");
@@ -82,7 +82,7 @@ fn print_usage() {
     eprintln!("Global options:");
     eprintln!("  --tui-listen ADDR   Publish remote TUI attach stream on loopback ADDR");
     eprintln!("  --host <HOST>       Bind address for API server when enabled");
-    eprintln!("  --config <PATH>     Config file for headless/service mode");
+    eprintln!("  --config <PATH>     Config file override for TUI/headless mode");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
     eprintln!("Run 'octo --tui --help' or 'octo --help' for mode-specific options.");
@@ -314,10 +314,6 @@ async fn main() -> octo_dl::Result<()> {
             std::process::exit(1);
         }
     } else if options.ui == Some(UiMode::Headless) {
-        let config = options.config_path.unwrap_or_else(|| {
-            eprintln!("Error: --headless requires --config <PATH>");
-            std::process::exit(1);
-        });
         let listen = options.tui_listen.as_deref().map(|value| {
             octo_dl::tui::parse_loopback_addr(value).unwrap_or_else(|error| {
                 eprintln!("Error: {error}");
@@ -326,13 +322,12 @@ async fn main() -> octo_dl::Result<()> {
         });
         #[cfg(feature = "tui")]
         {
-            octo_dl::tui::run_api_only(&config, listen)
+            octo_dl::tui::run_api_only(options.config_path.as_deref(), listen)
                 .await
                 .map_err(octo_dl::Error::Io)
         }
         #[cfg(not(feature = "tui"))]
         {
-            let _ = config;
             eprintln!("API support requires the 'tui' feature");
             std::process::exit(1);
         }
