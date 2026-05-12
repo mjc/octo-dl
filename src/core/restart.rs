@@ -277,7 +277,7 @@ mod tests {
     use crate::core::RuntimeState;
 
     fn package_id(raw: &str, source_url: &str) -> PackageId {
-        PackageId::parse_or_source_url(raw, source_url)
+        PackageId::parse_or_key(raw, &crate::core::PackageKey::new(source_url))
     }
 
     fn sample_snapshot() -> SessionSnapshotV3 {
