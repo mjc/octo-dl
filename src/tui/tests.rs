@@ -48,11 +48,11 @@ fn resume_session_requeues_urls() {
         app.visible_rows(),
         vec![
             TuiRow::File {
-                package_id: String::new(),
+                package_id: None,
                 file_id: expected_urls[0].clone(),
             },
             TuiRow::File {
-                package_id: String::new(),
+                package_id: None,
                 file_id: expected_urls[1].clone(),
             },
         ]
@@ -106,7 +106,7 @@ fn resume_session_clears_empty_failed_package_errors_and_requeues_urls() {
     assert_eq!(
         app.visible_rows(),
         vec![TuiRow::File {
-            package_id: String::new(),
+            package_id: None,
             file_id: "https://mega.nz/file/stale-error".to_string(),
         }]
     );
@@ -580,10 +580,10 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
 
     assert_eq!(
         app.visible_rows(),
-        vec![TuiRow::Package(package_id.to_string())]
+        vec![TuiRow::Package(package_id)]
     );
 
-    app.handle_ui_action(UiAction::RetryPackage(package_id.to_string()));
+    app.handle_ui_action(UiAction::RetryPackage(package_id));
 
     assert!(!app.core_state.packages.contains_key(&package_id));
     assert_eq!(
@@ -1161,7 +1161,7 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
     assert_eq!(
         harness.render().selected_row,
         Some(TuiRow::File {
-            package_id: package_id("pkg-a", "https://mega.nz/folder/pkg-a").to_string(),
+            package_id: Some(package_id("pkg-a", "https://mega.nz/folder/pkg-a")),
             file_id: "a.bin".to_string(),
         })
     );
@@ -1182,9 +1182,10 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
     let snapshot = harness.render();
     assert_eq!(
         snapshot.selected_row,
-        Some(TuiRow::Package(
-            package_id("pkg-a", "https://mega.nz/folder/pkg-a").to_string()
-        ))
+        Some(TuiRow::Package(package_id(
+            "pkg-a",
+            "https://mega.nz/folder/pkg-a"
+        )))
     );
     assert!(snapshot.text.contains("Package A"));
     assert!(snapshot.text.contains("Package B"));

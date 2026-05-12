@@ -3,6 +3,7 @@ use super::super::event::DownloadEvent;
 use super::helpers::{self, infer_host, require_api_key};
 use super::selection;
 use super::*;
+use crate::test_support::package_id;
 use axum::http::{HeaderValue, StatusCode};
 use tempfile::tempdir;
 use tokio::sync::watch;
@@ -110,31 +111,38 @@ fn resolve_file_id_by_name_reports_all_lookup_cases() {
 
 #[test]
 fn resolve_package_id_matches_package_rows() {
+    let package_id_str = package_id("pkg", "https://mega.nz/folder/pkg").to_string();
+    let other_package_id_str = package_id("other", "https://mega.nz/folder/other").to_string();
     let (state, _rx) = state_with_snapshot(
-        r#"{"packages":[{"id":"pkg","source_url":"https://mega.nz/folder/pkg","display_name":"Package"},{"id":"other","source_url":"https://mega.nz/folder/other","display_name":"Other"}],"files":[]}"#,
+        &format!(
+            r#"{{"packages":[{{"id":"{package_id_str}","source_url":"https://mega.nz/folder/pkg","display_name":"Package"}},{{"id":"{other_package_id_str}","source_url":"https://mega.nz/folder/other","display_name":"Other"}}],"files":[]}}"#
+        ),
     );
 
-    let by_id = selection::resolve_package_id(&state, Some("pkg"), None)
+    let by_id = selection::resolve_package_id(&state, Some(&package_id_str), None)
         .expect("package lookup should succeed")
         .expect("package should resolve");
-    assert_eq!(by_id, "pkg");
+    assert_eq!(by_id.to_string(), package_id_str);
 
     let by_name = selection::resolve_package_id(&state, None, Some("Package"))
         .expect("package lookup should succeed")
         .expect("package should resolve");
-    assert_eq!(by_name, "pkg");
+    assert_eq!(by_name.to_string(), package_id_str);
 }
 
 #[tokio::test]
 async fn retry_api_dispatches_package_action_for_package_id() {
+    let package_id_str = package_id("pkg", "https://mega.nz/folder/pkg").to_string();
     let (state, mut rx) = state_with_snapshot(
-        r#"{"packages":[{"id":"pkg","source_url":"https://mega.nz/folder/pkg","display_name":"Package"}],"files":[]}"#,
+        &format!(
+            r#"{{"packages":[{{"id":"{package_id_str}","source_url":"https://mega.nz/folder/pkg","display_name":"Package"}}],"files":[]}}"#
+        ),
     );
 
     let _ = api_retry(
         State(state),
         axum::Json(RetryRequest {
-            id: Some("pkg".to_string()),
+            id: Some(package_id_str.clone()),
             name: None,
         }),
     )
@@ -142,7 +150,7 @@ async fn retry_api_dispatches_package_action_for_package_id() {
     .into_response();
 
     match rx.try_recv().expect("UI action should be sent") {
-        UiAction::RetryPackage(id) => assert_eq!(id, "pkg"),
+        UiAction::RetryPackage(id) => assert_eq!(id.to_string(), package_id_str),
         other => panic!("unexpected UI action: {other:?}"),
     }
 }

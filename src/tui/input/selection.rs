@@ -106,7 +106,7 @@ pub(super) fn delete_selected_immediately(app: &mut App) {
 
 pub(super) fn toggle_selected_package(app: &mut App) {
     if let Some(TuiRow::Package(package_id)) = app.selected_row() {
-        if !app.expanded_packages.insert(package_id.clone()) {
+        if !app.expanded_packages.insert(package_id) {
             app.expanded_packages.remove(&package_id);
         }
     }
