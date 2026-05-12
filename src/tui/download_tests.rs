@@ -348,7 +348,6 @@ fn queued_events_keep_distinct_source_urls_in_distinct_packages() {
 #[test]
 fn remote_files_match_prefers_sparse_checksum_then_size_and_date() {
     let left = BatchItemSnapshot {
-        location: BatchItemLocation::Queued(0),
         package_id: "folder".to_string(),
         path: "folder/file.mkv".to_string(),
         size: 100,
@@ -360,12 +359,10 @@ fn remote_files_match_prefers_sparse_checksum_then_size_and_date() {
         ..left.clone()
     };
     let same_size_and_date_without_checksum = BatchItemSnapshot {
-        location: BatchItemLocation::Queued(1),
         sparse_checksum: None,
         ..left.clone()
     };
     let different_size = BatchItemSnapshot {
-        location: BatchItemLocation::Queued(2),
         size: 90,
         sparse_checksum: None,
         ..left.clone()
