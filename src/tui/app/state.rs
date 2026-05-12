@@ -248,12 +248,21 @@ impl App {
 
     pub(crate) fn register_session_queued_file(
         &mut self,
+        package_id: &str,
+        package_display_name: &str,
         submitted_url: &str,
         path: &str,
         size: u64,
     ) -> bool {
         self.mutate_session_and_save(|session| {
-            SessionAdapter::register_queued_file(session, submitted_url, path, size)
+            SessionAdapter::register_queued_file(
+                session,
+                package_id,
+                package_display_name,
+                submitted_url,
+                path,
+                size,
+            )
         })
         .unwrap_or(true)
     }

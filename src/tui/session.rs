@@ -258,13 +258,20 @@ impl SessionAdapter {
 
     pub(super) fn register_queued_file(
         session: &mut SessionSnapshotV3,
+        package_id: &str,
+        package_display_name: &str,
         submitted_url: &str,
         path: &str,
         size: u64,
     ) -> bool {
         Self::ensure_url(session, submitted_url);
         let package_id = {
-            let package = Self::ensure_package(session, submitted_url);
+            let package = Self::ensure_package(
+                session,
+                package_id,
+                package_display_name,
+                submitted_url,
+            );
             package.id.clone()
         };
         if let Some(file) = session
@@ -324,20 +331,22 @@ impl SessionAdapter {
 
     fn ensure_package<'a>(
         session: &'a mut SessionSnapshotV3,
+        package_id: &str,
+        display_name: &str,
         source_url: &str,
     ) -> &'a mut crate::core::PackageSnapshot {
         if let Some(index) = session
             .packages
             .iter()
-            .position(|package| package.source_url == source_url)
+            .position(|package| package.id == package_id)
         {
             return &mut session.packages[index];
         }
 
         session.packages.push(crate::core::PackageSnapshot {
-            id: source_url.to_string(),
+            id: package_id.to_string(),
             source_url: source_url.to_string(),
-            display_name: source_url.to_string(),
+            display_name: display_name.to_string(),
             file_ids: Vec::new(),
             error: None,
         });

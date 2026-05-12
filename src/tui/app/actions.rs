@@ -203,9 +203,6 @@ impl App {
     }
 
     fn register_queued_file(&mut self, file: &QueuedFile) -> bool {
-        if !self.register_session_queued_file(&file.origin.submitted_url, &file.id, file.size) {
-            return false;
-        }
         let package_id = file
             .origin
             .package_id
@@ -216,6 +213,15 @@ impl App {
             .package_display_name
             .as_deref()
             .unwrap_or(package_id);
+        if !self.register_session_queued_file(
+            package_id,
+            package_display_name,
+            &file.origin.submitted_url,
+            &file.id,
+            file.size,
+        ) {
+            return false;
+        }
         self.ensure_core_file_in_package(
             &file.id,
             package_id,
