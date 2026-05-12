@@ -114,31 +114,37 @@ in {
       enable = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Whether to serve the web UI. When false, runs in headless API-only mode.";
+        description = ''
+          Whether to publish the loopback remote TUI attach stream with the API.
+
+          When false, octo-dl still runs in headless API mode using the
+          configured `[api]` host and port, but does not expose the remote TUI
+          attach stream.
+        '';
       };
 
       host = lib.mkOption {
         type = lib.types.str;
         default = "127.0.0.1";
-        description = "Bind address for the web/API server.";
+        description = "Loopback bind address for the remote-TUI/API server.";
       };
 
       publicHost = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        description = "Public hostname for the PWA manifest and share target (e.g. 'octo.example.com'). Defaults to the bind host if unset.";
+        description = "Public hostname used when rendering the bookmarklet helper page. Defaults to the bind host if unset.";
       };
 
       port = lib.mkOption {
         type = lib.types.port;
         default = 9723;
-        description = "Port for the web/API server.";
+        description = "Port for the remote-TUI/API server.";
       };
 
       openFirewall = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description = "Whether to open the web UI port in the firewall.";
+        description = "Whether to open the remote-TUI/API port in the firewall.";
       };
     };
   };
@@ -153,9 +159,18 @@ in {
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.web.openFirewall [cfg.web.port];
 
+    assertions = [
+      {
+        assertion = !cfg.web.enable || lib.hasPrefix "127." cfg.web.host || cfg.web.host == "::1";
+        message = "services.octo-dl.web.host must be loopback when services.octo-dl.web.enable is true.";
+      }
+    ];
+
     systemd.services.octo-dl = let
-      mode = if cfg.web.enable then "--web" else "--api";
-      apiHostFlag = " --host ${cfg.web.host}";
+      listenHost =
+        if lib.hasInfix ":" cfg.web.host
+        then "[${cfg.web.host}]"
+        else cfg.web.host;
       manageConfigScript = ''
         toml_quote() {
           local value="$1"
@@ -273,7 +288,11 @@ in {
         StateDirectory = "octo-dl";
         PermissionsStartOnly = managedConfig;
         WorkingDirectory = cfg.downloadDir;
-        ExecStart = "${cfg.package}/bin/octo ${mode}${apiHostFlag} --config ${cfg.configFile}";
+        ExecStart = lib.escapeShellArgs (
+          [(lib.getExe cfg.package) "--headless" "--config" configPath]
+          ++ lib.optional cfg.web.enable "--tui-listen"
+          ++ lib.optional cfg.web.enable "${listenHost}:${toString cfg.web.port}"
+        );
         EnvironmentFile = environmentFile;
         Restart = "on-failure";
         RestartSec = 10;

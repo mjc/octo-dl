@@ -27,6 +27,7 @@
           inherit system;
           overlays = [(import rust-overlay)];
         };
+        cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
         overrides = builtins.fromTOML (builtins.readFile (self + "/rust-toolchain.toml"));
         libPath = with pkgs;
           lib.makeLibraryPath [];
@@ -97,6 +98,10 @@
         # Build only the cargo dependencies — cached when Cargo.lock is unchanged
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
       in {
+        apps.default = flake-utils.lib.mkApp {
+          drv = self.packages.${system}.octo-dl;
+        };
+
         packages = {
           default = self.packages.${system}.octo-dl;
 
@@ -104,8 +109,22 @@
             // {
               inherit cargoArtifacts;
 
+              postInstall = ''
+                cat > "$out/bin/octo-tui" <<'EOF'
+                #!/bin/sh
+                attach_addr="127.0.0.1:9723"
+                if [ "$#" -gt 0 ] && [ "''${1#-}" = "$1" ]; then
+                  attach_addr="$1"
+                  shift
+                fi
+                exec "@out@/bin/octo" --tui --tui-attach "$attach_addr" "$@"
+                EOF
+                substituteInPlace "$out/bin/octo-tui" --replace-fail "@out@" "$out"
+                chmod +x "$out/bin/octo-tui"
+              '';
+
               meta = with pkgs.lib; {
-                description = "MEGA download manager with TUI, web UI, and headless service mode";
+                description = cargoToml.package.description or "MEGA download manager with TUI, remote TUI attach, and headless service mode";
                 homepage = "https://github.com/mjc/octo-dl";
                 mainProgram = "octo";
               };
@@ -218,5 +237,6 @@
         imports = [./nixos-module.nix];
         services.octo-dl.package = lib.mkDefault self.packages.${pkgs.system}.octo-dl;
       };
+      nixosModules.octo-dl = self.nixosModules.default;
     };
 }
