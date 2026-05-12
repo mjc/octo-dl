@@ -364,6 +364,7 @@ fn register_session_queued_file_does_not_revive_skipped_entry() {
         "https://mega.nz/file/a",
         "https://mega.nz/file/a",
         "https://mega.nz/file/a",
+        "https://mega.nz/file/a",
         "skip-a.bin",
         1,
     );
@@ -391,6 +392,7 @@ fn register_session_queued_file_preserves_explicit_package_identity() {
     let should_queue = app.register_session_queued_file(
         "batch-folder",
         "Batch Folder",
+        "https://mega.nz/folder/root",
         "https://mega.nz/folder/root",
         "episode-1.mkv",
         128,
@@ -460,10 +462,144 @@ fn file_queued_without_explicit_package_id_reuses_existing_package_for_url() {
     );
 
     let session = app.session.as_ref().expect("session should be present");
-    assert_eq!(session.packages.len(), 1);
+    assert_eq!(
+        session.packages.len(),
+        1,
+        "status={} urls={:?} files={:?}",
+        app.status,
+        session.urls,
+        session.files
+    );
     assert_eq!(
         session.packages[0].id,
         package_id("batch-folder", "https://mega.nz/folder/root")
+    );
+}
+
+#[test]
+fn register_session_queued_file_uses_resolved_source_url_for_package_identity() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    app.session = Some(session_snapshot(vec![("bundle.dlc", UrlFixtureStatus::Fetched)]));
+
+    let should_queue = app.register_session_queued_file(
+        "batch-folder",
+        "Batch Folder",
+        "bundle.dlc",
+        "https://mega.nz/folder/resolved",
+        "episode-1.mkv",
+        128,
+    );
+
+    assert!(should_queue);
+    let session = app.session.as_ref().unwrap();
+    assert_eq!(
+        session.packages.len(),
+        1,
+        "status={} urls={:?} files={:?}",
+        app.status,
+        session.urls,
+        session.files
+    );
+    assert_eq!(
+        session.packages[0].id,
+        package_id("batch-folder", "https://mega.nz/folder/resolved")
+    );
+    assert_eq!(session.packages[0].source_url, "https://mega.nz/folder/resolved");
+    assert_eq!(
+        session.urls.iter().map(|entry| entry.url.as_str()).collect::<Vec<_>>(),
+        vec!["https://mega.nz/folder/resolved"]
+    );
+    assert_eq!(
+        session.files[0].package_id,
+        package_id("batch-folder", "https://mega.nz/folder/resolved")
+    );
+    assert_eq!(
+        session.files[0].source_url.as_deref(),
+        Some("https://mega.nz/folder/resolved")
+    );
+}
+
+#[test]
+fn register_session_queued_file_dedupes_same_source_url_across_package_ids() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    app.session = Some(session_snapshot(vec![(
+        "https://mega.nz/folder/root",
+        UrlFixtureStatus::Fetched,
+    )]));
+
+    assert!(app.register_session_queued_file(
+        "pkg-a",
+        "Package A",
+        "https://mega.nz/folder/root",
+        "https://mega.nz/folder/root",
+        "episode-1.mkv",
+        128,
+    ));
+    assert!(app.register_session_queued_file(
+        "pkg-b",
+        "Package B",
+        "https://mega.nz/folder/root",
+        "https://mega.nz/folder/root",
+        "episode-2.mkv",
+        256,
+    ));
+
+    let session = app.session.as_ref().unwrap();
+    assert_eq!(session.packages.len(), 1);
+    assert_eq!(
+        session.packages[0].id,
+        package_id("pkg-b", "https://mega.nz/folder/root")
+    );
+    assert_eq!(session.packages[0].display_name, "Package B");
+    assert_eq!(
+        session.packages[0].file_ids,
+        vec!["episode-1.mkv".to_string(), "episode-2.mkv".to_string()]
+    );
+    assert!(session.files.iter().all(|file| {
+        file.package_id == package_id("pkg-b", "https://mega.nz/folder/root")
+            && file.source_url.as_deref() == Some("https://mega.nz/folder/root")
+    }));
+}
+
+#[test]
+fn file_queued_retires_submitted_url_alias_after_resolution() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    app.urls.push("bundle.dlc".to_string());
+    app.session = Some(session_snapshot(vec![("bundle.dlc", UrlFixtureStatus::Pending)]));
+    app.queue_url_placeholder("bundle.dlc".to_string());
+    app.apply_core_event(CoreEvent::UrlSubmitted {
+        url: "bundle.dlc".to_string(),
+    });
+
+    app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
+        id: "episode-1.mkv".to_string(),
+        size: 128,
+        count_toward_progress: true,
+        origin: crate::tui::event::FileOrigin {
+            package_id: Some("batch-folder".to_string()),
+            package_display_name: Some("Batch Folder".to_string()),
+            source_url: "https://mega.nz/folder/resolved".to_string(),
+            submitted_url: "bundle.dlc".to_string(),
+        },
+    }));
+
+    assert_eq!(app.urls, vec!["https://mega.nz/folder/resolved".to_string()]);
+    assert_eq!(
+        app.core_state.url_order,
+        vec!["https://mega.nz/folder/resolved".to_string()]
+    );
+    assert!(!app.overlay_files.contains_key("bundle.dlc"));
+
+    let session = app.session.as_ref().unwrap();
+    assert_eq!(
+        session.urls.iter().map(|entry| entry.url.as_str()).collect::<Vec<_>>(),
+        vec!["https://mega.nz/folder/resolved"]
     );
 }
 

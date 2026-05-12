@@ -40,12 +40,19 @@ impl SessionAdapter {
         url: &str,
         update: SessionUrlUpdate<'_>,
     ) {
-        let tracked_url = Self::ensure_url(session, url);
         match update {
-            SessionUrlUpdate::Pending | SessionUrlUpdate::Fetched => {
+            SessionUrlUpdate::Pending => {
+                let tracked_url = Self::ensure_url(session, url);
+                tracked_url.error = None;
+            }
+            SessionUrlUpdate::Fetched => {
+                let Some(tracked_url) = session.urls.iter_mut().find(|entry| entry.url == url) else {
+                    return;
+                };
                 tracked_url.error = None;
             }
             SessionUrlUpdate::Error(error) => {
+                let tracked_url = Self::ensure_url(session, url);
                 tracked_url.error = Some(error.to_string());
             }
         }
@@ -262,27 +269,41 @@ impl SessionAdapter {
         package_id: &str,
         package_display_name: &str,
         submitted_url: &str,
+        source_url: &str,
         path: &str,
         size: u64,
     ) -> bool {
-        Self::ensure_url(session, submitted_url);
+        Self::ensure_url(session, source_url);
+        if submitted_url != source_url {
+            session.urls.retain(|entry| entry.url != submitted_url);
+        } else {
+            Self::ensure_url(session, submitted_url);
+        }
         let package_id = {
             let package = Self::ensure_package(
                 session,
                 package_id,
                 package_display_name,
-                submitted_url,
+                source_url,
             );
             package.id.clone()
         };
         if let Some(file) = session
             .files
             .iter_mut()
-            .find(|file| file.package_id == package_id && file.path == path)
+            .find(|file| {
+                file.path == path
+                    && (file.package_id == package_id
+                        || file.source_url.as_deref() == Some(source_url))
+            })
         {
             if matches!(file.lifecycle, FileLifecycle::Skipped) {
                 return false;
             }
+            file.package_id = package_id.clone();
+            file.source_url = Some(source_url.to_string());
+            file.size = size;
+            file.path = path.to_string();
             return true;
         }
 
@@ -298,7 +319,7 @@ impl SessionAdapter {
         session.files.push(FileSnapshot {
             id: file_id,
             package_id,
-            source_url: Some(submitted_url.to_string()),
+            source_url: Some(source_url.to_string()),
             path: path.to_string(),
             size,
             lifecycle: FileLifecycle::Queued,
@@ -340,8 +361,28 @@ impl SessionAdapter {
         if let Some(index) = session
             .packages
             .iter()
+            .position(|package| package.source_url == source_url)
+        {
+            let previous_id = session.packages[index].id;
+            if previous_id != package_id {
+                for file in &mut session.files {
+                    if file.package_id == previous_id {
+                        file.package_id = package_id;
+                    }
+                }
+            }
+            session.packages[index].id = package_id;
+            session.packages[index].source_url = source_url.to_string();
+            session.packages[index].display_name = display_name.to_string();
+            return &mut session.packages[index];
+        }
+        if let Some(index) = session
+            .packages
+            .iter()
             .position(|package| package.id == package_id)
         {
+            session.packages[index].source_url = source_url.to_string();
+            session.packages[index].display_name = display_name.to_string();
             return &mut session.packages[index];
         }
 
