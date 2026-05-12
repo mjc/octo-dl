@@ -3,7 +3,6 @@ use std::path::Path;
 
 use chrono::Utc;
 use indexmap::IndexMap;
-
 use crate::core::model::{
     DesiredState, DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
     PackageState, PackageStatus, RuntimeState, SessionMeta, UrlId,
@@ -21,6 +20,7 @@ pub struct PartialFileSnapshot {
     pub file_id: FileId,
     pub bytes: u64,
     pub has_sidecar: bool,
+    pub verified_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -40,13 +40,15 @@ pub struct RestartSnapshot {
 impl RestartSnapshot {
     #[must_use]
     pub fn resumable_urls(&self) -> Vec<UrlId> {
+        let mut seen = HashSet::new();
         self.state
             .packages
             .values()
             .filter(|package| {
-                package.error.is_none()
-                    && (package.file_ids.is_empty()
-                        || package.file_ids.iter().any(|file_id| {
+                let file_ids = self.state.package_file_ids(&package.id);
+                file_ids.is_empty()
+                    || (package.error.is_none()
+                        && file_ids.iter().any(|file_id| {
                             self.state.files.get(file_id).is_some_and(|file| {
                                 !matches!(
                                     file.lifecycle,
@@ -57,7 +59,10 @@ impl RestartSnapshot {
                             })
                         }))
             })
-            .map(|package| package.source_url.clone())
+            .filter_map(|package| {
+                seen.insert(package.source_url.clone())
+                    .then_some(package.source_url.clone())
+            })
             .collect()
     }
 }
@@ -94,16 +99,12 @@ where
                 file_id: file_id.clone(),
                 bytes: metadata.len(),
                 has_sidecar: crate::download::sidecar_path(&file_id).exists(),
+                verified_bytes: crate::download::resume_sidecar_verified_bytes(&file_id)
+                    .unwrap_or(0),
             });
         }
     }
     snapshot
-}
-
-#[derive(Clone)]
-struct CollapsedFile {
-    file: FileState,
-    precedence: usize,
 }
 
 pub fn reconcile_restart(
@@ -151,6 +152,11 @@ pub fn reconcile_restart(
 
     if let Some(snapshot) = session {
         for package in snapshot.packages {
+            let package_error = if package.file_ids.is_empty() {
+                None
+            } else {
+                package.error.clone()
+            };
             packages.insert(
                 package.id.clone(),
                 PackageState {
@@ -158,53 +164,25 @@ pub fn reconcile_restart(
                     source_url: package.source_url.clone(),
                     display_name: package.display_name.clone(),
                     status: PackageStatus::Pending,
-                    file_ids: package.file_ids.clone(),
-                    error: package.error.clone(),
+                    error: package_error,
                 },
             );
         }
 
-        let mut collapsed = HashMap::<FileId, CollapsedFile>::new();
         for file in snapshot.files {
-            let precedence = precedence(file.lifecycle);
-            let entry = collapsed
-                .entry(file.id.clone())
-                .or_insert_with(|| CollapsedFile {
-                    file: FileState {
-                        id: file.id.clone(),
-                        package_id: file.package_id.clone(),
-                        source_url: file.source_url.clone(),
-                        path: file.path.clone(),
-                        size: file.size,
-                        lifecycle: file.lifecycle,
-                        progress: file.progress.clone(),
-                        desired: file.desired,
-                        runtime: file.runtime.clone(),
-                        message: file.message.clone(),
-                    },
-                    precedence,
-                });
-            if precedence < entry.precedence {
-                *entry = CollapsedFile {
-                    file: FileState {
-                        id: file.id.clone(),
-                        package_id: file.package_id.clone(),
-                        source_url: file.source_url.clone(),
-                        path: file.path.clone(),
-                        size: file.size,
-                        lifecycle: file.lifecycle,
-                        progress: file.progress.clone(),
-                        desired: file.desired,
-                        runtime: file.runtime.clone(),
-                        message: file.message.clone(),
-                    },
-                    precedence,
-                };
-            }
-        }
-
-        for (file_id, collapsed) in collapsed {
-            let mut file = collapsed.file;
+            let file_id = file.id.clone();
+            let mut file = FileState {
+                id: file.id.clone(),
+                package_id: file.package_id.clone(),
+                source_url: file.source_url.clone(),
+                path: file.path.clone(),
+                size: file.size,
+                lifecycle: file.lifecycle,
+                progress: file.progress.clone(),
+                desired: file.desired,
+                runtime: file.runtime.clone(),
+                message: file.message.clone(),
+            };
             if matches!(
                 file.lifecycle,
                 FileLifecycle::Skipped | FileLifecycle::Deleted
@@ -229,7 +207,7 @@ pub fn reconcile_restart(
                 file.lifecycle = FileLifecycle::Queued;
                 file.runtime.counts_in_run_totals = true;
                 file.runtime.preexisting_complete = false;
-                file.progress.visible_completed_bytes = 0;
+                file.progress = FileProgressState::default();
                 file.message = None;
                 if !resume_file_ids.contains(&file.id) {
                     resume_file_ids.push(file.id.clone());
@@ -239,10 +217,14 @@ pub fn reconcile_restart(
             }
             if let Some(partial) = partial_map.get(&file.id) {
                 file.lifecycle = FileLifecycle::Queued;
-                file.progress.visible_completed_bytes =
-                    partial.bytes.min(file.size.max(partial.bytes));
+                file.progress = FileProgressState {
+                    verified_existing_bytes: 0,
+                    downloaded_network_bytes: 0,
+                    visible_completed_bytes: partial.verified_bytes.min(file.size),
+                };
                 file.runtime.counts_in_run_totals = true;
                 file.runtime.preexisting_complete = false;
+                file.message = None;
                 resume_file_ids.push(file.id.clone());
             } else if matches!(file.lifecycle, FileLifecycle::Complete) {
                 file.runtime.preexisting_complete = true;
@@ -252,6 +234,7 @@ pub fn reconcile_restart(
                 file.lifecycle = FileLifecycle::Queued;
                 file.runtime.counts_in_run_totals = true;
                 file.runtime.preexisting_complete = false;
+                file.progress = FileProgressState::default();
                 file.message = None;
                 resume_file_ids.push(file.id.clone());
             }
@@ -264,14 +247,15 @@ pub fn reconcile_restart(
         if seen_urls.insert(url.clone()) {
             state.url_order.push(url.clone());
         }
-        packages.entry(url.clone()).or_insert_with(|| PackageState {
-            id: url.clone(),
-            source_url: url.clone(),
-            display_name: url.clone(),
-            status: PackageStatus::Pending,
-            file_ids: Vec::new(),
-            error: None,
-        });
+        if !packages.values().any(|package| package.source_url == url) {
+            packages.entry(url.clone()).or_insert_with(|| PackageState {
+                id: url.clone(),
+                source_url: url.clone(),
+                display_name: url.clone(),
+                status: PackageStatus::Pending,
+                error: None,
+            });
+        }
     }
 
     for (file_id, size) in complete_map {
@@ -290,11 +274,8 @@ pub fn reconcile_restart(
                 source_url: package_id.clone(),
                 display_name: package_id.clone(),
                 status: PackageStatus::Pending,
-                file_ids: Vec::new(),
                 error: None,
-            })
-            .file_ids
-            .push(file_id.clone());
+            });
         files.insert(
             file_id.clone(),
             FileState {
@@ -338,11 +319,8 @@ pub fn reconcile_restart(
                 source_url: package_id.clone(),
                 display_name: package_id.clone(),
                 status: PackageStatus::Pending,
-                file_ids: Vec::new(),
                 error: None,
-            })
-            .file_ids
-            .push(partial.file_id.clone());
+            });
         files.insert(
             partial.file_id.clone(),
             FileState {
@@ -384,15 +362,6 @@ pub fn reconcile_restart(
         resume_file_ids,
         preexisting_complete_file_ids,
         suppressed_file_ids,
-    }
-}
-
-fn precedence(lifecycle: FileLifecycle) -> usize {
-    match lifecycle {
-        FileLifecycle::Deleted | FileLifecycle::Skipped => 0,
-        FileLifecycle::Complete => 1,
-        FileLifecycle::Downloading | FileLifecycle::Queued | FileLifecycle::Planned => 2,
-        FileLifecycle::Failed => 3,
     }
 }
 
@@ -448,6 +417,7 @@ mod tests {
                     file_id: "a.bin".to_string(),
                     bytes: 40,
                     has_sidecar: true,
+                    verified_bytes: 40,
                 }],
             },
             vec!["https://mega.nz/file/test".to_string()],
@@ -498,6 +468,137 @@ mod tests {
         assert!(file.runtime.counts_in_run_totals);
         assert_eq!(file.progress.visible_completed_bytes, 0);
         assert_eq!(restart.resume_file_ids, vec!["a.bin".to_string()]);
+    }
+
+    #[test]
+    fn restart_clears_stale_progress_for_missing_partial_files() {
+        let mut snapshot = sample_snapshot();
+        snapshot.files[0].progress = FileProgressState {
+            verified_existing_bytes: 0,
+            downloaded_network_bytes: 0,
+            visible_completed_bytes: 95,
+        };
+        snapshot.files[0].lifecycle = FileLifecycle::Failed;
+        snapshot.files[0].message = Some("corrupt".to_string());
+
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot::default(),
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        let file = &restart.state.files["a.bin"];
+        assert_eq!(file.lifecycle, FileLifecycle::Queued);
+        assert_eq!(file.progress, FileProgressState::default());
+        assert!(file.message.is_none());
+        assert_eq!(restart.resume_file_ids, vec!["a.bin".to_string()]);
+    }
+
+    #[test]
+    fn restart_clamps_partial_progress_to_file_size() {
+        let snapshot = sample_snapshot();
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot {
+                complete_files: Vec::new(),
+                partial_files: vec![PartialFileSnapshot {
+                    file_id: "a.bin".to_string(),
+                    bytes: 140,
+                    has_sidecar: true,
+                    verified_bytes: 140,
+                }],
+            },
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        let file = &restart.state.files["a.bin"];
+        assert_eq!(file.lifecycle, FileLifecycle::Queued);
+        assert_eq!(file.progress.visible_completed_bytes, 100);
+    }
+
+    #[test]
+    fn restart_ignores_preallocated_partial_length_without_verified_sidecar_bytes() {
+        let snapshot = sample_snapshot();
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot {
+                complete_files: Vec::new(),
+                partial_files: vec![PartialFileSnapshot {
+                    file_id: "a.bin".to_string(),
+                    bytes: 100,
+                    has_sidecar: false,
+                    verified_bytes: 0,
+                }],
+            },
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        let file = &restart.state.files["a.bin"];
+        assert_eq!(file.lifecycle, FileLifecycle::Queued);
+        assert_eq!(file.progress.visible_completed_bytes, 0);
+    }
+
+    #[test]
+    fn restart_rejects_duplicate_packages_for_same_source_url() {
+        let source_url = "https://mega.nz/folder/dup".to_string();
+        let mut snapshot = sample_snapshot();
+        snapshot.packages = vec![
+            PackageSnapshot {
+                id: source_url.clone(),
+                source_url: source_url.clone(),
+                display_name: source_url.clone(),
+                file_ids: vec!["a.bin".to_string()],
+                error: None,
+            },
+            PackageSnapshot {
+                id: "batch-dup".to_string(),
+                source_url: source_url.clone(),
+                display_name: "Folder".to_string(),
+                file_ids: vec!["b.bin".to_string()],
+                error: None,
+            },
+        ];
+        snapshot.files = vec![
+            FileSnapshot {
+                id: "a.bin".to_string(),
+                package_id: source_url.clone(),
+                source_url: Some(source_url.clone()),
+                path: "folder/a.bin".to_string(),
+                size: 10,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState::default(),
+                desired: DesiredState::Present,
+                runtime: RuntimeState::default(),
+                message: None,
+            },
+            FileSnapshot {
+                id: "b.bin".to_string(),
+                package_id: "batch-dup".to_string(),
+                source_url: Some(source_url.clone()),
+                path: "folder/b.bin".to_string(),
+                size: 20,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState::default(),
+                desired: DesiredState::Present,
+                runtime: RuntimeState::default(),
+                message: None,
+            },
+        ];
+        assert!(crate::core::session::validate_snapshot(&snapshot).is_err());
+    }
+
+    #[test]
+    fn restart_rejects_empty_synthetic_packages_without_files() {
+        let mut snapshot = sample_snapshot();
+        snapshot.packages.push(PackageSnapshot {
+            id: "batch-folder".to_string(),
+            source_url: "https://mega.nz/file/test".to_string(),
+            display_name: "Batch Folder".to_string(),
+            file_ids: Vec::new(),
+            error: Some("boom".to_string()),
+        });
+        snapshot.files.clear();
+        assert!(crate::core::session::validate_snapshot(&snapshot).is_err());
     }
 
     #[test]

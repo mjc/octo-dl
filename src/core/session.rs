@@ -9,6 +9,7 @@ use aes_gcm::{Aes128Gcm, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -114,7 +115,7 @@ impl SessionSnapshotV3 {
     #[must_use]
     pub fn new(config: DownloadConfig, credentials: SavedCredentials) -> Self {
         Self {
-            version: 3,
+            version: 4,
             id: uuid::Uuid::new_v4().to_string(),
             created: Utc::now(),
             status: SessionRunStatus::InProgress,
@@ -132,9 +133,10 @@ impl SessionSnapshotV3 {
             if let Some(state_dir) = test_state_dir() {
                 return state_dir.join("sessions");
             }
-            return default_test_state_dir().join("sessions");
+            default_test_state_dir().join("sessions")
         }
 
+        #[cfg(not(test))]
         std::env::var("STATE_DIRECTORY").map_or_else(
             |_| {
                 dirs::data_dir()
@@ -148,10 +150,13 @@ impl SessionSnapshotV3 {
 
     #[must_use]
     pub fn state_path(&self) -> PathBuf {
-        Self::state_dir().join(format!("session-v3-{}.toml", self.id))
+        Self::state_dir().join(format!("session-v4-{}.toml", self.id))
     }
 
     pub fn save(&self) -> std::io::Result<()> {
+        validate_snapshot(self).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+        })?;
         let dir = Self::state_dir();
         std::fs::create_dir_all(&dir)?;
         let path = self.state_path();
@@ -172,12 +177,14 @@ impl SessionSnapshotV3 {
         let contents = std::fs::read_to_string(path)?;
         let snapshot: Self = toml::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if snapshot.version != 3 {
+        if snapshot.version != 4 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "session is not version 3",
+                "session is not canonical version 4",
             ));
         }
+        validate_snapshot(&snapshot)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         Ok(snapshot)
     }
 
@@ -252,6 +259,73 @@ impl SessionSnapshotV3 {
             })
             .count()
     }
+}
+
+pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
+    if snapshot.version != 4 {
+        return Err(format!("unsupported session version {}", snapshot.version));
+    }
+
+    let mut packages_by_id = IndexMap::new();
+    let mut source_urls = std::collections::HashSet::new();
+    for package in &snapshot.packages {
+        if packages_by_id
+            .insert(package.id.clone(), package)
+            .is_some()
+        {
+            return Err(format!("duplicate package id {}", package.id));
+        }
+        if !source_urls.insert(package.source_url.clone()) {
+            return Err(format!(
+                "duplicate package source_url {}",
+                package.source_url
+            ));
+        }
+    }
+
+    let mut grouped_files = IndexMap::<String, Vec<String>>::new();
+    let mut file_ids = std::collections::HashSet::new();
+    for file in &snapshot.files {
+        if !file_ids.insert(file.id.clone()) {
+            return Err(format!("duplicate file id {}", file.id));
+        }
+        let Some(package) = packages_by_id.get(&file.package_id) else {
+            return Err(format!(
+                "file {} references unknown package {}",
+                file.id, file.package_id
+            ));
+        };
+        if let Some(source_url) = &file.source_url
+            && source_url != &package.source_url
+        {
+            return Err(format!(
+                "file {} source_url does not match package {}",
+                file.id, file.package_id
+            ));
+        }
+        grouped_files
+            .entry(file.package_id.clone())
+            .or_default()
+            .push(file.id.clone());
+    }
+
+    for package in &snapshot.packages {
+        let grouped = grouped_files.get(&package.id).cloned().unwrap_or_default();
+        if grouped != package.file_ids {
+            return Err(format!(
+                "package {} file_ids do not match grouped files",
+                package.id
+            ));
+        }
+        if grouped.is_empty() && package.id != package.source_url {
+            return Err(format!(
+                "empty non-placeholder package {} is unsupported",
+                package.id
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn derive_machine_key() -> [u8; 16] {

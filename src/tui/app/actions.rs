@@ -470,7 +470,7 @@ impl App {
         let source_url = package.source_url.clone();
         let package_failed =
             package.error.is_some() || matches!(package.status, crate::core::PackageStatus::Failed);
-        let file_ids = package.file_ids.clone();
+        let file_ids = self.package_file_ids(package_id);
         let mut retried_file = false;
 
         for file_id in file_ids {

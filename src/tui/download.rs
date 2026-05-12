@@ -901,7 +901,7 @@ fn same_batch_folder_package_ids<'a>(
                 Some((
                     folder.to_string(),
                     BatchPackageIdentity {
-                        id: format!("batch-{}", uuid::Uuid::new_v4()),
+                        id: crate::download::stable_batch_package_id(folder, &sources),
                         display_name: folder.to_string(),
                     },
                 ))

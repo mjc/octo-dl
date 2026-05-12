@@ -76,6 +76,69 @@ fn resume_session_requeues_urls() {
 }
 
 #[test]
+fn resume_session_clears_empty_failed_package_errors_and_requeues_urls() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+
+    let session = session_snapshot(vec![(
+        "https://mega.nz/file/stale-error",
+        UrlFixtureStatus::Error("boom".to_string()),
+    )]);
+    session.save().unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+
+    app.resume_latest_session();
+
+    assert_eq!(
+        app.urls,
+        vec!["https://mega.nz/file/stale-error".to_string()]
+    );
+    assert_eq!(
+        app.visible_rows(),
+        vec![TuiRow::Package(
+            "https://mega.nz/file/stale-error".to_string()
+        )]
+    );
+    let package = app
+        .core_state
+        .packages
+        .get("https://mega.nz/file/stale-error")
+        .expect("package should be restored");
+    assert_eq!(package.status, PackageStatus::Pending);
+    assert!(package.error.is_none());
+
+    let mut url_rx = app.url_rx.take().expect("url_rx should exist");
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::SubmitUrl {
+            url: "https://mega.nz/file/stale-error".to_string()
+        }
+    );
+    assert!(url_rx.try_recv().is_err());
+}
+
+#[test]
+fn save_rejects_empty_synthetic_package_placeholders() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/stale-error",
+        UrlFixtureStatus::Pending,
+    )]);
+    session.packages.push(PackageSnapshot {
+        id: "batch-folder".to_string(),
+        source_url: "https://mega.nz/file/stale-error".to_string(),
+        display_name: "Batch Folder".to_string(),
+        file_ids: Vec::new(),
+        error: Some("boom".to_string()),
+    });
+    assert!(session.save().is_err());
+}
+
+#[test]
 fn resume_session_restores_email_password_without_restoring_mfa() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
@@ -500,7 +563,6 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
             source_url: source_url.clone(),
             display_name: "Retry Folder".to_string(),
             status: PackageStatus::Failed,
-            file_ids: Vec::new(),
             error: Some("boom".to_string()),
         },
     );
@@ -875,7 +937,7 @@ fn reset_file_accepts_new_terminal_events_after_restart() {
 }
 
 #[test]
-fn resume_session_deduplicates_duplicate_file_entries_by_path() {
+fn save_rejects_duplicate_file_entries_by_path() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
 
@@ -897,26 +959,7 @@ fn resume_session_deduplicates_duplicate_file_entries_by_path() {
         128,
         FileFixtureStatus::Completed,
     );
-    session.save().unwrap();
-
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut app = App::new(0, event_tx, true);
-
-    app.resume_latest_session();
-
-    assert_eq!(app.files.len(), 1);
-    let file = app
-        .files
-        .iter()
-        .find(|entry| entry.id == "duplicate.mkv")
-        .expect("duplicate file should be collapsed into one row");
-    assert_eq!(file.status, FileStatus::Complete);
-    assert_eq!(app.urls, Vec::<String>::new());
-
-    let session = app.session.as_ref().expect("session should be present");
-    assert_eq!(session.files.len(), 1);
-    assert_eq!(session.files[0].path, "duplicate.mkv");
-    assert_eq!(session.files[0].lifecycle, FileLifecycle::Complete);
+    assert!(session.save().is_err());
 }
 
 struct ScenarioHarness {
@@ -1114,7 +1157,7 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
     let snapshot = harness.render();
     assert_eq!(
         snapshot.selected_row,
-        Some(TuiRow::Package("pkg-a".to_string()))
+        Some(TuiRow::Package("https://mega.nz/folder/pkg-a".to_string()))
     );
     assert!(snapshot.text.contains("Package A"));
     assert!(snapshot.text.contains("Package B"));

@@ -104,7 +104,6 @@ pub struct PackageState {
     pub source_url: UrlId,
     pub display_name: String,
     pub status: PackageStatus,
-    pub file_ids: Vec<FileId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -153,5 +152,14 @@ impl DownloadState {
             session_meta,
             ..Self::default()
         }
+    }
+
+    #[must_use]
+    pub fn package_file_ids(&self, package_id: &str) -> Vec<FileId> {
+        self.files
+            .values()
+            .filter(|file| file.package_id == package_id)
+            .map(|file| file.id.clone())
+            .collect()
     }
 }

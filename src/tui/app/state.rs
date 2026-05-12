@@ -148,7 +148,7 @@ impl App {
     }
 
     fn persist_core_session_snapshot(&mut self, snapshot: SessionSnapshotV3) {
-        let _ = self.mutate_session(|session| SessionAdapter::merge_state(session, snapshot));
+        let _ = self.mutate_session(|session| SessionAdapter::replace_state(session, snapshot));
     }
 
     pub(crate) fn ensure_session_for_pending_urls(&mut self) {
@@ -164,6 +164,9 @@ impl App {
 
     fn refresh_session_from_core_state(&mut self) {
         if self.session.is_none() {
+            return;
+        }
+        if self.core_state.packages.is_empty() && self.core_state.files.is_empty() {
             return;
         }
 
@@ -324,6 +327,7 @@ impl App {
         );
 
         self.resume_from_restart(session, &restart);
+        self.log_state_diagnostics("resume_latest_session");
     }
 
     pub(crate) fn resume_from_restart(
@@ -344,7 +348,7 @@ impl App {
             else {
                 continue;
             };
-            if !package.file_ids.is_empty() {
+            if !restart.state.package_file_ids(&package.id).is_empty() {
                 continue;
             }
             let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });

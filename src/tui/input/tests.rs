@@ -528,13 +528,14 @@ fn handle_main_input_delete_removes_failed_package_without_files() {
     handle_input(&mut app, key(KeyCode::Delete));
     assert_eq!(
         app.pending_confirmation,
-        Some(ConfirmAction::DeletePackage("failed-pkg".to_string()))
+        Some(ConfirmAction::DeletePackage(
+            "https://mega.nz/folder/failed".to_string()
+        ))
     );
     confirm(&mut app);
 
     assert!(app.visible_rows().is_empty());
-    assert!(!app.core_state.packages.contains_key("failed-pkg"));
-    assert!(app.deleted_files.contains("failed-pkg"));
+    assert!(!app.core_state.packages.contains_key("https://mega.nz/folder/failed"));
     assert!(app.deleted_files.contains("https://mega.nz/folder/failed"));
 }
 
@@ -612,14 +613,15 @@ fn handle_main_input_shift_d_removes_failed_package_without_files() {
     app.file_list_state.select(Some(0));
     assert_eq!(
         app.visible_rows(),
-        vec![TuiRow::Package("failed-pkg".to_string())]
+        vec![TuiRow::Package(
+            "https://mega.nz/folder/failed".to_string()
+        )]
     );
 
     handle_input(&mut app, key(KeyCode::Char('D')));
 
     assert!(app.visible_rows().is_empty());
-    assert!(!app.core_state.packages.contains_key("failed-pkg"));
-    assert!(app.deleted_files.contains("failed-pkg"));
+    assert!(!app.core_state.packages.contains_key("https://mega.nz/folder/failed"));
     assert!(app.deleted_files.contains("https://mega.nz/folder/failed"));
 }
 

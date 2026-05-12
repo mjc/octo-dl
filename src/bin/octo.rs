@@ -1,6 +1,7 @@
 use env_logger::Target;
 use std::env;
 use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::net::TcpStream;
 #[cfg(unix)]
@@ -92,15 +93,40 @@ fn print_usage() {
 fn init_logger(args: &[String]) {
     let mut builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("octo_dl=info"));
-    if let Some(pipe_writer) = log_writer(args) {
-        builder.target(Target::Pipe(pipe_writer));
+    if let Some(writer) = log_writer(args) {
+        builder.target(Target::Pipe(writer));
     }
     builder.init();
 }
 
 fn log_writer(args: &[String]) -> Option<Box<dyn Write + Send>> {
-    log_pipe_writer()
-        .or_else(|| native_tui_log_detachment_required(args).then(native_tui_log_writer))
+    let primary_writer = log_pipe_writer()
+        .or_else(|| native_tui_log_detachment_required(args).then(native_tui_log_writer));
+    let debug_file_writer = debug_logging_enabled()
+        .then(debug_log_file_writer)
+        .flatten();
+
+    match (primary_writer, debug_file_writer) {
+        (None, None) => None,
+        (Some(writer), None) | (None, Some(writer)) => Some(writer),
+        (Some(primary), Some(debug_file)) => Some(Box::new(TeeWriter::new(primary, debug_file))),
+    }
+}
+
+fn debug_logging_enabled() -> bool {
+    env::var("RUST_LOG").is_ok_and(|value| {
+        let value = value.to_ascii_lowercase();
+        value.contains("debug") || value.contains("trace")
+    })
+}
+
+fn debug_log_file_writer() -> Option<Box<dyn Write + Send>> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("debug.log")
+        .ok()
+        .map(|file| Box::new(file) as Box<dyn Write + Send>)
 }
 
 fn log_pipe_writer() -> Option<Box<dyn Write + Send>> {
@@ -118,6 +144,30 @@ fn log_pipe_writer_from_addr(addr: &str) -> Option<Box<dyn Write + Send>> {
     TcpStream::connect(addr)
         .ok()
         .map(|stream| Box::new(stream) as Box<dyn Write + Send>)
+}
+
+struct TeeWriter {
+    primary: Box<dyn Write + Send>,
+    secondary: Box<dyn Write + Send>,
+}
+
+impl TeeWriter {
+    fn new(primary: Box<dyn Write + Send>, secondary: Box<dyn Write + Send>) -> Self {
+        Self { primary, secondary }
+    }
+}
+
+impl Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.primary.write_all(buf)?;
+        self.secondary.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.primary.flush()?;
+        self.secondary.flush()
+    }
 }
 
 fn native_tui_log_detachment_required(args: &[String]) -> bool {

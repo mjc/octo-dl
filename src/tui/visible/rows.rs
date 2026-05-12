@@ -81,11 +81,11 @@ fn file_name_for_sort(core_state: &DownloadState, file_id: &str) -> String {
 }
 
 fn package_percent(core_state: &DownloadState, package_id: &str) -> u64 {
-    let Some(package) = core_state.packages.get(package_id) else {
+    if !core_state.packages.contains_key(package_id) {
         return 0;
-    };
-    let (downloaded, size) = package
-        .file_ids
+    }
+    let (downloaded, size) = core_state
+        .package_file_ids(package_id)
         .iter()
         .filter_map(|file_id| core_state.files.get(file_id))
         .fold((0_u64, 0_u64), |(downloaded, size), file| {
@@ -153,22 +153,20 @@ fn package_has_visible_content(
     let Some(package) = core_state.packages.get(package_id) else {
         return false;
     };
+    let file_ids = core_state.package_file_ids(package_id);
 
-    package.file_ids.is_empty()
-        || package
-            .file_ids
+    file_ids.is_empty()
+        || file_ids
             .iter()
             .any(|file_id| file_is_visible_in_package(core_state, file_id))
         || (package.error.is_some() && !overlay_files.contains_key(package_id))
 }
 
 fn package_has_visible_children(core_state: &DownloadState, package_id: &str) -> bool {
-    core_state.packages.get(package_id).is_some_and(|package| {
-        package
-            .file_ids
+    core_state.packages.contains_key(package_id) && core_state
+            .package_file_ids(package_id)
             .iter()
             .any(|file_id| file_is_visible_in_package(core_state, file_id))
-    })
 }
 
 pub(super) fn visible_rows_for(
@@ -223,10 +221,7 @@ pub(super) fn visible_rows_for(
             && package_has_visible_children(core_state, &package_id)
         {
             let mut file_ids = core_state
-                .packages
-                .get(&package_id)
-                .map(|package| package.file_ids.clone())
-                .unwrap_or_default();
+                .package_file_ids(&package_id);
             file_ids.sort_by(|left, right| {
                 natural_cmp(
                     &file_name_for_sort(core_state, left),

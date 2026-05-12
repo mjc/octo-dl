@@ -611,7 +611,7 @@ fn mark_visible_file_error_updates_session_file_status() {
 }
 
 #[test]
-fn session_adapter_merge_state_updates_matching_files_and_preserves_unmatched_entries() {
+fn session_adapter_replace_state_discards_stale_unmatched_entries() {
     let mut session = session_snapshot(vec![("https://mega.nz/file/a", UrlFixtureStatus::Pending)]);
     push_file(&mut session, 0, "keep.bin", 1, FileFixtureStatus::Pending);
     push_file(&mut session, 0, "stale.bin", 1, FileFixtureStatus::Pending);
@@ -624,7 +624,7 @@ fn session_adapter_merge_state_updates_matching_files_and_preserves_unmatched_en
     push_file(&mut next, 0, "keep.bin", 5, FileFixtureStatus::Completed);
     push_file(&mut next, 1, "new.bin", 2, FileFixtureStatus::Pending);
 
-    SessionAdapter::merge_state(&mut session, next);
+    SessionAdapter::replace_state(&mut session, next);
 
     assert_eq!(session.status, crate::core::SessionRunStatus::Paused);
     assert_eq!(session.packages.len(), 2);
@@ -635,18 +635,35 @@ fn session_adapter_merge_state_updates_matching_files_and_preserves_unmatched_en
             .any(|entry| entry.source_url == "https://mega.nz/file/b"),
         "new URLs should be appended during merge"
     );
-    assert_eq!(session.files.len(), 3);
+    assert_eq!(session.files.len(), 2);
     assert!(
         session.files.iter().any(|file| file.path == "keep.bin"
             && matches!(file.lifecycle, crate::core::FileLifecycle::Complete)
             && file.size == 5),
         "matching files should be replaced by the newer snapshot"
     );
-    assert!(
-        session.files.iter().any(|file| file.path == "stale.bin"),
-        "existing unmatched files should be retained during partial migration"
-    );
+    assert!(!session.files.iter().any(|file| file.path == "stale.bin"));
     assert!(session.files.iter().any(|file| file.path == "new.bin"));
+}
+
+#[test]
+fn session_adapter_replace_state_replaces_stale_package_rows() {
+    let mut session = session_snapshot(vec![("https://mega.nz/file/a", UrlFixtureStatus::Pending)]);
+    session.packages.push(crate::core::PackageSnapshot {
+        id: "batch-stale".to_string(),
+        source_url: "https://mega.nz/file/a".to_string(),
+        display_name: "Stale Batch".to_string(),
+        file_ids: vec!["old.bin".to_string()],
+        error: None,
+    });
+
+    let next = session_snapshot(vec![("https://mega.nz/file/a", UrlFixtureStatus::Fetched)]);
+
+    SessionAdapter::replace_state(&mut session, next);
+
+    assert_eq!(session.packages.len(), 1);
+    assert_eq!(session.packages[0].source_url, "https://mega.nz/file/a");
+    assert_eq!(session.packages[0].id, "https://mega.nz/file/a");
 }
 
 #[test]

@@ -860,6 +860,7 @@ mod tests {
             vec![
                 (0, "https://mega.nz/file/pending".to_string()),
                 (1, "https://mega.nz/file/fetched".to_string()),
+                (2, "https://mega.nz/file/error".to_string()),
             ]
         );
     }
