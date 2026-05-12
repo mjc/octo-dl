@@ -1,7 +1,6 @@
 //! Core download logic and abstractions.
 
 use std::io;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,7 +15,7 @@ use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::DownloadConfig;
-use crate::core::{PackageId, ProgressDelta};
+use crate::core::ProgressDelta;
 use crate::error::{Error, Result};
 use crate::fs::{FileSystem, TokioFileSystem};
 use crate::progress::CumulativeProgress;
@@ -395,22 +394,6 @@ fn encode_expected_mac(node: &mega::Node) -> Result<String> {
         .condensed_mac()
         .ok_or(mega::Error::MissingCondensedMac)?;
     Ok(STANDARD.encode(mac))
-}
-
-pub(crate) fn stable_batch_package_id(folder: &str, sources: &HashSet<&str>) -> PackageId {
-    let mut sorted_sources = sources.iter().copied().collect::<Vec<_>>();
-    sorted_sources.sort_unstable();
-
-    let mut key = String::from(folder);
-    key.push('\0');
-    for source in sorted_sources {
-        key.push_str(source);
-        key.push('\0');
-    }
-    PackageId::from(uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_URL,
-        key.as_bytes(),
-    ))
 }
 
 const fn should_reuse_resume_state(force_overwrite: bool, trust_resume_state: bool) -> bool {

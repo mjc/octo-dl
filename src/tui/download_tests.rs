@@ -321,21 +321,28 @@ fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
 }
 
 #[test]
-fn same_batch_folder_package_ids_groups_matching_folders_from_distinct_sources() {
-    let inputs = [
-        ("folder/file1.mkv", "https://mega.nz/folder/one"),
-        ("folder/file2.mkv", "https://mega.nz/folder/two"),
-        ("other/file3.mkv", "https://mega.nz/folder/three"),
-    ];
-    let groups = same_batch_folder_package_ids(inputs);
-    let groups_again = same_batch_folder_package_ids(inputs);
+fn queued_events_keep_distinct_source_urls_in_distinct_packages() {
+    let left = ResolvedUrl {
+        source_url: "https://mega.nz/folder/one".to_string(),
+        submitted_url: "bundle.dlc".to_string(),
+        package_id: None,
+        package_display_name: None,
+    };
+    let right = ResolvedUrl {
+        source_url: "https://mega.nz/folder/two".to_string(),
+        submitted_url: "bundle.dlc".to_string(),
+        package_id: None,
+        package_display_name: None,
+    };
 
-    let group = groups.get("folder").expect("folder should be grouped");
-    assert_eq!(group.display_name, "folder");
-    assert_eq!(group.id.to_string().len(), 36);
-    assert_ne!(group.id, "folder");
-    assert_eq!(group.id, groups_again["folder"].id);
-    assert!(!groups.contains_key("other"));
+    let left_origin = left.file_origin();
+    let right_origin = right.file_origin();
+
+    assert_eq!(left_origin.package_id, None);
+    assert_eq!(right_origin.package_id, None);
+    assert_ne!(left_origin.source_url, right_origin.source_url);
+    assert_eq!(left_origin.submitted_url, "bundle.dlc");
+    assert_eq!(right_origin.submitted_url, "bundle.dlc");
 }
 
 #[test]
