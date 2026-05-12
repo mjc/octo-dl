@@ -181,6 +181,29 @@ fn url_level_error_replaces_placeholder_in_overlay() {
 }
 
 #[test]
+fn file_queued_from_deleted_url_is_ignored() {
+    let mut app = test_app();
+    let url = "https://mega.nz/folder/deleted".to_string();
+    app.deleted_files.insert(url.clone());
+
+    app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
+        id: "episode.mkv".to_string(),
+        size: 128,
+        count_toward_progress: true,
+        origin: FileOrigin {
+            package_id: Some("batch-folder".to_string()),
+            package_display_name: Some("Batch Folder".to_string()),
+            source_url: url.clone(),
+            submitted_url: url.clone(),
+        },
+    }));
+
+    assert!(app.files.is_empty());
+    assert!(app.core_state.files.is_empty());
+    assert!(app.core_state.packages.is_empty());
+}
+
+#[test]
 fn handle_file_complete_is_idempotent_for_visible_complete_rows() {
     let mut app = test_app();
     app.files.push(FileEntry {
