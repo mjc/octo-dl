@@ -60,11 +60,6 @@ impl PackageId {
     }
 
     #[must_use]
-    pub fn for_source_url(source_url: &str) -> Self {
-        Self::for_package_key(&PackageKey::new(source_url))
-    }
-
-    #[must_use]
     pub fn parse_or_key(raw: &str, package_key: &PackageKey) -> Self {
         raw.parse().unwrap_or_else(|_| {
             if raw == package_key.as_str() {
@@ -76,11 +71,6 @@ impl PackageId {
                 scope.as_bytes(),
             ))
         })
-    }
-
-    #[must_use]
-    pub fn parse_or_source_url(raw: &str, source_url: &str) -> Self {
-        Self::parse_or_key(raw, &PackageKey::new(source_url))
     }
 
     #[must_use]
