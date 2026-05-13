@@ -75,12 +75,7 @@ fn resume_session_requeues_urls() {
 
     let session_state = app.session.as_ref().expect("session should be present");
     assert!(session_state.packages.is_empty());
-    assert!(
-        session_state
-            .urls
-            .iter()
-            .all(|entry| entry.error.is_none())
-    );
+    assert!(session_state.urls.iter().all(|entry| entry.error.is_none()));
 }
 
 #[test]
@@ -110,14 +105,10 @@ fn resume_session_clears_empty_failed_package_errors_and_requeues_urls() {
             file_id: "https://mega.nz/file/stale-error".to_string(),
         }]
     );
-    assert!(
-        !app.core_state
-            .packages
-            .contains_key(&package_id(
-                "https://mega.nz/file/stale-error",
-                "https://mega.nz/file/stale-error"
-            ))
-    );
+    assert!(!app.core_state.packages.contains_key(&package_id(
+        "https://mega.nz/file/stale-error",
+        "https://mega.nz/file/stale-error"
+    )));
 
     let mut url_rx = app.url_rx.take().expect("url_rx should exist");
     assert_eq!(
@@ -318,6 +309,106 @@ fn resume_session_requeues_package_url_once_for_multiple_pending_files() {
 }
 
 #[test]
+fn resume_session_requeues_each_source_url_for_merged_package() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+
+    let source_a = "https://mega.nz/folder/source-a";
+    let source_b = "https://mega.nz/folder/source-b";
+    let mut session = session_snapshot(vec![
+        (source_a, UrlFixtureStatus::Fetched),
+        (source_b, UrlFixtureStatus::Fetched),
+    ]);
+    let package_id =
+        crate::core::PackageId::for_package_key(&crate::core::PackageKey::new("Merged Folder"));
+    session.packages.push(PackageSnapshot {
+        id: package_id,
+        key: crate::core::PackageKey::new("Merged Folder"),
+        display_name: "Merged Folder".to_string(),
+        file_ids: vec![
+            "Merged Folder/a.mkv".to_string(),
+            "Merged Folder/b.mkv".to_string(),
+        ],
+        error: None,
+    });
+    session.files = vec![
+        crate::core::FileSnapshot {
+            id: "Merged Folder/a.mkv".to_string(),
+            package_id,
+            source_url: Some(source_a.to_string()),
+            path: "Merged Folder/a.mkv".to_string(),
+            size: 128,
+            lifecycle: FileLifecycle::Queued,
+            progress: crate::core::FileProgressState::default(),
+            desired: crate::core::DesiredState::Present,
+            runtime: crate::core::RuntimeState {
+                counts_in_run_totals: true,
+                ..crate::core::RuntimeState::default()
+            },
+            message: None,
+        },
+        crate::core::FileSnapshot {
+            id: "Merged Folder/b.mkv".to_string(),
+            package_id,
+            source_url: Some(source_b.to_string()),
+            path: "Merged Folder/b.mkv".to_string(),
+            size: 256,
+            lifecycle: FileLifecycle::Queued,
+            progress: crate::core::FileProgressState::default(),
+            desired: crate::core::DesiredState::Present,
+            runtime: crate::core::RuntimeState {
+                counts_in_run_totals: true,
+                ..crate::core::RuntimeState::default()
+            },
+            message: None,
+        },
+    ];
+    session.save().unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+
+    app.resume_latest_session();
+
+    assert_eq!(app.urls, vec![source_a.to_string(), source_b.to_string()]);
+    assert_eq!(app.visible_rows(), vec![TuiRow::Package(package_id)]);
+
+    let mut url_rx = app.url_rx.take().expect("url_rx should exist");
+    let first = url_rx.try_recv().unwrap();
+    let second = url_rx.try_recv().unwrap();
+    assert!(url_rx.try_recv().is_err());
+
+    let mut requests = vec![first, second];
+    requests.sort_by(|left, right| match (left, right) {
+        (
+            DownloadRequest::ResumeFileIds {
+                source_url: left, ..
+            },
+            DownloadRequest::ResumeFileIds {
+                source_url: right, ..
+            },
+        ) => left.cmp(right),
+        _ => std::cmp::Ordering::Equal,
+    });
+
+    assert_eq!(
+        requests,
+        vec![
+            DownloadRequest::ResumeFileIds {
+                source_url: source_a.to_string(),
+                file_ids: vec!["Merged Folder/a.mkv".to_string()],
+                attempt_ids: std::collections::HashMap::new(),
+            },
+            DownloadRequest::ResumeFileIds {
+                source_url: source_b.to_string(),
+                file_ids: vec!["Merged Folder/b.mkv".to_string()],
+                attempt_ids: std::collections::HashMap::new(),
+            },
+        ]
+    );
+}
+
+#[test]
 fn resume_session_restores_retryable_errors_as_queued() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
@@ -493,7 +584,10 @@ fn submitted_url_bootstraps_session_for_shutdown_persistence() {
     let session = crate::core::SessionSnapshotV3::latest().expect("session should be saved");
     assert_eq!(session.status, SessionRunStatus::Paused);
     assert!(
-        session.urls.iter().any(|entry| entry.url == "https://mega.nz/file/pending")
+        session
+            .urls
+            .iter()
+            .any(|entry| entry.url == "https://mega.nz/file/pending")
     );
 }
 
@@ -652,7 +746,9 @@ fn ui_delete_core_backed_file_removes_output_and_resume_artifacts() {
                 "https://mega.nz/file/core-delete",
             ),
             source_url: "https://mega.nz/file/core-delete".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/file/core-delete".to_string().clone()),
+            key: crate::core::PackageKey::new(
+                "https://mega.nz/file/core-delete".to_string().clone(),
+            ),
             display_name: "Core Delete".to_string(),
             files: vec![ResolvedFile {
                 file_id: file_id.clone(),
@@ -693,7 +789,9 @@ fn deleted_file_completion_event_redeletes_output_artifacts() {
                 "https://mega.nz/file/late-complete",
             ),
             source_url: "https://mega.nz/file/late-complete".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/file/late-complete".to_string().clone()),
+            key: crate::core::PackageKey::new(
+                "https://mega.nz/file/late-complete".to_string().clone(),
+            ),
             display_name: "Late Complete".to_string(),
             files: vec![ResolvedFile {
                 file_id: file_id.clone(),
@@ -743,7 +841,11 @@ fn deleted_file_stays_deleted_after_cancel_then_completion_events() {
                 "https://mega.nz/file/late-cancel-complete",
             ),
             source_url: "https://mega.nz/file/late-cancel-complete".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/file/late-cancel-complete".to_string().clone()),
+            key: crate::core::PackageKey::new(
+                "https://mega.nz/file/late-cancel-complete"
+                    .to_string()
+                    .clone(),
+            ),
             display_name: "Late Cancel Complete".to_string(),
             files: vec![ResolvedFile {
                 file_id: file_id.clone(),
@@ -799,7 +901,9 @@ fn deleted_file_error_event_redeletes_output_artifacts() {
                 "https://mega.nz/file/late-error",
             ),
             source_url: "https://mega.nz/file/late-error".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/file/late-error".to_string().clone()),
+            key: crate::core::PackageKey::new(
+                "https://mega.nz/file/late-error".to_string().clone(),
+            ),
             display_name: "Late Error".to_string(),
             files: vec![ResolvedFile {
                 file_id: file_id.clone(),
@@ -1137,7 +1241,9 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
                     &format!("https://mega.nz/folder/{raw_package_id}"),
                 ),
                 source_url: format!("https://mega.nz/folder/{raw_package_id}"),
-                key: crate::core::PackageKey::new(format!("https://mega.nz/folder/{raw_package_id}").clone()),
+                key: crate::core::PackageKey::new(
+                    format!("https://mega.nz/folder/{raw_package_id}").clone(),
+                ),
                 display_name: name.to_string(),
                 files: vec![ResolvedFile {
                     file_id: file_id.to_string(),
