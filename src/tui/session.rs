@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use indexmap::IndexMap;
-
 use crate::core::{
     DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
     RuntimeState, SessionMeta, SessionRunStatus, SessionSnapshotV3, SessionUrlSnapshot,
+    normalize_snapshot,
 };
 
 pub(super) enum SessionFileUpdate<'a> {
@@ -365,46 +364,5 @@ fn upsert_package_metadata(
 }
 
 fn rebuild_packages(session: &mut SessionSnapshotV3) {
-    let existing = session
-        .packages
-        .iter()
-        .cloned()
-        .map(|package| (package.id, package))
-        .collect::<IndexMap<_, _>>();
-    let mut grouped = IndexMap::<PackageId, Vec<String>>::new();
-    for file in &session.files {
-        grouped
-            .entry(file.package_id)
-            .or_default()
-            .push(file.id.clone());
-    }
-
-    let mut rebuilt = Vec::with_capacity(grouped.len());
-    for (package_id, file_ids) in grouped {
-        let existing_package = existing.get(&package_id);
-        let display_name = existing_package
-            .map(|package| package.display_name.clone())
-            .or_else(|| common_path_root(&file_ids))
-            .unwrap_or_else(|| package_id.to_string());
-        let key = existing_package
-            .map(|package| package.key.clone())
-            .unwrap_or_else(|| PackageKey::new(display_name.clone()));
-        rebuilt.push(crate::core::PackageSnapshot {
-            id: package_id,
-            key,
-            display_name,
-            file_ids,
-            error: existing_package.and_then(|package| package.error.clone()),
-        });
-    }
-    session.packages = rebuilt;
-}
-
-fn common_path_root(paths: &[String]) -> Option<String> {
-    let mut roots = paths.iter().filter_map(|path| {
-        let root = path.split('/').next()?;
-        (!root.is_empty()).then(|| root.to_string())
-    });
-    let first = roots.next()?;
-    roots.all(|root| root == first).then_some(first)
+    normalize_snapshot(session).expect("live session snapshots should stay canonical");
 }
