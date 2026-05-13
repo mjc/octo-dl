@@ -15,9 +15,10 @@ use crate::{
     SessionStats, SessionStatsBuilder,
     download::{infer_package_display_name, infer_package_id},
     core::{
+        build_restart_snapshot,
         DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
-        PackageSnapshot, ProgressDelta, RestartSnapshot, RuntimeState, SavedCredentials,
-        SessionRunStatus, SessionSnapshotV3, SessionUrlSnapshot, reconcile_restart, scan_filesystem,
+        PackageSnapshot, ProgressDelta, RuntimeState, SavedCredentials,
+        SessionRunStatus, SessionSnapshotV3, SessionUrlSnapshot,
     },
     format_bytes, format_duration, is_dlc_path,
 };
@@ -265,14 +266,6 @@ fn print_summary(stats: &SessionStats) {
     }
 
     println!("{SEPARATOR}");
-}
-
-fn build_restart_snapshot(session: &SessionSnapshotV3) -> RestartSnapshot {
-    reconcile_restart(
-        Some(session.clone()),
-        scan_filesystem(session.files.iter().map(|file| file.path.clone())),
-        session.urls.iter().map(|entry| entry.url.clone()).collect(),
-    )
 }
 
 fn ensure_session_url<'a>(session: &'a mut SessionSnapshotV3, url: &str) -> &'a mut SessionUrlSnapshot {

@@ -17,8 +17,8 @@ pub use reducer::{
     snapshot_from_state,
 };
 pub use restart::{
-    FilesystemFile, FilesystemSnapshot, PartialFileSnapshot, RestartSnapshot, reconcile_restart,
-    scan_filesystem,
+    FilesystemFile, FilesystemSnapshot, PartialFileSnapshot, RestartSnapshot,
+    build_restart_snapshot, reconcile_restart, scan_filesystem,
 };
 pub use session::{
     FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
