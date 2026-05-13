@@ -322,16 +322,12 @@ impl App {
             return;
         }
         self.reset_pending_files.remove(&id);
-        self.apply_core_event(CoreEvent::FileProgress {
+        self.apply_core_progress_event(CoreEvent::FileProgress {
             file_id: id.clone(),
             total_bytes_delta: delta.total_bytes_delta,
             network_bytes_delta: delta.network_bytes_delta,
         });
-        if let Some((previous_downloaded, downloaded)) = self.refresh_visible_core_file(&id)
-        {
-            let now = Instant::now();
-            let _ = self.update_file_ui_progress(&id, previous_downloaded, downloaded, now);
-        }
+        let _ = self.refresh_visible_progress_file(&id, Instant::now());
     }
 
     pub(crate) fn handle_resume_reused_event(

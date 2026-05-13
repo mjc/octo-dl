@@ -72,6 +72,11 @@ pub struct App {
     pub files_total: usize,
     pub current_speed: u64,
     total_network_downloaded: u64,
+    overlay_total_downloaded: u64,
+    overlay_total_size: u64,
+    overlay_files_completed: usize,
+    overlay_files_total: usize,
+    overlay_total_network_downloaded: u64,
     aggregate_rate: TransferRate,
     // Status
     pub status: String,
