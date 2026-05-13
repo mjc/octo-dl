@@ -35,6 +35,15 @@ fn package_sort_key_for(
     )
 }
 
+fn file_status_rank(status: &FileStatus) -> u8 {
+    match status {
+        FileStatus::Error(_) => 0,
+        FileStatus::Downloading => 1,
+        FileStatus::Queued => 2,
+        FileStatus::Complete => 3,
+    }
+}
+
 pub(super) fn sorted_file_indices(
     files: &[FileEntry],
     core_state: &DownloadState,
@@ -52,53 +61,34 @@ pub(super) fn sorted_file_indices(
             other => return other,
         }
 
-        let left_rank = match &left_file.status {
-            FileStatus::Downloading => 0,
-            FileStatus::Queued => 1,
-            FileStatus::Complete => 2,
-            FileStatus::Error(_) => 3,
-        };
-        let right_rank = match &right_file.status {
-            FileStatus::Downloading => 0,
-            FileStatus::Queued => 1,
-            FileStatus::Complete => 2,
-            FileStatus::Error(_) => 3,
-        };
+        let left_rank = file_status_rank(&left_file.status);
+        let right_rank = file_status_rank(&right_file.status);
         left_rank
             .cmp(&right_rank)
-            .then_with(|| left_file.name.cmp(&right_file.name))
+            .then_with(|| natural_cmp(&left_file.name, &right_file.name))
             .then_with(|| left_file.id.cmp(&right_file.id))
     });
     indices
-}
-
-fn file_name_for_sort(core_state: &DownloadState, file_id: &str) -> String {
-    core_state
-        .files
-        .get(file_id)
-        .map(|file| file.path.clone())
-        .unwrap_or_else(|| file_id.to_string())
 }
 
 fn package_percent(core_state: &DownloadState, package_id: &PackageId) -> u64 {
     if !core_state.packages.contains_key(package_id) {
         return 0;
     }
-    let (downloaded, size) = core_state
-        .package_file_ids(package_id)
-        .iter()
-        .filter_map(|file_id| core_state.files.get(file_id))
-        .fold((0_u64, 0_u64), |(downloaded, size), file| {
-            let visible = if matches!(file.lifecycle, FileLifecycle::Complete) {
-                file.size
-            } else {
-                file.progress.visible_completed_bytes.min(file.size)
-            };
-            (
-                downloaded.saturating_add(visible),
-                size.saturating_add(file.size),
-            )
-        });
+    let (downloaded, size) =
+        core_state
+            .package_files(package_id)
+            .fold((0_u64, 0_u64), |(downloaded, size), file| {
+                let visible = if matches!(file.lifecycle, FileLifecycle::Complete) {
+                    file.size
+                } else {
+                    file.progress.visible_completed_bytes.min(file.size)
+                };
+                (
+                    downloaded.saturating_add(visible),
+                    size.saturating_add(file.size),
+                )
+            });
     if size == 0 {
         0
     } else {
@@ -153,19 +143,21 @@ fn package_has_visible_content(
     let Some(package) = core_state.packages.get(package_id) else {
         return false;
     };
-    let file_ids = core_state.package_file_ids(package_id);
+    let has_visible_files = core_state
+        .package_files(package_id)
+        .any(|file| file_is_visible_in_package(core_state, &file.id));
 
-    file_ids
-        .iter()
-        .any(|file_id| file_is_visible_in_package(core_state, file_id))
-        || (package.error.is_some() && !file_ids.is_empty() && !overlay_files.contains_key(&package_id.to_string()))
+    has_visible_files
+        || (package.error.is_some()
+            && core_state.package_files(package_id).next().is_some()
+            && !overlay_files.contains_key(&package_id.to_string()))
 }
 
 fn package_has_visible_children(core_state: &DownloadState, package_id: &PackageId) -> bool {
-    core_state.packages.contains_key(package_id) && core_state
-            .package_file_ids(package_id)
-            .iter()
-            .any(|file_id| file_is_visible_in_package(core_state, file_id))
+    core_state.packages.contains_key(package_id)
+        && core_state
+            .package_files(package_id)
+            .any(|file| file_is_visible_in_package(core_state, &file.id))
 }
 
 pub(super) fn visible_rows_for(
@@ -219,22 +211,22 @@ pub(super) fn visible_rows_for(
         if package_is_auto_expanded_for(expanded_packages, core_state, &package_id)
             && package_has_visible_children(core_state, &package_id)
         {
-            let mut file_ids = core_state
-                .package_file_ids(&package_id);
-            file_ids.sort_by(|left, right| {
-                natural_cmp(
-                    &file_name_for_sort(core_state, left),
-                    &file_name_for_sort(core_state, right),
-                )
-                .then_with(|| left.cmp(right))
+            let mut package_files = core_state.package_files(&package_id).collect::<Vec<_>>();
+            package_files.sort_by(|left, right| {
+                let left_status = file_status_from_core(left);
+                let right_status = file_status_from_core(right);
+                file_status_rank(&left_status)
+                    .cmp(&file_status_rank(&right_status))
+                    .then_with(|| natural_cmp(&left.path, &right.path))
+                    .then_with(|| left.id.cmp(&right.id))
             });
             rows.extend(
-                file_ids
+                package_files
                     .into_iter()
-                    .filter(|file_id| file_is_visible_in_package(core_state, file_id))
-                    .map(|file_id| TuiRow::File {
+                    .filter(|file| file_is_visible_in_package(core_state, &file.id))
+                    .map(|file| TuiRow::File {
                         package_id: Some(package_id),
-                        file_id,
+                        file_id: file.id.clone(),
                     }),
             );
         }
@@ -258,6 +250,18 @@ pub(super) fn visible_rows_for(
             }),
     );
     rows
+}
+
+fn file_status_from_core(file: &crate::core::FileState) -> FileStatus {
+    match file.lifecycle {
+        FileLifecycle::Planned | FileLifecycle::Queued => FileStatus::Queued,
+        FileLifecycle::Downloading => FileStatus::Downloading,
+        FileLifecycle::Complete => FileStatus::Complete,
+        FileLifecycle::Failed => {
+            FileStatus::Error(file.message.clone().unwrap_or_else(|| "failed".to_string()))
+        }
+        FileLifecycle::Skipped | FileLifecycle::Deleted => FileStatus::Complete,
+    }
 }
 
 fn natural_cmp(left: &str, right: &str) -> Ordering {
