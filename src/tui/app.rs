@@ -126,17 +126,6 @@ impl App {
         self.visible_rows().get(selected).cloned()
     }
 
-    pub fn package_display_name(&self, package_id: &str) -> String {
-        let Ok(package_id) = package_id.parse::<PackageId>() else {
-            return package_id.to_string();
-        };
-        self.core_state
-            .packages
-            .get(&package_id)
-            .map(|package| package.display_name.clone())
-            .unwrap_or_else(|| package_id.to_string())
-    }
-
     pub(crate) fn sync_visible_files(&mut self) {
         let selected_row_identity = self.selected_row();
         self.sync_visible_files_preserving(selected_row_identity);
