@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::core::{
     DesiredState, FileLifecycle, FileSnapshot, PackageId, PackageKey, SessionMeta,
-    SessionRunStatus, SessionSnapshot, SessionUrlSnapshot, normalize_snapshot,
+    SessionRunStatus, SessionSnapshot, SessionUrlSnapshot, validate_snapshot,
 };
 
 pub(super) enum SessionFileUpdate<'a> {
@@ -61,9 +61,11 @@ impl SessionAdapter {
 
     pub(super) fn remove_url(session: &mut SessionSnapshot, url: &str) {
         session.urls.retain(|entry| entry.url != url);
-        session
-            .files
-            .retain(|file| file.source_url.as_deref() != Some(url) && file.id != url);
+        for package in &mut session.packages {
+            package
+                .files
+                .retain(|file| file.source_url.as_deref() != Some(url) && file.id != url);
+        }
         rebuild_packages(session);
     }
 
@@ -74,7 +76,7 @@ impl SessionAdapter {
     ) {
         match update {
             SessionFileUpdate::Complete => {
-                if let Some(file) = session.files.iter_mut().find(|file| file.id == file_id) {
+                if let Some(file) = find_file_mut(session, file_id) {
                     file.lifecycle = FileLifecycle::Complete;
                     file.progress.visible_completed_bytes = file.size;
                     file.runtime.active = false;
@@ -82,14 +84,14 @@ impl SessionAdapter {
                 }
             }
             SessionFileUpdate::Error(error) => {
-                if let Some(file) = session.files.iter_mut().find(|file| file.id == file_id) {
+                if let Some(file) = find_file_mut(session, file_id) {
                     file.lifecycle = FileLifecycle::Failed;
                     file.message = Some(error.to_string());
                     file.runtime.active = false;
                 }
             }
             SessionFileUpdate::Skipped => {
-                if let Some(file) = session.files.iter_mut().find(|file| file.id == file_id) {
+                if let Some(file) = find_file_mut(session, file_id) {
                     file.lifecycle = FileLifecycle::Skipped;
                     file.desired = DesiredState::Suppressed;
                     file.runtime.active = false;
@@ -97,6 +99,7 @@ impl SessionAdapter {
                 }
             }
         }
+        rebuild_packages(session);
     }
 
     pub(super) fn meta(session: &SessionSnapshot) -> SessionMeta {
@@ -113,7 +116,7 @@ impl SessionAdapter {
         session: &SessionSnapshot,
     ) -> HashMap<String, HashSet<String>> {
         let mut skipped = HashMap::<String, HashSet<String>>::new();
-        for file in &session.files {
+        for file in session.iter_files() {
             if !matches!(file.lifecycle, FileLifecycle::Skipped) {
                 continue;
             }
@@ -172,11 +175,22 @@ impl SessionAdapter {
             }
         }
 
-        session.files = restart
+        session.packages = restart
             .state
-            .files
+            .packages
             .values()
-            .map(Self::snapshot_file_from_state)
+            .map(|package| crate::core::PackageSnapshot {
+                id: package.id,
+                key: package.key.clone(),
+                display_name: package.display_name.clone(),
+                files: package
+                    .file_ids
+                    .iter()
+                    .filter_map(|file_id| restart.state.files.get(file_id))
+                    .map(Self::snapshot_file_from_state)
+                    .collect(),
+                error: package.error.clone(),
+            })
             .collect();
         rebuild_packages(session);
         resumed_urls
@@ -187,22 +201,24 @@ impl SessionAdapter {
             return;
         }
 
-        session.files.retain(|file| {
-            matches!(file.lifecycle, FileLifecycle::Skipped)
-                || visible.contains(file.path.as_str())
-                || visible.contains(file.id.as_str())
-        });
+        for package in &mut session.packages {
+            package.files.retain(|file| {
+                matches!(file.lifecycle, FileLifecycle::Skipped)
+                    || visible.contains(file.path.as_str())
+                    || visible.contains(file.id.as_str())
+            });
+        }
 
         rebuild_packages(session);
 
         let has_pending_urls = session.urls.iter().any(|tracked_url| {
-            !session.files.iter().any(|file| {
+            !session.iter_files().any(|file| {
                 file.source_url.as_deref() == Some(tracked_url.url.as_str())
                     && matches!(
                         file.lifecycle,
                         FileLifecycle::Complete | FileLifecycle::Skipped | FileLifecycle::Deleted
                     )
-            }) || session.files.iter().any(|file| {
+            }) || session.iter_files().any(|file| {
                 file.source_url.as_deref() == Some(tracked_url.url.as_str())
                     && !matches!(
                         file.lifecycle,
@@ -211,7 +227,7 @@ impl SessionAdapter {
             })
         });
 
-        if session.files.is_empty() && !has_pending_urls {
+        if session.iter_files().next().is_none() && !has_pending_urls {
             Self::apply_run_update(session, SessionRunUpdate::Completed);
         } else {
             log::info!("Marking session as paused for later resume");
@@ -235,9 +251,12 @@ impl SessionAdapter {
             Self::ensure_url(session, submitted_url);
         }
         let package_id = ensure_package_identity(session, package_id, package_display_name);
-        if let Some(file) = session.files.iter_mut().find(|file| {
-            file.path == path
-                && (file.package_id == package_id || file.source_url.as_deref() == Some(source_url))
+        if let Some(file) = session.packages.iter_mut().find_map(|package| {
+            package.files.iter_mut().find(|file| {
+                file.path == path
+                    && (file.package_id == package_id
+                        || file.source_url.as_deref() == Some(source_url))
+            })
         }) {
             if matches!(file.lifecycle, FileLifecycle::Skipped) {
                 return false;
@@ -251,7 +270,12 @@ impl SessionAdapter {
         }
 
         let file_id = path.to_string();
-        session.files.push(crate::core::queued_file_snapshot(
+        let package = session
+            .packages
+            .iter_mut()
+            .find(|package| package.id == package_id)
+            .expect("package identity should exist before queuing a file");
+        package.files.push(crate::core::queued_file_snapshot(
             file_id,
             package_id,
             Some(source_url.to_string()),
@@ -307,9 +331,11 @@ fn ensure_package_identity(
     if let Some(previous) = existing
         && previous.id != package_id
     {
-        for file in &mut session.files {
-            if file.package_id == previous.id {
-                file.package_id = package_id;
+        for package in &mut session.packages {
+            for file in &mut package.files {
+                if file.package_id == previous.id {
+                    file.package_id = package_id;
+                }
             }
         }
     }
@@ -348,11 +374,21 @@ fn upsert_package_metadata(
         key: package_key,
         display_name,
         files: Vec::new(),
-        file_ids: Vec::new(),
         error,
     });
 }
 
 fn rebuild_packages(session: &mut SessionSnapshot) {
-    normalize_snapshot(session).expect("live session snapshots should stay canonical");
+    session.sync_flat_files_from_packages();
+    if session.urls.is_empty() && session.packages.is_empty() {
+        return;
+    }
+    validate_snapshot(session).expect("live session snapshots should stay canonical");
+}
+
+fn find_file_mut<'a>(session: &'a mut SessionSnapshot, file_id: &str) -> Option<&'a mut FileSnapshot> {
+    session
+        .packages
+        .iter_mut()
+        .find_map(|package| package.files.iter_mut().find(|file| file.id == file_id))
 }

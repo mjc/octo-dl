@@ -246,6 +246,7 @@ pub enum ResumeReuseSource {
 }
 
 const CURRENT_RESUME_SIDECAR_VERSION: u32 = 2;
+const SIDECAR_CHECKPOINT_CHUNK_INTERVAL: usize = 32;
 
 /// Returns the `.part` file path for a given final path.
 pub(crate) fn part_path(path: &str) -> PathBuf {
@@ -349,8 +350,12 @@ impl ResumeTracker {
                         })
                     })
                 })
-                .collect(),
+            .collect(),
         }
+    }
+
+    fn checkpoint_snapshot(&mut self) -> Option<ResumeSidecar> {
+        (self.dirty_chunks >= SIDECAR_CHECKPOINT_CHUNK_INTERVAL).then(|| self.snapshot())
     }
 
     fn trusted_chunks(&self) -> Vec<Option<[u8; 16]>> {
@@ -436,7 +441,13 @@ fn spawn_sidecar_writer(
 ) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ResumeSidecar>();
     let handle = tokio::spawn(async move {
-        while let Some(snapshot) = rx.recv().await {
+        while let Some(mut snapshot) = rx.recv().await {
+            // Resume validation publishes a full snapshot after every newly
+            // verified chunk. Persist only the latest queued snapshot so the
+            // completion path does not stall flushing obsolete sidecar writes.
+            while let Ok(newer_snapshot) = rx.try_recv() {
+                snapshot = newer_snapshot;
+            }
             if let Err(err) = save_sidecar_atomic(&path, &snapshot).await {
                 log::warn!(
                     "Failed to persist resume sidecar {} after verified chunk sync: {err}",
@@ -881,9 +892,11 @@ impl<F: FileSystem> Downloader<F> {
             let snapshot = {
                 let mut guard = verify_tracker.lock().unwrap();
                 guard.mark_verified(index, mac);
-                guard.snapshot()
+                guard.checkpoint_snapshot()
             };
-            let _ = sidecar_updates_tx_for_cb.send(snapshot);
+            if let Some(snapshot) = snapshot {
+                let _ = sidecar_updates_tx_for_cb.send(snapshot);
+            }
         };
 
         // Download with progress callback, optionally with cancellation support

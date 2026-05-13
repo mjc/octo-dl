@@ -435,12 +435,12 @@ fn register_session_queued_file_does_not_revive_skipped_entry() {
 
     assert!(!should_queue);
     let session = app.session.as_ref().unwrap();
-    assert_eq!(session.files.len(), 1);
+    assert_eq!(session.file_count(), 1);
     assert!(matches!(
-        session.files[0].lifecycle,
+        session.find_file("skip-a.bin").unwrap().lifecycle,
         crate::core::FileLifecycle::Skipped
     ));
-    assert_eq!(session.files[0].id, "skip-a.bin");
+    assert_eq!(session.find_file("skip-a.bin").unwrap().id, "skip-a.bin");
 }
 
 #[test]
@@ -472,12 +472,16 @@ fn register_session_queued_file_preserves_explicit_package_identity() {
     assert_eq!(session.packages[0].key.as_str(), "Batch Folder");
     assert_eq!(session.packages[0].display_name, "Batch Folder");
     assert_eq!(
-        session.packages[0].file_ids,
-        vec!["episode-1.mkv".to_string()]
+        session.packages[0]
+            .files
+            .iter()
+            .map(|file| file.id.clone())
+            .collect::<Vec<_>>(),
+        vec![crate::core::FileId::from("episode-1.mkv")]
     );
-    assert_eq!(session.files.len(), 1);
+    assert_eq!(session.file_count(), 1);
     assert_eq!(
-        session.files[0].package_id,
+        session.find_file("episode-1.mkv").unwrap().package_id,
         package_id("batch-folder", "Batch Folder")
     );
 }
@@ -536,7 +540,7 @@ fn file_queued_without_explicit_package_id_reuses_existing_package_for_url() {
         "status={} urls={:?} files={:?}",
         app.status,
         session.urls,
-        session.files
+        session.iter_files().map(|file| file.id.clone()).collect::<Vec<_>>()
     );
     assert_eq!(
         session.packages[0].id,
@@ -571,7 +575,7 @@ fn register_session_queued_file_uses_resolved_source_url_for_package_identity() 
         "status={} urls={:?} files={:?}",
         app.status,
         session.urls,
-        session.files
+        session.iter_files().map(|file| file.id.clone()).collect::<Vec<_>>()
     );
     assert_eq!(
         session.packages[0].id,
@@ -586,14 +590,9 @@ fn register_session_queued_file_uses_resolved_source_url_for_package_identity() 
             .collect::<Vec<_>>(),
         vec!["https://mega.nz/folder/resolved"]
     );
-    assert_eq!(
-        session.files[0].package_id,
-        package_id("batch-folder", "Batch Folder")
-    );
-    assert_eq!(
-        session.files[0].source_url.as_deref(),
-        Some("https://mega.nz/folder/resolved")
-    );
+    let file = session.find_file("episode-1.mkv").unwrap();
+    assert_eq!(file.package_id, package_id("batch-folder", "Batch Folder"));
+    assert_eq!(file.source_url.as_deref(), Some("https://mega.nz/folder/resolved"));
 }
 
 #[test]
@@ -637,11 +636,11 @@ fn register_session_queued_file_dedupes_same_source_url_across_package_ids() {
             .iter()
             .any(|package| package.id == package_id("pkg-b", "Package B"))
     );
-    assert!(session.files.iter().any(|file| {
+    assert!(session.iter_files().any(|file| {
         file.package_id == package_id("pkg-a", "Package A")
             && file.source_url.as_deref() == Some("https://mega.nz/folder/root")
     }));
-    assert!(session.files.iter().any(|file| {
+    assert!(session.iter_files().any(|file| {
         file.package_id == package_id("pkg-b", "Package B")
             && file.source_url.as_deref() == Some("https://mega.nz/folder/root")
     }));
@@ -766,8 +765,8 @@ fn core_persisted_session_snapshot_is_saved_to_disk() {
     let session = crate::core::SessionSnapshot::latest().expect("session should be saved");
     assert_eq!(session.packages.len(), 1);
     assert_eq!(session.packages[0].key.as_str(), "Root");
-    assert_eq!(session.files.len(), 1);
-    assert_eq!(session.files[0].path, "episode-1.mkv");
+    assert_eq!(session.file_count(), 1);
+    assert_eq!(session.find_file("episode-1.mkv").unwrap().path, "episode-1.mkv");
 }
 
 #[test]
@@ -1014,10 +1013,13 @@ fn mark_visible_file_error_updates_session_file_status() {
 
     let session = app.session.as_ref().expect("session should remain");
     assert!(matches!(
-        session.files[0].lifecycle,
+        session.find_file("file-id").unwrap().lifecycle,
         crate::core::FileLifecycle::Failed
     ));
-    assert_eq!(session.files[0].message.as_deref(), Some("network failure"));
+    assert_eq!(
+        session.find_file("file-id").unwrap().message.as_deref(),
+        Some("network failure")
+    );
 }
 
 #[test]
@@ -1045,15 +1047,15 @@ fn session_adapter_replace_state_discards_stale_unmatched_entries() {
             .any(|entry| entry.display_name == "new.bin"),
         "new URLs should be appended during merge"
     );
-    assert_eq!(session.files.len(), 2);
+    assert_eq!(session.file_count(), 2);
     assert!(
-        session.files.iter().any(|file| file.path == "keep.bin"
+        session.iter_files().any(|file| file.path == "keep.bin"
             && matches!(file.lifecycle, crate::core::FileLifecycle::Complete)
             && file.size == 5),
         "matching files should be replaced by the newer snapshot"
     );
-    assert!(!session.files.iter().any(|file| file.path == "stale.bin"));
-    assert!(session.files.iter().any(|file| file.path == "new.bin"));
+    assert!(!session.iter_files().any(|file| file.path == "stale.bin"));
+    assert!(session.iter_files().any(|file| file.path == "new.bin"));
 }
 
 #[test]
@@ -1064,7 +1066,6 @@ fn session_adapter_replace_state_replaces_stale_package_rows() {
         key: crate::core::PackageKey::new("https://mega.nz/file/a".to_string().clone()),
         display_name: "Stale Batch".to_string(),
         files: Vec::new(),
-        file_ids: vec!["old.bin".to_string().into()],
         error: None,
     });
 
@@ -1088,7 +1089,6 @@ fn session_adapter_register_queued_file_rebuilds_package_membership_immediately(
         key: crate::core::PackageKey::new("Stale Folder"),
         display_name: "Stale Folder".to_string(),
         files: Vec::new(),
-        file_ids: vec!["ghost.bin".to_string().into()],
         error: Some("boom".to_string()),
     });
 
@@ -1109,11 +1109,18 @@ fn session_adapter_register_queued_file_rebuilds_package_membership_immediately(
         package_id("batch-folder", "Batch Folder")
     );
     assert_eq!(
-        session.packages[0].file_ids,
-        vec!["episode-1.mkv".to_string()]
+        session.packages[0]
+            .files
+            .iter()
+            .map(|file| file.id.clone())
+            .collect::<Vec<_>>(),
+        vec![crate::core::FileId::from("episode-1.mkv")]
     );
-    assert_eq!(session.files.len(), 1);
-    assert_eq!(session.files[0].package_id, session.packages[0].id);
+    assert_eq!(session.file_count(), 1);
+    assert_eq!(
+        session.find_file("episode-1.mkv").unwrap().package_id,
+        session.packages[0].id
+    );
 }
 
 #[test]
@@ -1136,13 +1143,13 @@ fn mutate_session_and_save_reloads_canonical_snapshot() {
     app.install_session(session);
 
     let _ = app.mutate_session_and_save(|session| {
-        session.packages[0].file_ids.clear();
+        session.clear_flat_files_cache();
     });
 
     let session = app.session.as_ref().expect("session should remain");
     assert_eq!(
-        session.packages[0].file_ids,
-        vec!["episode-1.mkv".to_string()]
+        session.iter_files().map(|file| file.id.clone()).collect::<Vec<_>>(),
+        vec![crate::core::FileId::from("episode-1.mkv")]
     );
 }
 
@@ -1166,14 +1173,17 @@ fn mutate_session_and_save_preserves_in_memory_state_on_failed_save() {
     app.install_session(session.clone());
 
     let _ = app.mutate_session_and_save(|session| {
-        session.files[0].source_url = Some("https://mega.nz/file/other".to_string());
+        session.find_file_mut("episode-1.mkv").unwrap().source_url =
+            Some("https://mega.nz/file/other".to_string());
+        session.sync_flat_files_from_packages();
     });
 
     assert_eq!(
         app.status,
         format!(
             "Failed to save session: file {} references untracked source_url {}",
-            session.files[0].id, "https://mega.nz/file/other"
+            session.find_file("episode-1.mkv").unwrap().id,
+            "https://mega.nz/file/other"
         )
     );
     let saved = app.session.as_ref().expect("session should remain");
