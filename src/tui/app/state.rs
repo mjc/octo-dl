@@ -22,6 +22,46 @@ fn core_event_requires_visible_sync(event: &CoreEvent) -> bool {
     )
 }
 
+fn core_event_requires_pending_sync(event: &CoreEvent) -> bool {
+    matches!(
+        event,
+        CoreEvent::PackageResolved { .. }
+            | CoreEvent::FileQueued { .. }
+            | CoreEvent::FileCancelled { .. }
+            | CoreEvent::FileDeleted { .. }
+            | CoreEvent::FileRetryRequested { .. }
+            | CoreEvent::FileResetRequested { .. }
+            | CoreEvent::PackageMoveRequested { .. }
+            | CoreEvent::FileMoveRequested { .. }
+            | CoreEvent::RestartReconciled { .. }
+    )
+}
+
+#[derive(Clone, Copy)]
+struct CoreApplyPolicy {
+    sync_visible: bool,
+    sync_pending: bool,
+    recompute_totals: bool,
+}
+
+impl CoreApplyPolicy {
+    fn for_event(event: &CoreEvent) -> Self {
+        Self {
+            sync_visible: core_event_requires_visible_sync(event),
+            sync_pending: core_event_requires_pending_sync(event),
+            recompute_totals: true,
+        }
+    }
+
+    const fn for_progress() -> Self {
+        Self {
+            sync_visible: false,
+            sync_pending: false,
+            recompute_totals: false,
+        }
+    }
+}
+
 impl App {
     pub(crate) fn visible_file(&self, file_id: &FileId) -> Option<&crate::tui::app::FileEntry> {
         let &visible_index = self.visible_file_positions.get(file_id)?;
@@ -42,22 +82,12 @@ impl App {
     }
 
     pub(crate) fn apply_core_event(&mut self, event: CoreEvent) {
-        let should_sync_visible = core_event_requires_visible_sync(&event);
-        let selected_row_identity = should_sync_visible.then(|| self.selected_row()).flatten();
-        self.seed_core_session_from_session();
-        let effects = reduce(&mut self.core_state, event);
-        self.apply_core_effects(effects);
-        if should_sync_visible {
-            self.sync_visible_files_preserving(selected_row_identity);
-        }
-        self.recompute_totals();
+        let policy = CoreApplyPolicy::for_event(&event);
+        self.apply_core_event_with_policy(event, policy);
     }
 
     pub(crate) fn apply_core_progress_event(&mut self, event: CoreEvent) {
-        self.seed_core_session_from_session();
-        let effects = reduce(&mut self.core_state, event);
-        self.apply_core_effects(effects);
-        self.apply_cached_totals();
+        self.apply_core_event_with_policy(event, CoreApplyPolicy::for_progress());
     }
 
     pub(crate) fn refresh_visible_core_file(&mut self, file_id: &FileId) -> Option<(u64, u64)> {
@@ -137,12 +167,27 @@ impl App {
         self.apply_core_event(command.into_event());
     }
 
-    fn apply_core_effects(&mut self, effects: Vec<CoreEffect>) {
+    fn apply_core_event_with_policy(&mut self, event: CoreEvent, policy: CoreApplyPolicy) {
+        let selected_row_identity = policy.sync_visible.then(|| self.selected_row()).flatten();
+        self.seed_core_session_from_session();
+        let effects = reduce(&mut self.core_state, event);
+        self.apply_core_effects(effects, policy.sync_pending);
+        if policy.sync_visible {
+            self.sync_visible_files_preserving(selected_row_identity);
+        }
+        if policy.recompute_totals {
+            self.recompute_totals();
+        } else {
+            self.apply_cached_totals();
+        }
+    }
+
+    fn apply_core_effects(&mut self, effects: Vec<CoreEffect>, should_sync_pending: bool) {
         let mut queued_file_map: IndexMap<String, Vec<FileId>> = IndexMap::new();
         for effect in effects {
             match effect {
                 CoreEffect::PersistSession(snapshot) => {
-                    self.persist_core_session_snapshot(snapshot);
+                    let _ = self.persist_session(snapshot);
                 }
                 CoreEffect::EnqueueUrlResolution { url } => {
                     let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
@@ -195,15 +240,11 @@ impl App {
             });
         }
 
-        if self.download_task_running {
+        if self.download_task_running && should_sync_pending {
             let _ = self.url_tx.send(DownloadRequest::SyncPendingOrder {
                 file_ids: self.core_state.pending_file_ids(),
             });
         }
-    }
-
-    fn persist_core_session_snapshot(&mut self, snapshot: SessionSnapshot) {
-        self.persist_session(snapshot);
     }
 
     pub(crate) fn ensure_session_for_pending_urls(&mut self) {
@@ -214,7 +255,7 @@ impl App {
         let credentials =
             SavedCredentials::encrypt(self.login.email(), self.login.password(), None);
         let session = SessionSnapshot::new(self.config.config.clone(), credentials);
-        self.save_and_install_session(session);
+        self.save_session(session);
     }
 
     fn refresh_session_from_core_state(&mut self) {
@@ -227,7 +268,7 @@ impl App {
 
         self.seed_core_session_from_session();
         let snapshot = snapshot_from_state(&self.core_state);
-        self.persist_core_session_snapshot(snapshot);
+        let _ = self.persist_session(snapshot);
     }
 
     pub(crate) fn ensure_core_file(
@@ -353,7 +394,7 @@ impl App {
         self.seed_core_session_from_session();
     }
 
-    pub(crate) fn save_and_install_session(&mut self, session: SessionSnapshot) {
+    pub(crate) fn save_session(&mut self, session: SessionSnapshot) {
         let _ = self.persist_session(session);
     }
 
@@ -399,7 +440,7 @@ impl App {
                 let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
             }
         }
-        self.save_and_install_session(session);
+        self.save_session(session);
     }
 
     pub(crate) fn sync_session_for_shutdown(&mut self) {
