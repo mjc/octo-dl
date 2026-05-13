@@ -54,6 +54,7 @@ pub struct App {
     pub authenticated: bool,
     // URL input (top bar)
     pub url_input: String,
+    pub url_input_cursor: usize,
     pub url_input_active: bool,
     // Tracked URLs for session persistence
     pub urls: Vec<String>,

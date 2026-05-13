@@ -22,7 +22,7 @@ pub fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     draw_dashboard(
         frame,
         &state,
-        &DashboardChrome::new(&app.url_input, app.url_input_active),
+        &DashboardChrome::new(&app.url_input, app.url_input_cursor, app.url_input_active),
         &mut app.file_list_state,
     );
     match app.popup {
@@ -118,7 +118,7 @@ pub fn draw_dashboard(
     let url_inner = url_block.inner(chunks[0]);
     let (url_value, cursor_col) =
         if !state.read_only && state.popup == Popup::None && chrome.url_input_active {
-            focused_url_input_view(chrome.url_input, url_inner.width)
+            focused_url_input_view(chrome.url_input, chrome.url_input_cursor, url_inner.width)
         } else {
             (
                 truncate_end(chrome.url_input, usize::from(url_inner.width)),
