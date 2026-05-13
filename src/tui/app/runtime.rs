@@ -147,6 +147,13 @@ impl App {
             });
             return;
         }
+        if self.urls.is_empty()
+            && self.files.is_empty()
+            && self.overlay_files.is_empty()
+            && self.core_state.files.is_empty()
+        {
+            return;
+        }
 
         let mut session = SessionSnapshotV3::new(config.clone(), credentials);
         session.urls = self
@@ -449,10 +456,15 @@ mod tests {
         let _guard = StateDirectoryGuard::set(dir.path());
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let mut app = App::new(9723, event_tx, true);
-        app.session = Some(SessionSnapshotV3::new(
+        let mut session = SessionSnapshotV3::new(
             DownloadConfig::default(),
             SavedCredentials::encrypt("stale@example.com", "stale-pass", Some("654321")),
-        ));
+        );
+        session.urls.push(SessionUrlSnapshot {
+            url: "https://mega.nz/folder/root".to_string(),
+            error: None,
+        });
+        app.session = Some(session);
         assert!(app.login.set_credentials(
             "fresh@example.com".to_string(),
             "fresh-pass".to_string(),
@@ -471,6 +483,24 @@ mod tests {
         assert_eq!(email, "fresh@example.com");
         assert_eq!(password, "fresh-pass");
         assert!(mfa.is_none());
+    }
+
+    #[test]
+    fn ensure_download_session_does_not_create_empty_session() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        assert!(app.login.set_credentials(
+            "fresh@example.com".to_string(),
+            "fresh-pass".to_string(),
+            String::new()
+        ));
+
+        app.ensure_download_session(&DownloadConfig::default());
+
+        assert!(app.session.is_none());
+        assert!(SessionSnapshotV3::latest().is_none());
     }
 
     #[test]

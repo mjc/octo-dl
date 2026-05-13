@@ -219,26 +219,33 @@ impl SessionSnapshotV3 {
             }
             match Self::load(&path) {
                 Ok(snapshot) => canonical_sessions.push((path, snapshot)),
-                Err(_) => {
-                    let _ = std::fs::remove_file(&path);
+                Err(error) => {
+                    log::error!(
+                        "Rejecting session {} during latest() scan: {error}",
+                        path.display()
+                    );
+                    preserve_rejected_session(&path);
                 }
             }
         }
 
-        canonical_sessions.sort_by(|a, b| b.1.created.cmp(&a.1.created));
-        for (path, snapshot) in canonical_sessions.iter() {
-            if snapshot.status == SessionRunStatus::Completed {
+        canonical_sessions.sort_by(|a, b| {
+            session_resume_priority(&b.1)
+                .cmp(&session_resume_priority(&a.1))
+                .then_with(|| b.1.created.cmp(&a.1.created))
+        });
+
+        let selected_path = canonical_sessions.first().map(|(path, _)| path.clone());
+        for (path, snapshot) in &canonical_sessions {
+            if Some(path) == selected_path.as_ref() {
+                continue;
+            }
+            if snapshot.status == SessionRunStatus::Completed || selected_path.is_some() {
                 let _ = std::fs::remove_file(path);
             }
         }
-        for (path, _) in canonical_sessions.iter().skip(1) {
-            let _ = std::fs::remove_file(path);
-        }
 
-        canonical_sessions
-            .into_iter()
-            .next()
-            .map(|(_, session)| session)
+        canonical_sessions.into_iter().next().map(|(_, session)| session)
     }
 
     pub fn mark_file_complete(&mut self, file_id: &str) {
@@ -277,6 +284,34 @@ impl SessionSnapshotV3 {
                 )
             })
             .count()
+    }
+}
+
+fn preserve_rejected_session(path: &Path) {
+    let backup = rejected_session_backup_path(path);
+    if let Err(error) = std::fs::rename(path, &backup) {
+        log::warn!(
+            "Failed to preserve rejected session {} as {}: {error}",
+            path.display(),
+            backup.display()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn rejected_session_backup_path(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("session");
+    path.with_file_name(format!("{stem}.invalid.bak"))
+}
+
+fn session_resume_priority(snapshot: &SessionSnapshotV3) -> u8 {
+    match snapshot.status {
+        SessionRunStatus::Paused => 2,
+        SessionRunStatus::InProgress => 1,
+        SessionRunStatus::Completed => 0,
     }
 }
 
@@ -352,6 +387,9 @@ pub fn normalize_snapshot(snapshot: &mut SessionSnapshotV3) -> Result<(), String
 pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
     if snapshot.version != 4 {
         return Err(format!("unsupported session version {}", snapshot.version));
+    }
+    if snapshot.urls.is_empty() && snapshot.packages.is_empty() && snapshot.files.is_empty() {
+        return Err("empty sessions cannot be persisted".to_string());
     }
 
     let mut packages_by_id = IndexMap::new();
@@ -536,11 +574,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
         let old_path = SessionSnapshotV3::state_dir().join("legacy.toml");
+        let backup = SessionSnapshotV3::state_dir().join("legacy.invalid.bak");
         std::fs::create_dir_all(SessionSnapshotV3::state_dir()).unwrap();
         std::fs::write(&old_path, "id = 'legacy'\n").unwrap();
 
         assert!(SessionSnapshotV3::latest().is_none());
         assert!(!old_path.exists());
+        assert!(backup.exists());
     }
 
     #[test]
@@ -552,16 +592,171 @@ mod tests {
             SavedCredentials::encrypt("a", "b", None),
         );
         first.created = Utc::now() - chrono::TimeDelta::minutes(5);
+        first.urls.push(SessionUrlSnapshot {
+            url: "https://mega.nz/folder/first".to_string(),
+            error: None,
+        });
         first.save().unwrap();
 
-        let second = SessionSnapshotV3::new(
+        let mut second = SessionSnapshotV3::new(
             DownloadConfig::default(),
             SavedCredentials::encrypt("a", "b", None),
         );
+        second.urls.push(SessionUrlSnapshot {
+            url: "https://mega.nz/folder/second".to_string(),
+            error: None,
+        });
         let second_id = second.id.clone();
         second.save().unwrap();
 
         let latest = SessionSnapshotV3::latest().unwrap();
         assert_eq!(latest.id, second_id);
+    }
+
+    #[test]
+    fn latest_prefers_paused_session_over_newer_completed_stub() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+
+        let mut paused = SessionSnapshotV3::new(
+            DownloadConfig::default(),
+            SavedCredentials::encrypt("a", "b", None),
+        );
+        paused.created = Utc::now() - chrono::TimeDelta::minutes(5);
+        paused.status = SessionRunStatus::Paused;
+        paused.urls.push(SessionUrlSnapshot {
+            url: "https://mega.nz/folder/root".to_string(),
+            error: None,
+        });
+        paused.packages.push(PackageSnapshot {
+            id: PackageId::for_package_key(&PackageKey::new("Folder")),
+            key: PackageKey::new("Folder"),
+            display_name: "Folder".to_string(),
+            file_ids: vec!["folder/file.bin".to_string()],
+            error: None,
+        });
+        paused.files.push(FileSnapshot {
+            id: "folder/file.bin".to_string(),
+            package_id: PackageId::for_package_key(&PackageKey::new("Folder")),
+            source_url: Some("https://mega.nz/folder/root".to_string()),
+            path: "folder/file.bin".to_string(),
+            size: 10,
+            lifecycle: FileLifecycle::Queued,
+            progress: FileProgressState::default(),
+            desired: DesiredState::Present,
+            runtime: RuntimeState::default(),
+            message: None,
+        });
+        paused.save().unwrap();
+
+        let mut completed = SessionSnapshotV3::new(
+            DownloadConfig::default(),
+            SavedCredentials::encrypt("a", "b", None),
+        );
+        completed.status = SessionRunStatus::Completed;
+        completed.urls.push(SessionUrlSnapshot {
+            url: "https://mega.nz/folder/newer".to_string(),
+            error: None,
+        });
+        completed.save().unwrap();
+
+        let latest = SessionSnapshotV3::latest().unwrap();
+        assert_eq!(latest.status, SessionRunStatus::Paused);
+        assert_eq!(latest.files.len(), 1);
+        assert!(!completed.state_path().exists());
+        assert!(paused.state_path().exists());
+    }
+
+    #[test]
+    fn latest_loads_canonical_multi_source_package_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+
+        let package_key = PackageKey::new("Folder");
+        let package_id = PackageId::for_package_key(&package_key);
+        let mut session = SessionSnapshotV3::new(
+            DownloadConfig::default(),
+            SavedCredentials::encrypt("a", "b", None),
+        );
+        session.urls = vec![
+            SessionUrlSnapshot {
+                url: "https://mega.nz/folder/one".to_string(),
+                error: None,
+            },
+            SessionUrlSnapshot {
+                url: "https://mega.nz/folder/two".to_string(),
+                error: None,
+            },
+        ];
+        session.packages.push(PackageSnapshot {
+            id: package_id,
+            key: package_key,
+            display_name: "Folder".to_string(),
+            file_ids: vec!["folder/a.bin".to_string(), "folder/b.bin".to_string()],
+            error: None,
+        });
+        session.files = vec![
+            FileSnapshot {
+                id: "folder/a.bin".to_string(),
+                package_id,
+                source_url: Some("https://mega.nz/folder/one".to_string()),
+                path: "folder/a.bin".to_string(),
+                size: 10,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState::default(),
+                desired: DesiredState::Present,
+                runtime: RuntimeState::default(),
+                message: None,
+            },
+            FileSnapshot {
+                id: "folder/b.bin".to_string(),
+                package_id,
+                source_url: Some("https://mega.nz/folder/two".to_string()),
+                path: "folder/b.bin".to_string(),
+                size: 20,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState::default(),
+                desired: DesiredState::Present,
+                runtime: RuntimeState::default(),
+                message: None,
+            },
+        ];
+        session.save().unwrap();
+
+        let latest = SessionSnapshotV3::latest().unwrap();
+        assert_eq!(latest.packages.len(), 1);
+        assert_eq!(latest.files.len(), 2);
+        assert_eq!(latest.packages[0].display_name, "Folder");
+    }
+
+    #[test]
+    fn empty_session_is_rejected_and_preserved_as_invalid_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+
+        let path = SessionSnapshotV3::state_dir().join("session-v4-empty.toml");
+        std::fs::create_dir_all(SessionSnapshotV3::state_dir()).unwrap();
+        std::fs::write(
+            &path,
+            toml::to_string(&SessionSnapshotV3 {
+                version: 4,
+                id: "empty".to_string(),
+                created: Utc::now(),
+                status: SessionRunStatus::Completed,
+                urls: Vec::new(),
+                packages: Vec::new(),
+                files: Vec::new(),
+                config: DownloadConfig::default(),
+                credentials: SavedCredentials::encrypt("a", "b", None),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(SessionSnapshotV3::latest().is_none());
+        assert!(!path.exists());
+        assert!(SessionSnapshotV3::state_dir()
+            .join("session-v4-empty.invalid.bak")
+            .exists());
     }
 }
