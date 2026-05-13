@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use sysinfo::{ProcessesToUpdate, System};
@@ -17,6 +18,21 @@ const MAX_DOWNLOAD_EVENTS_PER_TICK: usize = 256;
 const MAX_TOKEN_MESSAGES_PER_TICK: usize = 256;
 
 impl App {
+    fn flush_pending_progress_events(
+        &mut self,
+        pending_progress: &mut Vec<(Arc<str>, crate::core::ProgressDelta, u64)>,
+    ) -> bool {
+        if pending_progress.is_empty() {
+            return false;
+        }
+
+        for (id, delta, attempt_id) in pending_progress.drain(..) {
+            self.handle_file_progress_event(id, delta, attempt_id);
+        }
+
+        true
+    }
+
     pub(crate) fn log_state_diagnostics(&self, reason: &str) {
         let duplicate_package_urls = {
             let mut counts = std::collections::HashMap::<&str, usize>::new();
@@ -294,13 +310,42 @@ impl App {
         download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
     ) -> bool {
         let mut handled = false;
+        let mut pending_progress: Vec<(Arc<str>, crate::core::ProgressDelta, u64)> = Vec::new();
         for _ in 0..MAX_DOWNLOAD_EVENTS_PER_TICK {
             let Ok(event) = download_rx.try_recv() else {
                 break;
             };
-            self.handle_download_event(event);
-            handled = true;
+            match event {
+                DownloadEvent::Progress {
+                    id,
+                    delta,
+                    attempt_id,
+                } => {
+                    if let Some((_, pending_delta, _)) = pending_progress
+                        .iter_mut()
+                        .find(|(pending_id, _, pending_attempt_id)| {
+                            pending_id.as_ref() == id.as_ref() && *pending_attempt_id == attempt_id
+                        })
+                    {
+                        pending_delta.total_bytes_delta = pending_delta
+                            .total_bytes_delta
+                            .saturating_add(delta.total_bytes_delta);
+                        pending_delta.network_bytes_delta = pending_delta
+                            .network_bytes_delta
+                            .saturating_add(delta.network_bytes_delta);
+                    } else {
+                        pending_progress.push((id, delta, attempt_id));
+                    }
+                    handled = true;
+                }
+                other => {
+                    let _ = self.flush_pending_progress_events(&mut pending_progress);
+                    self.handle_download_event(other);
+                    handled = true;
+                }
+            }
         }
+        handled |= self.flush_pending_progress_events(&mut pending_progress);
         handled
     }
 
@@ -544,5 +589,54 @@ mod tests {
             app.status,
             format!("status {}", MAX_DOWNLOAD_EVENTS_PER_TICK - 1)
         );
+    }
+
+    #[test]
+    fn drain_download_events_coalesces_progress_for_same_file_within_tick() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let (download_tx, mut download_rx) = mpsc::unbounded_channel();
+
+        app.apply_core_event(crate::core::CoreEvent::PackageResolved {
+            package: crate::core::ResolvedPackage {
+                id: crate::test_support::package_id("pkg", "https://mega.nz/file/root"),
+                source_url: "https://mega.nz/file/root".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+                display_name: "Package".to_string(),
+                files: vec![crate::core::ResolvedFile {
+                    file_id: "file.bin".to_string(),
+                    path: "file.bin".to_string(),
+                    size: 100,
+                }],
+                collision: None,
+            },
+        });
+        app.apply_core_event(crate::core::CoreEvent::FileStarted {
+            file_id: "file.bin".to_string(),
+            size: 100,
+        });
+
+        for _ in 0..3 {
+            download_tx
+                .send(DownloadEvent::Progress {
+                    id: Arc::<str>::from("file.bin"),
+                    delta: crate::core::ProgressDelta {
+                        total_bytes_delta: 10,
+                        network_bytes_delta: 10,
+                    },
+                    attempt_id: 0,
+                })
+                .expect("progress event should send");
+        }
+
+        assert!(app.drain_download_events(&mut download_rx));
+
+        let file = app
+            .core_state
+            .files
+            .get("file.bin")
+            .expect("file should exist");
+        assert_eq!(file.progress.visible_completed_bytes, 30);
+        assert_eq!(file.progress.downloaded_network_bytes, 30);
     }
 }
