@@ -136,12 +136,7 @@ impl App {
                 _ => file.progress.visible_completed_bytes.min(file.size),
             })
             .or_else(|| self.overlay_files.get(file_id).map(|file| file.file.downloaded))
-            .or_else(|| {
-                self.files
-                    .iter()
-                    .find(|file| file.id == file_id)
-                    .map(|file| file.downloaded)
-            })
+            .or_else(|| self.visible_file(file_id).map(|file| file.downloaded))
             .unwrap_or(0);
         self.ensure_file_ui(file_id, downloaded, true);
     }

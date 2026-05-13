@@ -20,6 +20,11 @@ fn core_event_requires_visible_sync(event: &CoreEvent) -> bool {
 }
 
 impl App {
+    pub(crate) fn visible_file(&self, file_id: &str) -> Option<&crate::tui::app::FileEntry> {
+        let &visible_index = self.visible_file_positions.get(file_id)?;
+        self.files.get(visible_index)
+    }
+
     pub(crate) fn seed_core_session_from_session(&mut self) {
         if let Some(meta) = self.read_session(SessionAdapter::meta) {
             self.core_state.session_meta = meta;
