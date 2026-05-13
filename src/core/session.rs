@@ -659,11 +659,11 @@ mod tests {
             id: PackageId::for_package_key(&PackageKey::new("Folder")),
             key: PackageKey::new("Folder"),
             display_name: "Folder".to_string(),
-            file_ids: vec!["folder/file.bin".to_string()],
+            file_ids: vec!["folder/file.bin".to_string().into()],
             error: None,
         });
         paused.files.push(FileSnapshot {
-            id: "folder/file.bin".to_string(),
+            id: "folder/file.bin".to_string().into(),
             package_id: PackageId::for_package_key(&PackageKey::new("Folder")),
             source_url: Some("https://mega.nz/folder/root".to_string()),
             path: "folder/file.bin".to_string(),
@@ -719,12 +719,12 @@ mod tests {
             id: package_id,
             key: package_key,
             display_name: "Folder".to_string(),
-            file_ids: vec!["folder/a.bin".to_string(), "folder/b.bin".to_string()],
+            file_ids: vec!["folder/a.bin".to_string().into(), "folder/b.bin".to_string().into()],
             error: None,
         });
         session.files = vec![
             FileSnapshot {
-                id: "folder/a.bin".to_string(),
+                id: "folder/a.bin".to_string().into(),
                 package_id,
                 source_url: Some("https://mega.nz/folder/one".to_string()),
                 path: "folder/a.bin".to_string(),
@@ -736,7 +736,7 @@ mod tests {
                 message: None,
             },
             FileSnapshot {
-                id: "folder/b.bin".to_string(),
+                id: "folder/b.bin".to_string().into(),
                 package_id,
                 source_url: Some("https://mega.nz/folder/two".to_string()),
                 path: "folder/b.bin".to_string(),
@@ -767,7 +767,7 @@ mod tests {
             &path,
             toml::to_string(&SessionSnapshotV3 {
                 version: 4,
-                id: "empty".to_string(),
+                id: "empty".to_string().into(),
                 created: Utc::now(),
                 status: SessionRunStatus::Completed,
                 urls: Vec::new(),

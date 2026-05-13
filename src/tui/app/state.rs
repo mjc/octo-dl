@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::core::{
-    CoreCommand, CoreEffect, CoreEvent, PackageId, ResolvedFile, ResolvedPackage, RestartSnapshot,
-    SavedCredentials, SessionSnapshotV3, build_restart_snapshot, reduce, snapshot_from_state,
+    CoreCommand, CoreEffect, CoreEvent, FileId, PackageId, ResolvedFile, ResolvedPackage,
+    RestartSnapshot, SavedCredentials, SessionSnapshotV3, build_restart_snapshot, reduce,
+    snapshot_from_state,
 };
 
 use super::{
@@ -20,7 +21,7 @@ fn core_event_requires_visible_sync(event: &CoreEvent) -> bool {
 }
 
 impl App {
-    pub(crate) fn visible_file(&self, file_id: &str) -> Option<&crate::tui::app::FileEntry> {
+    pub(crate) fn visible_file(&self, file_id: &FileId) -> Option<&crate::tui::app::FileEntry> {
         let &visible_index = self.visible_file_positions.get(file_id)?;
         self.files.get(visible_index)
     }
@@ -50,7 +51,7 @@ impl App {
         self.recompute_totals();
     }
 
-    pub(crate) fn refresh_visible_core_file(&mut self, file_id: &str) -> Option<(u64, u64)> {
+    pub(crate) fn refresh_visible_core_file(&mut self, file_id: &FileId) -> Option<(u64, u64)> {
         let Some(core_file) = self.core_state.files.get(file_id) else {
             return None;
         };
@@ -95,7 +96,7 @@ impl App {
     }
 
     fn apply_core_effects(&mut self, effects: Vec<CoreEffect>) {
-        let mut queued_file_map: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut queued_file_map: HashMap<String, HashSet<FileId>> = HashMap::new();
         for effect in effects {
             match effect {
                 CoreEffect::PersistSession(snapshot) => {
@@ -184,7 +185,7 @@ impl App {
 
     pub(crate) fn ensure_core_file(
         &mut self,
-        file_id: &str,
+        file_id: &FileId,
         source_url: &str,
         path: &str,
         size: u64,
@@ -203,7 +204,7 @@ impl App {
 
     pub(crate) fn ensure_core_file_in_package(
         &mut self,
-        file_id: &str,
+        file_id: &FileId,
         package_id: &str,
         package_display_name: &str,
         source_url: &str,
@@ -221,7 +222,7 @@ impl App {
                 source_url: source_url.to_string(),
                 display_name: package_display_name.to_string(),
                 files: vec![ResolvedFile {
-                    file_id: file_id.to_string(),
+                    file_id: file_id.clone(),
                     path: path.to_string(),
                     size,
                 }],
@@ -229,7 +230,7 @@ impl App {
             },
         });
         self.apply_core_event(CoreEvent::FileQueued {
-            file_id: file_id.to_string(),
+            file_id: file_id.clone(),
         });
         if let Some(file) = self.core_state.files.get_mut(file_id) {
             file.source_url = Some(source_url.to_string());
@@ -251,9 +252,9 @@ impl App {
         let _ = self.mutate_session_and_save(|session| SessionAdapter::remove_url(session, url));
     }
 
-    pub(crate) fn update_session_file(&mut self, file_id: &str, update: SessionFileUpdate<'_>) {
+    pub(crate) fn update_session_file(&mut self, file_id: &FileId, update: SessionFileUpdate<'_>) {
         let _ = self.mutate_session_and_save(|session| {
-            SessionAdapter::update_file(session, file_id, update)
+            SessionAdapter::update_file(session, file_id.as_str(), update)
         });
     }
 
@@ -263,7 +264,7 @@ impl App {
         package_display_name: &str,
         submitted_url: &str,
         source_url: &str,
-        path: &str,
+        path: &FileId,
         size: u64,
     ) -> bool {
         self.mutate_session_and_save(|session| {
@@ -273,7 +274,7 @@ impl App {
                 package_display_name,
                 submitted_url,
                 source_url,
-                path,
+                path.as_str(),
                 size,
             )
         })
@@ -356,13 +357,17 @@ impl App {
 
     pub(crate) fn sync_session_for_shutdown(&mut self) {
         self.refresh_session_from_core_state();
-        let visible: HashSet<String> = self.files.iter().map(|file| file.id.clone()).collect();
+        let visible: HashSet<String> = self
+            .files
+            .iter()
+            .map(|file| file.id.to_string())
+            .collect();
         let _ = self.mutate_session_and_save(|session| {
             SessionAdapter::sync_for_shutdown(session, &visible)
         });
     }
 
-    pub(crate) fn sync_session_after_file_complete(&mut self, id: &str) {
+    pub(crate) fn sync_session_after_file_complete(&mut self, id: &FileId) {
         self.update_session_file(id, SessionFileUpdate::Complete);
         if self.files_completed == self.files_total && self.files_total > 0 {
             self.update_session_run_status(SessionRunUpdate::Completed);

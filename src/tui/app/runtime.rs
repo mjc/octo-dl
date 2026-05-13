@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::sync::Arc;
 use std::time::Duration;
 
 use sysinfo::{ProcessesToUpdate, System};
@@ -7,7 +6,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     DownloadConfig,
-    core::{SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot},
+    core::{FileId, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot},
     format_bytes,
     tui::dashboard::DashboardUiMode,
 };
@@ -20,7 +19,7 @@ const MAX_TOKEN_MESSAGES_PER_TICK: usize = 256;
 impl App {
     fn flush_pending_progress_events(
         &mut self,
-        pending_progress: &mut Vec<(Arc<str>, crate::core::ProgressDelta, u64)>,
+        pending_progress: &mut Vec<(FileId, crate::core::ProgressDelta, u64)>,
     ) -> bool {
         if pending_progress.is_empty() {
             return false;
@@ -191,7 +190,7 @@ impl App {
         );
     }
 
-    pub(crate) fn set_resume_reuse_status(&mut self, id: &str, chunks: usize, bytes: u64) {
+    pub(crate) fn set_resume_reuse_status(&mut self, id: &FileId, chunks: usize, bytes: u64) {
         self.status = format!(
             "Reusing {chunks} verified chunk(s) for {id} ({})",
             format_bytes(bytes)
@@ -199,10 +198,10 @@ impl App {
     }
 
     pub(crate) fn queue_url_placeholder(&mut self, url: String) {
-        if !self.overlay_files.contains_key(&url) {
+        if !self.overlay_files.contains_key(url.as_str()) {
             self.upsert_overlay_file(
                 FileEntry {
-                    id: url.clone(),
+                    id: url.clone().into(),
                     name: url,
                     size: 0,
                     downloaded: 0,
@@ -282,9 +281,6 @@ impl App {
                 self.log_state_diagnostics("scope_error");
             }
             DownloadEvent::UrlQueued { url } => {
-                if self.deleted_files.contains(&url) {
-                    return;
-                }
                 self.queue_url_placeholder(url);
             }
             DownloadEvent::FileQueued(file) => {
@@ -310,7 +306,7 @@ impl App {
         download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
     ) -> bool {
         let mut handled = false;
-        let mut pending_progress: Vec<(Arc<str>, crate::core::ProgressDelta, u64)> = Vec::new();
+        let mut pending_progress: Vec<(FileId, crate::core::ProgressDelta, u64)> = Vec::new();
         for _ in 0..MAX_DOWNLOAD_EVENTS_PER_TICK {
             let Ok(event) = download_rx.try_recv() else {
                 break;
@@ -324,7 +320,7 @@ impl App {
                     if let Some((_, pending_delta, _)) = pending_progress
                         .iter_mut()
                         .find(|(pending_id, _, pending_attempt_id)| {
-                            pending_id.as_ref() == id.as_ref() && *pending_attempt_id == attempt_id
+                            pending_id == &id && *pending_attempt_id == attempt_id
                         })
                     {
                         pending_delta.total_bytes_delta = pending_delta
@@ -604,7 +600,7 @@ mod tests {
                 key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
                 display_name: "Package".to_string(),
                 files: vec![crate::core::ResolvedFile {
-                    file_id: "file.bin".to_string(),
+                    file_id: "file.bin".to_string().into(),
                     path: "file.bin".to_string(),
                     size: 100,
                 }],
@@ -612,14 +608,14 @@ mod tests {
             },
         });
         app.apply_core_event(crate::core::CoreEvent::FileStarted {
-            file_id: "file.bin".to_string(),
+            file_id: "file.bin".to_string().into(),
             size: 100,
         });
 
         for _ in 0..3 {
             download_tx
                 .send(DownloadEvent::Progress {
-                    id: Arc::<str>::from("file.bin"),
+                    id: "file.bin".into(),
                     delta: crate::core::ProgressDelta {
                         total_bytes_delta: 10,
                         network_bytes_delta: 10,

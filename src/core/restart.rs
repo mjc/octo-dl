@@ -84,7 +84,7 @@ where
             && metadata.is_file()
         {
             snapshot.complete_files.push(FilesystemFile {
-                file_id: file_id.clone(),
+                file_id: file_id.clone().into(),
                 size: metadata.len(),
             });
             continue;
@@ -95,7 +95,7 @@ where
             && metadata.is_file()
         {
             snapshot.partial_files.push(PartialFileSnapshot {
-                file_id: file_id.clone(),
+                file_id: file_id.clone().into(),
                 bytes: metadata.len(),
                 has_sidecar: crate::download::sidecar_path(&file_id).exists(),
                 verified_bytes: crate::download::resume_sidecar_verified_bytes(&file_id)
@@ -300,7 +300,7 @@ mod tests {
     fn sample_snapshot() -> SessionSnapshotV3 {
         SessionSnapshotV3 {
             version: 4,
-            id: "session".to_string(),
+            id: "session".to_string().into(),
             created: Utc::now(),
             status: SessionRunStatus::InProgress,
             urls: vec![SessionUrlSnapshot {
@@ -311,11 +311,11 @@ mod tests {
                 id: package_id("pkg", "https://mega.nz/file/test"),
                 key: crate::core::PackageKey::new("https://mega.nz/file/test".to_string().clone()),
                 display_name: "pkg".to_string(),
-                file_ids: vec!["a.bin".to_string()],
+                file_ids: vec!["a.bin".to_string().into()],
                 error: None,
             }],
             files: vec![FileSnapshot {
-                id: "a.bin".to_string(),
+                id: "a.bin".to_string().into(),
                 package_id: package_id("pkg", "https://mega.nz/file/test"),
                 source_url: Some("https://mega.nz/file/test".to_string()),
                 path: "a.bin".to_string(),
@@ -342,7 +342,7 @@ mod tests {
             FilesystemSnapshot {
                 complete_files: Vec::new(),
                 partial_files: vec![PartialFileSnapshot {
-                    file_id: "a.bin".to_string(),
+                    file_id: "a.bin".to_string().into(),
                     bytes: 40,
                     has_sidecar: true,
                     verified_bytes: 40,
@@ -364,7 +364,7 @@ mod tests {
             Some(snapshot),
             FilesystemSnapshot {
                 complete_files: vec![FilesystemFile {
-                    file_id: "a.bin".to_string(),
+                    file_id: "a.bin".to_string().into(),
                     size: 100,
                 }],
                 partial_files: Vec::new(),
@@ -383,7 +383,7 @@ mod tests {
             Some(snapshot),
             FilesystemSnapshot {
                 complete_files: vec![FilesystemFile {
-                    file_id: "a.bin".to_string(),
+                    file_id: "a.bin".to_string().into(),
                     size: 1000,
                 }],
                 partial_files: Vec::new(),
@@ -430,7 +430,7 @@ mod tests {
             FilesystemSnapshot {
                 complete_files: Vec::new(),
                 partial_files: vec![PartialFileSnapshot {
-                    file_id: "a.bin".to_string(),
+                    file_id: "a.bin".to_string().into(),
                     bytes: 140,
                     has_sidecar: true,
                     verified_bytes: 140,
@@ -452,7 +452,7 @@ mod tests {
             FilesystemSnapshot {
                 complete_files: Vec::new(),
                 partial_files: vec![PartialFileSnapshot {
-                    file_id: "a.bin".to_string(),
+                    file_id: "a.bin".to_string().into(),
                     bytes: 100,
                     has_sidecar: false,
                     verified_bytes: 0,
@@ -475,20 +475,20 @@ mod tests {
                 id: package_id(&source_url, &source_url),
                 key: crate::core::PackageKey::new(source_url.clone().clone()),
                 display_name: source_url.clone(),
-                file_ids: vec!["a.bin".to_string()],
+                file_ids: vec!["a.bin".to_string().into()],
                 error: None,
             },
             PackageSnapshot {
                 id: package_id("batch-dup", &source_url),
                 key: crate::core::PackageKey::new(source_url.clone().clone()),
                 display_name: "Folder".to_string(),
-                file_ids: vec!["b.bin".to_string()],
+                file_ids: vec!["b.bin".to_string().into()],
                 error: None,
             },
         ];
         snapshot.files = vec![
             FileSnapshot {
-                id: "a.bin".to_string(),
+                id: "a.bin".to_string().into(),
                 package_id: package_id(&source_url, &source_url),
                 source_url: Some(source_url.clone()),
                 path: "folder/a.bin".to_string(),
@@ -500,7 +500,7 @@ mod tests {
                 message: None,
             },
             FileSnapshot {
-                id: "b.bin".to_string(),
+                id: "b.bin".to_string().into(),
                 package_id: package_id("batch-dup", &source_url),
                 source_url: Some(source_url.clone()),
                 path: "folder/b.bin".to_string(),
@@ -536,7 +536,7 @@ mod tests {
             id: package_id("stale", "https://mega.nz/file/test"),
             key: crate::core::PackageKey::new("Stale Package"),
             display_name: "Stale Package".to_string(),
-            file_ids: vec!["ghost.bin".to_string()],
+            file_ids: vec!["ghost.bin".to_string().into()],
             error: Some("boom".to_string()),
         });
         snapshot.packages[0].file_ids.clear();
@@ -568,7 +568,7 @@ mod tests {
             Some(snapshot),
             FilesystemSnapshot {
                 complete_files: vec![FilesystemFile {
-                    file_id: "orphan.bin".to_string(),
+                    file_id: "orphan.bin".to_string().into(),
                     size: 100,
                 }],
                 partial_files: Vec::new(),
@@ -599,7 +599,7 @@ mod tests {
             FilesystemSnapshot {
                 complete_files: Vec::new(),
                 partial_files: vec![PartialFileSnapshot {
-                    file_id: "orphan.bin".to_string(),
+                    file_id: "orphan.bin".to_string().into(),
                     bytes: 40,
                     has_sidecar: true,
                     verified_bytes: 40,
@@ -620,7 +620,7 @@ mod tests {
     fn restart_suppresses_deleted_and_skipped_files() {
         let mut snapshot = sample_snapshot();
         snapshot.files = vec![FileSnapshot {
-            id: "a.bin".to_string(),
+            id: "a.bin".to_string().into(),
             package_id: package_id("pkg", "https://mega.nz/file/test"),
             source_url: Some("https://mega.nz/file/test".to_string()),
             path: "a.bin".to_string(),
@@ -644,7 +644,7 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.files = vec![
             FileSnapshot {
-                id: "a.bin".to_string(),
+                id: "a.bin".to_string().into(),
                 package_id: package_id("pkg", "https://mega.nz/file/test"),
                 source_url: Some("https://mega.nz/file/test".to_string()),
                 path: "a.bin".to_string(),
@@ -656,7 +656,7 @@ mod tests {
                 message: Some("boom".to_string()),
             },
             FileSnapshot {
-                id: "a.bin".to_string(),
+                id: "a.bin".to_string().into(),
                 package_id: package_id("pkg", "https://mega.nz/file/test"),
                 source_url: Some("https://mega.nz/file/test".to_string()),
                 path: "a.bin".to_string(),

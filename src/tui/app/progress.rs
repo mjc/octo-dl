@@ -114,19 +114,19 @@ fn throughput_weight(elapsed: Duration) -> f64 {
 }
 
 impl App {
-    pub(crate) fn file_speed(&self, file_id: &str) -> u64 {
+    pub(crate) fn file_speed(&self, file_id: &crate::core::FileId) -> u64 {
         self.file_ui.get(file_id).map_or(0, |state| state.speed)
     }
 
-    fn ensure_file_ui(&mut self, file_id: &str, downloaded: u64, reset: bool) {
-        let state = self.file_ui.entry(file_id.to_string()).or_default();
+    fn ensure_file_ui(&mut self, file_id: &crate::core::FileId, downloaded: u64, reset: bool) {
+        let state = self.file_ui.entry(file_id.clone()).or_default();
         if reset {
             state.speed = 0;
             state.rate.reset(downloaded, Instant::now());
         }
     }
 
-    pub(crate) fn reset_file_ui_rate(&mut self, file_id: &str) {
+    pub(crate) fn reset_file_ui_rate(&mut self, file_id: &crate::core::FileId) {
         let downloaded = self
             .core_state
             .files
@@ -143,13 +143,13 @@ impl App {
 
     pub(crate) fn update_file_ui_progress(
         &mut self,
-        file_id: &str,
+        file_id: &crate::core::FileId,
         previous_downloaded: u64,
         downloaded: u64,
         now: Instant,
     ) -> u64 {
         let accepted = downloaded.saturating_sub(previous_downloaded);
-        let state = self.file_ui.entry(file_id.to_string()).or_default();
+        let state = self.file_ui.entry(file_id.clone()).or_default();
         state.rate.record(downloaded, now);
         state.speed = state.rate.bytes_per_sec(now);
         accepted

@@ -279,7 +279,7 @@ impl App {
                     })
                     .unwrap_or_default();
                 DashboardFileRow {
-                    id: file.id.clone(),
+                    id: file.id.to_string(),
                     package_id,
                     name: file.name.clone(),
                     size: file.size,
@@ -319,7 +319,7 @@ impl App {
                         file_id,
                     } => DashboardRow::File {
                         package_id: package_id.map_or_else(String::new, |id| id.to_string()),
-                        file_id,
+                        file_id: file_id.to_string(),
                     },
                 })
                 .collect(),
@@ -384,7 +384,7 @@ impl App {
                     }
                     let file_ids = package_files
                         .iter()
-                        .map(|file| file.id.clone())
+                        .map(|file| file.id.to_string())
                         .collect::<Vec<_>>();
                     let mut present = 0_usize;
                     let mut complete = 0_usize;
@@ -462,15 +462,15 @@ impl App {
                     file.downloaded.min(file.size)
                 };
                 DashboardPackageRow {
-                    id: file.id.clone(),
+                    id: file.id.to_string(),
                     source_url: self
                         .overlay_files
                         .get(&file.id)
                         .and_then(|overlay| overlay.source_url.clone())
-                        .unwrap_or_else(|| file.id.clone()),
+                        .unwrap_or_else(|| file.id.to_string()),
                     display_name: file.name.clone(),
                     status,
-                    file_ids: vec![file.id.clone()],
+                    file_ids: vec![file.id.to_string()],
                     present_files: 1,
                     completed_files: usize::from(matches!(file.status, FileStatus::Complete)),
                     downloaded_bytes: downloaded,
@@ -598,7 +598,7 @@ mod tests {
                 key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
                 display_name: "Package".to_string(),
                 files: vec![ResolvedFile {
-                    file_id: "file.bin".to_string(),
+                    file_id: "file.bin".to_string().into(),
                     path: "file.bin".to_string(),
                     size: 100,
                 }],
@@ -606,11 +606,11 @@ mod tests {
             },
         });
         app.apply_core_event(CoreEvent::FileStarted {
-            file_id: "file.bin".to_string(),
+            file_id: "file.bin".to_string().into(),
             size: 100,
         });
         app.apply_core_event(CoreEvent::FileProgress {
-            file_id: "file.bin".to_string(),
+            file_id: "file.bin".to_string().into(),
             total_bytes_delta: 40,
             network_bytes_delta: 40,
         });
@@ -653,7 +653,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new(9723, tx, true);
         app.files.push(super::super::app::FileEntry {
-            id: "file.bin".to_string(),
+            id: "file.bin".to_string().into(),
             name: "file.bin".to_string(),
             size: 100,
             downloaded: 0,

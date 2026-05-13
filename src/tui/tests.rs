@@ -49,11 +49,11 @@ fn resume_session_requeues_urls() {
         vec![
             TuiRow::File {
                 package_id: None,
-                file_id: expected_urls[0].clone(),
+                file_id: expected_urls[0].clone().into(),
             },
             TuiRow::File {
                 package_id: None,
-                file_id: expected_urls[1].clone(),
+                file_id: expected_urls[1].clone().into(),
             },
         ]
     );
@@ -102,7 +102,7 @@ fn resume_session_clears_empty_failed_package_errors_and_requeues_urls() {
         app.visible_rows(),
         vec![TuiRow::File {
             package_id: None,
-            file_id: "https://mega.nz/file/stale-error".to_string(),
+            file_id: "https://mega.nz/file/stale-error".to_string().into(),
         }]
     );
     assert!(!app.core_state.packages.contains_key(&package_id(
@@ -247,7 +247,7 @@ fn resume_session_restores_files_and_only_requeues_remaining_urls() {
         url_rx.try_recv().unwrap(),
         DownloadRequest::ResumeFileIds {
             source_url: "https://mega.nz/file/pending".to_string(),
-            file_ids: vec!["pending.mkv".to_string()],
+            file_ids: vec!["pending.mkv".to_string().into()],
             attempt_ids: std::collections::HashMap::new(),
         }
     );
@@ -326,14 +326,14 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
         key: crate::core::PackageKey::new("Merged Folder"),
         display_name: "Merged Folder".to_string(),
         file_ids: vec![
-            "Merged Folder/a.mkv".to_string(),
-            "Merged Folder/b.mkv".to_string(),
+            "Merged Folder/a.mkv".to_string().into(),
+            "Merged Folder/b.mkv".to_string().into(),
         ],
         error: None,
     });
     session.files = vec![
         crate::core::FileSnapshot {
-            id: "Merged Folder/a.mkv".to_string(),
+            id: "Merged Folder/a.mkv".to_string().into(),
             package_id,
             source_url: Some(source_a.to_string()),
             path: "Merged Folder/a.mkv".to_string(),
@@ -348,7 +348,7 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
             message: None,
         },
         crate::core::FileSnapshot {
-            id: "Merged Folder/b.mkv".to_string(),
+            id: "Merged Folder/b.mkv".to_string().into(),
             package_id,
             source_url: Some(source_b.to_string()),
             path: "Merged Folder/b.mkv".to_string(),
@@ -396,12 +396,12 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
         vec![
             DownloadRequest::ResumeFileIds {
                 source_url: source_a.to_string(),
-                file_ids: vec!["Merged Folder/a.mkv".to_string()],
+                file_ids: vec!["Merged Folder/a.mkv".to_string().into()],
                 attempt_ids: std::collections::HashMap::new(),
             },
             DownloadRequest::ResumeFileIds {
                 source_url: source_b.to_string(),
-                file_ids: vec!["Merged Folder/b.mkv".to_string()],
+                file_ids: vec!["Merged Folder/b.mkv".to_string().into()],
                 attempt_ids: std::collections::HashMap::new(),
             },
         ]
@@ -504,14 +504,14 @@ fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
     let mut app = App::new(0, event_tx, true);
     app.files = vec![
         app::FileEntry {
-            id: "completed.mkv".to_string(),
+            id: "completed.mkv".to_string().into(),
             name: "completed.mkv".to_string(),
             size: 128,
             downloaded: 128,
             status: FileStatus::Complete,
         },
         app::FileEntry {
-            id: "pending.mkv".to_string(),
+            id: "pending.mkv".to_string().into(),
             name: "pending.mkv".to_string(),
             size: 256,
             downloaded: 0,
@@ -599,7 +599,7 @@ fn ui_retry_file_recomputes_totals() {
     app.url_tx = url_tx;
     app.upsert_overlay_file(
         app::FileEntry {
-            id: "error.bin".to_string(),
+            id: "error.bin".to_string().into(),
             name: "error.bin".to_string(),
             size: 100,
             downloaded: 20,
@@ -613,7 +613,7 @@ fn ui_retry_file_recomputes_totals() {
     assert_eq!(app.files_total, 0);
     assert_eq!(app.total_downloaded, 20);
 
-    app.handle_ui_action(UiAction::RetryFile("error.bin".to_string()));
+    app.handle_ui_action(UiAction::RetryFile("error.bin".to_string().into()));
 
     assert_eq!(app.files[0].status, FileStatus::Queued);
     assert_eq!(app.files[0].downloaded, 0);
@@ -623,8 +623,8 @@ fn ui_retry_file_recomputes_totals() {
         url_rx.try_recv().unwrap(),
         DownloadRequest::ResumeFileIds {
             source_url: "https://mega.nz/file/error".to_string(),
-            file_ids: vec!["error.bin".to_string()],
-            attempt_ids: std::collections::HashMap::from([("error.bin".to_string(), 1)]),
+            file_ids: vec!["error.bin".to_string().into()],
+            attempt_ids: std::collections::HashMap::from([("error.bin".to_string().into(), 1)]),
         }
     );
 }
@@ -708,7 +708,7 @@ fn ui_delete_file_removes_completed_artifact_from_disk() {
     let mut app = App::new(0, event_tx, true);
     app.upsert_overlay_file(
         app::FileEntry {
-            id: file_path.to_string_lossy().into_owned(),
+            id: file_path.to_string_lossy().into_owned().into(),
             name: file_path.to_string_lossy().into_owned(),
             size: 4,
             downloaded: 4,
@@ -719,7 +719,7 @@ fn ui_delete_file_removes_completed_artifact_from_disk() {
     );
 
     app.handle_ui_action(UiAction::DeleteFile(
-        file_path.to_string_lossy().into_owned(),
+        file_path.to_string_lossy().into_owned().into(),
     ));
 
     assert!(app.files.is_empty());
@@ -751,7 +751,7 @@ fn ui_delete_core_backed_file_removes_output_and_resume_artifacts() {
             ),
             display_name: "Core Delete".to_string(),
             files: vec![ResolvedFile {
-                file_id: file_id.clone(),
+                file_id: file_id.clone().into(),
                 path: file_id.clone(),
                 size: 4,
             }],
@@ -759,10 +759,10 @@ fn ui_delete_core_backed_file_removes_output_and_resume_artifacts() {
         },
     });
     app.apply_core_event(CoreEvent::FileCompleted {
-        file_id: file_id.clone(),
+        file_id: file_id.clone().into(),
     });
 
-    app.handle_ui_action(UiAction::DeleteFile(file_id));
+    app.handle_ui_action(UiAction::DeleteFile(file_id.into()));
 
     assert!(!file_path.exists());
     assert!(!part_path.exists());
@@ -794,7 +794,7 @@ fn deleted_file_completion_event_redeletes_output_artifacts() {
             ),
             display_name: "Late Complete".to_string(),
             files: vec![ResolvedFile {
-                file_id: file_id.clone(),
+                file_id: file_id.clone().into(),
                 path: file_id.clone(),
                 size: 4,
             }],
@@ -802,17 +802,17 @@ fn deleted_file_completion_event_redeletes_output_artifacts() {
         },
     });
     app.apply_core_event(CoreEvent::FileStarted {
-        file_id: file_id.clone(),
+        file_id: file_id.clone().into(),
         size: 4,
     });
 
-    app.handle_ui_action(UiAction::DeleteFile(file_id.clone()));
+    app.handle_ui_action(UiAction::DeleteFile(file_id.clone().into()));
 
     std::fs::write(&file_path, b"done").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
     std::fs::write(&sidecar_path, b"{}").unwrap();
     app.handle_download_event(DownloadEvent::FileComplete {
-        id: file_id,
+        id: file_id.into(),
         attempt_id: 0,
     });
 
@@ -848,7 +848,7 @@ fn deleted_file_stays_deleted_after_cancel_then_completion_events() {
             ),
             display_name: "Late Cancel Complete".to_string(),
             files: vec![ResolvedFile {
-                file_id: file_id.clone(),
+                file_id: file_id.clone().into(),
                 path: file_id.clone(),
                 size: 4,
             }],
@@ -856,13 +856,13 @@ fn deleted_file_stays_deleted_after_cancel_then_completion_events() {
         },
     });
     app.apply_core_event(CoreEvent::FileStarted {
-        file_id: file_id.clone(),
+        file_id: file_id.clone().into(),
         size: 4,
     });
 
-    app.handle_ui_action(UiAction::DeleteFile(file_id.clone()));
+    app.handle_ui_action(UiAction::DeleteFile(file_id.clone().into()));
     app.handle_download_event(DownloadEvent::FileCancelled {
-        id: file_id.clone(),
+        id: file_id.clone().into(),
         attempt_id: 0,
     });
 
@@ -870,12 +870,12 @@ fn deleted_file_stays_deleted_after_cancel_then_completion_events() {
     std::fs::write(&part_path, b"partial").unwrap();
     std::fs::write(&sidecar_path, b"{}").unwrap();
     app.handle_download_event(DownloadEvent::FileComplete {
-        id: file_id.clone(),
+        id: file_id.clone().into(),
         attempt_id: 0,
     });
 
     assert!(app.files.is_empty());
-    assert!(app.deleted_files.contains(&file_id));
+    assert!(app.deleted_files.contains(file_id.as_str()));
     assert!(!file_path.exists());
     assert!(!part_path.exists());
     assert!(!sidecar_path.exists());
@@ -906,7 +906,7 @@ fn deleted_file_error_event_redeletes_output_artifacts() {
             ),
             display_name: "Late Error".to_string(),
             files: vec![ResolvedFile {
-                file_id: file_id.clone(),
+                file_id: file_id.clone().into(),
                 path: file_id.clone(),
                 size: 4,
             }],
@@ -914,17 +914,17 @@ fn deleted_file_error_event_redeletes_output_artifacts() {
         },
     });
     app.apply_core_event(CoreEvent::FileStarted {
-        file_id: file_id.clone(),
+        file_id: file_id.clone().into(),
         size: 4,
     });
 
-    app.handle_ui_action(UiAction::DeleteFile(file_id.clone()));
+    app.handle_ui_action(UiAction::DeleteFile(file_id.clone().into()));
 
     std::fs::write(&file_path, b"done").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
     std::fs::write(&sidecar_path, b"{}").unwrap();
     app.handle_download_event(DownloadEvent::FileError {
-        id: file_id,
+        id: file_id.into(),
         error: "boom".to_string(),
         attempt_id: 0,
     });
@@ -951,7 +951,7 @@ fn ui_reset_file_resets_progress_and_requeues_url() {
     app.url_tx = url_tx;
     app.upsert_overlay_file(
         app::FileEntry {
-            id: "active.bin".to_string(),
+            id: "active.bin".to_string().into(),
             name: file_path.to_string_lossy().into_owned(),
             size: 100,
             downloaded: 80,
@@ -961,7 +961,7 @@ fn ui_reset_file_resets_progress_and_requeues_url() {
         true,
     );
 
-    app.handle_ui_action(UiAction::ResetFile("active.bin".to_string()));
+    app.handle_ui_action(UiAction::ResetFile("active.bin".to_string().into()));
 
     assert_eq!(app.files[0].status, FileStatus::Queued);
     assert_eq!(app.files[0].downloaded, 0);
@@ -969,8 +969,8 @@ fn ui_reset_file_resets_progress_and_requeues_url() {
         url_rx.try_recv().unwrap(),
         DownloadRequest::ResumeFileIds {
             source_url: "https://mega.nz/file/reset".to_string(),
-            file_ids: vec!["active.bin".to_string()],
-            attempt_ids: std::collections::HashMap::from([("active.bin".to_string(), 1)]),
+            file_ids: vec!["active.bin".to_string().into()],
+            attempt_ids: std::collections::HashMap::from([("active.bin".to_string().into(), 1)]),
         }
     );
     assert!(!file_path.exists());
@@ -984,7 +984,7 @@ fn reset_file_ignores_late_completion_until_new_attempt_starts() {
     let mut app = App::new(0, event_tx, true);
     app.upsert_overlay_file(
         app::FileEntry {
-            id: "active.bin".to_string(),
+            id: "active.bin".to_string().into(),
             name: "active.bin".to_string(),
             size: 100,
             downloaded: 80,
@@ -994,9 +994,9 @@ fn reset_file_ignores_late_completion_until_new_attempt_starts() {
         true,
     );
 
-    app.handle_ui_action(UiAction::ResetFile("active.bin".to_string()));
+    app.handle_ui_action(UiAction::ResetFile("active.bin".to_string().into()));
     app.handle_download_event(DownloadEvent::FileComplete {
-        id: "active.bin".to_string(),
+        id: "active.bin".to_string().into(),
         attempt_id: 0,
     });
 
@@ -1010,7 +1010,7 @@ fn reset_file_ignores_late_error_until_new_attempt_starts() {
     let mut app = App::new(0, event_tx, true);
     app.upsert_overlay_file(
         app::FileEntry {
-            id: "active.bin".to_string(),
+            id: "active.bin".to_string().into(),
             name: "active.bin".to_string(),
             size: 100,
             downloaded: 80,
@@ -1020,9 +1020,9 @@ fn reset_file_ignores_late_error_until_new_attempt_starts() {
         true,
     );
 
-    app.handle_ui_action(UiAction::ResetFile("active.bin".to_string()));
+    app.handle_ui_action(UiAction::ResetFile("active.bin".to_string().into()));
     app.handle_download_event(DownloadEvent::FileError {
-        id: "active.bin".to_string(),
+        id: "active.bin".to_string().into(),
         error: "boom".to_string(),
         attempt_id: 0,
     });
@@ -1037,7 +1037,7 @@ fn reset_file_accepts_new_terminal_events_after_restart() {
     let mut app = App::new(0, event_tx, true);
     app.upsert_overlay_file(
         app::FileEntry {
-            id: "active.bin".to_string(),
+            id: "active.bin".to_string().into(),
             name: "active.bin".to_string(),
             size: 100,
             downloaded: 80,
@@ -1047,14 +1047,14 @@ fn reset_file_accepts_new_terminal_events_after_restart() {
         true,
     );
 
-    app.handle_ui_action(UiAction::ResetFile("active.bin".to_string()));
+    app.handle_ui_action(UiAction::ResetFile("active.bin".to_string().into()));
     app.handle_download_event(DownloadEvent::FileStart {
-        id: "active.bin".to_string(),
+        id: "active.bin".to_string().into(),
         size: 100,
         attempt_id: 1,
     });
     app.handle_download_event(DownloadEvent::FileError {
-        id: "active.bin".to_string(),
+        id: "active.bin".to_string().into(),
         error: "boom".to_string(),
         attempt_id: 1,
     });
@@ -1246,7 +1246,7 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
                 ),
                 display_name: name.to_string(),
                 files: vec![ResolvedFile {
-                    file_id: file_id.to_string(),
+                    file_id: file_id.to_string().into(),
                     path: file_id.to_string(),
                     size: 128,
                 }],
@@ -1258,7 +1258,7 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
     let _ = harness.render();
 
     harness.inject_download(DownloadEvent::FileError {
-        id: "a.bin".to_string(),
+        id: "a.bin".to_string().into(),
         error: "boom".to_string(),
         attempt_id: 0,
     });
@@ -1270,12 +1270,12 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
         harness.render().selected_row,
         Some(TuiRow::File {
             package_id: Some(package_id("pkg-a", "https://mega.nz/folder/pkg-a")),
-            file_id: "a.bin".to_string(),
+            file_id: "a.bin".to_string().into(),
         })
     );
 
     harness.inject_download(DownloadEvent::FileQueued(QueuedFile {
-        id: "a.bin".to_string(),
+        id: "a.bin".to_string().into(),
         size: 128,
         count_toward_progress: true,
         origin: crate::tui::event::FileOrigin {
@@ -1310,7 +1310,7 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
             key: crate::core::PackageKey::new("https://mega.nz/file/reset".to_string().clone()),
             display_name: "Package A".to_string(),
             files: vec![ResolvedFile {
-                file_id: "active.bin".to_string(),
+                file_id: "active.bin".to_string().into(),
                 path: "active.bin".to_string(),
                 size: 128,
             }],
@@ -1318,15 +1318,15 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
         },
     });
     harness.app.apply_core_event(CoreEvent::FileStarted {
-        file_id: "active.bin".to_string(),
+        file_id: "active.bin".to_string().into(),
         size: 128,
     });
 
     harness
         .app
-        .handle_ui_action(UiAction::ResetFile("active.bin".to_string()));
+        .handle_ui_action(UiAction::ResetFile("active.bin".to_string().into()));
     harness.inject_download(DownloadEvent::FileComplete {
-        id: "active.bin".to_string(),
+        id: "active.bin".to_string().into(),
         attempt_id: 0,
     });
     harness.tick();
@@ -1341,12 +1341,12 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
     assert_eq!(file.downloaded, 0);
 
     harness.inject_download(DownloadEvent::FileStart {
-        id: "active.bin".to_string(),
+        id: "active.bin".to_string().into(),
         size: 128,
         attempt_id: 1,
     });
     harness.inject_download(DownloadEvent::FileComplete {
-        id: "active.bin".to_string(),
+        id: "active.bin".to_string().into(),
         attempt_id: 0,
     });
     harness.tick();
@@ -1361,7 +1361,7 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
     assert_eq!(file.downloaded, 0);
 
     harness.inject_download(DownloadEvent::FileComplete {
-        id: "active.bin".to_string(),
+        id: "active.bin".to_string().into(),
         attempt_id: 1,
     });
     harness.tick();

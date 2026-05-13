@@ -173,15 +173,23 @@ fn remove_totals_contribution(state: &mut DownloadState, file: FileDerivedState)
     }
 }
 
-fn insert_file_into_package_index(state: &mut DownloadState, file_id: &str, package_id: PackageId) {
+fn insert_file_into_package_index(
+    state: &mut DownloadState,
+    file_id: &FileId,
+    package_id: PackageId,
+) {
     state
         .package_file_index
         .entry(package_id)
         .or_default()
-        .push(file_id.to_string());
+        .push(file_id.clone());
 }
 
-fn remove_file_from_package_index(state: &mut DownloadState, file_id: &str, package_id: PackageId) {
+fn remove_file_from_package_index(
+    state: &mut DownloadState,
+    file_id: &FileId,
+    package_id: PackageId,
+) {
     if let Some(file_ids) = state.package_file_index.get_mut(&package_id) {
         if let Some(index) = file_ids.iter().position(|existing| existing == file_id) {
             file_ids.swap_remove(index);
@@ -269,7 +277,7 @@ fn recompute_session_status(state: &mut DownloadState) {
 
 fn apply_file_change(
     state: &mut DownloadState,
-    file_id: &str,
+    file_id: &FileId,
     before: FileDerivedState,
     after: FileDerivedState,
 ) {
@@ -895,9 +903,9 @@ mod tests {
             },
         );
         state.files.insert(
-            "file.bin".to_string(),
+            "file.bin".to_string().into(),
             FileState {
-                id: "file.bin".to_string(),
+                id: "file.bin".to_string().into(),
                 package_id: pkg_id,
                 source_url: Some("pkg".to_string()),
                 path: "file.bin".to_string(),
@@ -928,12 +936,12 @@ mod tests {
                     display_name: "pkg".to_string(),
                     files: vec![
                         ResolvedFile {
-                            file_id: "a.bin".to_string(),
+                            file_id: "a.bin".to_string().into(),
                             path: "a.bin".to_string(),
                             size: 10,
                         },
                         ResolvedFile {
-                            file_id: "a.bin".to_string(),
+                            file_id: "a.bin".to_string().into(),
                             path: "a.bin".to_string(),
                             size: 10,
                         },
@@ -970,7 +978,7 @@ mod tests {
                     ),
                     display_name: "Resolved Folder".to_string(),
                     files: vec![ResolvedFile {
-                        file_id: "a.bin".to_string(),
+                        file_id: "a.bin".to_string().into(),
                         path: "a.bin".to_string(),
                         size: 10,
                     }],
@@ -1014,7 +1022,7 @@ mod tests {
                     ),
                     display_name: "Persist".to_string(),
                     files: vec![ResolvedFile {
-                        file_id: "episode-1.mkv".to_string(),
+                        file_id: "episode-1.mkv".to_string().into(),
                         path: "episode-1.mkv".to_string(),
                         size: 128,
                     }],
@@ -1044,7 +1052,7 @@ mod tests {
                     display_name: "Failed package".to_string(),
                     files: Vec::new(),
                     collision: Some(PackageCollision {
-                        file_id: "duplicate.bin".to_string(),
+                        file_id: "duplicate.bin".to_string().into(),
                         existing_package_id: package_id(
                             "existing",
                             "https://mega.nz/folder/failed",
@@ -1084,9 +1092,9 @@ mod tests {
             },
         );
         state.files.insert(
-            "a.bin".to_string(),
+            "a.bin".to_string().into(),
             FileState {
-                id: "a.bin".to_string(),
+                id: "a.bin".to_string().into(),
                 package_id: existing_id,
                 source_url: Some("https://mega.nz/folder/test".to_string()),
                 path: "folder/a.bin".to_string(),
@@ -1113,7 +1121,7 @@ mod tests {
                     ),
                     display_name: "Folder".to_string(),
                     files: vec![ResolvedFile {
-                        file_id: "b.bin".to_string(),
+                        file_id: "b.bin".to_string().into(),
                         path: "folder/b.bin".to_string(),
                         size: 20,
                     }],
@@ -1152,9 +1160,9 @@ mod tests {
             },
         );
         state.files.insert(
-            "a.bin".to_string(),
+            "a.bin".to_string().into(),
             FileState {
-                id: "a.bin".to_string(),
+                id: "a.bin".to_string().into(),
                 package_id: existing_id,
                 source_url: Some("https://mega.nz/folder/pkg-a".to_string()),
                 path: "a.bin".to_string(),
@@ -1184,7 +1192,7 @@ mod tests {
                     ),
                     display_name: "https://mega.nz/folder/pkg-a".to_string(),
                     files: vec![ResolvedFile {
-                        file_id: "a.bin".to_string(),
+                        file_id: "a.bin".to_string().into(),
                         path: "a.bin".to_string(),
                         size: 10,
                     }],
@@ -1224,9 +1232,9 @@ mod tests {
             },
         );
         state.files.insert(
-            "a.bin".to_string(),
+            "a.bin".to_string().into(),
             FileState {
-                id: "a.bin".to_string(),
+                id: "a.bin".to_string().into(),
                 package_id: old_id,
                 source_url: Some("https://mega.nz/folder/test".to_string()),
                 path: "folder/a.bin".to_string(),
@@ -1253,7 +1261,7 @@ mod tests {
                     ),
                     display_name: "Folder".to_string(),
                     files: vec![ResolvedFile {
-                        file_id: "b.bin".to_string(),
+                        file_id: "b.bin".to_string().into(),
                         path: "folder/b.bin".to_string(),
                         size: 20,
                     }],
@@ -1282,13 +1290,13 @@ mod tests {
         reduce(
             &mut state,
             CoreEvent::FileDeleted {
-                file_id: "file.bin".to_string(),
+                file_id: "file.bin".to_string().into(),
             },
         );
         reduce(
             &mut state,
             CoreEvent::FileStarted {
-                file_id: "file.bin".to_string(),
+                file_id: "file.bin".to_string().into(),
                 size: 100,
             },
         );
@@ -1301,7 +1309,7 @@ mod tests {
         let effects = reduce(
             &mut state,
             CoreEvent::FileDeleted {
-                file_id: "file.bin".to_string(),
+                file_id: "file.bin".to_string().into(),
             },
         );
         assert!(effects.iter().any(|effect| matches!(
@@ -1327,12 +1335,12 @@ mod tests {
                     display_name: "pkg".to_string(),
                     files: vec![
                         ResolvedFile {
-                            file_id: "done.bin".to_string(),
+                            file_id: "done.bin".to_string().into(),
                             path: "done.bin".to_string(),
                             size: 10,
                         },
                         ResolvedFile {
-                            file_id: "todo.bin".to_string(),
+                            file_id: "todo.bin".to_string().into(),
                             path: "todo.bin".to_string(),
                             size: 10,
                         },
@@ -1344,13 +1352,13 @@ mod tests {
         reduce(
             &mut state,
             CoreEvent::FileCompleted {
-                file_id: "done.bin".to_string(),
+                file_id: "done.bin".to_string().into(),
             },
         );
         reduce(
             &mut state,
             CoreEvent::FileQueued {
-                file_id: "todo.bin".to_string(),
+                file_id: "todo.bin".to_string().into(),
             },
         );
         assert_eq!(
@@ -1365,13 +1373,13 @@ mod tests {
         reduce(
             &mut state,
             CoreEvent::FileCompleted {
-                file_id: "file.bin".to_string(),
+                file_id: "file.bin".to_string().into(),
             },
         );
         let effects = reduce(
             &mut state,
             CoreEvent::FileResetRequested {
-                file_id: "file.bin".to_string(),
+                file_id: "file.bin".to_string().into(),
             },
         );
         assert_eq!(state.files["file.bin"].lifecycle, FileLifecycle::Queued);
@@ -1387,7 +1395,7 @@ mod tests {
         reduce(
             &mut state,
             CoreEvent::FileFailed {
-                file_id: "file.bin".to_string(),
+                file_id: "file.bin".to_string().into(),
                 message: "corrupt".to_string(),
             },
         );
@@ -1395,7 +1403,7 @@ mod tests {
         let effects = reduce(
             &mut state,
             CoreEvent::FileRetryRequested {
-                file_id: "file.bin".to_string(),
+                file_id: "file.bin".to_string().into(),
             },
         );
 
@@ -1416,7 +1424,7 @@ mod tests {
         let effects = reduce(
             &mut state,
             CoreEvent::FileProgress {
-                file_id: "file.bin".to_string(),
+                file_id: "file.bin".to_string().into(),
                 total_bytes_delta: 10,
                 network_bytes_delta: 10,
             },
@@ -1440,7 +1448,7 @@ mod tests {
         let effects = reduce(
             &mut state,
             CoreEvent::FileReuseDetected {
-                file_id: "file.bin".to_string(),
+                file_id: "file.bin".to_string().into(),
                 reused_bytes: 10,
                 reused_chunks: 1,
             },

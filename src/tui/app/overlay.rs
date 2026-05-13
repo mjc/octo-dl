@@ -1,12 +1,13 @@
 use super::{App, FileEntry, FileStatus, OverlayFile, VisibleFileContext};
+use crate::core::FileId;
 
 impl App {
     pub(crate) fn counted_overlay_files(
         &self,
-    ) -> impl Iterator<Item = (&str, &OverlayFile)> + '_ {
+    ) -> impl Iterator<Item = (&FileId, &OverlayFile)> + '_ {
         self.overlay_files.iter().filter_map(|(id, overlay)| {
             (!self.core_state.files.contains_key(id) && overlay.counts_toward_progress)
-                .then_some((id.as_str(), overlay))
+                .then_some((id, overlay))
         })
     }
 
@@ -19,7 +20,7 @@ impl App {
         );
     }
 
-    pub(crate) fn package_label_for_file(&self, file_id: &str) -> Option<String> {
+    pub(crate) fn package_label_for_file(&self, file_id: &FileId) -> Option<String> {
         if let Some(core_file) = self.core_state.files.get(file_id) {
             let configured = self
                 .core_state
@@ -59,14 +60,14 @@ impl App {
         self.sync_visible_files();
     }
 
-    pub(crate) fn overlay_file_mut(&mut self, id: &str) -> Option<&mut FileEntry> {
+    pub(crate) fn overlay_file_mut(&mut self, id: &FileId) -> Option<&mut FileEntry> {
         if !self.overlay_files.contains_key(id) {
             self.seed_overlay_from_visible();
         }
         self.overlay_files.get_mut(id).map(|file| &mut file.file)
     }
 
-    pub(crate) fn remove_overlay_file(&mut self, id: &str) -> Option<FileEntry> {
+    pub(crate) fn remove_overlay_file(&mut self, id: &FileId) -> Option<FileEntry> {
         if !self.overlay_files.contains_key(id) {
             self.seed_overlay_from_visible();
         }
@@ -75,15 +76,7 @@ impl App {
         removed
     }
 
-    pub(crate) fn drop_overlay_file(&mut self, id: &str) -> Option<FileEntry> {
-        self.deleted_files.insert(id.to_string());
-        let removed = self.overlay_files.shift_remove(id).map(|file| file.file);
-        self.sync_visible_files();
-        self.deleted_files.remove(id);
-        removed
-    }
-
-    pub(crate) fn visible_file_context(&self, id: &str) -> Option<VisibleFileContext> {
+    pub(crate) fn visible_file_context(&self, id: &FileId) -> Option<VisibleFileContext> {
         if let Some(core_file) = self.core_state.files.get(id) {
             let status = match core_file.lifecycle {
                 crate::core::FileLifecycle::Planned | crate::core::FileLifecycle::Queued => {
@@ -135,7 +128,7 @@ impl App {
         })
     }
 
-    pub(crate) fn mark_visible_file_complete(&mut self, id: &str, name: &str) {
+    pub(crate) fn mark_visible_file_complete(&mut self, id: &FileId, name: &str) {
         self.cancellation_tokens.remove(id);
         if !self.core_state.files.contains_key(id)
             && let Some(file) = self.overlay_file_mut(id)
@@ -154,7 +147,7 @@ impl App {
 
     pub(crate) fn show_overlay_error(
         &mut self,
-        id: &str,
+        id: &FileId,
         name: &str,
         error: &str,
         counts_toward_progress: bool,
@@ -169,7 +162,7 @@ impl App {
         } else {
             self.upsert_overlay_file(
                 FileEntry {
-                    id: id.to_string(),
+                    id: id.clone(),
                     name: name.to_string(),
                     size: 0,
                     downloaded: 0,
@@ -182,13 +175,13 @@ impl App {
         self.reset_file_ui_rate(id);
     }
 
-    pub(crate) fn mark_visible_file_error(&mut self, id: &str, name: &str, error: &str) {
+    pub(crate) fn mark_visible_file_error(&mut self, id: &FileId, name: &str, error: &str) {
         self.show_overlay_error(id, name, error, true);
         self.note_file_error(id, error);
     }
 
     pub(crate) fn show_ui_error_only(&mut self, name: &str, error: &str) {
-        self.show_overlay_error(name, name, error, false);
+        self.show_overlay_error(&FileId::from(name), name, error, false);
     }
 }
 

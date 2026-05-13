@@ -225,7 +225,7 @@ pub(super) fn draw_confirm_popup(frame: &mut ratatui::Frame, app: &App) {
             app.files
                 .iter()
                 .find(|file| file.id == *id)
-                .map_or_else(|| id.clone(), |file| file.name.clone()),
+                .map_or_else(|| id.to_string(), |file| file.name.clone()),
         ),
         Some(ConfirmAction::DeletePackage(id)) => (
             "Delete",
@@ -241,7 +241,7 @@ pub(super) fn draw_confirm_popup(frame: &mut ratatui::Frame, app: &App) {
             app.files
                 .iter()
                 .find(|file| file.id == *id)
-                .map_or_else(|| id.clone(), |file| file.name.clone()),
+                .map_or_else(|| id.to_string(), |file| file.name.clone()),
         ),
         Some(ConfirmAction::ResetPackage(id)) => (
             "Reset",

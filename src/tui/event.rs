@@ -1,18 +1,18 @@
 //! Download event types and TUI progress adapter.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use crate::{
     DownloadProgress, FileStats,
-    core::{PackageId, ProgressDelta},
+    core::{FileId, PackageId, ProgressDelta},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct TokenMessage {
-    pub file_id: String,
+    pub file_id: FileId,
     pub token: CancellationToken,
 }
 
@@ -26,7 +26,7 @@ pub struct FileOrigin {
 
 #[derive(Debug, Clone)]
 pub struct QueuedFile {
-    pub id: String,
+    pub id: FileId,
     pub size: u64,
     pub count_toward_progress: bool,
     pub origin: FileOrigin,
@@ -49,39 +49,39 @@ pub enum DownloadRequest {
     },
     ResumeFileIds {
         source_url: String,
-        file_ids: Vec<String>,
-        attempt_ids: HashMap<String, u64>,
+        file_ids: Vec<FileId>,
+        attempt_ids: HashMap<FileId, u64>,
     },
 }
 
 #[derive(Debug)]
 pub enum DownloadEvent {
     FileStart {
-        id: String,
+        id: FileId,
         size: u64,
         attempt_id: u64,
     },
     Progress {
-        id: Arc<str>,
+        id: FileId,
         delta: ProgressDelta,
         attempt_id: u64,
     },
     ResumeReused {
-        id: String,
+        id: FileId,
         chunks: usize,
         bytes: u64,
         attempt_id: u64,
     },
     FileComplete {
-        id: String,
+        id: FileId,
         attempt_id: u64,
     },
     FileCancelled {
-        id: String,
+        id: FileId,
         attempt_id: u64,
     },
     FileError {
-        id: String,
+        id: FileId,
         error: String,
         attempt_id: u64,
     },
@@ -114,7 +114,7 @@ pub enum DownloadEvent {
 
 pub struct TuiProgress {
     pub tx: mpsc::UnboundedSender<DownloadEvent>,
-    ids: Mutex<HashMap<String, Arc<str>>>,
+    ids: Mutex<HashMap<String, FileId>>,
 }
 
 impl TuiProgress {
@@ -125,13 +125,13 @@ impl TuiProgress {
         }
     }
 
-    fn intern_id(&self, name: &str) -> Arc<str> {
+    fn intern_id(&self, name: &str) -> FileId {
         let mut ids = self.ids.lock().unwrap();
         if let Some(id) = ids.get(name) {
-            return Arc::clone(id);
+            return id.clone();
         }
-        let id = Arc::<str>::from(name);
-        ids.insert(name.to_string(), Arc::clone(&id));
+        let id = FileId::from(name);
+        ids.insert(name.to_string(), id.clone());
         id
     }
 }
@@ -140,7 +140,7 @@ impl DownloadProgress for TuiProgress {
     fn on_file_start(&self, name: &str, size: u64) {
         let _ = self.intern_id(name);
         let _ = self.tx.send(DownloadEvent::FileStart {
-            id: name.to_string(),
+            id: FileId::from(name),
             size,
             attempt_id: 0,
         });
@@ -158,7 +158,7 @@ impl DownloadProgress for TuiProgress {
     fn on_resume_reused(&self, name: &str, chunks: usize, bytes: u64) {
         let _ = self.intern_id(name);
         let _ = self.tx.send(DownloadEvent::ResumeReused {
-            id: name.to_string(),
+            id: FileId::from(name),
             chunks,
             bytes,
             attempt_id: 0,
@@ -167,14 +167,14 @@ impl DownloadProgress for TuiProgress {
 
     fn on_file_complete(&self, name: &str, _stats: &FileStats) {
         let _ = self.tx.send(DownloadEvent::FileComplete {
-            id: name.to_string(),
+            id: FileId::from(name),
             attempt_id: 0,
         });
     }
 
     fn on_error(&self, name: &str, error: &str) {
         let _ = self.tx.send(DownloadEvent::FileError {
-            id: name.to_string(),
+            id: FileId::from(name),
             error: error.to_string(),
             attempt_id: 0,
         });

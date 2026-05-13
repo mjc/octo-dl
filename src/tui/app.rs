@@ -27,7 +27,7 @@ use ratatui::widgets::ListState;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::{DownloadState, PackageId, ProgressDelta, SessionSnapshotV3};
+use crate::core::{DownloadState, FileId, PackageId, ProgressDelta, SessionSnapshotV3};
 use crate::tui::dashboard::DashboardUiMode;
 
 pub(crate) use self::progress::FileUiState;
@@ -59,9 +59,9 @@ pub struct App {
     pub urls: Vec<String>,
     // File queue (main content)
     pub files: Vec<FileEntry>,
-    pub(crate) visible_file_positions: HashMap<String, usize>,
-    pub(crate) overlay_files: IndexMap<String, OverlayFile>,
-    pub(crate) file_ui: HashMap<String, FileUiState>,
+    pub(crate) visible_file_positions: HashMap<FileId, usize>,
+    pub(crate) overlay_files: IndexMap<FileId, OverlayFile>,
+    pub(crate) file_ui: HashMap<FileId, FileUiState>,
     pub file_list_state: ListState,
     pub expanded_packages: HashSet<PackageId>,
     pub sort: SortState,
@@ -95,13 +95,13 @@ pub struct App {
     /// Receives the authenticated client from the login task.
     pub client_rx: Option<tokio::sync::oneshot::Receiver<(mega::Client, reqwest::Client)>>,
     // Cancellation tokens for active downloads (maps file path to token)
-    pub cancellation_tokens: HashMap<String, CancellationToken>,
+    pub cancellation_tokens: HashMap<FileId, CancellationToken>,
     // Per-file download attempt IDs for retry/reset flows
-    pub file_attempt_ids: HashMap<String, u64>,
+    pub file_attempt_ids: HashMap<FileId, u64>,
     // Files deleted from the UI — used to suppress stale download events
-    pub deleted_files: HashSet<String>,
+    pub deleted_files: HashSet<FileId>,
     // Files reset from the UI — used to suppress stale terminal events from the old attempt
-    pub reset_pending_files: HashSet<String>,
+    pub reset_pending_files: HashSet<FileId>,
     // Session
     pub session: Option<SessionSnapshotV3>,
     pub core_state: DownloadState,

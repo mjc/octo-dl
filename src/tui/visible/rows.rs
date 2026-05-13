@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
 
-use crate::core::{DownloadState, FileLifecycle, PackageId, PackageStatus};
+use crate::core::{DownloadState, FileId, FileLifecycle, PackageId, PackageStatus};
 
 use super::TuiRow;
 use crate::tui::app::{FileEntry, FileStatus, OverlayFile, SortDirection, SortKey, SortState};
@@ -49,7 +49,7 @@ fn package_projections(
 
 fn package_sort_key_for<'a>(
     file_sort_keys: &'a HashMap<&'a str, (usize, &'a str)>,
-    overlay_files: &'a IndexMap<String, OverlayFile>,
+    overlay_files: &'a IndexMap<FileId, OverlayFile>,
     file: &'a FileEntry,
 ) -> (usize, &'a str) {
     if let Some((order, display_name)) = file_sort_keys.get(file.id.as_str()) {
@@ -77,7 +77,7 @@ fn file_status_rank(status: &FileStatus) -> u8 {
 fn sorted_file_indices_with_keys(
     files: &[FileEntry],
     file_sort_keys: &HashMap<&str, (usize, &str)>,
-    overlay_files: &IndexMap<String, OverlayFile>,
+    overlay_files: &IndexMap<FileId, OverlayFile>,
 ) -> Vec<usize> {
     let mut indices: Vec<_> = (0..files.len()).collect();
     indices.sort_by(|&left, &right| {
@@ -105,7 +105,7 @@ fn sorted_file_indices_with_keys(
 pub(super) fn sorted_file_indices(
     files: &[FileEntry],
     core_state: &DownloadState,
-    overlay_files: &IndexMap<String, OverlayFile>,
+    overlay_files: &IndexMap<FileId, OverlayFile>,
 ) -> Vec<usize> {
     let (_, file_sort_keys) = package_projections(core_state);
     sorted_file_indices_with_keys(files, &file_sort_keys, overlay_files)
@@ -157,7 +157,7 @@ fn package_is_auto_expanded_for(
             .is_some_and(|package| matches!(package.status, PackageStatus::Failed))
 }
 
-fn file_is_visible_in_package(core_state: &DownloadState, file_id: &str) -> bool {
+fn file_is_visible_in_package(core_state: &DownloadState, file_id: &FileId) -> bool {
     core_state.files.get(file_id).is_some_and(|file| {
         !matches!(
             file.lifecycle,
@@ -176,7 +176,7 @@ fn overlay_row_is_hidden_placeholder(file: &FileEntry, overlay: Option<&OverlayF
 fn package_has_visible_content(
     package_projections: &IndexMap<PackageId, PackageProjection<'_>>,
     core_state: &DownloadState,
-    overlay_files: &IndexMap<String, OverlayFile>,
+    overlay_files: &IndexMap<FileId, OverlayFile>,
     package_id: &PackageId,
 ) -> bool {
     let Some(package) = core_state.packages.get(package_id) else {
@@ -190,10 +190,10 @@ fn package_has_visible_content(
         .iter()
         .any(|file| file_is_visible_in_package(core_state, &file.id));
 
-    has_visible_files
-        || (package.error.is_some()
-            && !package_projection.files.is_empty()
-            && !overlay_files.contains_key(&package_id.to_string()))
+    has_visible_files || (package.error.is_some() && !package_projection.files.is_empty() && {
+        let package_overlay_id = package_id.to_string();
+        !overlay_files.contains_key(package_overlay_id.as_str())
+    })
 }
 
 fn package_has_visible_children(
@@ -212,7 +212,7 @@ fn package_has_visible_children(
 pub(super) fn visible_rows_for(
     files: &[FileEntry],
     core_state: &DownloadState,
-    overlay_files: &IndexMap<String, OverlayFile>,
+    overlay_files: &IndexMap<FileId, OverlayFile>,
     expanded_packages: &HashSet<PackageId>,
     sort: &SortState,
 ) -> Vec<TuiRow> {
