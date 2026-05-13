@@ -681,6 +681,33 @@ fn core_persisted_session_snapshot_is_saved_to_disk() {
 }
 
 #[test]
+fn download_status_message_reflects_actual_activity() {
+    let mut app = test_app();
+
+    app.upsert_overlay_file(
+        FileEntry {
+            id: "episode-1.mkv".to_string(),
+            name: "episode-1.mkv".to_string(),
+            size: 128,
+            downloaded: 0,
+            status: FileStatus::Queued,
+        },
+        Some("https://mega.nz/folder/root".to_string()),
+        true,
+    );
+    app.recompute_totals();
+    app.update_download_status_message();
+
+    assert_eq!(app.status, "Queued (0/1)");
+
+    app.overlay_file_mut("episode-1.mkv").unwrap().status = FileStatus::Downloading;
+    app.sync_visible_files();
+    app.update_download_status_message();
+
+    assert_eq!(app.status, "Downloading (0/1)");
+}
+
+#[test]
 fn visible_rows_hide_empty_failed_packages() {
     let mut app = test_app();
     let package_id = package_id("failed", "https://mega.nz/folder/failed");

@@ -370,11 +370,22 @@ impl App {
     }
 
     pub(crate) fn update_download_status_message(&mut self) {
-        if self.files_completed == self.files_total && self.files_total > 0 {
+        if self.paused {
+            self.status = "Paused".to_string();
+        } else if self.files_completed == self.files_total && self.files_total > 0 {
             self.status = "All downloads complete".to_string();
-        } else {
+        } else if self.files_total > 0 {
+            let activity = if self
+                .files
+                .iter()
+                .any(|file| matches!(file.status, super::FileStatus::Downloading))
+            {
+                "Downloading"
+            } else {
+                "Queued"
+            };
             self.status = format!(
-                "Downloading ({}/{})",
+                "{activity} ({}/{})",
                 self.files_completed, self.files_total
             );
         }
