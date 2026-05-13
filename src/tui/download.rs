@@ -13,7 +13,6 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::PackageId;
-use crate::download::part_path;
 use crate::{DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, is_dlc_path};
 use dirs;
 
@@ -810,16 +809,7 @@ async fn collect_node_set(
 
     let mut partial_count: usize = 0;
     for item in &to_download {
-        if downloader.config().force_overwrite {
-            continue;
-        }
-        if tokio::fs::metadata(&item.path)
-            .await
-            .is_ok_and(|metadata| metadata.len() == item.node.size())
-        {
-            continue;
-        }
-        if tokio::fs::metadata(part_path(&item.path)).await.is_ok() {
+        if item.was_partial {
             partial_count = partial_count.saturating_add(1);
         }
     }
@@ -829,6 +819,7 @@ async fn collect_node_set(
         .map(|item| crate::OwnedDownloadItem {
             path: item.path.to_string(),
             node: item.node.clone(),
+            was_partial: item.was_partial,
         })
         .collect::<Vec<_>>();
 
@@ -837,6 +828,7 @@ async fn collect_node_set(
         .map(|item| crate::OwnedDownloadItem {
             path: item.path.to_string(),
             node: item.node.clone(),
+            was_partial: item.was_partial,
         })
         .collect::<Vec<_>>();
 

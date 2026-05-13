@@ -148,6 +148,8 @@ pub struct DownloadItem<'a> {
     pub path: String,
     /// Reference to the MEGA node to download.
     pub node: &'a mega::Node,
+    /// Whether this item already has a partial local `.part` file.
+    pub was_partial: bool,
 }
 
 /// Result of collecting files from nodes.
@@ -186,6 +188,7 @@ impl CollectedFiles<'_> {
             .map(|item| OwnedDownloadItem {
                 path: item.path,
                 node: item.node.clone(),
+                was_partial: item.was_partial,
             })
             .collect()
     }
@@ -199,6 +202,7 @@ impl CollectedFiles<'_> {
             .map(|item| OwnedDownloadItem {
                 path: item.path,
                 node: item.node.clone(),
+                was_partial: item.was_partial,
             })
             .collect();
         let completed = self
@@ -207,6 +211,7 @@ impl CollectedFiles<'_> {
             .map(|item| OwnedDownloadItem {
                 path: item.path,
                 node: item.node.clone(),
+                was_partial: item.was_partial,
             })
             .collect();
         (to_download, completed)
@@ -222,6 +227,8 @@ pub struct OwnedDownloadItem {
     pub path: String,
     /// Owned copy of the MEGA node to download.
     pub node: mega::Node,
+    /// Whether this item already has a partial local `.part` file.
+    pub was_partial: bool,
 }
 
 /// Bytes and chunks reused from resumable state.
@@ -571,6 +578,7 @@ impl<F: FileSystem> Downloader<F> {
                     vec![DownloadItem {
                         path: root.name().to_string(),
                         node: root,
+                        was_partial: false,
                     }]
                 }
             })
@@ -595,7 +603,10 @@ impl<F: FileSystem> Downloader<F> {
                         item.node.size(),
                     );
                     partial += 1;
-                    to_download.push(item);
+                    to_download.push(DownloadItem {
+                        was_partial: true,
+                        ..item
+                    });
                 }
                 FileStatus::Missing => {
                     to_download.push(item);
@@ -1101,6 +1112,7 @@ fn collect_files_recursive<'a>(
     let current_files = files.into_iter().map(|file| DownloadItem {
         path: build_path(nodes, file),
         node: file,
+        was_partial: false,
     });
 
     let nested_files = folders
