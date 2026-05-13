@@ -70,6 +70,10 @@ fn dashboard_file_item(
         DashboardFileStatus::Complete => ("\u{2713}", Color::Green),
         DashboardFileStatus::Error { .. } => ("\u{2717}", Color::Red),
     };
+    let detail_color = match &file.status {
+        DashboardFileStatus::Downloading => Color::Yellow,
+        _ => Color::DarkGray,
+    };
     let prefix_label = if include_package {
         file.package_label
             .as_deref()
@@ -105,7 +109,7 @@ fn dashboard_file_item(
     ListItem::new(Line::from(vec![
         Span::styled(format!("{prefix}{name}"), row_style),
         Span::raw(filler),
-        Span::styled(detail, Style::default().fg(Color::DarkGray)),
+        Span::styled(detail, Style::default().fg(detail_color)),
     ]))
 }
 
