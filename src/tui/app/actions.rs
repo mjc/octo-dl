@@ -321,19 +321,16 @@ impl App {
             return;
         }
         self.reset_pending_files.remove(id.as_ref());
-        let previous_downloaded = self
-            .files
-            .iter()
-            .find(|file| file.id == id.as_ref())
-            .map_or(0, |file| file.downloaded);
         self.apply_core_event(CoreEvent::FileProgress {
             file_id: id.to_string(),
             total_bytes_delta: delta.total_bytes_delta,
             network_bytes_delta: delta.network_bytes_delta,
         });
-        self.refresh_visible_core_file(id.as_ref());
-        let now = Instant::now();
-        let _ = self.update_file_ui_progress(id.as_ref(), previous_downloaded, now);
+        if let Some((previous_downloaded, downloaded)) = self.refresh_visible_core_file(id.as_ref())
+        {
+            let now = Instant::now();
+            let _ = self.update_file_ui_progress(id.as_ref(), previous_downloaded, downloaded, now);
+        }
     }
 
     pub(crate) fn handle_resume_reused_event(
