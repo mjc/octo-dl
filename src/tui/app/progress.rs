@@ -144,16 +144,6 @@ impl App {
             .totals
             .displayed_network_bytes
             .saturating_add(self.overlay_total_network_downloaded);
-
-        if self.total_downloaded > self.total_size || self.files_completed > self.files_total {
-            self.log_state_diagnostics("recompute_totals_impossible");
-        } else if self.files.iter().any(|file| {
-            file.size > 0
-                && file.downloaded >= file.size
-                && !matches!(file.status, FileStatus::Complete)
-        }) {
-            self.log_state_diagnostics("recompute_totals_full_not_complete");
-        }
     }
 
     pub(crate) fn file_speed(&self, file_id: &crate::core::FileId) -> u64 {

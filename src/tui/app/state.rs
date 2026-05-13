@@ -421,7 +421,6 @@ impl App {
         let restart = build_restart_snapshot(&session);
 
         self.resume_from_restart(session, &restart);
-        self.log_state_diagnostics("resume_latest_session");
     }
 
     pub(crate) fn resume_from_restart(

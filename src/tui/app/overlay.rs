@@ -2,15 +2,6 @@ use super::{App, FileEntry, FileStatus, OverlayFile, VisibleFileContext};
 use crate::core::FileId;
 
 impl App {
-    pub(crate) fn counted_overlay_files(
-        &self,
-    ) -> impl Iterator<Item = (&FileId, &OverlayFile)> + '_ {
-        self.overlay_files.iter().filter_map(|(id, overlay)| {
-            (!self.core_state.files.contains_key(id) && overlay.counts_toward_progress)
-                .then_some((id, overlay))
-        })
-    }
-
     fn seed_overlay_from_visible(&mut self) {
         super::super::visible::seed_overlay_from_visible(
             &self.files,
