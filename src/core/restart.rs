@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use chrono::Utc;
-use indexmap::IndexMap;
 use crate::core::model::{
     DesiredState, DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
     PackageState, PackageStatus, SessionMeta, UrlId,
 };
 use crate::core::session::SessionSnapshotV3;
+use chrono::Utc;
+use indexmap::IndexMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesystemFile {
@@ -109,7 +109,7 @@ where
 #[must_use]
 pub fn build_restart_snapshot(session: &SessionSnapshotV3) -> RestartSnapshot {
     reconcile_restart(
-        Some(session.clone()),
+        Some(canonical_restart_session(session.clone())),
         scan_filesystem(session.files.iter().map(|file| file.path.clone())),
         session.urls.iter().map(|entry| entry.url.clone()).collect(),
     )
@@ -158,9 +158,13 @@ pub fn reconcile_restart(
         .map(|file| (file.file_id.clone(), file))
         .collect();
 
-    if let Some(snapshot) = session {
+    if let Some(snapshot) = session.map(canonical_restart_session) {
         for tracked_url in snapshot.urls {
-            if !state.url_order.iter().any(|existing| existing == &tracked_url.url) {
+            if !state
+                .url_order
+                .iter()
+                .any(|existing| existing == &tracked_url.url)
+            {
                 state.url_order.push(tracked_url.url);
             }
         }
@@ -211,11 +215,7 @@ pub fn reconcile_restart(
                     .get(&file.id)
                     .map_or(0, |partial| partial.verified_bytes),
             };
-            let local = crate::download::classify_observed_local_file(
-                observed,
-                file.size,
-                false,
-            );
+            let local = crate::download::classify_observed_local_file(observed, file.size, false);
             if matches!(local.status, crate::download::FileStatus::Complete) {
                 file.lifecycle = FileLifecycle::Complete;
                 file.progress.visible_completed_bytes = file.size;
@@ -278,14 +278,20 @@ pub fn reconcile_restart(
     }
 }
 
+fn canonical_restart_session(mut snapshot: SessionSnapshotV3) -> SessionSnapshotV3 {
+    crate::core::normalize_snapshot(&mut snapshot)
+        .expect("restart snapshots should be canonicalizable");
+    snapshot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::RuntimeState;
     use crate::core::model::SessionRunStatus;
     use crate::core::session::{
         FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
     };
-    use crate::core::RuntimeState;
 
     fn package_id(raw: &str, source_url: &str) -> PackageId {
         PackageId::parse_or_key(raw, &crate::core::PackageKey::new(source_url))
@@ -521,6 +527,31 @@ mod tests {
         });
         snapshot.files.clear();
         assert!(crate::core::session::validate_snapshot(&snapshot).is_err());
+    }
+
+    #[test]
+    fn build_restart_snapshot_prunes_stale_package_rows_from_in_memory_session() {
+        let mut snapshot = sample_snapshot();
+        snapshot.packages.push(PackageSnapshot {
+            id: package_id("stale", "https://mega.nz/file/test"),
+            key: crate::core::PackageKey::new("Stale Package"),
+            display_name: "Stale Package".to_string(),
+            file_ids: vec!["ghost.bin".to_string()],
+            error: Some("boom".to_string()),
+        });
+        snapshot.packages[0].file_ids.clear();
+
+        let restart = build_restart_snapshot(&snapshot);
+
+        assert_eq!(restart.state.packages.len(), 1);
+        let package = restart
+            .state
+            .packages
+            .values()
+            .next()
+            .expect("canonical package should remain");
+        assert_eq!(package.display_name, "pkg");
+        assert!(!restart.state.package_file_ids(&package.id).is_empty());
     }
 
     #[test]
