@@ -59,6 +59,7 @@ pub struct App {
     pub urls: Vec<String>,
     // File queue (main content)
     pub files: Vec<FileEntry>,
+    pub(crate) visible_file_positions: HashMap<String, usize>,
     pub(crate) overlay_files: IndexMap<String, OverlayFile>,
     pub(crate) file_ui: HashMap<String, FileUiState>,
     pub file_list_state: ListState,
@@ -137,6 +138,7 @@ impl App {
     ) {
         visible::sync_visible_files(
             &mut self.files,
+            &mut self.visible_file_positions,
             &mut self.overlay_files,
             &mut self.file_ui,
             &mut self.file_list_state,

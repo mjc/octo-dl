@@ -49,7 +49,10 @@ impl App {
         let Some(core_file) = self.core_state.files.get(file_id) else {
             return None;
         };
-        let Some(visible_file) = self.files.iter_mut().find(|file| file.id == file_id) else {
+        let Some(&visible_index) = self.visible_file_positions.get(file_id) else {
+            return None;
+        };
+        let Some(visible_file) = self.files.get_mut(visible_index) else {
             return None;
         };
 

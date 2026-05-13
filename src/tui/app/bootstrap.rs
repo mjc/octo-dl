@@ -69,6 +69,7 @@ impl App {
             url_input_active: false,
             urls: Vec::new(),
             files: Vec::new(),
+            visible_file_positions: HashMap::new(),
             overlay_files: IndexMap::new(),
             file_ui: HashMap::new(),
             file_list_state: ListState::default(),

@@ -319,6 +319,43 @@ fn progress_event_updates_visible_file_without_full_visible_sync() {
 }
 
 #[test]
+fn sync_visible_files_rebuilds_visible_file_positions_for_core_rows() {
+    let mut app = test_app();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id("pkg", "https://mega.nz/file/root"),
+            source_url: "https://mega.nz/file/root".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+            display_name: "Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: "file.bin".to_string(),
+                path: "file.bin".to_string(),
+                size: 100,
+            }],
+            collision: None,
+        },
+    });
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: "file.bin".to_string(),
+        size: 100,
+    });
+
+    assert_eq!(app.visible_file_positions.get("file.bin"), Some(&0));
+
+    app.handle_file_progress_event(
+        Arc::<str>::from("file.bin"),
+        crate::core::ProgressDelta {
+            total_bytes_delta: 25,
+            network_bytes_delta: 25,
+        },
+        0,
+    );
+
+    assert_eq!(app.visible_file_positions.get("file.bin"), Some(&0));
+    assert_eq!(app.files[0].downloaded, 25);
+}
+
+#[test]
 fn skipped_session_paths_groups_only_skipped_files_by_url() {
     let mut app = test_app();
     let mut session = session_snapshot(vec![
