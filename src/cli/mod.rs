@@ -16,7 +16,7 @@ use crate::{
     core::{
         DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
         PackageSnapshot, ProgressDelta, RuntimeState, SavedCredentials, SessionRunStatus,
-        SessionSnapshotV3, SessionUrlSnapshot, build_restart_snapshot,
+        SessionSnapshotV3, SessionUrlSnapshot, build_restart_snapshot, normalize_snapshot,
     },
     download::{infer_package_display_name, infer_package_id},
     format_bytes, format_duration, is_dlc_path,
@@ -385,6 +385,7 @@ fn register_cli_package_in_session(
             message: None,
         });
     }
+    normalize_snapshot(session).expect("cli session snapshots should stay canonical");
 }
 
 #[cfg(test)]

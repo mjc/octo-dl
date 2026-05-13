@@ -22,5 +22,5 @@ pub use restart::{
 };
 pub use session::{
     FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
-    decrypt_credential, encrypt_credential,
+    decrypt_credential, encrypt_credential, normalize_snapshot,
 };
