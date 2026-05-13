@@ -156,7 +156,7 @@ pub fn push_file(
         };
 
     session.files.push(FileSnapshot {
-        id: path.to_string(),
+        id: path.to_string().into(),
         package_id,
         source_url: Some(source_url.clone()),
         path: path.to_string(),

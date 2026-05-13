@@ -176,6 +176,12 @@ impl PartialEq<&str> for FileId {
     }
 }
 
+impl PartialEq<str> for FileId {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
 impl PartialEq<String> for FileId {
     fn eq(&self, other: &String) -> bool {
         self.as_str() == other.as_str()

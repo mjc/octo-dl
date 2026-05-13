@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 
 use super::app::App;
-use crate::core::{DownloadState, PackageId};
+use crate::core::{DownloadState, FileId, PackageId};
 use crate::tui::app::{FileEntry, FileUiState, OverlayFile, SortState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,7 +15,7 @@ pub(crate) enum TuiRow {
     Package(PackageId),
     File {
         package_id: Option<PackageId>,
-        file_id: String,
+        file_id: FileId,
     },
 }
 
@@ -33,7 +33,7 @@ pub(super) fn visible_rows(app: &App) -> Vec<TuiRow> {
 pub(super) fn sorted_file_indices(
     files: &[FileEntry],
     core_state: &DownloadState,
-    overlay_files: &IndexMap<String, OverlayFile>,
+    overlay_files: &IndexMap<FileId, OverlayFile>,
 ) -> Vec<usize> {
     rows::sorted_file_indices(files, core_state, overlay_files)
 }
@@ -41,22 +41,22 @@ pub(super) fn sorted_file_indices(
 pub(super) fn seed_overlay_from_visible(
     files: &[FileEntry],
     core_state: &DownloadState,
-    deleted_files: &HashSet<String>,
-    overlay_files: &mut IndexMap<String, OverlayFile>,
+    deleted_files: &HashSet<FileId>,
+    overlay_files: &mut IndexMap<FileId, OverlayFile>,
 ) {
     sync::seed_overlay_from_visible(files, core_state, deleted_files, overlay_files);
 }
 
 pub(super) fn sync_visible_files(
     files: &mut Vec<FileEntry>,
-    visible_file_positions: &mut HashMap<String, usize>,
-    overlay_files: &mut IndexMap<String, OverlayFile>,
-    file_ui: &mut HashMap<String, FileUiState>,
+    visible_file_positions: &mut HashMap<FileId, usize>,
+    overlay_files: &mut IndexMap<FileId, OverlayFile>,
+    file_ui: &mut HashMap<FileId, FileUiState>,
     file_list_state: &mut ListState,
     core_state: &DownloadState,
     expanded_packages: &HashSet<PackageId>,
     sort: &SortState,
-    deleted_files: &HashSet<String>,
+    deleted_files: &HashSet<FileId>,
     selected_row_identity: Option<TuiRow>,
 ) {
     sync::sync_visible_files(

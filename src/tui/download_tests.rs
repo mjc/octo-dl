@@ -39,7 +39,7 @@ fn handle_file_complete_marks_session_file_complete() {
     let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
     app.files.push(FileEntry {
-        id: "first.bin".to_string(),
+        id: "first.bin".to_string().into(),
         name: "first.bin".to_string(),
         size: 64,
         downloaded: 16,
@@ -50,7 +50,7 @@ fn handle_file_complete_marks_session_file_complete() {
     let session_path = session.state_path();
     app.session = Some(session);
 
-    app.mark_visible_file_complete("first.bin", "renamed.bin");
+    app.mark_visible_file_complete(&"first.bin".into(), "renamed.bin");
 
     let file = app
         .files
@@ -73,7 +73,7 @@ fn handle_file_complete_marks_session_file_complete() {
 fn file_queued_clears_stale_error_state() {
     let mut app = test_app();
     app.files.push(FileEntry {
-        id: "file-id".to_string(),
+        id: "file-id".to_string().into(),
         name: "old-name.mkv".to_string(),
         size: 64,
         downloaded: 17,
@@ -81,7 +81,7 @@ fn file_queued_clears_stale_error_state() {
     });
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
-        id: "file-id".to_string(),
+        id: "file-id".to_string().into(),
         size: 128,
         count_toward_progress: true,
         origin: FileOrigin {
@@ -96,13 +96,13 @@ fn file_queued_clears_stale_error_state() {
     assert_eq!(file.name, "file-id");
     assert_eq!(file.size, 128);
     assert_eq!(
-        app.visible_file_context("file-id")
+        app.visible_file_context(&"file-id".into())
             .and_then(|context| context.source_url),
         Some("https://mega.nz/file/new".to_string())
     );
     assert_eq!(file.status, FileStatus::Queued);
     assert_eq!(file.downloaded, 0);
-    assert_eq!(app.file_speed("file-id"), 0);
+    assert_eq!(app.file_speed(&"file-id".into()), 0);
 }
 
 #[test]
@@ -124,7 +124,7 @@ fn file_queued_does_not_restore_session_skipped_file() {
     app.session = Some(session);
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
-        id: "episode.mkv".to_string(),
+        id: "episode.mkv".to_string().into(),
         size: 128,
         count_toward_progress: true,
         origin: FileOrigin {
@@ -147,11 +147,11 @@ fn url_placeholder_lives_in_overlay_until_resolved() {
     let url = "https://mega.nz/folder/root".to_string();
 
     app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
-    assert!(app.overlay_files.contains_key(&url));
+    assert!(app.overlay_files.contains_key(url.as_str()));
     assert!(app.files.iter().any(|file| file.id == url));
 
     app.handle_download_event(DownloadEvent::UrlResolved { url: url.clone() });
-    assert!(!app.overlay_files.contains_key(&url));
+    assert!(!app.overlay_files.contains_key(url.as_str()));
     assert!(!app.files.iter().any(|file| file.id == url));
 }
 
@@ -172,7 +172,7 @@ fn url_level_error_replaces_placeholder_in_overlay() {
 
     let overlay = app
         .overlay_files
-        .get(&url)
+        .get(url.as_str())
         .expect("url-level errors should remain in overlay");
     assert!(matches!(overlay.file.status, FileStatus::Error(ref msg) if msg == "bad folder"));
     let session = app.session.as_ref().expect("session should remain");
@@ -181,13 +181,13 @@ fn url_level_error_replaces_placeholder_in_overlay() {
 }
 
 #[test]
-fn file_queued_from_deleted_url_is_ignored() {
+fn file_queued_is_not_blocked_by_deleted_url_like_file_id() {
     let mut app = test_app();
     let url = "https://mega.nz/folder/deleted".to_string();
-    app.deleted_files.insert(url.clone());
+    app.deleted_files.insert(url.clone().into());
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
-        id: "episode.mkv".to_string(),
+        id: "episode.mkv".to_string().into(),
         size: 128,
         count_toward_progress: true,
         origin: FileOrigin {
@@ -201,9 +201,9 @@ fn file_queued_from_deleted_url_is_ignored() {
         },
     }));
 
-    assert!(app.files.is_empty());
-    assert!(app.core_state.files.is_empty());
-    assert!(app.core_state.packages.is_empty());
+    assert_eq!(app.files.len(), 1);
+    assert_eq!(app.core_state.files.len(), 1);
+    assert_eq!(app.core_state.packages.len(), 1);
 }
 
 #[test]
@@ -211,7 +211,7 @@ fn handle_file_complete_is_idempotent_for_visible_complete_rows() {
     let mut app = test_app();
     app.upsert_overlay_file(
         FileEntry {
-            id: "file-id".to_string(),
+            id: "file-id".to_string().into(),
             name: "file.mkv".to_string(),
             size: 128,
             downloaded: 128,
@@ -223,7 +223,7 @@ fn handle_file_complete_is_idempotent_for_visible_complete_rows() {
     app.recompute_totals();
     assert_eq!(app.files_completed, 1);
 
-    app.mark_visible_file_complete("file-id", "file.mkv");
+    app.mark_visible_file_complete(&"file-id".into(), "file.mkv");
 
     assert_eq!(app.files_completed, 1);
     let file = app.files.iter().find(|file| file.id == "file-id").unwrap();
@@ -236,7 +236,7 @@ fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
     let mut app = test_app();
     app.upsert_overlay_file(
         FileEntry {
-            id: "episode.mkv".to_string(),
+            id: "episode.mkv".to_string().into(),
             name: "episode.mkv".to_string(),
             size: 128,
             downloaded: 128,
@@ -248,7 +248,7 @@ fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
     app.recompute_totals();
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
-        id: "episode.mkv".to_string(),
+        id: "episode.mkv".to_string().into(),
         size: 128,
         count_toward_progress: false,
         origin: FileOrigin {
@@ -259,7 +259,7 @@ fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
         },
     }));
     app.handle_download_event(DownloadEvent::FileComplete {
-        id: "episode.mkv".to_string(),
+        id: "episode.mkv".to_string().into(),
         attempt_id: 0,
     });
 
@@ -272,7 +272,7 @@ fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
     assert_eq!(file.status, FileStatus::Complete);
     assert_eq!(file.downloaded, 128);
     assert_eq!(app.files_completed, 0);
-    assert_eq!(app.files_total, 0);
+    assert_eq!(app.files_total, 1);
 }
 
 #[test]
@@ -286,7 +286,7 @@ fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
                 package_display_name: None,
             },
             nodes: None,
-            requested_file_ids: None,
+            requested_files: RequestedFiles::All,
             requested_attempt_ids: HashMap::new(),
             emit_url_resolved: true,
         },
@@ -298,7 +298,7 @@ fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
                 package_display_name: None,
             },
             nodes: None,
-            requested_file_ids: None,
+            requested_files: RequestedFiles::All,
             requested_attempt_ids: HashMap::new(),
             emit_url_resolved: true,
         },
@@ -310,7 +310,7 @@ fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
                 package_display_name: None,
             },
             nodes: None,
-            requested_file_ids: None,
+            requested_files: RequestedFiles::All,
             requested_attempt_ids: HashMap::new(),
             emit_url_resolved: true,
         },
@@ -416,7 +416,7 @@ fn progress_deltas_do_not_exceed_file_size() {
     let file_size: u64 = 1_000_000;
 
     app.handle_download_event(DownloadEvent::FileStart {
-        id: "test.bin".to_string(),
+        id: "test.bin".to_string().into(),
         size: file_size,
         attempt_id: 0,
     });
@@ -424,7 +424,7 @@ fn progress_deltas_do_not_exceed_file_size() {
     let deltas = [100_000u64, 250_000, 350_000, 200_000, 100_000];
     for d in deltas {
         app.handle_download_event(DownloadEvent::Progress {
-            id: std::sync::Arc::<str>::from("test.bin"),
+            id: "test.bin".into(),
             delta: ProgressDelta {
                 total_bytes_delta: d,
                 network_bytes_delta: d,
@@ -453,7 +453,7 @@ fn cumulative_values_as_deltas_are_capped_at_file_size() {
     let file_size: u64 = 1_000_000;
 
     app.handle_download_event(DownloadEvent::FileStart {
-        id: "test.bin".to_string(),
+        id: "test.bin".to_string().into(),
         size: file_size,
         attempt_id: 0,
     });
@@ -461,7 +461,7 @@ fn cumulative_values_as_deltas_are_capped_at_file_size() {
     let cumulatives = [100_000u64, 350_000, 700_000, 900_000, 1_000_000];
     for c in cumulatives {
         app.handle_download_event(DownloadEvent::Progress {
-            id: std::sync::Arc::<str>::from("test.bin"),
+            id: "test.bin".into(),
             delta: ProgressDelta {
                 total_bytes_delta: c,
                 network_bytes_delta: c,

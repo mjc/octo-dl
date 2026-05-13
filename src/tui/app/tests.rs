@@ -1,5 +1,4 @@
 use super::*;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tempfile::tempdir;
@@ -17,7 +16,7 @@ use crate::{
 fn test_app() -> App {
     let path = tempdir()
         .expect("test state directory should exist")
-        .into_path();
+        .keep();
     std::mem::forget(StateDirectoryGuard::set(&path));
     let (tx, _rx) = mpsc::unbounded_channel();
     App::new(9723, tx, true)
@@ -144,7 +143,7 @@ fn dashboard_json_contains_visible_file_state_without_internal_fields() {
     let mut app = test_app();
     app.upsert_overlay_file(
         FileEntry {
-            id: "stable/file.bin".to_string(),
+            id: "stable/file.bin".to_string().into(),
             name: "file.bin".to_string(),
             size: 128,
             downloaded: 64,
@@ -154,7 +153,7 @@ fn dashboard_json_contains_visible_file_state_without_internal_fields() {
         true,
     );
     app.file_ui.insert(
-        "stable/file.bin".to_string(),
+        "stable/file.bin".to_string().into(),
         FileUiState {
             speed: 32,
             rate: Default::default(),
@@ -218,7 +217,7 @@ fn aggregate_rate_uses_progress_since_current_baseline() {
     let start = Instant::now();
     let mut app = test_app();
     app.files.push(FileEntry {
-        id: "file.bin".to_string(),
+        id: "file.bin".to_string().into(),
         name: "file.bin".to_string(),
         size: 2_000,
         downloaded: 1_000,
@@ -240,7 +239,7 @@ fn aggregate_rate_ignores_reused_bytes() {
     let start = Instant::now();
     let mut app = test_app();
     app.files.push(FileEntry {
-        id: "file.bin".to_string(),
+        id: "file.bin".to_string().into(),
         name: "file.bin".to_string(),
         size: 2_000,
         downloaded: 1_000,
@@ -260,7 +259,7 @@ fn aggregate_rate_ignores_reused_bytes() {
 fn record_progress_caps_downloaded_at_file_size() {
     let mut app = test_app();
     let file = FileEntry {
-        id: "file.bin".to_string(),
+        id: "file.bin".to_string().into(),
         name: "file.bin".to_string(),
         size: 100,
         downloaded: 90,
@@ -269,10 +268,10 @@ fn record_progress_caps_downloaded_at_file_size() {
     let now = Instant::now();
 
     app.file_ui
-        .insert("file.bin".to_string(), FileUiState::default());
+        .insert("file.bin".to_string().into(), FileUiState::default());
     app.files.push(file);
     app.files[0].downloaded = 100;
-    let accepted = app.update_file_ui_progress("file.bin", 90, 100, now);
+    let accepted = app.update_file_ui_progress(&"file.bin".into(), 90, 100, now);
 
     assert_eq!(accepted, 10);
     assert_eq!(app.files[0].downloaded, 100);
@@ -288,7 +287,7 @@ fn progress_event_updates_visible_file_without_full_visible_sync() {
             key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string().clone()),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
-                file_id: "file.bin".to_string(),
+                file_id: "file.bin".to_string().into(),
                 path: "file.bin".to_string(),
                 size: 100,
             }],
@@ -296,12 +295,11 @@ fn progress_event_updates_visible_file_without_full_visible_sync() {
         },
     });
     app.apply_core_event(CoreEvent::FileStarted {
-        file_id: "file.bin".to_string(),
+        file_id: "file.bin".to_string().into(),
         size: 100,
     });
 
-    app.handle_file_progress_event(
-        Arc::<str>::from("file.bin"),
+    app.handle_file_progress_event("file.bin".into(),
         crate::core::ProgressDelta {
             total_bytes_delta: 40,
             network_bytes_delta: 40,
@@ -328,7 +326,7 @@ fn sync_visible_files_rebuilds_visible_file_positions_for_core_rows() {
             key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
-                file_id: "file.bin".to_string(),
+                file_id: "file.bin".to_string().into(),
                 path: "file.bin".to_string(),
                 size: 100,
             }],
@@ -336,14 +334,13 @@ fn sync_visible_files_rebuilds_visible_file_positions_for_core_rows() {
         },
     });
     app.apply_core_event(CoreEvent::FileStarted {
-        file_id: "file.bin".to_string(),
+        file_id: "file.bin".to_string().into(),
         size: 100,
     });
 
     assert_eq!(app.visible_file_positions.get("file.bin"), Some(&0));
 
-    app.handle_file_progress_event(
-        Arc::<str>::from("file.bin"),
+    app.handle_file_progress_event("file.bin".into(),
         crate::core::ProgressDelta {
             total_bytes_delta: 25,
             network_bytes_delta: 25,
@@ -365,7 +362,7 @@ fn visible_file_context_prefers_core_state_over_stale_visible_row() {
             key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
-                file_id: "file.bin".to_string(),
+                file_id: "file.bin".to_string().into(),
                 path: "fresh.bin".to_string(),
                 size: 321,
             }],
@@ -377,7 +374,7 @@ fn visible_file_context_prefers_core_state_over_stale_visible_row() {
     app.files[0].status = FileStatus::Error("stale".to_string());
 
     let context = app
-        .visible_file_context("file.bin")
+        .visible_file_context(&"file.bin".into())
         .expect("context should exist");
 
     assert_eq!(context.artifact_path, "fresh.bin");
@@ -432,7 +429,7 @@ fn register_session_queued_file_does_not_revive_skipped_entry() {
         "https://mega.nz/file/a",
         "https://mega.nz/file/a",
         "https://mega.nz/file/a",
-        "skip-a.bin",
+        &"skip-a.bin".into(),
         1,
     );
 
@@ -461,7 +458,7 @@ fn register_session_queued_file_preserves_explicit_package_identity() {
         "Batch Folder",
         "https://mega.nz/folder/root",
         "https://mega.nz/folder/root",
-        "episode-1.mkv",
+        &"episode-1.mkv".into(),
         128,
     );
 
@@ -502,7 +499,7 @@ fn file_queued_without_explicit_package_id_reuses_existing_package_for_url() {
             key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string().clone()),
             display_name: "Batch Folder".to_string(),
             files: vec![ResolvedFile {
-                file_id: "episode-1.mkv".to_string(),
+                file_id: "episode-1.mkv".to_string().into(),
                 path: "episode-1.mkv".to_string(),
                 size: 128,
             }],
@@ -511,7 +508,7 @@ fn file_queued_without_explicit_package_id_reuses_existing_package_for_url() {
     });
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
-        id: "episode-1.mkv".to_string(),
+        id: "episode-1.mkv".to_string().into(),
         size: 128,
         count_toward_progress: true,
         origin: crate::tui::event::FileOrigin {
@@ -562,7 +559,7 @@ fn register_session_queued_file_uses_resolved_source_url_for_package_identity() 
         "Batch Folder",
         "bundle.dlc",
         "https://mega.nz/folder/resolved",
-        "episode-1.mkv",
+        &"episode-1.mkv".into(),
         128,
     );
 
@@ -614,7 +611,7 @@ fn register_session_queued_file_dedupes_same_source_url_across_package_ids() {
         "Package A",
         "https://mega.nz/folder/root",
         "https://mega.nz/folder/root",
-        "episode-1.mkv",
+        &"episode-1.mkv".into(),
         128,
     ));
     assert!(app.register_session_queued_file(
@@ -622,7 +619,7 @@ fn register_session_queued_file_dedupes_same_source_url_across_package_ids() {
         "Package B",
         "https://mega.nz/folder/root",
         "https://mega.nz/folder/root",
-        "episode-2.mkv",
+        &"episode-2.mkv".into(),
         256,
     ));
 
@@ -666,7 +663,7 @@ fn file_queued_retires_submitted_url_alias_after_resolution() {
     });
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
-        id: "episode-1.mkv".to_string(),
+        id: "episode-1.mkv".to_string().into(),
         size: 128,
         count_toward_progress: true,
         origin: crate::tui::event::FileOrigin {
@@ -713,11 +710,11 @@ fn url_resolved_updates_session_status_and_clears_overlay() {
     )]));
 
     app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
-    assert!(app.overlay_files.contains_key(&url));
+    assert!(app.overlay_files.contains_key(url.as_str()));
 
     app.handle_download_event(DownloadEvent::UrlResolved { url: url.clone() });
 
-    assert!(!app.overlay_files.contains_key(&url));
+    assert!(!app.overlay_files.contains_key(url.as_str()));
     let session = app.session.as_ref().expect("session should remain");
     assert_eq!(session.urls[0].url, url);
     assert!(session.urls[0].error.is_none());
@@ -733,14 +730,14 @@ fn pending_empty_package_placeholder_is_visible() {
         app.visible_rows(),
         vec![TuiRow::File {
             package_id: None,
-            file_id: "https://mega.nz/folder/root".to_string(),
+            file_id: "https://mega.nz/folder/root".to_string().into(),
         }]
     );
     assert_eq!(
         app.selected_row(),
         Some(TuiRow::File {
             package_id: None,
-            file_id: "https://mega.nz/folder/root".to_string(),
+            file_id: "https://mega.nz/folder/root".to_string().into(),
         })
     );
 }
@@ -758,7 +755,7 @@ fn core_persisted_session_snapshot_is_saved_to_disk() {
             key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string().clone()),
             display_name: "Root".to_string(),
             files: vec![ResolvedFile {
-                file_id: "episode-1.mkv".to_string(),
+                file_id: "episode-1.mkv".to_string().into(),
                 path: "episode-1.mkv".to_string(),
                 size: 128,
             }],
@@ -779,7 +776,7 @@ fn download_status_message_reflects_actual_activity() {
 
     app.upsert_overlay_file(
         FileEntry {
-            id: "episode-1.mkv".to_string(),
+            id: "episode-1.mkv".to_string().into(),
             name: "episode-1.mkv".to_string(),
             size: 128,
             downloaded: 0,
@@ -793,7 +790,7 @@ fn download_status_message_reflects_actual_activity() {
 
     assert_eq!(app.status, "Queued (0/1)");
 
-    app.overlay_file_mut("episode-1.mkv").unwrap().status = FileStatus::Downloading;
+    app.overlay_file_mut(&"episode-1.mkv".into()).unwrap().status = FileStatus::Downloading;
     app.sync_visible_files();
     app.update_download_status_message();
 
@@ -828,7 +825,7 @@ fn deleted_package_with_no_remaining_visible_files_is_hidden() {
             key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string().clone()),
             display_name: "https://mega.nz/folder/root".to_string(),
             files: vec![ResolvedFile {
-                file_id: "ghost.bin".to_string(),
+                file_id: "ghost.bin".to_string().into(),
                 path: "ghost.bin".to_string(),
                 size: 1,
             }],
@@ -836,7 +833,7 @@ fn deleted_package_with_no_remaining_visible_files_is_hidden() {
         },
     });
     app.apply_core_event(CoreEvent::FileDeleted {
-        file_id: "ghost.bin".to_string(),
+        file_id: "ghost.bin".to_string().into(),
     });
 
     assert!(app.visible_rows().is_empty());
@@ -853,7 +850,7 @@ fn overlay_error_remains_visible_alongside_core_package_rows() {
             key: crate::core::PackageKey::new("https://mega.nz/folder/good".to_string().clone()),
             display_name: "Good Package".to_string(),
             files: vec![ResolvedFile {
-                file_id: "good.bin".to_string(),
+                file_id: "good.bin".to_string().into(),
                 path: "good.bin".to_string(),
                 size: 1,
             }],
@@ -873,7 +870,7 @@ fn overlay_error_remains_visible_alongside_core_package_rows() {
     ))));
     assert!(rows.contains(&TuiRow::File {
         package_id: None,
-        file_id: "https://mega.nz/folder/bad".to_string(),
+        file_id: "https://mega.nz/folder/bad".to_string().into(),
     }));
 }
 
@@ -897,7 +894,7 @@ fn url_level_overlay_error_does_not_also_render_empty_package_row() {
         app.visible_rows(),
         vec![TuiRow::File {
             package_id: None,
-            file_id: url,
+            file_id: url.into(),
         }]
     );
 }
@@ -917,7 +914,7 @@ fn deleting_url_level_error_removes_session_url_and_ignores_late_events() {
         scope: url.clone(),
         error: "bad folder".to_string(),
     });
-    app.handle_ui_action(UiAction::DeleteFile(url.clone()));
+    app.handle_ui_action(UiAction::DeleteFile(url.clone().into()));
 
     assert!(app.visible_rows().is_empty());
     assert!(!app.urls.contains(&url));
@@ -946,17 +943,17 @@ fn deleting_url_level_error_removes_session_url_and_ignores_late_events() {
 }
 
 #[test]
-fn resubmitting_deleted_url_clears_late_event_fence() {
+fn submitting_url_does_not_consult_deleted_file_ids() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
     let url = "https://mega.nz/folder/bad".to_string();
-    app.deleted_files.insert(url.clone());
+    app.deleted_files.insert(url.clone().into());
 
     app.submit_url(url.clone());
 
     assert!(app.urls.contains(&url));
-    assert!(!app.deleted_files.contains(&url));
+    assert!(app.deleted_files.contains(url.as_str()));
 }
 
 #[test]
@@ -968,14 +965,14 @@ fn shutdown_sync_refreshes_session_progress_skipped_during_hot_events() {
     let mut session = session_snapshot(vec![(url.as_str(), UrlFixtureStatus::Fetched)]);
     push_file(&mut session, 0, "file-id", 128, FileFixtureStatus::Pending);
     app.session = Some(session);
-    app.ensure_core_file("file-id", &url, "file-id", 128, true);
+    app.ensure_core_file(&"file-id".into(), &url, "file-id", 128, true);
 
     app.apply_core_event(CoreEvent::FileStarted {
-        file_id: "file-id".to_string(),
+        file_id: "file-id".to_string().into(),
         size: 128,
     });
     app.apply_core_event(CoreEvent::FileProgress {
-        file_id: "file-id".to_string(),
+        file_id: "file-id".to_string().into(),
         total_bytes_delta: 64,
         network_bytes_delta: 64,
     });
@@ -1012,7 +1009,7 @@ fn mark_visible_file_error_updates_session_file_status() {
     push_file(&mut session, 0, "file-id", 128, FileFixtureStatus::Pending);
     app.session = Some(session);
 
-    app.mark_visible_file_error("file-id", "file-id", "network failure");
+    app.mark_visible_file_error(&"file-id".into(), "file-id", "network failure");
 
     let session = app.session.as_ref().expect("session should remain");
     assert!(matches!(
@@ -1065,7 +1062,7 @@ fn session_adapter_replace_state_replaces_stale_package_rows() {
         id: package_id("batch-stale", "https://mega.nz/file/a"),
         key: crate::core::PackageKey::new("https://mega.nz/file/a".to_string().clone()),
         display_name: "Stale Batch".to_string(),
-        file_ids: vec!["old.bin".to_string()],
+        file_ids: vec!["old.bin".to_string().into()],
         error: None,
     });
 
@@ -1088,7 +1085,7 @@ fn session_adapter_register_queued_file_rebuilds_package_membership_immediately(
         id: package_id("stale", "Stale Folder"),
         key: crate::core::PackageKey::new("Stale Folder"),
         display_name: "Stale Folder".to_string(),
-        file_ids: vec!["ghost.bin".to_string()],
+        file_ids: vec!["ghost.bin".to_string().into()],
         error: Some("boom".to_string()),
     });
 
@@ -1191,12 +1188,12 @@ fn sorted_file_indices_group_by_package_before_status() {
             display_name: "Package A".to_string(),
             files: vec![
                 ResolvedFile {
-                    file_id: "a-queued.bin".to_string(),
+                    file_id: "a-queued.bin".to_string().into(),
                     path: "a-queued.bin".to_string(),
                     size: 10,
                 },
                 ResolvedFile {
-                    file_id: "a-complete.bin".to_string(),
+                    file_id: "a-complete.bin".to_string().into(),
                     path: "a-complete.bin".to_string(),
                     size: 10,
                 },
@@ -1211,7 +1208,7 @@ fn sorted_file_indices_group_by_package_before_status() {
             key: crate::core::PackageKey::new("https://mega.nz/folder/b".to_string().clone()),
             display_name: "Package B".to_string(),
             files: vec![ResolvedFile {
-                file_id: "b-downloading.bin".to_string(),
+                file_id: "b-downloading.bin".to_string().into(),
                 path: "b-downloading.bin".to_string(),
                 size: 10,
             }],
@@ -1219,13 +1216,13 @@ fn sorted_file_indices_group_by_package_before_status() {
         },
     });
     app.apply_core_event(CoreEvent::FileQueued {
-        file_id: "a-queued.bin".to_string(),
+        file_id: "a-queued.bin".to_string().into(),
     });
     app.apply_core_event(CoreEvent::FileCompleted {
-        file_id: "a-complete.bin".to_string(),
+        file_id: "a-complete.bin".to_string().into(),
     });
     app.apply_core_event(CoreEvent::FileStarted {
-        file_id: "b-downloading.bin".to_string(),
+        file_id: "b-downloading.bin".to_string().into(),
         size: 10,
     });
 
@@ -1257,22 +1254,22 @@ fn expanded_package_orders_files_error_downloading_queued_complete() {
             display_name: "Package".to_string(),
             files: vec![
                 ResolvedFile {
-                    file_id: "queued.bin".to_string(),
+                    file_id: "queued.bin".to_string().into(),
                     path: "queued.bin".to_string(),
                     size: 10,
                 },
                 ResolvedFile {
-                    file_id: "complete.bin".to_string(),
+                    file_id: "complete.bin".to_string().into(),
                     path: "complete.bin".to_string(),
                     size: 10,
                 },
                 ResolvedFile {
-                    file_id: "downloading.bin".to_string(),
+                    file_id: "downloading.bin".to_string().into(),
                     path: "downloading.bin".to_string(),
                     size: 10,
                 },
                 ResolvedFile {
-                    file_id: "error.bin".to_string(),
+                    file_id: "error.bin".to_string().into(),
                     path: "error.bin".to_string(),
                     size: 10,
                 },
@@ -1282,17 +1279,17 @@ fn expanded_package_orders_files_error_downloading_queued_complete() {
     });
     app.expanded_packages.insert(package_id);
     app.apply_core_event(CoreEvent::FileQueued {
-        file_id: "queued.bin".to_string(),
+        file_id: "queued.bin".to_string().into(),
     });
     app.apply_core_event(CoreEvent::FileCompleted {
-        file_id: "complete.bin".to_string(),
+        file_id: "complete.bin".to_string().into(),
     });
     app.apply_core_event(CoreEvent::FileStarted {
-        file_id: "downloading.bin".to_string(),
+        file_id: "downloading.bin".to_string().into(),
         size: 10,
     });
     app.apply_core_event(CoreEvent::FileFailed {
-        file_id: "error.bin".to_string(),
+        file_id: "error.bin".to_string().into(),
         message: "boom".to_string(),
     });
 
@@ -1302,19 +1299,19 @@ fn expanded_package_orders_files_error_downloading_queued_complete() {
             TuiRow::Package(package_id),
             TuiRow::File {
                 package_id: Some(package_id),
-                file_id: "error.bin".to_string(),
+                file_id: "error.bin".to_string().into(),
             },
             TuiRow::File {
                 package_id: Some(package_id),
-                file_id: "downloading.bin".to_string(),
+                file_id: "downloading.bin".to_string().into(),
             },
             TuiRow::File {
                 package_id: Some(package_id),
-                file_id: "queued.bin".to_string(),
+                file_id: "queued.bin".to_string().into(),
             },
             TuiRow::File {
                 package_id: Some(package_id),
-                file_id: "complete.bin".to_string(),
+                file_id: "complete.bin".to_string().into(),
             },
         ]
     );
@@ -1330,7 +1327,7 @@ fn pause_downloads_queues_core_backed_active_files() {
             key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string().clone()),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
-                file_id: "episode.bin".to_string(),
+                file_id: "episode.bin".to_string().into(),
                 path: "episode.bin".to_string(),
                 size: 128,
             }],
@@ -1338,12 +1335,12 @@ fn pause_downloads_queues_core_backed_active_files() {
         },
     });
     app.apply_core_event(CoreEvent::FileStarted {
-        file_id: "episode.bin".to_string(),
+        file_id: "episode.bin".to_string().into(),
         size: 128,
     });
     let token = CancellationToken::new();
     app.cancellation_tokens
-        .insert("episode.bin".to_string(), token.clone());
+        .insert("episode.bin".to_string().into(), token.clone());
 
     app.pause_downloads();
 
@@ -1373,7 +1370,7 @@ fn sync_visible_files_prunes_stale_file_ui_state() {
             key: crate::core::PackageKey::new("https://mega.nz/file/test".to_string().clone()),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
-                file_id: "kept.bin".to_string(),
+                file_id: "kept.bin".to_string().into(),
                 path: "kept.bin".to_string(),
                 size: 128,
             }],
@@ -1381,14 +1378,14 @@ fn sync_visible_files_prunes_stale_file_ui_state() {
         },
     });
     app.file_ui.insert(
-        "kept.bin".to_string(),
+        "kept.bin".to_string().into(),
         FileUiState {
             speed: 42,
             rate: Default::default(),
         },
     );
     app.file_ui.insert(
-        "stale.bin".to_string(),
+        "stale.bin".to_string().into(),
         FileUiState {
             speed: 99,
             rate: Default::default(),
@@ -1412,12 +1409,12 @@ fn sync_visible_files_keeps_package_row_selected_when_failed_package_auto_expand
             display_name: "Package".to_string(),
             files: vec![
                 ResolvedFile {
-                    file_id: "episode-1.bin".to_string(),
+                    file_id: "episode-1.bin".to_string().into(),
                     path: "episode-1.bin".to_string(),
                     size: 128,
                 },
                 ResolvedFile {
-                    file_id: "episode-2.bin".to_string(),
+                    file_id: "episode-2.bin".to_string().into(),
                     path: "episode-2.bin".to_string(),
                     size: 256,
                 },
@@ -1435,7 +1432,7 @@ fn sync_visible_files_keeps_package_row_selected_when_failed_package_auto_expand
     );
 
     app.apply_core_event(CoreEvent::FileFailed {
-        file_id: "episode-1.bin".to_string(),
+        file_id: "episode-1.bin".to_string().into(),
         message: "boom".to_string(),
     });
 

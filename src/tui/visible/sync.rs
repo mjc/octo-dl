@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 
-use crate::core::{DownloadState, FileLifecycle, FileState, PackageId, PackageState};
+use crate::core::{DownloadState, FileId, FileLifecycle, FileState, PackageId, PackageState};
 
 use super::TuiRow;
 use super::rows::visible_rows_for;
@@ -48,8 +48,8 @@ fn project_core_file(
 pub(super) fn seed_overlay_from_visible(
     files: &[FileEntry],
     core_state: &DownloadState,
-    deleted_files: &HashSet<String>,
-    overlay_files: &mut IndexMap<String, OverlayFile>,
+    deleted_files: &HashSet<FileId>,
+    overlay_files: &mut IndexMap<FileId, OverlayFile>,
 ) {
     for file in files {
         if !core_state.files.contains_key(&file.id) && !deleted_files.contains(&file.id) {
@@ -66,14 +66,14 @@ pub(super) fn seed_overlay_from_visible(
 
 pub(super) fn sync_visible_files(
     files: &mut Vec<FileEntry>,
-    visible_file_positions: &mut HashMap<String, usize>,
-    overlay_files: &mut IndexMap<String, OverlayFile>,
-    file_ui: &mut HashMap<String, FileUiState>,
+    visible_file_positions: &mut HashMap<FileId, usize>,
+    overlay_files: &mut IndexMap<FileId, OverlayFile>,
+    file_ui: &mut HashMap<FileId, FileUiState>,
     file_list_state: &mut ListState,
     core_state: &DownloadState,
     expanded_packages: &HashSet<PackageId>,
     sort: &SortState,
-    deleted_files: &HashSet<String>,
+    deleted_files: &HashSet<FileId>,
     selected_row_identity: Option<TuiRow>,
 ) {
     let selected_row = file_list_state.selected().unwrap_or(0);

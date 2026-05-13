@@ -420,7 +420,7 @@ async fn download_all(
     let results: Vec<_> = stream::iter(files)
         .map(|item| {
             let progress = Arc::clone(&progress_trait);
-            let trust_resume_state = known_session_file_ids.contains(&item.path);
+            let trust_resume_state = known_session_file_ids.contains(item.path.as_str());
             async move {
                 let result = downloader
                     .download_file(item.node, &item.path, &progress, trust_resume_state, None)
@@ -806,7 +806,7 @@ async fn resume_session(mut session: SessionSnapshotV3, config: &CliConfig) -> c
     for (_url_idx, _url, nodes) in &all_nodes {
         let package = collect_cli_package_files(&downloader, &no_progress, nodes, |item| {
             resumable_file_ids.is_empty()
-                || resumable_file_ids.contains(&item.path)
+                || resumable_file_ids.contains(item.path.as_str())
                 || !ignored_paths.contains(&item.path)
         })
         .await;

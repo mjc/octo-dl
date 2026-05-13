@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use crate::DownloadConfig;
-use crate::core::PackageId;
+use crate::core::{FileId, PackageId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -16,9 +16,9 @@ pub enum Popup {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmAction {
-    DeleteFile(String),
+    DeleteFile(FileId),
     DeletePackage(PackageId),
-    ResetFile(String),
+    ResetFile(FileId),
     ResetPackage(PackageId),
 }
 
@@ -221,7 +221,7 @@ pub enum FileStatus {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FileEntry {
-    pub id: String,
+    pub id: FileId,
     pub name: String,
     pub size: u64,
     pub downloaded: u64,
@@ -237,7 +237,7 @@ pub(crate) struct OverlayFile {
 
 #[derive(Debug, Clone)]
 pub(crate) struct VisibleFileContext {
-    pub id: String,
+    pub id: FileId,
     pub status: FileStatus,
     pub source_url: Option<String>,
     pub artifact_path: String,
@@ -274,11 +274,11 @@ pub enum UiAction {
         mfa: String,
     },
     TogglePause,
-    DeleteFile(String),
+    DeleteFile(FileId),
     DeletePackage(PackageId),
-    RetryFile(String),
+    RetryFile(FileId),
     RetryPackage(PackageId),
-    ResetFile(String),
+    ResetFile(FileId),
     ResetPackage(PackageId),
     UpdateConfig {
         chunks_per_file: Option<usize>,

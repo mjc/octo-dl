@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 fn test_app() -> App {
     let path = tempdir()
         .expect("test state directory should exist")
-        .into_path();
+        .keep();
     std::mem::forget(StateDirectoryGuard::set(&path));
     let (tx, _rx) = mpsc::unbounded_channel();
     App::new(9723, tx, true)
@@ -150,7 +150,7 @@ fn handle_main_input_navigation_keys_move_selection() {
     let mut app = test_app();
     for i in 0..12 {
         app.files.push(FileEntry {
-            id: format!("file-{i}"),
+            id: format!("file-{i}").into(),
             name: format!("file-{i}"),
             size: 1,
             downloaded: 0,
@@ -183,20 +183,20 @@ fn handle_main_input_delete_cancels_downloading() {
     let mut app = test_app();
     let token = tokio_util::sync::CancellationToken::new();
     app.files.push(FileEntry {
-        id: "test.zip".to_string(),
+        id: "test.zip".to_string().into(),
         name: "test.zip".to_string(),
         size: 1000,
         downloaded: 500,
         status: FileStatus::Downloading,
     });
     app.cancellation_tokens
-        .insert("test.zip".to_string(), token.clone());
+        .insert("test.zip".to_string().into(), token.clone());
     app.file_list_state.select(Some(0));
 
     handle_input(&mut app, key(KeyCode::Char('d')));
     assert_eq!(
         app.pending_confirmation,
-        Some(ConfirmAction::DeleteFile("test.zip".to_string()))
+        Some(ConfirmAction::DeleteFile("test.zip".to_string().into()))
     );
     assert!(!token.is_cancelled());
     confirm(&mut app);
@@ -208,7 +208,7 @@ fn handle_main_input_delete_cancels_downloading() {
 fn handle_confirm_cancel_leaves_destructive_action_unapplied() {
     let mut app = test_app();
     app.files.push(FileEntry {
-        id: "keep.bin".to_string(),
+        id: "keep.bin".to_string().into(),
         name: "keep.bin".to_string(),
         size: 10,
         downloaded: 0,
@@ -219,7 +219,7 @@ fn handle_confirm_cancel_leaves_destructive_action_unapplied() {
     handle_input(&mut app, key(KeyCode::Char('d')));
     assert_eq!(
         app.pending_confirmation,
-        Some(ConfirmAction::DeleteFile("keep.bin".to_string()))
+        Some(ConfirmAction::DeleteFile("keep.bin".to_string().into()))
     );
 
     handle_input(&mut app, key(KeyCode::Esc));
@@ -240,7 +240,7 @@ fn handle_main_input_delete_core_backed_entry() {
             key: crate::core::PackageKey::new("https://mega.nz/file/core".to_string().clone()),
             display_name: "Core".to_string(),
             files: vec![ResolvedFile {
-                file_id: "core.bin".to_string(),
+                file_id: "core.bin".to_string().into(),
                 path: "core.bin".to_string(),
                 size: 10,
             }],
@@ -248,7 +248,7 @@ fn handle_main_input_delete_core_backed_entry() {
         },
     });
     app.apply_core_event(CoreEvent::FileCompleted {
-        file_id: "core.bin".to_string(),
+        file_id: "core.bin".to_string().into(),
     });
     app.file_list_state.select(Some(0));
 
@@ -276,12 +276,12 @@ fn handle_main_input_expands_package_and_file_action_targets_child() {
             display_name: "Package".to_string(),
             files: vec![
                 ResolvedFile {
-                    file_id: "first.bin".to_string(),
+                    file_id: "first.bin".to_string().into(),
                     path: "first.bin".to_string(),
                     size: 10,
                 },
                 ResolvedFile {
-                    file_id: "second.bin".to_string(),
+                    file_id: "second.bin".to_string().into(),
                     path: "second.bin".to_string(),
                     size: 20,
                 },
@@ -299,7 +299,7 @@ fn handle_main_input_expands_package_and_file_action_targets_child() {
     handle_input(&mut app, key(KeyCode::Delete));
     assert_eq!(
         app.pending_confirmation,
-        Some(ConfirmAction::DeleteFile("first.bin".to_string()))
+        Some(ConfirmAction::DeleteFile("first.bin".to_string().into()))
     );
 }
 
@@ -313,7 +313,7 @@ fn handle_main_input_reset_package_targets_package_row() {
             key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
-                file_id: "file.bin".to_string(),
+                file_id: "file.bin".to_string().into(),
                 path: "file.bin".to_string(),
                 size: 10,
             }],
@@ -369,7 +369,7 @@ fn handle_sort_popup_keeps_selected_row_identity_when_order_changes() {
                 ),
                 display_name: display_name.to_string(),
                 files: vec![ResolvedFile {
-                    file_id: format!("{raw_package_id}.bin"),
+                    file_id: format!("{raw_package_id}.bin").into(),
                     path: format!("{raw_package_id}.bin"),
                     size: 10,
                 }],
@@ -410,14 +410,14 @@ fn handle_main_input_delete_removes_session_entry_and_keeps_selection() {
     let mut app = test_app();
     app.files = vec![
         FileEntry {
-            id: "first.bin".to_string(),
+            id: "first.bin".to_string().into(),
             name: "first.bin".to_string(),
             size: 10,
             downloaded: 0,
             status: FileStatus::Queued,
         },
         FileEntry {
-            id: "second.bin".to_string(),
+            id: "second.bin".to_string().into(),
             name: "second.bin".to_string(),
             size: 20,
             downloaded: 0,
@@ -445,7 +445,7 @@ fn handle_main_input_delete_removes_session_entry_and_keeps_selection() {
     handle_input(&mut app, key(KeyCode::Delete));
     assert_eq!(
         app.pending_confirmation,
-        Some(ConfirmAction::DeleteFile("first.bin".to_string()))
+        Some(ConfirmAction::DeleteFile("first.bin".to_string().into()))
     );
     confirm(&mut app);
 
@@ -476,14 +476,14 @@ fn handle_main_input_delete_uses_visible_sorted_row() {
     let mut app = test_app();
     app.files = vec![
         FileEntry {
-            id: "complete.bin".to_string(),
+            id: "complete.bin".to_string().into(),
             name: "complete.bin".to_string(),
             size: 10,
             downloaded: 10,
             status: FileStatus::Complete,
         },
         FileEntry {
-            id: "active.bin".to_string(),
+            id: "active.bin".to_string().into(),
             name: "active.bin".to_string(),
             size: 20,
             downloaded: 5,
@@ -495,7 +495,7 @@ fn handle_main_input_delete_uses_visible_sorted_row() {
     handle_input(&mut app, key(KeyCode::Delete));
     assert_eq!(
         app.pending_confirmation,
-        Some(ConfirmAction::DeleteFile("active.bin".to_string()))
+        Some(ConfirmAction::DeleteFile("active.bin".to_string().into()))
     );
     confirm(&mut app);
 
@@ -508,7 +508,7 @@ fn handle_main_input_delete_uses_visible_sorted_row() {
 fn handle_main_input_delete_removes_failed_file() {
     let mut app = test_app();
     app.files.push(FileEntry {
-        id: "failed.bin".to_string(),
+        id: "failed.bin".to_string().into(),
         name: "failed.bin".to_string(),
         size: 10,
         downloaded: 4,
@@ -519,7 +519,7 @@ fn handle_main_input_delete_removes_failed_file() {
     handle_input(&mut app, key(KeyCode::Delete));
     assert_eq!(
         app.pending_confirmation,
-        Some(ConfirmAction::DeleteFile("failed.bin".to_string()))
+        Some(ConfirmAction::DeleteFile("failed.bin".to_string().into()))
     );
     confirm(&mut app);
 
@@ -538,7 +538,7 @@ fn handle_main_input_delete_does_not_surface_failed_package_without_files() {
             display_name: "Failed package".to_string(),
             files: Vec::new(),
             collision: Some(PackageCollision {
-                file_id: "duplicate.bin".to_string(),
+                file_id: "duplicate.bin".to_string().into(),
                 existing_package_id: package_id("existing", "https://mega.nz/folder/failed"),
                 incoming_package_id: package_id("failed-pkg", "https://mega.nz/folder/failed"),
             }),
@@ -557,7 +557,7 @@ fn handle_main_input_delete_does_not_surface_failed_package_without_files() {
 fn handle_main_input_shift_d_deletes_without_confirmation() {
     let mut app = test_app();
     app.files.push(FileEntry {
-        id: "remove.bin".to_string(),
+        id: "remove.bin".to_string().into(),
         name: "remove.bin".to_string(),
         size: 10,
         downloaded: 0,
@@ -587,7 +587,7 @@ fn handle_main_input_shift_d_removes_completed_file_and_artifacts() {
     let mut app = test_app();
     app.upsert_overlay_file(
         FileEntry {
-            id: "shift-delete-complete.bin".to_string(),
+            id: "shift-delete-complete.bin".to_string().into(),
             name: final_path.to_string_lossy().into_owned(),
             size: 100,
             downloaded: 100,
@@ -619,7 +619,7 @@ fn handle_main_input_shift_d_does_not_surface_failed_package_without_files() {
             display_name: "Failed package".to_string(),
             files: Vec::new(),
             collision: Some(PackageCollision {
-                file_id: "duplicate.bin".to_string(),
+                file_id: "duplicate.bin".to_string().into(),
                 existing_package_id: package_id("existing", "https://mega.nz/folder/failed"),
                 incoming_package_id: package_id("failed-pkg", "https://mega.nz/folder/failed"),
             }),
@@ -651,7 +651,7 @@ fn handle_main_input_shift_r_resets_selected_file_from_scratch() {
     let token = tokio_util::sync::CancellationToken::new();
     app.upsert_overlay_file(
         FileEntry {
-            id: "active.bin".to_string(),
+            id: "active.bin".to_string().into(),
             name: final_path.to_string_lossy().into_owned(),
             size: 100,
             downloaded: 80,
@@ -661,13 +661,13 @@ fn handle_main_input_shift_r_resets_selected_file_from_scratch() {
         true,
     );
     app.cancellation_tokens
-        .insert("active.bin".to_string(), token.clone());
+        .insert("active.bin".to_string().into(), token.clone());
     app.file_list_state.select(Some(0));
 
     handle_input(&mut app, key(KeyCode::Char('R')));
     assert_eq!(
         app.pending_confirmation,
-        Some(ConfirmAction::ResetFile("active.bin".to_string()))
+        Some(ConfirmAction::ResetFile("active.bin".to_string().into()))
     );
     assert!(!token.is_cancelled());
     confirm(&mut app);
@@ -675,13 +675,13 @@ fn handle_main_input_shift_r_resets_selected_file_from_scratch() {
     assert!(token.is_cancelled());
     assert_eq!(app.files[0].status, FileStatus::Queued);
     assert_eq!(app.files[0].downloaded, 0);
-    assert_eq!(app.file_speed("active.bin"), 0);
+    assert_eq!(app.file_speed(&"active.bin".into()), 0);
     assert_eq!(
         url_rx.try_recv().unwrap(),
         DownloadRequest::ResumeFileIds {
             source_url: "https://mega.nz/file/reset".to_string(),
-            file_ids: vec!["active.bin".to_string()],
-            attempt_ids: std::collections::HashMap::from([("active.bin".to_string(), 1)]),
+            file_ids: vec!["active.bin".to_string().into()],
+            attempt_ids: std::collections::HashMap::from([("active.bin".to_string().into(), 1)]),
         }
     );
     assert!(!final_path.exists());
@@ -703,7 +703,7 @@ fn handle_main_input_delete_removes_completed_file_and_artifacts() {
     let mut app = test_app();
     app.upsert_overlay_file(
         FileEntry {
-            id: "complete.bin".to_string(),
+            id: "complete.bin".to_string().into(),
             name: final_path.to_string_lossy().into_owned(),
             size: 100,
             downloaded: 100,
@@ -717,7 +717,7 @@ fn handle_main_input_delete_removes_completed_file_and_artifacts() {
     handle_input(&mut app, key(KeyCode::Char('d')));
     assert_eq!(
         app.pending_confirmation,
-        Some(ConfirmAction::DeleteFile("complete.bin".to_string()))
+        Some(ConfirmAction::DeleteFile("complete.bin".to_string().into()))
     );
     confirm(&mut app);
 
@@ -801,7 +801,7 @@ fn retry_recomputes_totals_for_errored_file() {
     app.url_tx = url_tx;
     app.upsert_overlay_file(
         FileEntry {
-            id: "error.bin".to_string(),
+            id: "error.bin".to_string().into(),
             name: "error.bin".to_string(),
             size: 100,
             downloaded: 42,
@@ -826,8 +826,8 @@ fn retry_recomputes_totals_for_errored_file() {
         url_rx.try_recv().unwrap(),
         DownloadRequest::ResumeFileIds {
             source_url: "https://mega.nz/file/error".to_string(),
-            file_ids: vec!["error.bin".to_string()],
-            attempt_ids: std::collections::HashMap::from([("error.bin".to_string(), 1)]),
+            file_ids: vec!["error.bin".to_string().into()],
+            attempt_ids: std::collections::HashMap::from([("error.bin".to_string().into(), 1)]),
         }
     );
 }

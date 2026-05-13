@@ -2,7 +2,7 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use std::str::FromStr;
 
-use crate::core::PackageId;
+use crate::core::{FileId, PackageId};
 
 use super::ApiState;
 
@@ -92,9 +92,9 @@ pub(super) fn resolve_file_id(
     state: &ApiState,
     id: Option<String>,
     name: Option<String>,
-) -> Result<String, Box<axum::response::Response>> {
+) -> Result<FileId, Box<axum::response::Response>> {
     if let Some(id) = id {
-        return Ok(id);
+        return Ok(id.into());
     }
 
     let Some(name) = name else {
@@ -122,7 +122,7 @@ pub(super) fn resolve_file_id(
             )
                 .into_response(),
         )),
-        [file] => Ok(file.id.clone()),
+        [file] => Ok(file.id.clone().into()),
         _ => Err(Box::new(
             (
                 axum::http::StatusCode::CONFLICT,

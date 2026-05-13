@@ -259,7 +259,7 @@ mod tests {
     fn draw_main_shows_command_mode_navigation() {
         let mut app = test_app();
         app.files.push(FileEntry {
-            id: "queued.bin".to_string(),
+            id: "queued.bin".to_string().into(),
             name: "queued.bin".to_string(),
             size: 10,
             downloaded: 0,
@@ -295,7 +295,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
         let mut app = App::new(9723, tx, true);
         app.files.push(FileEntry {
-            id: "queued.bin".to_string(),
+            id: "queued.bin".to_string().into(),
             name: "queued.bin".to_string(),
             size: 10,
             downloaded: 0,
@@ -333,21 +333,21 @@ mod tests {
         app.status = "Processing 3 URL(s)...".to_string();
         app.files = vec![
             FileEntry {
-                id: "active.bin".to_string(),
+                id: "active.bin".to_string().into(),
                 name: "active.bin".to_string(),
                 size: 10,
                 downloaded: 5,
                 status: FileStatus::Downloading,
             },
             FileEntry {
-                id: "queued.bin".to_string(),
+                id: "queued.bin".to_string().into(),
                 name: "queued.bin".to_string(),
                 size: 10,
                 downloaded: 0,
                 status: FileStatus::Queued,
             },
             FileEntry {
-                id: "failed.bin".to_string(),
+                id: "failed.bin".to_string().into(),
                 name: "failed.bin".to_string(),
                 size: 10,
                 downloaded: 0,
@@ -370,14 +370,14 @@ mod tests {
         app.status = "Processing 2 URL(s)...".to_string();
         app.files = vec![
             FileEntry {
-                id: "active.bin".to_string(),
+                id: "active.bin".to_string().into(),
                 name: "active.bin".to_string(),
                 size: 10,
                 downloaded: 5,
                 status: FileStatus::Downloading,
             },
             FileEntry {
-                id: "failed.bin".to_string(),
+                id: "failed.bin".to_string().into(),
                 name: "failed.bin".to_string(),
                 size: 10,
                 downloaded: 0,
@@ -425,14 +425,14 @@ mod tests {
     fn draw_confirm_popup_shows_destructive_action_prompt() {
         let mut app = test_app();
         app.files.push(FileEntry {
-            id: "danger.bin".to_string(),
+            id: "danger.bin".to_string().into(),
             name: "danger.bin".to_string(),
             size: 10,
             downloaded: 0,
             status: FileStatus::Queued,
         });
         app.popup = Popup::Confirm;
-        app.pending_confirmation = Some(ConfirmAction::DeleteFile("danger.bin".to_string()));
+        app.pending_confirmation = Some(ConfirmAction::DeleteFile("danger.bin".to_string().into()));
 
         let rendered = render_text(&mut app);
 
@@ -453,12 +453,12 @@ mod tests {
                 display_name: "Mega Package".to_string(),
                 files: vec![
                     ResolvedFile {
-                        file_id: "first.bin".to_string(),
+                        file_id: "first.bin".to_string().into(),
                         path: "first.bin".to_string(),
                         size: 10,
                     },
                     ResolvedFile {
-                        file_id: "second.bin".to_string(),
+                        file_id: "second.bin".to_string().into(),
                         path: "second.bin".to_string(),
                         size: 20,
                     },
@@ -467,10 +467,10 @@ mod tests {
             },
         });
         app.apply_core_event(CoreEvent::FileQueued {
-            file_id: "first.bin".to_string(),
+            file_id: "first.bin".to_string().into(),
         });
         app.apply_core_event(CoreEvent::FileQueued {
-            file_id: "second.bin".to_string(),
+            file_id: "second.bin".to_string().into(),
         });
 
         let rendered = render_text(&mut app);
@@ -494,12 +494,12 @@ mod tests {
                 display_name: "Mega Package".to_string(),
                 files: vec![
                     ResolvedFile {
-                        file_id: "b.bin".to_string(),
+                        file_id: "b.bin".to_string().into(),
                         path: "b.bin".to_string(),
                         size: 20,
                     },
                     ResolvedFile {
-                        file_id: "a.bin".to_string(),
+                        file_id: "a.bin".to_string().into(),
                         path: "a.bin".to_string(),
                         size: 10,
                     },
@@ -536,7 +536,7 @@ mod tests {
                 ),
                 display_name: "https://mega.nz/folder/abc#secret".to_string(),
                 files: vec![ResolvedFile {
-                    file_id: "file.bin".to_string(),
+                    file_id: "file.bin".to_string().into(),
                     path: "Folder Name/file.bin".to_string(),
                     size: 10,
                 }],
@@ -562,12 +562,12 @@ mod tests {
                 display_name: "Merged Package".to_string(),
                 files: vec![
                     ResolvedFile {
-                        file_id: "episode-1.mkv".to_string(),
+                        file_id: "episode-1.mkv".to_string().into(),
                         path: "season/episode-1.mkv".to_string(),
                         size: 100,
                     },
                     ResolvedFile {
-                        file_id: "episode-2.mkv".to_string(),
+                        file_id: "episode-2.mkv".to_string().into(),
                         path: "season/episode-2.mkv".to_string(),
                         size: 100,
                     },
@@ -576,11 +576,11 @@ mod tests {
             },
         });
         app.apply_core_event(CoreEvent::FileStarted {
-            file_id: "episode-1.mkv".to_string(),
+            file_id: "episode-1.mkv".to_string().into(),
             size: 100,
         });
         app.apply_core_event(CoreEvent::FileProgress {
-            file_id: "episode-1.mkv".to_string(),
+            file_id: "episode-1.mkv".to_string().into(),
             total_bytes_delta: 50,
             network_bytes_delta: 50,
         });
@@ -596,7 +596,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
         let mut app = App::new(9723, tx, true);
         app.files.push(FileEntry {
-            id: "active.bin".to_string(),
+            id: "active.bin".to_string().into(),
             name: "active.bin".to_string(),
             size: 100,
             downloaded: 40,
@@ -635,7 +635,7 @@ mod tests {
                 key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
                 display_name: "Mega Package".to_string(),
                 files: vec![ResolvedFile {
-                    file_id: "active.bin".to_string(),
+                    file_id: "active.bin".to_string().into(),
                     path: "active.bin".to_string(),
                     size: 20,
                 }],
@@ -643,7 +643,7 @@ mod tests {
             },
         });
         app.apply_core_event(CoreEvent::FileFailed {
-            file_id: "active.bin".to_string(),
+            file_id: "active.bin".to_string().into(),
             message: "boom".to_string(),
         });
 
@@ -663,7 +663,7 @@ mod tests {
                 key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
                 display_name: "Mega Package".to_string(),
                 files: vec![ResolvedFile {
-                    file_id: "active.bin".to_string(),
+                    file_id: "active.bin".to_string().into(),
                     path: "active.bin".to_string(),
                     size: 20,
                 }],
@@ -671,7 +671,7 @@ mod tests {
             },
         });
         app.apply_core_event(CoreEvent::FileStarted {
-            file_id: "active.bin".to_string(),
+            file_id: "active.bin".to_string().into(),
             size: 20,
         });
 
@@ -687,14 +687,14 @@ mod tests {
         app.status = "Processing 13 URL(s)...".to_string();
         app.files_total = 2;
         app.files.push(FileEntry {
-            id: "active.bin".to_string(),
+            id: "active.bin".to_string().into(),
             name: "active.bin".to_string(),
             size: 100,
             downloaded: 20,
             status: FileStatus::Downloading,
         });
         app.files.push(FileEntry {
-            id: "queued.bin".to_string(),
+            id: "queued.bin".to_string().into(),
             name: "queued.bin".to_string(),
             size: 100,
             downloaded: 0,
@@ -715,7 +715,7 @@ mod tests {
         app.total_downloaded = 20;
         app.current_speed = 0;
         app.files.push(FileEntry {
-            id: "active.bin".to_string(),
+            id: "active.bin".to_string().into(),
             name: "active.bin".to_string(),
             size: 100,
             downloaded: 20,
@@ -737,7 +737,7 @@ mod tests {
         app.total_downloaded = 20;
         app.current_speed = 20;
         app.files.push(FileEntry {
-            id: "active.bin".to_string(),
+            id: "active.bin".to_string().into(),
             name: "active.bin".to_string(),
             size: 100,
             downloaded: 20,

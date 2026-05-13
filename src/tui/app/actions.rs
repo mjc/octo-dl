@@ -1,8 +1,7 @@
-use std::sync::Arc;
 use std::time::Instant;
 
 use crate::{
-    core::{CoreCommand, CoreEvent, PackageId},
+    core::{CoreCommand, CoreEvent, FileId, PackageId},
     format_bytes,
 };
 
@@ -14,11 +13,16 @@ use super::{
 const MAX_UI_ACTIONS_PER_TICK: usize = 64;
 
 impl App {
+    fn discard_visible_placeholder(&mut self, id: &FileId) {
+        self.files.retain(|file| file.id != *id);
+        self.visible_file_positions.remove(id);
+        self.file_ui.remove(id);
+    }
+
     pub(crate) fn submit_url(&mut self, url: String) {
         if self.urls.contains(&url) {
             return;
         }
-        self.deleted_files.remove(&url);
         self.urls.push(url.clone());
         self.ensure_session_for_pending_urls();
         self.queue_url_placeholder(url.clone());
@@ -27,7 +31,6 @@ impl App {
     }
 
     fn retry_source_url(&mut self, url: &str) {
-        self.deleted_files.remove(url);
         if !self.urls.iter().any(|existing| existing == url) {
             self.urls.push(url.to_string());
         }
@@ -110,21 +113,21 @@ impl App {
         source_url
     }
 
-    fn cancel_file_token(&mut self, id: &str) {
+    fn cancel_file_token(&mut self, id: &FileId) {
         if let Some(token) = self.cancellation_tokens.remove(id) {
             token.cancel();
         }
     }
 
-    pub(crate) fn note_file_error(&mut self, id: &str, error: &str) {
+    pub(crate) fn note_file_error(&mut self, id: &FileId, error: &str) {
         self.update_session_file(id, SessionFileUpdate::Error(error));
     }
 
-    fn mark_file_skipped(&mut self, id: &str) {
+    fn mark_file_skipped(&mut self, id: &FileId) {
         self.update_session_file(id, SessionFileUpdate::Skipped);
     }
 
-    fn handle_deleted_download_artifact(&mut self, id: &str, artifact_path: &str) -> bool {
+    fn handle_deleted_download_artifact(&mut self, id: &FileId, artifact_path: &str) -> bool {
         if !self.deleted_files.contains(id) {
             return false;
         }
@@ -137,21 +140,21 @@ impl App {
         true
     }
 
-    fn reset_is_waiting_for_new_attempt(&self, id: &str) -> bool {
+    fn reset_is_waiting_for_new_attempt(&self, id: &FileId) -> bool {
         self.reset_pending_files.contains(id)
     }
 
-    fn current_attempt_id(&self, id: &str) -> u64 {
+    fn current_attempt_id(&self, id: &FileId) -> u64 {
         self.file_attempt_ids.get(id).copied().unwrap_or(0)
     }
 
-    fn bump_file_attempt_id(&mut self, id: &str) -> u64 {
+    fn bump_file_attempt_id(&mut self, id: &FileId) -> u64 {
         let next = self.current_attempt_id(id).saturating_add(1);
-        self.file_attempt_ids.insert(id.to_string(), next);
+        self.file_attempt_ids.insert(id.clone(), next);
         next
     }
 
-    fn event_matches_current_attempt(&self, id: &str, attempt_id: u64) -> bool {
+    fn event_matches_current_attempt(&self, id: &FileId, attempt_id: u64) -> bool {
         self.current_attempt_id(id) == attempt_id
     }
 
@@ -162,13 +165,17 @@ impl App {
 
     fn handle_session_url_error(&mut self, url: &str, error: &str) {
         self.update_session_url(url, SessionUrlUpdate::Error(error));
-        let _ = self.remove_overlay_file(url);
+        let _ = self
+            .overlay_files
+            .shift_remove(&FileId::from(url))
+            .map(|file| file.file);
+        self.sync_visible_files();
         self.show_ui_error_only(url, error);
     }
 
-    pub(crate) fn handle_file_error_event(&mut self, id: String, error: String, attempt_id: u64) {
+    pub(crate) fn handle_file_error_event(&mut self, id: FileId, error: String, attempt_id: u64) {
         log::error!("Download error: {id}: {error}");
-        if self.handle_deleted_download_artifact(&id, &id) {
+        if self.handle_deleted_download_artifact(&id, id.as_str()) {
             return;
         }
         if !self.event_matches_current_attempt(&id, attempt_id) {
@@ -186,17 +193,13 @@ impl App {
                 message: error.clone(),
             });
         } else {
-            self.mark_visible_file_error(&id, &id, &error);
+            self.mark_visible_file_error(&id, id.as_str(), &error);
         }
         self.update_download_status_message();
     }
 
     pub(crate) fn handle_scope_error_event(&mut self, scope: String, error: String) {
         log::error!("Download error: {scope}: {error}");
-        if self.deleted_files.contains(&scope) {
-            log::info!("Ignoring stale URL-level error after delete: {scope}");
-            return;
-        }
         if self.is_session_url(&scope) {
             self.handle_session_url_error(&scope, &error);
         } else {
@@ -227,7 +230,12 @@ impl App {
             self.core_state
                 .url_order
                 .retain(|url| url != &file.origin.submitted_url);
-            let _ = self.drop_overlay_file(&file.origin.submitted_url);
+            let submitted_id = FileId::from(file.origin.submitted_url.as_str());
+            let _ = self
+                .overlay_files
+                .shift_remove(&submitted_id)
+                .map(|file| file.file);
+            self.discard_visible_placeholder(&submitted_id);
         }
         if !self.register_session_queued_file(
             &package_id.to_string(),
@@ -244,7 +252,7 @@ impl App {
             &package_id.to_string(),
             &package_display_name,
             &file.origin.source_url,
-            &file.id,
+            file.id.as_str(),
             file.size,
             file.count_toward_progress,
         );
@@ -252,17 +260,6 @@ impl App {
     }
 
     pub(crate) fn handle_file_queued_event(&mut self, file: QueuedFile) {
-        if self.deleted_files.contains(&file.origin.submitted_url)
-            || self.deleted_files.contains(&file.origin.source_url)
-        {
-            log::info!(
-                "Ignoring queued file {} from deleted url/source {} / {}",
-                file.id,
-                file.origin.submitted_url,
-                file.origin.source_url
-            );
-            return;
-        }
         if self.deleted_files.contains(&file.id) {
             self.deleted_files.remove(&file.id);
         }
@@ -273,20 +270,22 @@ impl App {
     }
 
     fn handle_session_url_fetched(&mut self, url: &str) {
-        let _ = self.drop_overlay_file(url);
+        let url_id = FileId::from(url);
+        let _ = self
+            .overlay_files
+            .shift_remove(&url_id)
+            .map(|file| file.file);
+        self.discard_visible_placeholder(&url_id);
+        self.sync_visible_files();
         self.update_session_url(url, SessionUrlUpdate::Fetched);
         self.recompute_totals();
     }
 
     pub(crate) fn handle_url_resolved_event(&mut self, url: String) {
-        if self.deleted_files.contains(&url) {
-            log::info!("Ignoring stale URL resolution after delete: {url}");
-            return;
-        }
         self.handle_session_url_fetched(&url);
     }
 
-    pub(crate) fn handle_file_start_event(&mut self, id: String, size: u64, attempt_id: u64) {
+    pub(crate) fn handle_file_start_event(&mut self, id: FileId, size: u64, attempt_id: u64) {
         log::info!("Download started: {id} ({})", format_bytes(size));
         if self.deleted_files.contains(&id) {
             return;
@@ -299,8 +298,8 @@ impl App {
         let source_url = self
             .visible_file_context(&id)
             .and_then(|context| context.source_url)
-            .unwrap_or_else(|| id.clone());
-        self.ensure_core_file(&id, &source_url, &id, size, true);
+            .unwrap_or_else(|| id.to_string());
+        self.ensure_core_file(&id, &source_url, id.as_str(), size, true);
         self.apply_core_event(CoreEvent::FileStarted {
             file_id: id.clone(),
             size,
@@ -311,33 +310,33 @@ impl App {
 
     pub(crate) fn handle_file_progress_event(
         &mut self,
-        id: Arc<str>,
+        id: FileId,
         delta: ProgressDelta,
         attempt_id: u64,
     ) {
-        if self.deleted_files.contains(id.as_ref()) {
+        if self.deleted_files.contains(&id) {
             return;
         }
-        if !self.event_matches_current_attempt(id.as_ref(), attempt_id) {
+        if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale download progress after retry/reset: {}", id);
             return;
         }
-        self.reset_pending_files.remove(id.as_ref());
+        self.reset_pending_files.remove(&id);
         self.apply_core_event(CoreEvent::FileProgress {
-            file_id: id.to_string(),
+            file_id: id.clone(),
             total_bytes_delta: delta.total_bytes_delta,
             network_bytes_delta: delta.network_bytes_delta,
         });
-        if let Some((previous_downloaded, downloaded)) = self.refresh_visible_core_file(id.as_ref())
+        if let Some((previous_downloaded, downloaded)) = self.refresh_visible_core_file(&id)
         {
             let now = Instant::now();
-            let _ = self.update_file_ui_progress(id.as_ref(), previous_downloaded, downloaded, now);
+            let _ = self.update_file_ui_progress(&id, previous_downloaded, downloaded, now);
         }
     }
 
     pub(crate) fn handle_resume_reused_event(
         &mut self,
-        id: String,
+        id: FileId,
         chunks: usize,
         bytes: u64,
         attempt_id: u64,
@@ -363,9 +362,9 @@ impl App {
         self.set_resume_reuse_status(&id, chunks, bytes);
     }
 
-    pub(crate) fn handle_file_complete_event(&mut self, id: String, attempt_id: u64) {
+    pub(crate) fn handle_file_complete_event(&mut self, id: FileId, attempt_id: u64) {
         log::info!("Download complete: {id}");
-        if self.handle_deleted_download_artifact(&id, &id) {
+        if self.handle_deleted_download_artifact(&id, id.as_str()) {
             return;
         }
         if !self.event_matches_current_attempt(&id, attempt_id) {
@@ -383,13 +382,13 @@ impl App {
             self.reset_file_ui_rate(&id);
             self.update_download_status_message();
         } else {
-            self.mark_visible_file_complete(&id, &id);
+            self.mark_visible_file_complete(&id, id.as_str());
         }
     }
 
-    pub(crate) fn handle_file_cancelled_event(&mut self, id: String, attempt_id: u64) {
+    pub(crate) fn handle_file_cancelled_event(&mut self, id: FileId, attempt_id: u64) {
         log::info!("Download cancelled: {id}");
-        if self.handle_deleted_download_artifact(&id, &id) {
+        if self.handle_deleted_download_artifact(&id, id.as_str()) {
             return;
         }
         if !self.event_matches_current_attempt(&id, attempt_id) {
@@ -408,7 +407,7 @@ impl App {
         self.update_download_status_message();
     }
 
-    pub(crate) fn perform_delete_file_action(&mut self, id: &str) {
+    pub(crate) fn perform_delete_file_action(&mut self, id: &FileId) {
         let context = self.visible_file_context(id);
         let artifact_path = context
             .as_ref()
@@ -420,14 +419,14 @@ impl App {
         self.cancel_file_token(id);
         self.file_attempt_ids.remove(id);
         self.reset_pending_files.remove(id);
-        self.deleted_files.insert(id.to_string());
-        if !is_core_backed && self.is_session_url(id) {
-            self.remove_session_url(id);
-            self.urls.retain(|url| url != id);
+        self.deleted_files.insert(id.clone());
+        if !is_core_backed && self.is_session_url(id.as_str()) {
+            self.remove_session_url(id.as_str());
+            self.urls.retain(|url| url != id.as_str());
         }
         if is_core_backed {
             self.apply_core_command(CoreCommand::DeleteFile {
-                file_id: id.to_string(),
+                file_id: id.clone(),
             });
         } else {
             let _ = self.remove_overlay_file(id);
@@ -446,7 +445,6 @@ impl App {
             .map(|file| file.id.clone())
             .collect();
         if file_ids.is_empty() {
-            self.deleted_files.insert(package_id.to_string());
             self.core_state.packages.shift_remove(&package_id);
             self.sync_visible_files();
             self.recompute_totals();
@@ -458,7 +456,7 @@ impl App {
         }
     }
 
-    pub(crate) fn perform_retry_file_action(&mut self, id: &str) {
+    pub(crate) fn perform_retry_file_action(&mut self, id: &FileId) {
         let had_core_file = self.core_state.files.contains_key(id);
         let context = self.visible_file_context(id);
         let has_source_url = context
@@ -470,21 +468,21 @@ impl App {
                 context.as_ref().map(|context| &context.status)
         {
             self.apply_core_event(CoreEvent::FileFailed {
-                file_id: id.to_string(),
+                file_id: id.clone(),
                 message: message.clone(),
             });
         }
         self.bump_file_attempt_id(id);
         self.reset_pending_files.remove(id);
         self.apply_core_command(CoreCommand::RetryFile {
-            file_id: id.to_string(),
+            file_id: id.clone(),
         });
         if has_source_url {
             self.reset_file_ui_rate(id);
         } else {
             self.status = format!("Retry unavailable for {id}");
             if !self.core_state.files.contains_key(id) {
-                self.show_overlay_error(id, id, "Retry unavailable for this file", true);
+                self.show_overlay_error(id, id.as_str(), "Retry unavailable for this file", true);
             }
         }
     }
@@ -547,13 +545,13 @@ impl App {
         }
     }
 
-    pub(crate) fn perform_reset_file_action(&mut self, id: &str) {
+    pub(crate) fn perform_reset_file_action(&mut self, id: &FileId) {
         let Some(context) = self.visible_file_context(id) else {
             return;
         };
         if self.ensure_core_file_from_context(&context).is_none() {
             if !self.core_state.files.contains_key(id) {
-                self.show_overlay_error(id, id, "Reset unavailable for this file", true);
+                self.show_overlay_error(id, id.as_str(), "Reset unavailable for this file", true);
             }
             self.status = "Reset unavailable for selected file".to_string();
             self.recompute_totals();
@@ -562,10 +560,10 @@ impl App {
 
         self.cancel_file_token(id);
         self.bump_file_attempt_id(id);
-        self.reset_pending_files.insert(id.to_string());
+        self.reset_pending_files.insert(id.clone());
 
         self.apply_core_command(CoreCommand::ResetFile {
-            file_id: id.to_string(),
+            file_id: id.clone(),
         });
         self.reset_file_ui_rate(id);
     }
