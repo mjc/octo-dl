@@ -646,7 +646,7 @@ mod tests {
         assert_eq!(restart.suppressed_file_ids, vec!["a.bin".to_string()]);
         assert_eq!(
             restart.state.files["a.bin"].lifecycle,
-            FileLifecycle::Deleted
+            FileLifecycle::Skipped
         );
     }
 }

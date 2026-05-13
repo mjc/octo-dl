@@ -109,6 +109,31 @@ fn file_queued_clears_stale_error_state() {
 }
 
 #[test]
+fn file_queued_bootstraps_and_saves_session() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+
+    app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
+        id: "file-id".to_string().into(),
+        size: 128,
+        count_toward_progress: true,
+        origin: FileOrigin {
+            package_id: None,
+            package_display_name: None,
+            source_url: "https://mega.nz/file/new".to_string(),
+            submitted_url: "https://mega.nz/file/new".to_string(),
+        },
+    }));
+
+    let saved = crate::core::SessionSnapshot::latest().expect("session should be saved");
+    assert_eq!(saved.urls.len(), 1);
+    assert_eq!(saved.urls[0].url, "https://mega.nz/file/new");
+    assert_eq!(saved.file_count(), 1);
+    assert!(saved.find_file("file-id").is_some());
+}
+
+#[test]
 fn file_queued_does_not_restore_session_skipped_file() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
@@ -145,6 +170,29 @@ fn file_queued_does_not_restore_session_skipped_file() {
         session.find_file("episode.mkv").unwrap().lifecycle,
         FileLifecycle::Skipped
     );
+}
+
+#[test]
+fn file_queued_does_not_clear_deleted_file_guard() {
+    let mut app = test_app();
+    let file_id = crate::core::FileId::from("episode.mkv");
+    app.deleted_files.insert(file_id.clone());
+
+    app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
+        id: file_id.clone(),
+        size: 128,
+        count_toward_progress: true,
+        origin: FileOrigin {
+            package_id: None,
+            package_display_name: None,
+            source_url: "https://mega.nz/file/root".to_string(),
+            submitted_url: "https://mega.nz/file/root".to_string(),
+        },
+    }));
+
+    assert!(app.deleted_files.contains(&file_id));
+    assert!(app.files.is_empty());
+    assert!(app.core_state.files.is_empty());
 }
 
 #[test]

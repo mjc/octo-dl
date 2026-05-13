@@ -261,7 +261,7 @@ impl App {
 
     pub(crate) fn handle_file_queued_event(&mut self, file: QueuedFile) {
         if self.deleted_files.contains(&file.id) {
-            self.deleted_files.remove(&file.id);
+            return;
         }
         if !self.register_queued_file(&file) {
             return;
@@ -442,6 +442,9 @@ impl App {
             .collect();
         if file_ids.is_empty() {
             self.core_state.packages.shift_remove(&package_id);
+            let _ = self.mutate_session_and_save(|session| {
+                session.packages.retain(|package| package.id != package_id);
+            });
             self.sync_visible_files();
             self.recompute_totals();
             return;
