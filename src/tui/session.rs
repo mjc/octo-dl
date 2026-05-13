@@ -1,9 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::core::{
-    DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
-    RuntimeState, SessionMeta, SessionRunStatus, SessionSnapshotV3, SessionUrlSnapshot,
-    normalize_snapshot,
+    DesiredState, FileLifecycle, FileSnapshot, PackageId, PackageKey, SessionMeta,
+    SessionRunStatus, SessionSnapshotV3, SessionUrlSnapshot, normalize_snapshot,
 };
 
 pub(super) enum SessionFileUpdate<'a> {
@@ -252,23 +251,13 @@ impl SessionAdapter {
         }
 
         let file_id = path.to_string();
-        session.files.push(FileSnapshot {
-            id: file_id,
+        session.files.push(crate::core::queued_file_snapshot(
+            file_id,
             package_id,
-            source_url: Some(source_url.to_string()),
-            path: path.to_string(),
+            Some(source_url.to_string()),
+            path.to_string(),
             size,
-            lifecycle: FileLifecycle::Queued,
-            progress: FileProgressState::default(),
-            desired: DesiredState::Present,
-            runtime: RuntimeState {
-                counts_in_run_totals: true,
-                active: false,
-                preexisting_complete: false,
-                reused_chunks: 0,
-            },
-            message: None,
-        });
+        ));
         rebuild_packages(session);
         true
     }

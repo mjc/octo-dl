@@ -14,8 +14,7 @@ use crate::{
     DlcKeyCache, DownloadConfig, DownloadItem, DownloadProgress, FileStats, NoProgress,
     SessionStats, SessionStatsBuilder,
     core::{
-        DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
-        PackageSnapshot, ProgressDelta, RuntimeState, SavedCredentials, SessionRunStatus,
+        PackageId, PackageKey, PackageSnapshot, ProgressDelta, SavedCredentials, SessionRunStatus,
         SessionSnapshotV3, SessionUrlSnapshot, build_restart_snapshot, normalize_snapshot,
     },
     download::{infer_package_display_name, infer_package_id},
@@ -367,23 +366,13 @@ fn register_cli_package_in_session(
     }
 
     for item in &package.files {
-        session.files.push(FileSnapshot {
-            id: item.path.clone(),
-            package_id: package.id,
-            source_url: Some(source_url.to_string()),
-            path: item.path.clone(),
-            size: item.node.size(),
-            lifecycle: FileLifecycle::Queued,
-            progress: FileProgressState::default(),
-            desired: DesiredState::Present,
-            runtime: RuntimeState {
-                counts_in_run_totals: true,
-                active: false,
-                preexisting_complete: false,
-                reused_chunks: 0,
-            },
-            message: None,
-        });
+        session.files.push(crate::core::queued_file_snapshot(
+            item.path.clone(),
+            package.id,
+            Some(source_url.to_string()),
+            item.path.clone(),
+            item.node.size(),
+        ));
     }
     normalize_snapshot(session).expect("cli session snapshots should stay canonical");
 }
