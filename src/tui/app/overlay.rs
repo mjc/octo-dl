@@ -84,36 +84,56 @@ impl App {
     }
 
     pub(crate) fn visible_file_context(&self, id: &str) -> Option<VisibleFileContext> {
-        self.files.iter().find(|file| file.id == id).map(|file| {
-            let source_url = self
-                .core_state
-                .files
-                .get(id)
-                .and_then(|core_file| core_file.source_url.clone())
-                .or_else(|| {
-                    self.overlay_files
-                        .get(id)
-                        .and_then(|overlay| overlay.source_url.clone())
-                });
-            let counts_toward_progress = self
-                .core_state
-                .files
-                .get(id)
-                .map(|file| file.runtime.counts_in_run_totals && !file.runtime.preexisting_complete)
-                .or_else(|| {
-                    self.overlay_files
-                        .get(id)
-                        .map(|overlay| overlay.counts_toward_progress)
-                })
-                .unwrap_or(true);
-            VisibleFileContext {
-                id: file.id.clone(),
-                status: file.status.clone(),
-                artifact_path: file.name.clone(),
-                size: file.size,
-                counts_toward_progress,
-                source_url,
-            }
+        if let Some(core_file) = self.core_state.files.get(id) {
+            let status = match core_file.lifecycle {
+                crate::core::FileLifecycle::Planned | crate::core::FileLifecycle::Queued => {
+                    FileStatus::Queued
+                }
+                crate::core::FileLifecycle::Downloading => FileStatus::Downloading,
+                crate::core::FileLifecycle::Complete => FileStatus::Complete,
+                crate::core::FileLifecycle::Failed => FileStatus::Error(
+                    core_file
+                        .message
+                        .clone()
+                        .unwrap_or_else(|| "failed".to_string()),
+                ),
+                crate::core::FileLifecycle::Skipped | crate::core::FileLifecycle::Deleted => {
+                    self.files
+                        .iter()
+                        .find(|file| file.id == id)
+                        .map(|file| file.status.clone())
+                        .unwrap_or(FileStatus::Queued)
+                }
+            };
+            return Some(VisibleFileContext {
+                id: core_file.id.clone(),
+                status,
+                source_url: core_file.source_url.clone(),
+                artifact_path: core_file.path.clone(),
+                size: core_file.size,
+                counts_toward_progress: core_file.runtime.counts_in_run_totals
+                    && !core_file.runtime.preexisting_complete,
+            });
+        }
+
+        if let Some(overlay) = self.overlay_files.get(id) {
+            return Some(VisibleFileContext {
+                id: overlay.file.id.clone(),
+                status: overlay.file.status.clone(),
+                source_url: overlay.source_url.clone(),
+                artifact_path: overlay.file.name.clone(),
+                size: overlay.file.size,
+                counts_toward_progress: overlay.counts_toward_progress,
+            });
+        }
+
+        self.files.iter().find(|file| file.id == id).map(|file| VisibleFileContext {
+            id: file.id.clone(),
+            status: file.status.clone(),
+            source_url: None,
+            artifact_path: file.name.clone(),
+            size: file.size,
+            counts_toward_progress: true,
         })
     }
 
