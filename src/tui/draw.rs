@@ -246,6 +246,15 @@ mod tests {
         output
     }
 
+    fn render_buffer(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        terminal
+            .draw(|frame| draw(frame, app))
+            .expect("draw should succeed");
+        terminal.backend().buffer().clone()
+    }
+
     #[test]
     fn draw_main_shows_command_mode_navigation() {
         let mut app = test_app();
@@ -578,6 +587,37 @@ mod tests {
 
         assert!(rendered.contains("◑ Merged Package"));
         assert!(rendered.contains(" 25%"));
+    }
+
+    #[test]
+    fn draw_main_colors_active_file_progress_yellow() {
+        let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
+        let mut app = App::new(9723, tx, true);
+        app.files.push(FileEntry {
+            id: "active.bin".to_string(),
+            name: "active.bin".to_string(),
+            size: 100,
+            downloaded: 40,
+            status: FileStatus::Downloading,
+        });
+
+        let buffer = render_buffer(&mut app, 100, 24);
+        let area = buffer.area;
+        let mut saw_yellow_progress = false;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = buffer.cell((x, y)).expect("cell should exist");
+                if cell.symbol() == "4" && cell.fg == Color::Yellow {
+                    saw_yellow_progress = true;
+                    break;
+                }
+            }
+            if saw_yellow_progress {
+                break;
+            }
+        }
+
+        assert!(saw_yellow_progress, "active file progress should render in yellow");
     }
 
     #[test]
