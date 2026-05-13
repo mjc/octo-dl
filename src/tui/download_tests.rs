@@ -65,7 +65,10 @@ fn handle_file_complete_marks_session_file_complete() {
 
     let session = app.session.as_ref().expect("session should remain");
     assert_eq!(session.file_count(), 1);
-    assert_eq!(session.find_file("first.bin").unwrap().lifecycle, FileLifecycle::Complete);
+    assert_eq!(
+        session.find_file("first.bin").unwrap().lifecycle,
+        FileLifecycle::Complete
+    );
     assert_eq!(session.status, SessionRunStatus::Completed);
 }
 
@@ -138,7 +141,10 @@ fn file_queued_does_not_restore_session_skipped_file() {
     assert!(app.files.is_empty());
     let session = app.session.as_ref().expect("session should remain");
     assert_eq!(session.file_count(), 1);
-    assert_eq!(session.find_file("episode.mkv").unwrap().lifecycle, FileLifecycle::Skipped);
+    assert_eq!(
+        session.find_file("episode.mkv").unwrap().lifecycle,
+        FileLifecycle::Skipped
+    );
 }
 
 #[test]
@@ -436,7 +442,7 @@ fn progress_deltas_do_not_exceed_file_size() {
     let file = app.files.iter().find(|f| f.id == "test.bin").unwrap();
     assert_eq!(
         file.downloaded, file_size,
-        "downloaded should equal sum of deltas"
+        "downloading rows may reach full byte progress before completion"
     );
     assert!(
         file.downloaded <= file.size,

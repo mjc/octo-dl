@@ -900,13 +900,16 @@ mod tests {
         );
         session.clear_flat_files_cache();
 
-    persist_session(&mut session).unwrap();
+        persist_session(&mut session).unwrap();
 
-    assert_eq!(
-        session.iter_files().map(|file| file.id.clone()).collect::<Vec<_>>(),
-        vec![crate::core::FileId::from("episode-1.mkv")]
-    );
-}
+        assert_eq!(
+            session
+                .iter_files()
+                .map(|file| file.id.clone())
+                .collect::<Vec<_>>(),
+            vec![crate::core::FileId::from("episode-1.mkv")]
+        );
+    }
 
     #[test]
     fn resume_url_selection_includes_pending_and_fetched() {

@@ -159,7 +159,11 @@ pub fn reconcile_restart(
         .collect();
 
     if let Some(snapshot) = session.map(canonical_restart_session) {
-        let SessionSnapshot { urls, packages: snapshot_packages, .. } = snapshot;
+        let SessionSnapshot {
+            urls,
+            packages: snapshot_packages,
+            ..
+        } = snapshot;
         for tracked_url in urls {
             if !state
                 .url_order

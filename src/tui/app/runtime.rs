@@ -74,10 +74,12 @@ impl App {
             .collect::<Vec<_>>();
         let counted_overlay_files = self
             .counted_overlay_files()
-            .map(|(id, overlay)| format!("{id} {} / {}", overlay.file.downloaded, overlay.file.size))
+            .map(|(id, overlay)| {
+                format!("{id} {} / {}", overlay.file.downloaded, overlay.file.size)
+            })
             .collect::<Vec<_>>();
 
-        log::warn!(
+        log::debug!(
             "[diag/{reason}] urls={} core_packages={} core_files={} visible_files={} overlay_files={} totals={}/{} files={}/{} dup_urls={:?} failed_empty={:?} full_not_complete={:?} counted_overlay={:?}",
             self.urls.len(),
             self.core_state.packages.len(),
@@ -318,11 +320,12 @@ impl App {
                     delta,
                     attempt_id,
                 } => {
-                    if let Some((_, pending_delta, _)) = pending_progress
-                        .iter_mut()
-                        .find(|(pending_id, _, pending_attempt_id)| {
-                            pending_id == &id && *pending_attempt_id == attempt_id
-                        })
+                    if let Some((_, pending_delta, _)) =
+                        pending_progress
+                            .iter_mut()
+                            .find(|(pending_id, _, pending_attempt_id)| {
+                                pending_id == &id && *pending_attempt_id == attempt_id
+                            })
                     {
                         pending_delta.total_bytes_delta = pending_delta
                             .total_bytes_delta

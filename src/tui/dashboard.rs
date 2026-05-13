@@ -414,7 +414,7 @@ impl App {
                         let visible = if file_complete {
                             file.size
                         } else {
-                            file.progress.visible_completed_bytes.min(file.size)
+                            crate::core::visible_completed_bytes_for_display(file)
                         };
                         present += 1;
                         complete += usize::from(file_complete);
@@ -458,6 +458,8 @@ impl App {
                 };
                 let downloaded = if matches!(file.status, FileStatus::Complete) {
                     file.size
+                } else if file.size > 0 && file.downloaded >= file.size {
+                    file.size.saturating_sub(1)
                 } else {
                     file.downloaded.min(file.size)
                 };
@@ -621,6 +623,46 @@ mod tests {
         assert_eq!(state.packages[0].present_files, 1);
         assert_eq!(state.packages[0].downloaded_bytes, 40);
         assert_eq!(state.packages[0].percent, 40);
+        assert_eq!(state.files[0].status, DashboardFileStatus::Downloading);
+    }
+
+    #[test]
+    fn dashboard_projection_allows_full_progress_before_complete_status() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx, true);
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/pkg"),
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "file.bin".to_string().into(),
+                    path: "file.bin".to_string(),
+                    size: 100,
+                }],
+                collision: None,
+            },
+        });
+        app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
+            id: "file.bin".to_string().into(),
+            size: 100,
+            attempt_id: 0,
+        });
+        app.handle_download_event(crate::tui::event::DownloadEvent::Progress {
+            id: "file.bin".to_string().into(),
+            delta: crate::core::ProgressDelta {
+                total_bytes_delta: 100,
+                network_bytes_delta: 100,
+            },
+            attempt_id: 0,
+        });
+
+        let state = app.dashboard_state(DashboardUiMode::Tui, false);
+
+        assert_eq!(state.packages[0].downloaded_bytes, 100);
+        assert_eq!(state.packages[0].percent, 100);
+        assert_eq!(state.files[0].downloaded, 100);
         assert_eq!(state.files[0].status, DashboardFileStatus::Downloading);
     }
 

@@ -1359,7 +1359,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mega"
 version = "0.8.0"
-source = "git+https://github.com/mjc/mega-rs.git?rev=dafe37744317632d525fb77d8eb1d83cf393d5a5#dafe37744317632d525fb77d8eb1d83cf393d5a5"
+source = "git+https://github.com/mjc/mega-rs.git?rev=0d9ba4abbece073cd6aa7bc311e8b175f0c7d6db#0d9ba4abbece073cd6aa7bc311e8b175f0c7d6db"
 dependencies = [
  "aes",
  "aes-gcm",

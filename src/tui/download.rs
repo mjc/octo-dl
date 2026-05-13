@@ -287,7 +287,8 @@ impl SchedulerState {
             .desired_pending_order
             .iter()
             .filter(|file_id| {
-                self.available_downloads.contains_key(*file_id) && !self.active_downloads.contains(*file_id)
+                self.available_downloads.contains_key(*file_id)
+                    && !self.active_downloads.contains(*file_id)
             })
             .cloned()
             .collect();
@@ -428,7 +429,9 @@ fn queue_download_request_events(
     match request {
         DownloadRequest::SubmitUrl { url } => {
             let _ = tx.send(DownloadEvent::UrlQueued { url: url.clone() });
-            let _ = tx.send(DownloadEvent::StatusMessage("Processing 1 URL(s)...".to_string()));
+            let _ = tx.send(DownloadEvent::StatusMessage(
+                "Processing 1 URL(s)...".to_string(),
+            ));
         }
         DownloadRequest::ResumeFileIds { file_ids, .. } => {
             let _ = tx.send(DownloadEvent::StatusMessage(format!(
@@ -501,11 +504,9 @@ async fn resolve_download_requests(
                 attempt_ids,
             } => {
                 let file_ids = file_ids.iter().cloned().collect::<IndexSet<_>>();
-                let entry = by_source
-                    .entry(source_url.clone())
-                    .or_insert_with(|| {
-                        (RequestedFiles::Only(IndexSet::new()), HashMap::new(), false)
-                    });
+                let entry = by_source.entry(source_url.clone()).or_insert_with(|| {
+                    (RequestedFiles::Only(IndexSet::new()), HashMap::new(), false)
+                });
                 match &mut entry.0 {
                     RequestedFiles::Only(existing) => {
                         existing.extend(file_ids);

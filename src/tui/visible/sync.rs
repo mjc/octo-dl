@@ -26,7 +26,7 @@ fn project_core_file(
 
     let downloaded = match file.lifecycle {
         FileLifecycle::Complete => file.size,
-        _ => file.progress.visible_completed_bytes.min(file.size),
+        _ => crate::core::visible_completed_bytes_for_display(file),
     };
     if let Some(mut existing) = existing {
         existing.name = file.path.clone();

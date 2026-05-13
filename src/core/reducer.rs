@@ -506,9 +506,11 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 ) {
                     file.size = size;
                     file.lifecycle = FileLifecycle::Downloading;
+                    file.progress = FileProgressState::default();
                     file.runtime.active = true;
                     file.runtime.counts_in_run_totals = true;
                     file.runtime.preexisting_complete = false;
+                    file.runtime.reused_chunks = 0;
                 }
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
@@ -1320,6 +1322,108 @@ mod tests {
             },
         );
         assert_eq!(state.files["file.bin"].lifecycle, FileLifecycle::Deleted);
+    }
+
+    #[test]
+    fn starting_file_resets_stale_progress_from_previous_attempt() {
+        let mut state = sample_state();
+        reduce(
+            &mut state,
+            CoreEvent::FileProgress {
+                file_id: "file.bin".to_string().into(),
+                total_bytes_delta: 100,
+                network_bytes_delta: 100,
+            },
+        );
+        reduce(
+            &mut state,
+            CoreEvent::FileCompleted {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+        reduce(
+            &mut state,
+            CoreEvent::FileResetRequested {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+
+        reduce(
+            &mut state,
+            CoreEvent::FileStarted {
+                file_id: "file.bin".to_string().into(),
+                size: 100,
+            },
+        );
+
+        let file = &state.files["file.bin"];
+        assert_eq!(file.lifecycle, FileLifecycle::Downloading);
+        assert_eq!(file.progress, FileProgressState::default());
+        assert_eq!(state.totals.run_completed_bytes, 0);
+    }
+
+    #[test]
+    fn starting_file_resets_stale_resume_reuse_progress() {
+        let mut state = sample_state();
+        reduce(
+            &mut state,
+            CoreEvent::FileReuseDetected {
+                file_id: "file.bin".to_string().into(),
+                reused_bytes: 80,
+                reused_chunks: 2,
+            },
+        );
+
+        reduce(
+            &mut state,
+            CoreEvent::FileStarted {
+                file_id: "file.bin".to_string().into(),
+                size: 100,
+            },
+        );
+
+        let file = &state.files["file.bin"];
+        assert_eq!(file.progress.verified_existing_bytes, 0);
+        assert_eq!(file.progress.visible_completed_bytes, 0);
+        assert_eq!(file.progress.downloaded_network_bytes, 0);
+        assert_eq!(file.runtime.reused_chunks, 0);
+        assert_eq!(state.totals.run_completed_bytes, 0);
+        assert_eq!(state.totals.displayed_network_bytes, 0);
+    }
+
+    #[test]
+    fn reuse_then_fresh_progress_does_not_double_count_reused_bytes() {
+        let mut state = sample_state();
+        reduce(
+            &mut state,
+            CoreEvent::FileStarted {
+                file_id: "file.bin".to_string().into(),
+                size: 100,
+            },
+        );
+        reduce(
+            &mut state,
+            CoreEvent::FileReuseDetected {
+                file_id: "file.bin".to_string().into(),
+                reused_bytes: 40,
+                reused_chunks: 1,
+            },
+        );
+        reduce(
+            &mut state,
+            CoreEvent::FileProgress {
+                file_id: "file.bin".to_string().into(),
+                total_bytes_delta: 25,
+                network_bytes_delta: 25,
+            },
+        );
+
+        let file = &state.files["file.bin"];
+        assert_eq!(file.progress.visible_completed_bytes, 65);
+        assert_eq!(file.progress.verified_existing_bytes, 40);
+        assert_eq!(file.progress.downloaded_network_bytes, 25);
+        assert_eq!(state.totals.run_completed_bytes, 65);
+        assert_eq!(state.totals.displayed_network_bytes, 25);
     }
 
     #[test]

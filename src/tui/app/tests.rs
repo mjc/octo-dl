@@ -14,9 +14,7 @@ use crate::{
 };
 
 fn test_app() -> App {
-    let path = tempdir()
-        .expect("test state directory should exist")
-        .keep();
+    let path = tempdir().expect("test state directory should exist").keep();
     std::mem::forget(StateDirectoryGuard::set(&path));
     let (tx, _rx) = mpsc::unbounded_channel();
     App::new(9723, tx, true)
@@ -299,7 +297,8 @@ fn progress_event_updates_visible_file_without_full_visible_sync() {
         size: 100,
     });
 
-    app.handle_file_progress_event("file.bin".into(),
+    app.handle_file_progress_event(
+        "file.bin".into(),
         crate::core::ProgressDelta {
             total_bytes_delta: 40,
             network_bytes_delta: 40,
@@ -340,7 +339,8 @@ fn sync_visible_files_rebuilds_visible_file_positions_for_core_rows() {
 
     assert_eq!(app.visible_file_positions.get("file.bin"), Some(&0));
 
-    app.handle_file_progress_event("file.bin".into(),
+    app.handle_file_progress_event(
+        "file.bin".into(),
         crate::core::ProgressDelta {
             total_bytes_delta: 25,
             network_bytes_delta: 25,
@@ -380,7 +380,10 @@ fn visible_file_context_prefers_core_state_over_stale_visible_row() {
     assert_eq!(context.artifact_path, "fresh.bin");
     assert_eq!(context.size, 321);
     assert!(matches!(context.status, FileStatus::Queued));
-    assert_eq!(context.source_url.as_deref(), Some("https://mega.nz/file/root"));
+    assert_eq!(
+        context.source_url.as_deref(),
+        Some("https://mega.nz/file/root")
+    );
 }
 
 #[test]
@@ -540,7 +543,10 @@ fn file_queued_without_explicit_package_id_reuses_existing_package_for_url() {
         "status={} urls={:?} files={:?}",
         app.status,
         session.urls,
-        session.iter_files().map(|file| file.id.clone()).collect::<Vec<_>>()
+        session
+            .iter_files()
+            .map(|file| file.id.clone())
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         session.packages[0].id,
@@ -575,7 +581,10 @@ fn register_session_queued_file_uses_resolved_source_url_for_package_identity() 
         "status={} urls={:?} files={:?}",
         app.status,
         session.urls,
-        session.iter_files().map(|file| file.id.clone()).collect::<Vec<_>>()
+        session
+            .iter_files()
+            .map(|file| file.id.clone())
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         session.packages[0].id,
@@ -592,7 +601,10 @@ fn register_session_queued_file_uses_resolved_source_url_for_package_identity() 
     );
     let file = session.find_file("episode-1.mkv").unwrap();
     assert_eq!(file.package_id, package_id("batch-folder", "Batch Folder"));
-    assert_eq!(file.source_url.as_deref(), Some("https://mega.nz/folder/resolved"));
+    assert_eq!(
+        file.source_url.as_deref(),
+        Some("https://mega.nz/folder/resolved")
+    );
 }
 
 #[test]
@@ -766,7 +778,10 @@ fn core_persisted_session_snapshot_is_saved_to_disk() {
     assert_eq!(session.packages.len(), 1);
     assert_eq!(session.packages[0].key.as_str(), "Root");
     assert_eq!(session.file_count(), 1);
-    assert_eq!(session.find_file("episode-1.mkv").unwrap().path, "episode-1.mkv");
+    assert_eq!(
+        session.find_file("episode-1.mkv").unwrap().path,
+        "episode-1.mkv"
+    );
 }
 
 #[test]
@@ -789,7 +804,9 @@ fn download_status_message_reflects_actual_activity() {
 
     assert_eq!(app.status, "Queued (0/1)");
 
-    app.overlay_file_mut(&"episode-1.mkv".into()).unwrap().status = FileStatus::Downloading;
+    app.overlay_file_mut(&"episode-1.mkv".into())
+        .unwrap()
+        .status = FileStatus::Downloading;
     app.sync_visible_files();
     app.update_download_status_message();
 
@@ -998,6 +1015,110 @@ fn shutdown_sync_refreshes_session_progress_skipped_during_hot_events() {
 }
 
 #[test]
+fn downloading_file_can_reach_full_progress_before_complete_event() {
+    let mut app = test_app();
+    let url = "https://mega.nz/file/root";
+    app.ensure_core_file(&"file-id".into(), url, "file-id", 100, true);
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
+        id: "file-id".to_string().into(),
+        size: 100,
+        attempt_id: 0,
+    });
+    app.handle_download_event(crate::tui::event::DownloadEvent::Progress {
+        id: "file-id".to_string().into(),
+        delta: crate::core::ProgressDelta {
+            total_bytes_delta: 100,
+            network_bytes_delta: 100,
+        },
+        attempt_id: 0,
+    });
+
+    let file = app
+        .visible_file(&"file-id".into())
+        .expect("file should be visible");
+    assert_eq!(file.downloaded, 100);
+    assert_eq!(file.status, FileStatus::Downloading);
+    assert_eq!(app.total_downloaded, 100);
+    assert_eq!(app.total_size, 100);
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::FileComplete {
+        id: "file-id".to_string().into(),
+        attempt_id: 0,
+    });
+
+    let file = app
+        .visible_file(&"file-id".into())
+        .expect("file should be visible");
+    assert_eq!(file.downloaded, 100);
+    assert_eq!(file.status, FileStatus::Complete);
+    assert_eq!(app.total_downloaded, 100);
+}
+
+#[test]
+fn restarting_completed_file_resets_visible_progress_before_new_deltas() {
+    let mut app = test_app();
+    let url = "https://mega.nz/file/root";
+    app.ensure_core_file(&"file-id".into(), url, "file-id", 100, true);
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: "file-id".to_string().into(),
+    });
+    app.sync_visible_files();
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
+        id: "file-id".to_string().into(),
+        size: 100,
+        attempt_id: 0,
+    });
+
+    let file = app
+        .visible_file(&"file-id".into())
+        .expect("file should be visible");
+    assert_eq!(file.downloaded, 0);
+    assert_eq!(file.status, FileStatus::Downloading);
+    assert_eq!(app.total_downloaded, 0);
+}
+
+#[test]
+fn resume_reuse_then_progress_keeps_file_bandwidth_on_fresh_bytes_only() {
+    let mut app = test_app();
+    let url = "https://mega.nz/file/root";
+    app.ensure_core_file(&"file-id".into(), url, "file-id", 100, true);
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
+        id: "file-id".to_string().into(),
+        size: 100,
+        attempt_id: 0,
+    });
+    app.handle_download_event(crate::tui::event::DownloadEvent::ResumeReused {
+        id: "file-id".to_string().into(),
+        chunks: 1,
+        bytes: 60,
+        attempt_id: 0,
+    });
+    app.handle_download_event(crate::tui::event::DownloadEvent::Progress {
+        id: "file-id".to_string().into(),
+        delta: crate::core::ProgressDelta {
+            total_bytes_delta: 25,
+            network_bytes_delta: 25,
+        },
+        attempt_id: 0,
+    });
+
+    let file_id = crate::core::FileId::from("file-id");
+    let core_file = app
+        .core_state
+        .files
+        .get(&file_id)
+        .expect("core file should exist");
+    assert_eq!(core_file.progress.visible_completed_bytes, 85);
+    assert_eq!(core_file.progress.verified_existing_bytes, 60);
+    assert_eq!(core_file.progress.downloaded_network_bytes, 25);
+    assert_eq!(app.total_downloaded, 85);
+    assert_eq!(app.total_network_downloaded, 25);
+}
+
+#[test]
 fn mark_visible_file_error_updates_session_file_status() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
@@ -1148,7 +1269,10 @@ fn mutate_session_and_save_reloads_canonical_snapshot() {
 
     let session = app.session.as_ref().expect("session should remain");
     assert_eq!(
-        session.iter_files().map(|file| file.id.clone()).collect::<Vec<_>>(),
+        session
+            .iter_files()
+            .map(|file| file.id.clone())
+            .collect::<Vec<_>>(),
         vec![crate::core::FileId::from("episode-1.mkv")]
     );
 }

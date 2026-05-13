@@ -12,9 +12,7 @@ use tempfile::tempdir;
 use tokio::sync::mpsc;
 
 fn test_app() -> App {
-    let path = tempdir()
-        .expect("test state directory should exist")
-        .keep();
+    let path = tempdir().expect("test state directory should exist").keep();
     std::mem::forget(StateDirectoryGuard::set(&path));
     let (tx, _rx) = mpsc::unbounded_channel();
     App::new(9723, tx, true)

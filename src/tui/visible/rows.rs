@@ -126,7 +126,7 @@ fn package_percent(package: &PackageProjection<'_>) -> u64 {
                 let visible = if matches!(file.lifecycle, FileLifecycle::Complete) {
                     file.size
                 } else {
-                    file.progress.visible_completed_bytes.min(file.size)
+                    crate::core::visible_completed_bytes_for_display(file)
                 };
                 (
                     downloaded.saturating_add(visible),
@@ -196,10 +196,11 @@ fn package_has_visible_content(
         .iter()
         .any(|file| file_is_visible_in_package(core_state, &file.id));
 
-    has_visible_files || (package.error.is_some() && !package_projection.files.is_empty() && {
-        let package_overlay_id = package_id.to_string();
-        !overlay_files.contains_key(package_overlay_id.as_str())
-    })
+    has_visible_files
+        || (package.error.is_some() && !package_projection.files.is_empty() && {
+            let package_overlay_id = package_id.to_string();
+            !overlay_files.contains_key(package_overlay_id.as_str())
+        })
 }
 
 fn package_has_visible_children(

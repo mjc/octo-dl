@@ -174,7 +174,11 @@ impl App {
             .files
             .get(file_id)
             .map(Self::core_file_network_downloaded)
-            .or_else(|| self.overlay_files.get(file_id).map(|file| file.file.downloaded))
+            .or_else(|| {
+                self.overlay_files
+                    .get(file_id)
+                    .map(|file| file.file.downloaded)
+            })
             .or_else(|| self.visible_file(file_id).map(|file| file.downloaded))
             .unwrap_or(0);
         self.ensure_file_ui(file_id, downloaded, true);

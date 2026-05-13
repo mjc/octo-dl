@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::config::DownloadConfig;
 use crate::core::session::SavedCredentials;
@@ -308,6 +308,11 @@ pub struct FileProgressState {
     pub verified_existing_bytes: u64,
     pub downloaded_network_bytes: u64,
     pub visible_completed_bytes: u64,
+}
+
+#[must_use]
+pub fn visible_completed_bytes_for_display(file: &FileState) -> u64 {
+    file.progress.visible_completed_bytes.min(file.size)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
