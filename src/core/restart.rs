@@ -106,6 +106,15 @@ where
     snapshot
 }
 
+#[must_use]
+pub fn build_restart_snapshot(session: &SessionSnapshotV3) -> RestartSnapshot {
+    reconcile_restart(
+        Some(session.clone()),
+        scan_filesystem(session.files.iter().map(|file| file.path.clone())),
+        session.urls.iter().map(|entry| entry.url.clone()).collect(),
+    )
+}
+
 pub fn reconcile_restart(
     session: Option<SessionSnapshotV3>,
     fs: FilesystemSnapshot,

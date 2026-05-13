@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::core::{
     CoreCommand, CoreEffect, CoreEvent, PackageId, ResolvedFile, ResolvedPackage, RestartSnapshot,
-    SavedCredentials, SessionSnapshotV3, reconcile_restart, reduce, scan_filesystem,
+    SavedCredentials, SessionSnapshotV3, build_restart_snapshot, reduce,
     snapshot_from_state,
 };
 
@@ -316,16 +316,7 @@ impl App {
             self.login.set_credentials_if_missing(&email, &password, "");
         }
 
-        let file_ids = session
-            .files
-            .iter()
-            .map(|file| file.path.clone())
-            .collect::<Vec<_>>();
-        let restart = reconcile_restart(
-            Some(session.clone()),
-            scan_filesystem(file_ids),
-            session.urls.iter().map(|entry| entry.url.clone()).collect(),
-        );
+        let restart = build_restart_snapshot(&session);
 
         self.resume_from_restart(session, &restart);
         self.log_state_diagnostics("resume_latest_session");
