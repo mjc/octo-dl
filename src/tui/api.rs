@@ -133,13 +133,7 @@ async fn api_parse_page(
         return response;
     }
 
-    let mut urls = crate::extract_urls(&payload.page);
-    if urls.is_empty() {
-        urls = helpers::extract_and_dispatch_urls_from_html(&payload.page);
-    }
-    if urls.is_empty() && !payload.fallback.is_empty() {
-        urls = crate::extract_urls(&payload.fallback);
-    }
+    let urls = helpers::extract_urls_from_parse_payload(&payload.page, &payload.fallback);
     let count = urls.len();
     helpers::dispatch_urls(&state, urls.clone());
     axum::Json(UrlResponse { added: urls, count }).into_response()

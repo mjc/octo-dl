@@ -1,5 +1,6 @@
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
+use std::collections::HashSet;
 
 use crate::extract_urls;
 
@@ -44,8 +45,23 @@ pub(super) fn extract_and_dispatch_urls(state: &ApiState, text: &str) -> (Vec<St
     (urls, count)
 }
 
-pub(super) fn extract_and_dispatch_urls_from_html(html: &str) -> Vec<String> {
-    extract_urls(&html_to_text(html))
+pub(super) fn extract_urls_from_parse_payload(page: &str, fallback: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut seen = HashSet::new();
+    append_unique_urls(&mut urls, &mut seen, extract_urls(page));
+    append_unique_urls(&mut urls, &mut seen, extract_urls(&html_to_text(page)));
+    if !fallback.is_empty() {
+        append_unique_urls(&mut urls, &mut seen, extract_urls(fallback));
+    }
+    urls
+}
+
+fn append_unique_urls(urls: &mut Vec<String>, seen: &mut HashSet<String>, candidates: Vec<String>) {
+    for url in candidates {
+        if seen.insert(url.clone()) {
+            urls.push(url);
+        }
+    }
 }
 
 pub(super) fn provided_api_key(headers: &HeaderMap) -> Option<&str> {
@@ -139,6 +155,23 @@ fn html_to_text(html: &str) -> String {
 }
 
 fn decode_html_entity(entity: &str) -> char {
+    if let Some(value) = entity
+        .strip_prefix("#x")
+        .or_else(|| entity.strip_prefix("#X"))
+        .and_then(|value| value.strip_suffix(';'))
+        .and_then(|value| u32::from_str_radix(value, 16).ok())
+        .and_then(char::from_u32)
+    {
+        return value;
+    }
+    if let Some(value) = entity
+        .strip_prefix('#')
+        .and_then(|value| value.strip_suffix(';'))
+        .and_then(|value| value.parse::<u32>().ok())
+        .and_then(char::from_u32)
+    {
+        return value;
+    }
     match entity {
         "amp;" => '&',
         "lt;" => '<',

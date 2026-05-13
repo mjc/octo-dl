@@ -202,6 +202,69 @@ async fn parse_api_extracts_url_from_syntax_highlighted_code_html() {
     }
 }
 
+#[tokio::test]
+async fn parse_api_extracts_multiple_folder_urls_from_pre_code_html() {
+    let dir = tempdir().unwrap();
+    let _guard = crate::test_support::StateDirectoryGuard::set(dir.path());
+    let (state, mut rx) = state_with_snapshot(r#"{"files":[]}"#);
+
+    let response = api_parse_page(
+        State(state),
+        HeaderMap::new(),
+        axum::Json(ParseRequest {
+            page: r#"<pre><code>
+https://mega.nz/folder/first#first-key
+https://mega.nz/folder/second#second-key
+</code></pre>"#
+                .to_string(),
+            fallback: String::new(),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    match rx.try_recv().expect("UI action should be sent") {
+        UiAction::AddUrls(received) => {
+            assert_eq!(
+                received,
+                vec![
+                    "https://mega.nz/folder/first#first-key".to_string(),
+                    "https://mega.nz/folder/second#second-key".to_string(),
+                ]
+            )
+        }
+        other => panic!("unexpected UI action: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn parse_api_extracts_code_url_with_numeric_html_entities() {
+    let dir = tempdir().unwrap();
+    let _guard = crate::test_support::StateDirectoryGuard::set(dir.path());
+    let (state, mut rx) = state_with_snapshot(r#"{"files":[]}"#);
+
+    let response = api_parse_page(
+        State(state),
+        HeaderMap::new(),
+        axum::Json(ParseRequest {
+            page: r#"<pre><code>https&#58;&#47;&#47;mega.nz&#47;folder&#47;abc123&#35;key456</code></pre>"#
+                .to_string(),
+            fallback: String::new(),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    match rx.try_recv().expect("UI action should be sent") {
+        UiAction::AddUrls(received) => {
+            assert_eq!(received, vec!["https://mega.nz/folder/abc123#key456"])
+        }
+        other => panic!("unexpected UI action: {other:?}"),
+    }
+}
+
 #[test]
 fn resolve_file_id_by_name_requires_valid_shared_state() {
     let (state, _rx) = state_without_shared();
