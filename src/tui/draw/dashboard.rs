@@ -114,7 +114,7 @@ fn dashboard_package_item(
     selected: bool,
     content_width: usize,
 ) -> ListItem<'static> {
-    let (icon, color) = package_status_style(package.status);
+    let (icon, color) = package_status_style(package.status, package.percent);
     let marker = if package.present_files > 1 {
         if package.expanded { "-" } else { "+" }
     } else {
@@ -412,14 +412,24 @@ fn is_processing_status(status: &str) -> bool {
     status.starts_with("Processing ")
 }
 
-fn package_status_style(status: PackageStatus) -> (&'static str, Color) {
+fn package_status_style(status: PackageStatus, percent: u64) -> (&'static str, Color) {
     match status {
-        PackageStatus::Downloading => ("\u{25cf}", Color::Yellow),
+        PackageStatus::Downloading => (package_progress_icon(percent), Color::Yellow),
         PackageStatus::Failed => ("\u{2717}", Color::Red),
         PackageStatus::Complete => ("\u{2713}", Color::Green),
-        PackageStatus::Partial => ("\u{25d0}", Color::Yellow),
+        PackageStatus::Partial => (package_progress_icon(percent), Color::Yellow),
         PackageStatus::Queued | PackageStatus::Pending => ("\u{25cb}", Color::DarkGray),
         PackageStatus::Skipped | PackageStatus::Deleted => ("\u{2715}", Color::DarkGray),
+    }
+}
+
+fn package_progress_icon(percent: u64) -> &'static str {
+    match percent {
+        0 => "\u{25cb}",
+        1..=24 => "\u{25d4}",
+        25..=74 => "\u{25d1}",
+        75..=99 => "\u{25d5}",
+        _ => "\u{25cf}",
     }
 }
 

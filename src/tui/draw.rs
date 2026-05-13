@@ -541,6 +541,46 @@ mod tests {
     }
 
     #[test]
+    fn draw_main_uses_progress_glyph_for_merged_package_rows() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg-merged", "https://mega.nz/folder/a"),
+                source_url: "https://mega.nz/folder/a".to_string(),
+                key: crate::core::PackageKey::new("Merged Package".to_string()),
+                display_name: "Merged Package".to_string(),
+                files: vec![
+                    ResolvedFile {
+                        file_id: "episode-1.mkv".to_string(),
+                        path: "season/episode-1.mkv".to_string(),
+                        size: 100,
+                    },
+                    ResolvedFile {
+                        file_id: "episode-2.mkv".to_string(),
+                        path: "season/episode-2.mkv".to_string(),
+                        size: 100,
+                    },
+                ],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: "episode-1.mkv".to_string(),
+            size: 100,
+        });
+        app.apply_core_event(CoreEvent::FileProgress {
+            file_id: "episode-1.mkv".to_string(),
+            total_bytes_delta: 50,
+            network_bytes_delta: 50,
+        });
+
+        let rendered = render_text(&mut app);
+
+        assert!(rendered.contains("◑ Merged Package"));
+        assert!(rendered.contains(" 25%"));
+    }
+
+    #[test]
     fn draw_main_failed_packages_expand_by_default() {
         let mut app = test_app();
         app.apply_core_event(CoreEvent::PackageResolved {
