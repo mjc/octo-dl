@@ -192,34 +192,36 @@ pub fn reconcile_restart(
                 files.insert(file_id, file);
                 continue;
             }
-            if let Some(size) = complete_map.get(&file.id) {
-                if *size == file.size {
-                    file.size = *size;
-                    file.lifecycle = FileLifecycle::Complete;
-                    file.progress.visible_completed_bytes = *size;
-                    file.runtime.preexisting_complete = true;
-                    file.runtime.counts_in_run_totals = false;
-                    preexisting_complete_file_ids.push(file.id.clone());
-                    files.insert(file.id.clone(), file);
-                    continue;
-                }
-                file.lifecycle = FileLifecycle::Queued;
-                file.runtime.counts_in_run_totals = true;
-                file.runtime.preexisting_complete = false;
-                file.progress = FileProgressState::default();
-                file.message = None;
-                if !resume_file_ids.contains(&file.id) {
-                    resume_file_ids.push(file.id.clone());
-                }
+            let observed = crate::download::ObservedLocalFile {
+                final_size: complete_map.get(&file.id).copied(),
+                part_size: partial_map.get(&file.id).map(|partial| partial.bytes),
+                has_sidecar: partial_map
+                    .get(&file.id)
+                    .is_some_and(|partial| partial.has_sidecar),
+                verified_resume_bytes: partial_map
+                    .get(&file.id)
+                    .map_or(0, |partial| partial.verified_bytes),
+            };
+            let local = crate::download::classify_observed_local_file(
+                observed,
+                file.size,
+                false,
+            );
+            if matches!(local.status, crate::download::FileStatus::Complete) {
+                file.lifecycle = FileLifecycle::Complete;
+                file.progress.visible_completed_bytes = file.size;
+                file.runtime.preexisting_complete = true;
+                file.runtime.counts_in_run_totals = false;
+                preexisting_complete_file_ids.push(file.id.clone());
                 files.insert(file.id.clone(), file);
                 continue;
             }
-            if let Some(partial) = partial_map.get(&file.id) {
+            if matches!(local.status, crate::download::FileStatus::Partial) {
                 file.lifecycle = FileLifecycle::Queued;
                 file.progress = FileProgressState {
                     verified_existing_bytes: 0,
                     downloaded_network_bytes: 0,
-                    visible_completed_bytes: partial.verified_bytes.min(file.size),
+                    visible_completed_bytes: local.verified_resume_bytes.min(file.size),
                 };
                 file.runtime.counts_in_run_totals = true;
                 file.runtime.preexisting_complete = false;

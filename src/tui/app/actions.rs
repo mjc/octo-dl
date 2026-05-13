@@ -186,6 +186,7 @@ impl App {
         });
         self.mark_visible_file_error(&id, &id, &error);
         self.recompute_totals();
+        self.update_download_status_message();
     }
 
     pub(crate) fn handle_scope_error_event(&mut self, scope: String, error: String) {
@@ -266,6 +267,7 @@ impl App {
         if !self.register_queued_file(&file) {
             return;
         }
+        self.update_download_status_message();
     }
 
     fn handle_session_url_fetched(&mut self, url: &str) {
@@ -302,6 +304,7 @@ impl App {
             size,
         });
         self.reset_file_ui_rate(&id);
+        self.update_download_status_message();
     }
 
     pub(crate) fn handle_file_progress_event(
@@ -399,9 +402,7 @@ impl App {
             file_id: id.clone(),
         });
         self.reset_file_ui_rate(&id);
-        if self.paused {
-            self.status = "Paused".to_string();
-        }
+        self.update_download_status_message();
     }
 
     pub(crate) fn perform_delete_file_action(&mut self, id: &str) {

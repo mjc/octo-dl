@@ -47,6 +47,67 @@ pub enum FileStatus {
     Missing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ObservedLocalFile {
+    pub final_size: Option<u64>,
+    pub part_size: Option<u64>,
+    pub has_sidecar: bool,
+    pub verified_resume_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InspectedLocalFile {
+    pub status: FileStatus,
+    pub existing_partial_bytes: u64,
+    pub has_resume_sidecar: bool,
+    pub verified_resume_bytes: u64,
+}
+
+impl Default for InspectedLocalFile {
+    fn default() -> Self {
+        Self {
+            status: FileStatus::Missing,
+            existing_partial_bytes: 0,
+            has_resume_sidecar: false,
+            verified_resume_bytes: 0,
+        }
+    }
+}
+
+pub(crate) fn classify_observed_local_file(
+    observed: ObservedLocalFile,
+    expected_size: u64,
+    force_overwrite: bool,
+) -> InspectedLocalFile {
+    if force_overwrite {
+        return InspectedLocalFile {
+            status: FileStatus::Missing,
+            ..InspectedLocalFile::default()
+        };
+    }
+
+    if observed.final_size == Some(expected_size) {
+        return InspectedLocalFile {
+            status: FileStatus::Complete,
+            ..InspectedLocalFile::default()
+        };
+    }
+
+    if let Some(part_size) = observed.part_size {
+        return InspectedLocalFile {
+            status: FileStatus::Partial,
+            existing_partial_bytes: part_size,
+            has_resume_sidecar: observed.has_sidecar,
+            verified_resume_bytes: observed.verified_resume_bytes.min(expected_size),
+        };
+    }
+
+    InspectedLocalFile {
+        status: FileStatus::Missing,
+        ..InspectedLocalFile::default()
+    }
+}
+
 /// Trait for receiving download progress updates.
 ///
 /// Implement this trait to receive callbacks during download operations.
@@ -484,25 +545,15 @@ impl<F: FileSystem> Downloader<F> {
     }
 
     /// Classifies a file's current status on disk.
-    async fn classify_file(&self, path: &str, expected_size: u64) -> FileStatus {
-        if self.config.force_overwrite {
-            return FileStatus::Missing;
-        }
-        // Check final file first
-        if self
-            .fs
-            .file_size(Path::new(path))
-            .await
-            .is_some_and(|size| size == expected_size)
-        {
-            return FileStatus::Complete;
-        }
-        // Check for .part file
-        let pp = part_path(path);
-        if self.fs.file_exists(&pp).await {
-            return FileStatus::Partial;
-        }
-        FileStatus::Missing
+    async fn inspect_local_file(&self, path: &str, expected_size: u64) -> InspectedLocalFile {
+        let part_path = part_path(path);
+        let observed = ObservedLocalFile {
+            final_size: self.fs.file_size(Path::new(path)).await,
+            part_size: self.fs.file_size(&part_path).await,
+            has_sidecar: self.fs.file_exists(&sidecar_path(path)).await,
+            verified_resume_bytes: resume_sidecar_verified_bytes(path).unwrap_or(0),
+        };
+        classify_observed_local_file(observed, expected_size, self.config.force_overwrite)
     }
 
     /// Collects files from nodes, checking which need to be downloaded.
@@ -531,15 +582,18 @@ impl<F: FileSystem> Downloader<F> {
         let mut partial = 0;
 
         for item in all_items {
-            match self.classify_file(&item.path, item.node.size()).await {
+            let local = self.inspect_local_file(&item.path, item.node.size()).await;
+            match local.status {
                 FileStatus::Complete => {
                     skipped += 1;
                     completed.push(item);
                 }
                 FileStatus::Partial => {
-                    let pp = part_path(&item.path);
-                    let existing_size = self.fs.file_size(&pp).await.unwrap_or(0);
-                    progress.on_partial_detected(&item.path, existing_size, item.node.size());
+                    progress.on_partial_detected(
+                        &item.path,
+                        local.existing_partial_bytes,
+                        item.node.size(),
+                    );
                     partial += 1;
                     to_download.push(item);
                 }
@@ -1705,7 +1759,7 @@ mod tests {
         fs.add_file("movie.mkv", 1_000_000);
         let dl = mock_downloader(fs);
         assert_eq!(
-            dl.classify_file("movie.mkv", 1_000_000).await,
+            dl.inspect_local_file("movie.mkv", 1_000_000).await.status,
             FileStatus::Complete
         );
     }
@@ -1717,7 +1771,7 @@ mod tests {
         fs.add_file("movie.mkv", 500);
         let dl = mock_downloader(fs);
         assert_eq!(
-            dl.classify_file("movie.mkv", 1_000_000).await,
+            dl.inspect_local_file("movie.mkv", 1_000_000).await.status,
             FileStatus::Missing
         );
     }
@@ -1729,7 +1783,7 @@ mod tests {
         fs.add_file("movie.mkv.part", 500_000);
         let dl = mock_downloader(fs);
         assert_eq!(
-            dl.classify_file("movie.mkv", 1_000_000).await,
+            dl.inspect_local_file("movie.mkv", 1_000_000).await.status,
             FileStatus::Partial
         );
     }
@@ -1739,7 +1793,7 @@ mod tests {
         let fs = MockFileSystem::new();
         let dl = mock_downloader(fs);
         assert_eq!(
-            dl.classify_file("movie.mkv", 1_000_000).await,
+            dl.inspect_local_file("movie.mkv", 1_000_000).await.status,
             FileStatus::Missing
         );
     }
@@ -1751,7 +1805,7 @@ mod tests {
         fs.add_file("movie.mkv", 1_000_000);
         let dl = mock_downloader_force(fs);
         assert_eq!(
-            dl.classify_file("movie.mkv", 1_000_000).await,
+            dl.inspect_local_file("movie.mkv", 1_000_000).await.status,
             FileStatus::Missing
         );
     }
