@@ -90,6 +90,10 @@ fn print_usage() {
     eprintln!("Run 'octo --tui --help' or 'octo --help' for mode-specific options.");
 }
 
+fn help_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "-h" || arg == "--help")
+}
+
 fn init_logger(args: &[String]) {
     let mut builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("octo_dl=info"));
@@ -318,6 +322,11 @@ async fn main() -> octo_dl::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     init_logger(&args);
 
+    if help_requested(&args) {
+        print_usage();
+        std::process::exit(0);
+    }
+
     let options = parse_runtime_options(&args).unwrap_or_else(|error| {
         eprintln!("Error: {error}");
         std::process::exit(1);
@@ -387,7 +396,7 @@ async fn main() -> octo_dl::Result<()> {
         let has_positional = has_positional_args(&args);
         if !has_positional && !args.iter().any(|a| a == "-r" || a == "--resume") {
             // No URLs, no --resume, and not TUI/API — show help
-            if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
+            if args.is_empty() {
                 print_usage();
                 std::process::exit(0);
             }
@@ -449,6 +458,13 @@ mod tests {
             "https://mega.nz/file/test".to_string(),
         ];
         assert!(has_positional_args(&args));
+    }
+
+    #[test]
+    fn help_requested_matches_global_help_flags() {
+        assert!(help_requested(&["--tui".to_string(), "--help".to_string()]));
+        assert!(help_requested(&["-h".to_string()]));
+        assert!(!help_requested(&["--tui".to_string()]));
     }
 
     #[test]
