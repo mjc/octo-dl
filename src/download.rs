@@ -11,7 +11,6 @@ use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
-use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::DownloadConfig;
@@ -842,9 +841,6 @@ impl<F: FileSystem> Downloader<F> {
         )));
         let trusted_for_download = tracker.lock().unwrap().trusted_chunks();
         let (sidecar_updates_tx, sidecar_writer) = spawn_sidecar_writer(sp.clone());
-        // Wrap tokio file for futures::AsyncWrite/AsyncSeek compatibility
-        let file = file.compat_write();
-
         // The mega library calls the progress callback with the *cumulative*
         // total bytes downloaded so far, NOT a delta.  We use fetch_max (not
         // swap) so that out-of-order callbacks from parallel workers never

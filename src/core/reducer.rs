@@ -103,9 +103,212 @@ fn should_persist_session(event: &CoreEvent) -> bool {
     )
 }
 
+fn counts_in_run_totals(file: &FileState) -> bool {
+    file.runtime.counts_in_run_totals
+        && !file.runtime.preexisting_complete
+        && !matches!(
+            file.lifecycle,
+            FileLifecycle::Skipped | FileLifecycle::Deleted
+        )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FileDerivedState {
+    package_id: PackageId,
+    lifecycle: FileLifecycle,
+    size: u64,
+    visible_completed_bytes: u64,
+    downloaded_network_bytes: u64,
+    counts_in_run_totals: bool,
+}
+
+impl From<&FileState> for FileDerivedState {
+    fn from(file: &FileState) -> Self {
+        Self {
+            package_id: file.package_id,
+            lifecycle: file.lifecycle,
+            size: file.size,
+            visible_completed_bytes: file.progress.visible_completed_bytes.min(file.size),
+            downloaded_network_bytes: file.progress.downloaded_network_bytes.min(file.size),
+            counts_in_run_totals: counts_in_run_totals(file),
+        }
+    }
+}
+
+fn add_totals_contribution(state: &mut DownloadState, file: FileDerivedState) {
+    if !file.counts_in_run_totals {
+        return;
+    }
+    state.totals.run_total_bytes = state.totals.run_total_bytes.saturating_add(file.size);
+    state.totals.run_completed_bytes = state
+        .totals
+        .run_completed_bytes
+        .saturating_add(file.visible_completed_bytes);
+    state.totals.displayed_network_bytes = state
+        .totals
+        .displayed_network_bytes
+        .saturating_add(file.downloaded_network_bytes);
+    state.totals.run_file_total = state.totals.run_file_total.saturating_add(1);
+    if matches!(file.lifecycle, FileLifecycle::Complete) {
+        state.totals.run_file_completed = state.totals.run_file_completed.saturating_add(1);
+    }
+}
+
+fn remove_totals_contribution(state: &mut DownloadState, file: FileDerivedState) {
+    if !file.counts_in_run_totals {
+        return;
+    }
+    state.totals.run_total_bytes = state.totals.run_total_bytes.saturating_sub(file.size);
+    state.totals.run_completed_bytes = state
+        .totals
+        .run_completed_bytes
+        .saturating_sub(file.visible_completed_bytes);
+    state.totals.displayed_network_bytes = state
+        .totals
+        .displayed_network_bytes
+        .saturating_sub(file.downloaded_network_bytes);
+    state.totals.run_file_total = state.totals.run_file_total.saturating_sub(1);
+    if matches!(file.lifecycle, FileLifecycle::Complete) {
+        state.totals.run_file_completed = state.totals.run_file_completed.saturating_sub(1);
+    }
+}
+
+fn insert_file_into_package_index(state: &mut DownloadState, file_id: &str, package_id: PackageId) {
+    state
+        .package_file_index
+        .entry(package_id)
+        .or_default()
+        .push(file_id.to_string());
+}
+
+fn remove_file_from_package_index(state: &mut DownloadState, file_id: &str, package_id: PackageId) {
+    if let Some(file_ids) = state.package_file_index.get_mut(&package_id) {
+        if let Some(index) = file_ids.iter().position(|existing| existing == file_id) {
+            file_ids.swap_remove(index);
+        }
+        if file_ids.is_empty() {
+            state.package_file_index.shift_remove(&package_id);
+        }
+    }
+}
+
+fn package_status_from_files(state: &DownloadState, package_id: PackageId) -> PackageStatus {
+    let Some(file_ids) = state.package_file_index.get(&package_id) else {
+        return PackageStatus::Pending;
+    };
+    let Some(package) = state.packages.get(&package_id) else {
+        return PackageStatus::Pending;
+    };
+
+    let mut has_downloading = false;
+    let mut has_failed = false;
+    let mut has_queued = false;
+    let mut has_complete = false;
+    let mut all_skipped = true;
+    let mut all_deleted = true;
+
+    for file_id in file_ids {
+        let Some(file) = state.files.get(file_id) else {
+            continue;
+        };
+        match file.lifecycle {
+            FileLifecycle::Downloading => has_downloading = true,
+            FileLifecycle::Failed => has_failed = true,
+            FileLifecycle::Queued | FileLifecycle::Planned => has_queued = true,
+            FileLifecycle::Complete => has_complete = true,
+            FileLifecycle::Skipped => all_deleted = false,
+            FileLifecycle::Deleted => all_skipped = false,
+        }
+        if !matches!(file.lifecycle, FileLifecycle::Skipped) {
+            all_skipped = false;
+        }
+        if !matches!(file.lifecycle, FileLifecycle::Deleted) {
+            all_deleted = false;
+        }
+    }
+
+    if package.error.is_some() || has_failed {
+        PackageStatus::Failed
+    } else if has_downloading {
+        PackageStatus::Downloading
+    } else if all_deleted && !file_ids.is_empty() {
+        PackageStatus::Deleted
+    } else if all_skipped && !file_ids.is_empty() {
+        PackageStatus::Skipped
+    } else if has_complete && (has_queued || has_downloading) {
+        PackageStatus::Partial
+    } else if has_complete && !file_ids.is_empty() {
+        PackageStatus::Complete
+    } else if has_queued {
+        PackageStatus::Queued
+    } else {
+        PackageStatus::Pending
+    }
+}
+
+fn recompute_package_status(state: &mut DownloadState, package_id: PackageId) {
+    let status = package_status_from_files(state, package_id);
+    if let Some(package) = state.packages.get_mut(&package_id) {
+        package.status = status;
+    }
+}
+
+fn recompute_session_status(state: &mut DownloadState) {
+    state.session_meta.status = if !state.files.is_empty()
+        && state.packages.values().all(|package| {
+            matches!(
+                package.status,
+                PackageStatus::Complete | PackageStatus::Skipped | PackageStatus::Deleted
+            )
+        }) {
+        SessionRunStatus::Completed
+    } else {
+        SessionRunStatus::InProgress
+    };
+}
+
+fn apply_file_change(
+    state: &mut DownloadState,
+    file_id: &str,
+    before: FileDerivedState,
+    after: FileDerivedState,
+) {
+    remove_totals_contribution(state, before);
+    if before.package_id != after.package_id {
+        remove_file_from_package_index(state, file_id, before.package_id);
+        insert_file_into_package_index(state, file_id, after.package_id);
+    }
+    add_totals_contribution(state, after);
+    recompute_package_status(state, before.package_id);
+    if before.package_id != after.package_id {
+        recompute_package_status(state, after.package_id);
+    }
+    recompute_session_status(state);
+}
+
+fn insert_file_state(state: &mut DownloadState, file: FileState) {
+    let derived = FileDerivedState::from(&file);
+    insert_file_into_package_index(state, &file.id, file.package_id);
+    add_totals_contribution(state, derived);
+    let package_id = file.package_id;
+    state.files.insert(file.id.clone(), file);
+    recompute_package_status(state, package_id);
+    recompute_session_status(state);
+}
+
+#[cfg(debug_assertions)]
+fn maybe_debug_assert_invariants(state: &DownloadState) {
+    debug_assert_invariants(state);
+}
+
+#[cfg(not(debug_assertions))]
+fn maybe_debug_assert_invariants(_state: &DownloadState) {}
+
 pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
+    state.ensure_package_file_index();
     let mut effects = Vec::new();
     let persist_session = should_persist_session(&event);
+    let mut full_refresh = false;
     match event {
         CoreEvent::UrlSubmitted { url } => {
             if !state.url_order.iter().any(|existing| existing == &url) {
@@ -133,12 +336,15 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 state
                     .packages
                     .retain(|_, existing| existing.key != package.key);
-                recompute_derived(state);
+                if full_refresh {
+                    state.rebuild_package_file_index();
+                    recompute_derived(state);
+                }
                 if persist_session {
                     effects.push(CoreEffect::PersistSession(snapshot_from_state(state)));
                 }
                 effects.push(CoreEffect::PublishViewSnapshot);
-                debug_assert_invariants(state);
+                maybe_debug_assert_invariants(state);
                 return effects;
             }
             let incoming_package_id = package.id.clone();
@@ -152,10 +358,13 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 && previous_package_id != &incoming_package_id
             {
                 state.packages.shift_remove(previous_package_id);
-                for file in state.files.values_mut() {
-                    if &file.package_id == previous_package_id {
-                        file.package_id = incoming_package_id.clone();
+                if let Some(file_ids) = state.package_file_index.shift_remove(previous_package_id) {
+                    for file_id in &file_ids {
+                        if let Some(file) = state.files.get_mut(file_id) {
+                            file.package_id = incoming_package_id;
+                        }
                     }
+                    state.package_file_index.insert(incoming_package_id, file_ids);
                 }
             }
 
@@ -175,24 +384,26 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 package.display_name.clone()
             };
 
-            let package_entry = state
-                .packages
-                .entry(incoming_package_id.clone())
-                .or_insert_with(|| PackageState {
-                    id: incoming_package_id.clone(),
-                    key: package.key.clone(),
-                    display_name: package_display_name.clone(),
-                    status: PackageStatus::Pending,
-                    error: None,
-                });
-            package_entry.key = package.key.clone();
-            if !preserve_display_name {
-                package_entry.display_name = package_display_name;
-            }
-            package_entry.error = package
+            let mut package_error = package
                 .collision
                 .as_ref()
                 .map(|collision| format!("path collision on {}", collision.file_id));
+            {
+                let package_entry = state
+                    .packages
+                    .entry(incoming_package_id.clone())
+                    .or_insert_with(|| PackageState {
+                        id: incoming_package_id.clone(),
+                        key: package.key.clone(),
+                        display_name: package_display_name.clone(),
+                        status: PackageStatus::Pending,
+                        error: None,
+                    });
+                package_entry.key = package.key.clone();
+                if !preserve_display_name {
+                    package_entry.display_name = package_display_name;
+                }
+            }
 
             if let Some(collision) = package.collision {
                 effects.push(CoreEffect::PublishStatusMessage(format!(
@@ -208,16 +419,23 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                     .map(|existing| existing.package_id.clone());
                 match existing_package_id {
                     Some(existing_package_id) if existing_package_id != incoming_package_id => {
-                        package_entry.error = Some(format!(
+                        package_error = Some(format!(
                             "path collision on {} with package {}",
                             resolved.file_id, existing_package_id
                         ));
                     }
                     Some(_) => {
+                        let mut delta = None;
                         if let Some(file) = state.files.get_mut(&resolved.file_id) {
+                            let before = FileDerivedState::from(&*file);
                             file.source_url = Some(package.source_url.clone());
                             file.path = resolved.path.clone();
                             file.size = resolved.size;
+                            let after = FileDerivedState::from(&*file);
+                            delta = Some((before, after));
+                        }
+                        if let Some((before, after)) = delta {
+                            apply_file_change(state, &resolved.file_id, before, after);
                         }
                     }
                     None => {
@@ -236,13 +454,20 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                             },
                             message: None,
                         };
-                        state.files.insert(resolved.file_id, file);
+                        insert_file_state(state, file);
                     }
                 }
             }
+            if let Some(package_entry) = state.packages.get_mut(&incoming_package_id) {
+                package_entry.error = package_error;
+            }
+            recompute_package_status(state, incoming_package_id);
+            recompute_session_status(state);
         }
         CoreEvent::FileQueued { file_id } => {
+            let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id) {
+                let before = FileDerivedState::from(&*file);
                 if !matches!(
                     file.lifecycle,
                     FileLifecycle::Skipped | FileLifecycle::Deleted
@@ -251,10 +476,17 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                     file.runtime.active = false;
                     file.message = None;
                 }
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileStarted { file_id, size } => {
+            let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id) {
+                let before = FileDerivedState::from(&*file);
                 if !matches!(
                     file.lifecycle,
                     FileLifecycle::Skipped | FileLifecycle::Deleted
@@ -265,6 +497,11 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                     file.runtime.counts_in_run_totals = true;
                     file.runtime.preexisting_complete = false;
                 }
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileProgress {
@@ -272,7 +509,9 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             total_bytes_delta,
             network_bytes_delta,
         } => {
+            let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id) {
+                let before = FileDerivedState::from(&*file);
                 if matches!(
                     file.lifecycle,
                     FileLifecycle::Downloading | FileLifecycle::Queued
@@ -292,6 +531,11 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                         file.runtime.active = true;
                     }
                 }
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileReuseDetected {
@@ -299,7 +543,9 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             reused_bytes,
             reused_chunks,
         } => {
+            let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id) {
+                let before = FileDerivedState::from(&*file);
                 file.progress.verified_existing_bytes = file
                     .progress
                     .verified_existing_bytes
@@ -312,35 +558,63 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                     .min(file.size);
                 file.runtime.reused_chunks =
                     file.runtime.reused_chunks.saturating_add(reused_chunks);
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileCompleted { file_id } => {
+            let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id) {
+                let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Complete;
                 file.runtime.active = false;
                 file.progress.visible_completed_bytes = file.size;
                 file.message = None;
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileFailed { file_id, message } => {
+            let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id) {
+                let before = FileDerivedState::from(&*file);
                 if !file.lifecycle.is_terminal() {
                     file.lifecycle = FileLifecycle::Failed;
                     file.runtime.active = false;
                     file.message = Some(message);
                 }
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileCancelled { file_id } => {
+            let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id) {
+                let before = FileDerivedState::from(&*file);
                 if !file.lifecycle.is_terminal() {
                     file.lifecycle = FileLifecycle::Queued;
                     file.runtime.active = false;
                 }
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileDeleted { file_id } => {
+            let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id) {
+                let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Deleted;
                 file.desired = DesiredState::Suppressed;
                 file.runtime.active = false;
@@ -353,12 +627,19 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                     file_id: file.id.clone(),
                     path: file.path.clone(),
                 });
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileRetryRequested { file_id } => {
+            let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id)
                 && matches!(file.lifecycle, FileLifecycle::Failed)
             {
+                let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Queued;
                 file.desired = DesiredState::RetryRequested;
                 file.runtime.active = false;
@@ -371,11 +652,20 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                     file_id: file.id.clone(),
                     path: file.path.clone(),
                 });
-                effects.push(CoreEffect::EnqueueFileDownload { file_id });
+                effects.push(CoreEffect::EnqueueFileDownload {
+                    file_id: file_id.clone(),
+                });
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileResetRequested { file_id } => {
+            let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id) {
+                let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Queued;
                 file.desired = DesiredState::ResetRequested;
                 file.runtime.active = false;
@@ -391,11 +681,19 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                     file_id: file.id.clone(),
                     path: file.path.clone(),
                 });
-                effects.push(CoreEffect::EnqueueFileDownload { file_id });
+                effects.push(CoreEffect::EnqueueFileDownload {
+                    file_id: file_id.clone(),
+                });
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::RestartReconciled { snapshot } => {
             *state = snapshot.state;
+            full_refresh = true;
             for file_id in snapshot.resume_file_ids {
                 effects.push(CoreEffect::EnqueueFileDownload { file_id });
             }
@@ -405,17 +703,19 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
         }
     }
 
-    recompute_derived(state);
+    if full_refresh {
+        state.rebuild_package_file_index();
+        recompute_derived(state);
+    }
     if persist_session {
         effects.push(CoreEffect::PersistSession(snapshot_from_state(state)));
     }
     effects.push(CoreEffect::PublishViewSnapshot);
-    debug_assert_invariants(state);
+    maybe_debug_assert_invariants(state);
     effects
 }
 
 pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
-    let package_aggregates = package_file_aggregates(state);
     let mut url_errors = std::collections::HashMap::<UrlId, String>::new();
     for file in state.files.values() {
         let Some(source_url) = file.source_url.as_ref() else {
@@ -436,10 +736,7 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
         .packages
         .values()
         .filter_map(|package| {
-            let file_ids = package_aggregates
-                .get(&package.id)
-                .map(|aggregate| aggregate.file_ids.clone())
-                .unwrap_or_default();
+            let file_ids = state.package_file_ids(&package.id);
             if file_ids.is_empty() {
                 return None;
             }
@@ -487,80 +784,17 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
     }
 }
 
-#[derive(Debug, Default)]
-struct PackageFileAggregate {
-    file_ids: Vec<FileId>,
-    has_downloading: bool,
-    has_failed: bool,
-    has_queued: bool,
-    has_complete: bool,
-    all_skipped: bool,
-    all_deleted: bool,
-}
-
-impl PackageFileAggregate {
-    fn observe(&mut self, file: &FileState) {
-        self.file_ids.push(file.id.clone());
-        if self.file_ids.len() == 1 {
-            self.all_skipped = true;
-            self.all_deleted = true;
-        }
-        match file.lifecycle {
-            FileLifecycle::Downloading => self.has_downloading = true,
-            FileLifecycle::Failed => self.has_failed = true,
-            FileLifecycle::Queued | FileLifecycle::Planned => self.has_queued = true,
-            FileLifecycle::Complete => self.has_complete = true,
-            FileLifecycle::Skipped => self.all_deleted = false,
-            FileLifecycle::Deleted => self.all_skipped = false,
-        }
-        if !matches!(file.lifecycle, FileLifecycle::Skipped) {
-            self.all_skipped = false;
-        }
-        if !matches!(file.lifecycle, FileLifecycle::Deleted) {
-            self.all_deleted = false;
-        }
-    }
-}
-
-fn package_file_aggregates(
-    state: &DownloadState,
-) -> std::collections::HashMap<PackageId, PackageFileAggregate> {
-    let mut aggregates: std::collections::HashMap<PackageId, PackageFileAggregate> =
-        std::collections::HashMap::with_capacity(state.packages.len());
-    for file in state.files.values() {
-        aggregates
-            .entry(file.package_id)
-            .or_default()
-            .observe(file);
-    }
-    aggregates
-}
-
 fn recompute_derived(state: &mut DownloadState) {
-    let package_aggregates = package_file_aggregates(state);
-    for (package_id, package) in &mut state.packages {
-        let aggregate = package_aggregates.get(package_id);
-        let has_present = aggregate.is_some_and(|files| !files.file_ids.is_empty());
-        package.status = if package.error.is_some() || aggregate.is_some_and(|files| files.has_failed)
-        {
-            PackageStatus::Failed
-        } else if aggregate.is_some_and(|files| files.has_downloading) {
-            PackageStatus::Downloading
-        } else if aggregate.is_some_and(|files| files.all_deleted) && has_present {
-            PackageStatus::Deleted
-        } else if aggregate.is_some_and(|files| files.all_skipped) && has_present {
-            PackageStatus::Skipped
-        } else if aggregate.is_some_and(|files| files.has_complete)
-            && aggregate.is_some_and(|files| files.has_queued || files.has_downloading)
-        {
-            PackageStatus::Partial
-        } else if aggregate.is_some_and(|files| files.has_complete) && has_present {
-            PackageStatus::Complete
-        } else if aggregate.is_some_and(|files| files.has_queued) {
-            PackageStatus::Queued
-        } else {
-            PackageStatus::Pending
-        };
+    let package_statuses: Vec<_> = state
+        .packages
+        .keys()
+        .copied()
+        .map(|package_id| (package_id, package_status_from_files(state, package_id)))
+        .collect();
+    for (package_id, status) in package_statuses {
+        if let Some(package) = state.packages.get_mut(&package_id) {
+            package.status = status;
+        }
     }
 
     let mut totals = crate::core::model::TotalsState::default();
@@ -587,16 +821,10 @@ fn recompute_derived(state: &mut DownloadState) {
         }
     }
     state.totals = totals;
-    if state
-        .files
-        .values()
-        .all(|file| file.lifecycle.is_terminal())
-        && !state.files.is_empty()
-    {
-        state.session_meta.status = SessionRunStatus::Completed;
-    }
+    recompute_session_status(state);
 }
 
+#[cfg(debug_assertions)]
 fn debug_assert_invariants(state: &DownloadState) {
     let mut package_keys = std::collections::HashSet::new();
     let package_file_counts = state.files.values().fold(
