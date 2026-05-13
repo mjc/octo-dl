@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
 
@@ -8,30 +8,60 @@ use crate::core::{DownloadState, FileLifecycle, PackageId, PackageStatus};
 use super::TuiRow;
 use crate::tui::app::{FileEntry, FileStatus, OverlayFile, SortDirection, SortKey, SortState};
 
-fn package_sort_key_for(
+struct PackageProjection<'a> {
+    order: usize,
+    display_name: &'a str,
+    files: Vec<&'a crate::core::FileState>,
+}
+
+fn package_projections(
     core_state: &DownloadState,
-    overlay_files: &IndexMap<String, OverlayFile>,
-    file: &FileEntry,
-) -> (usize, String) {
-    if let Some(core_file) = core_state.files.get(&file.id) {
-        let package_order = core_state
-            .packages
-            .get_index_of(&core_file.package_id)
-            .unwrap_or(usize::MAX);
-        let display_name = core_state
-            .packages
-            .get(&core_file.package_id)
-            .map(|package| package.display_name.clone())
-            .unwrap_or_else(|| core_file.package_id.to_string());
-        return (package_order, display_name);
+) -> (
+    IndexMap<PackageId, PackageProjection<'_>>,
+    HashMap<&str, (usize, &str)>,
+) {
+    let mut projections = core_state
+        .packages
+        .iter()
+        .enumerate()
+        .map(|(order, (package_id, package))| {
+            (
+                *package_id,
+                PackageProjection {
+                    order,
+                    display_name: package.display_name.as_str(),
+                    files: Vec::new(),
+                },
+            )
+        })
+        .collect::<IndexMap<_, _>>();
+    let mut file_sort_keys = HashMap::new();
+
+    for file in core_state.files.values() {
+        if let Some(package) = projections.get_mut(&file.package_id) {
+            package.files.push(file);
+            file_sort_keys.insert(file.id.as_str(), (package.order, package.display_name));
+        }
+    }
+
+    (projections, file_sort_keys)
+}
+
+fn package_sort_key_for<'a>(
+    file_sort_keys: &'a HashMap<&'a str, (usize, &'a str)>,
+    overlay_files: &'a IndexMap<String, OverlayFile>,
+    file: &'a FileEntry,
+) -> (usize, &'a str) {
+    if let Some((order, display_name)) = file_sort_keys.get(file.id.as_str()) {
+        return (*order, display_name);
     }
 
     (
         usize::MAX,
         overlay_files
             .get(&file.id)
-            .and_then(|file| file.source_url.clone())
-            .unwrap_or_else(|| file.id.clone()),
+            .and_then(|file| file.source_url.as_deref())
+            .unwrap_or(file.id.as_str()),
     )
 }
 
@@ -44,17 +74,17 @@ fn file_status_rank(status: &FileStatus) -> u8 {
     }
 }
 
-pub(super) fn sorted_file_indices(
+fn sorted_file_indices_with_keys(
     files: &[FileEntry],
-    core_state: &DownloadState,
+    file_sort_keys: &HashMap<&str, (usize, &str)>,
     overlay_files: &IndexMap<String, OverlayFile>,
 ) -> Vec<usize> {
     let mut indices: Vec<_> = (0..files.len()).collect();
     indices.sort_by(|&left, &right| {
         let left_file = &files[left];
         let right_file = &files[right];
-        let left_package = package_sort_key_for(core_state, overlay_files, left_file);
-        let right_package = package_sort_key_for(core_state, overlay_files, right_file);
+        let left_package = package_sort_key_for(file_sort_keys, overlay_files, left_file);
+        let right_package = package_sort_key_for(file_sort_keys, overlay_files, right_file);
 
         match left_package.cmp(&right_package) {
             Ordering::Equal => {}
@@ -71,13 +101,21 @@ pub(super) fn sorted_file_indices(
     indices
 }
 
-fn package_percent(core_state: &DownloadState, package_id: &PackageId) -> u64 {
-    if !core_state.packages.contains_key(package_id) {
-        return 0;
-    }
+#[cfg(test)]
+pub(super) fn sorted_file_indices(
+    files: &[FileEntry],
+    core_state: &DownloadState,
+    overlay_files: &IndexMap<String, OverlayFile>,
+) -> Vec<usize> {
+    let (_, file_sort_keys) = package_projections(core_state);
+    sorted_file_indices_with_keys(files, &file_sort_keys, overlay_files)
+}
+
+fn package_percent(package: &PackageProjection<'_>) -> u64 {
     let (downloaded, size) =
-        core_state
-            .package_files(package_id)
+        package
+            .files
+            .iter()
             .fold((0_u64, 0_u64), |(downloaded, size), file| {
                 let visible = if matches!(file.lifecycle, FileLifecycle::Complete) {
                     file.size
@@ -136,6 +174,7 @@ fn overlay_row_is_hidden_placeholder(file: &FileEntry, overlay: Option<&OverlayF
 }
 
 fn package_has_visible_content(
+    package_projections: &IndexMap<PackageId, PackageProjection<'_>>,
     core_state: &DownloadState,
     overlay_files: &IndexMap<String, OverlayFile>,
     package_id: &PackageId,
@@ -143,21 +182,31 @@ fn package_has_visible_content(
     let Some(package) = core_state.packages.get(package_id) else {
         return false;
     };
-    let has_visible_files = core_state
-        .package_files(package_id)
+    let Some(package_projection) = package_projections.get(package_id) else {
+        return false;
+    };
+    let has_visible_files = package_projection
+        .files
+        .iter()
         .any(|file| file_is_visible_in_package(core_state, &file.id));
 
     has_visible_files
         || (package.error.is_some()
-            && core_state.package_files(package_id).next().is_some()
+            && !package_projection.files.is_empty()
             && !overlay_files.contains_key(&package_id.to_string()))
 }
 
-fn package_has_visible_children(core_state: &DownloadState, package_id: &PackageId) -> bool {
-    core_state.packages.contains_key(package_id)
-        && core_state
-            .package_files(package_id)
+fn package_has_visible_children(
+    package_projections: &IndexMap<PackageId, PackageProjection<'_>>,
+    core_state: &DownloadState,
+    package_id: &PackageId,
+) -> bool {
+    package_projections.get(package_id).is_some_and(|package| {
+        package
+            .files
+            .iter()
             .any(|file| file_is_visible_in_package(core_state, &file.id))
+    })
 }
 
 pub(super) fn visible_rows_for(
@@ -167,8 +216,13 @@ pub(super) fn visible_rows_for(
     expanded_packages: &HashSet<PackageId>,
     sort: &SortState,
 ) -> Vec<TuiRow> {
+    let (package_projections, file_sort_keys) = package_projections(core_state);
+    let package_percents = package_projections
+        .iter()
+        .map(|(package_id, package)| (*package_id, package_percent(package)))
+        .collect::<HashMap<_, _>>();
     if core_state.packages.is_empty() {
-        return sorted_file_indices(files, core_state, overlay_files)
+        return sorted_file_indices_with_keys(files, &file_sort_keys, overlay_files)
             .into_iter()
             .map(|index| TuiRow::File {
                 package_id: None,
@@ -189,9 +243,7 @@ pub(super) fn visible_rows_for(
             SortKey::Status => package_status_rank(left_package.status)
                 .cmp(&package_status_rank(right_package.status)),
             SortKey::Name => left_package.display_name.cmp(&right_package.display_name),
-            SortKey::Percent => {
-                package_percent(core_state, left).cmp(&package_percent(core_state, right))
-            }
+            SortKey::Percent => package_percents.get(left).cmp(&package_percents.get(right)),
         }
         .then_with(|| left_package.display_name.cmp(&right_package.display_name))
         .then_with(|| left.cmp(right));
@@ -204,14 +256,22 @@ pub(super) fn visible_rows_for(
 
     let mut rows = Vec::new();
     for package_id in package_ids {
-        if !package_has_visible_content(core_state, overlay_files, &package_id) {
+        if !package_has_visible_content(
+            &package_projections,
+            core_state,
+            overlay_files,
+            &package_id,
+        ) {
             continue;
         }
         rows.push(TuiRow::Package(package_id));
         if package_is_auto_expanded_for(expanded_packages, core_state, &package_id)
-            && package_has_visible_children(core_state, &package_id)
+            && package_has_visible_children(&package_projections, core_state, &package_id)
         {
-            let mut package_files = core_state.package_files(&package_id).collect::<Vec<_>>();
+            let mut package_files = package_projections
+                .get(&package_id)
+                .map(|package| package.files.clone())
+                .unwrap_or_default();
             package_files.sort_by(|left, right| {
                 let left_status = file_status_from_core(left);
                 let right_status = file_status_from_core(right);
@@ -233,7 +293,7 @@ pub(super) fn visible_rows_for(
     }
 
     rows.extend(
-        sorted_file_indices(files, core_state, overlay_files)
+        sorted_file_indices_with_keys(files, &file_sort_keys, overlay_files)
             .into_iter()
             .filter_map(|index| {
                 let file = &files[index];

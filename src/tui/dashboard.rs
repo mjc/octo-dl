@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 use serde::{Deserialize, Serialize};
 
@@ -360,15 +361,24 @@ impl App {
 
     fn dashboard_packages(&self) -> Vec<DashboardPackageRow> {
         if !self.core_state.packages.is_empty() {
+            let mut package_files = self
+                .core_state
+                .packages
+                .keys()
+                .copied()
+                .map(|package_id| (package_id, Vec::new()))
+                .collect::<IndexMap<_, Vec<&crate::core::FileState>>>();
+            for file in self.core_state.files.values() {
+                if let Some(files) = package_files.get_mut(&file.package_id) {
+                    files.push(file);
+                }
+            }
             return self
                 .core_state
                 .packages
                 .values()
                 .filter_map(|package| {
-                    let package_files = self
-                        .core_state
-                        .package_files(&package.id)
-                        .collect::<Vec<_>>();
+                    let package_files = package_files.get(&package.id)?;
                     if package_files.is_empty() {
                         return None;
                     }
@@ -384,7 +394,7 @@ impl App {
                     let mut common_folder = None;
                     let mut folder_conflict = false;
 
-                    for file in &package_files {
+                    for file in package_files {
                         source_url = source_url.or_else(|| file.source_url.clone());
                         let folder = file.path.split('/').next().filter(|part| !part.is_empty());
                         match (common_folder, folder) {
