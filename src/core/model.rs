@@ -269,6 +269,8 @@ pub struct TotalsState {
 pub struct DownloadState {
     pub packages: IndexMap<PackageId, PackageState>,
     pub files: IndexMap<FileId, FileState>,
+    #[serde(skip)]
+    pub package_file_index: IndexMap<PackageId, Vec<FileId>>,
     pub url_order: Vec<UrlId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<FileId>,
@@ -285,23 +287,43 @@ impl DownloadState {
         }
     }
 
+    pub fn rebuild_package_file_index(&mut self) {
+        self.package_file_index.clear();
+        for file in self.files.values() {
+            self.package_file_index
+                .entry(file.package_id)
+                .or_default()
+                .push(file.id.clone());
+        }
+    }
+
+    pub fn ensure_package_file_index(&mut self) {
+        if self.package_file_index.is_empty() && !self.files.is_empty() {
+            self.rebuild_package_file_index();
+        }
+    }
+
     pub fn package_files(&self, package_id: &PackageId) -> impl Iterator<Item = &FileState> + '_ {
-        let package_id = *package_id;
-        self.files
-            .values()
-            .filter(move |file| file.package_id == package_id)
+        self.package_file_index
+            .get(package_id)
+            .into_iter()
+            .flat_map(|file_ids| file_ids.iter())
+            .filter_map(|file_id| self.files.get(file_id))
     }
 
     #[must_use]
     pub fn package_has_files(&self, package_id: &PackageId) -> bool {
-        self.package_files(package_id).next().is_some()
+        self.package_file_index
+            .get(package_id)
+            .is_some_and(|file_ids| !file_ids.is_empty())
     }
 
     #[must_use]
     pub fn package_file_ids(&self, package_id: &PackageId) -> Vec<FileId> {
-        self.package_files(package_id)
-            .map(|file| file.id.clone())
-            .collect()
+        self.package_file_index
+            .get(package_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     #[must_use]
