@@ -180,12 +180,14 @@ impl App {
             return;
         }
 
-        self.apply_core_event(CoreEvent::FileFailed {
-            file_id: id.clone(),
-            message: error.clone(),
-        });
-        self.mark_visible_file_error(&id, &id, &error);
-        self.recompute_totals();
+        if self.core_state.files.contains_key(&id) {
+            self.apply_core_event(CoreEvent::FileFailed {
+                file_id: id.clone(),
+                message: error.clone(),
+            });
+        } else {
+            self.mark_visible_file_error(&id, &id, &error);
+        }
         self.update_download_status_message();
     }
 
@@ -374,11 +376,15 @@ impl App {
             log::info!("Ignoring stale download completion after reset: {id}");
             return;
         }
-        self.apply_core_event(CoreEvent::FileCompleted {
-            file_id: id.clone(),
-        });
-        self.recompute_totals();
-        self.mark_visible_file_complete(&id, &id);
+        if self.core_state.files.contains_key(&id) {
+            self.apply_core_event(CoreEvent::FileCompleted {
+                file_id: id.clone(),
+            });
+            self.reset_file_ui_rate(&id);
+            self.update_download_status_message();
+        } else {
+            self.mark_visible_file_complete(&id, &id);
+        }
     }
 
     pub(crate) fn handle_file_cancelled_event(&mut self, id: String, attempt_id: u64) {

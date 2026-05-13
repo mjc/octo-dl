@@ -128,10 +128,21 @@ impl App {
 
     pub(crate) fn reset_file_ui_rate(&mut self, file_id: &str) {
         let downloaded = self
+            .core_state
             .files
-            .iter()
-            .find(|file| file.id == file_id)
-            .map_or(0, |file| file.downloaded);
+            .get(file_id)
+            .map(|file| match file.lifecycle {
+                crate::core::FileLifecycle::Complete => file.size,
+                _ => file.progress.visible_completed_bytes.min(file.size),
+            })
+            .or_else(|| self.overlay_files.get(file_id).map(|file| file.file.downloaded))
+            .or_else(|| {
+                self.files
+                    .iter()
+                    .find(|file| file.id == file_id)
+                    .map(|file| file.downloaded)
+            })
+            .unwrap_or(0);
         self.ensure_file_ui(file_id, downloaded, true);
     }
 
