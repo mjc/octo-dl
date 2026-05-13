@@ -92,51 +92,65 @@ pub fn draw_dashboard(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(3),
             Constraint::Min(5),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(inner);
 
-    let url_style = if !state.read_only && state.popup == Popup::None && chrome.url_input_active {
-        Style::default().fg(Color::Yellow)
+    let show_url_input = !state.read_only && state.popup == Popup::None && chrome.url_input_active;
+    if show_url_input {
+        let url_block = Block::default()
+            .title(" Add URL(s): editing ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow));
+        let url_inner = url_block.inner(chunks[0]);
+        let (url_value, cursor_col) =
+            focused_url_input_view(chrome.url_input, chrome.url_input_cursor, url_inner.width);
+        frame.render_widget(
+            Paragraph::new(url_value)
+                .block(url_block)
+                .style(Style::default().fg(Color::White)),
+            chunks[0],
+        );
+        if let Some(cursor_col) = cursor_col
+            && url_inner.height > 0
+        {
+            frame.set_cursor_position(Position::new(url_inner.x + cursor_col, url_inner.y));
+        }
     } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let url_title = if state.read_only {
-        " Attached dashboard "
-    } else if chrome.url_input_active {
-        " Add URL(s): editing "
-    } else {
-        " Add URL(s): press a "
-    };
-    let url_block = Block::default()
-        .title(url_title)
-        .borders(Borders::ALL)
-        .border_style(url_style);
-    let url_inner = url_block.inner(chunks[0]);
-    let (url_value, cursor_col) =
-        if !state.read_only && state.popup == Popup::None && chrome.url_input_active {
-            focused_url_input_view(chrome.url_input, chrome.url_input_cursor, url_inner.width)
-        } else {
-            (
-                truncate_end(chrome.url_input, usize::from(url_inner.width)),
-                None,
-            )
-        };
-    frame.render_widget(
-        Paragraph::new(url_value)
-            .block(url_block)
-            .style(Style::default().fg(Color::White)),
-        chunks[0],
-    );
-    if let Some(cursor_col) = cursor_col
-        && url_inner.height > 0
-    {
-        frame.set_cursor_position(Position::new(url_inner.x + cursor_col, url_inner.y));
+        render_aggregate_progress(frame, state, chunks[0]);
     }
 
+    draw_dashboard_file_list(frame, state, list_state, chunks[1]);
+
+    let status_line = Paragraph::new(Line::from(dashboard_status_line(
+        state,
+        chunks[2].width,
+        list_state.selected(),
+    )))
+    .style(Style::default().fg(Color::White));
+    frame.render_widget(status_line, chunks[2]);
+
+    let controls = if state.read_only {
+        truncate_end(
+            "up/down:select  q:quit  read-only",
+            usize::from(chunks[3].width),
+        )
+    } else {
+        controls_label_from_snapshot(state, chrome, chunks[3].width)
+    };
+    let controls_bar = Paragraph::new(controls)
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
+    frame.render_widget(controls_bar, chunks[3]);
+}
+
+fn render_aggregate_progress(
+    frame: &mut ratatui::Frame,
+    state: &DownloadDashboardState,
+    area: Rect,
+) {
     let ratio = if state.totals.total_size > 0 {
         #[allow(clippy::cast_precision_loss)]
         let r = state.totals.total_downloaded as f64 / state.totals.total_size as f64;
@@ -154,35 +168,8 @@ pub fn draw_dashboard(
         .block(Block::default().borders(Borders::ALL))
         .gauge_style(Style::default().fg(Color::Green))
         .ratio(ratio)
-        .label(dashboard_aggregate_progress_label(
-            state,
-            pct,
-            chunks[1].width,
-        ));
-    frame.render_widget(gauge, chunks[1]);
-
-    draw_dashboard_file_list(frame, state, list_state, chunks[2]);
-
-    let status_line = Paragraph::new(Line::from(dashboard_status_line(
-        state,
-        chunks[3].width,
-        list_state.selected(),
-    )))
-    .style(Style::default().fg(Color::White));
-    frame.render_widget(status_line, chunks[3]);
-
-    let controls = if state.read_only {
-        truncate_end(
-            "up/down:select  q:quit  read-only",
-            usize::from(chunks[4].width),
-        )
-    } else {
-        controls_label_from_snapshot(state, chrome, chunks[4].width)
-    };
-    let controls_bar = Paragraph::new(controls)
-        .style(Style::default().fg(Color::DarkGray))
-        .alignment(Alignment::Center);
-    frame.render_widget(controls_bar, chunks[4]);
+        .label(dashboard_aggregate_progress_label(state, pct, area.width));
+    frame.render_widget(gauge, area);
 }
 
 fn draw_dashboard_file_list(
@@ -268,7 +255,8 @@ mod tests {
 
         let rendered = render_text(&mut app);
 
-        assert!(rendered.contains("Add URL(s): press a"));
+        assert!(!rendered.contains("Add URL(s):"));
+        assert!(rendered.contains("0%"));
         assert!(rendered.contains("a:add"));
         assert!(rendered.contains("up/down:select"));
         assert!(rendered.contains("queued.bin"));
@@ -288,6 +276,26 @@ mod tests {
         assert!(rendered.contains("enter:add"));
         assert!(rendered.contains("esc:cancel"));
         assert!(!rendered.contains("q:quit"));
+    }
+
+    #[test]
+    fn draw_main_swaps_url_input_back_to_progress_when_editing_ends() {
+        let mut app = test_app();
+        app.url_input_active = true;
+        app.url_input = "https://mega.nz/file/test".to_string();
+
+        let editing = render_text(&mut app);
+        assert!(editing.contains("Add URL(s): editing"));
+        assert!(editing.contains("https://mega.nz/file/test"));
+
+        app.url_input_active = false;
+        app.url_input.clear();
+
+        let command_mode = render_text(&mut app);
+        assert!(!command_mode.contains("Add URL(s):"));
+        assert!(!command_mode.contains("https://mega.nz/file/test"));
+        assert!(command_mode.contains("0%"));
+        assert!(command_mode.contains("a:add"));
     }
 
     #[test]
