@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use indexmap::IndexMap;
+
 use crate::core::{
     DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
     RuntimeState, SessionMeta, SessionRunStatus, SessionSnapshotV3, SessionUrlSnapshot,
@@ -46,7 +48,8 @@ impl SessionAdapter {
                 tracked_url.error = None;
             }
             SessionUrlUpdate::Fetched => {
-                let Some(tracked_url) = session.urls.iter_mut().find(|entry| entry.url == url) else {
+                let Some(tracked_url) = session.urls.iter_mut().find(|entry| entry.url == url)
+                else {
                     return;
                 };
                 tracked_url.error = None;
@@ -59,13 +62,11 @@ impl SessionAdapter {
     }
 
     pub(super) fn remove_url(session: &mut SessionSnapshotV3, url: &str) {
-        session
-            .urls
-            .retain(|entry| entry.url != url);
+        session.urls.retain(|entry| entry.url != url);
         session
             .files
             .retain(|file| file.source_url.as_deref() != Some(url) && file.id != url);
-        prune_empty_packages(session);
+        rebuild_packages(session);
     }
 
     pub(super) fn update_file(
@@ -146,7 +147,6 @@ impl SessionAdapter {
     ) -> Vec<String> {
         let resumed_urls = restart.resumable_urls();
         let resumed_url_set: HashSet<_> = resumed_urls.iter().cloned().collect();
-        let active_package_ids: HashSet<_> = restart.state.packages.keys().cloned().collect();
 
         session.urls = restart
             .state
@@ -157,29 +157,15 @@ impl SessionAdapter {
                 error: None,
             })
             .collect();
-        session
-            .packages
-            .retain(|package| active_package_ids.contains(&package.id));
 
         for package in restart.state.packages.values() {
-            if let Some(existing) = session
-                .packages
-                .iter_mut()
-                .find(|entry| entry.id == package.id)
-            {
-                existing.display_name = package.display_name.clone();
-                existing.key = package.key.clone();
-                existing.file_ids = restart.state.package_file_ids(&package.id);
-                existing.error = package.error.clone();
-            } else {
-                session.packages.push(crate::core::PackageSnapshot {
-                    id: package.id.clone(),
-                    key: package.key.clone(),
-                    display_name: package.display_name.clone(),
-                    file_ids: restart.state.package_file_ids(&package.id),
-                    error: package.error.clone(),
-                });
-            }
+            upsert_package_metadata(
+                session,
+                package.id.clone(),
+                package.key.clone(),
+                package.display_name.clone(),
+                package.error.clone(),
+            );
         }
 
         for tracked_url in &mut session.urls {
@@ -194,6 +180,7 @@ impl SessionAdapter {
             .values()
             .map(Self::snapshot_file_from_state)
             .collect();
+        rebuild_packages(session);
         resumed_urls
     }
 
@@ -208,16 +195,7 @@ impl SessionAdapter {
                 || visible.contains(file.id.as_str())
         });
 
-        for package in &mut session.packages {
-            package.file_ids = session
-                .files
-                .iter()
-                .filter(|file| file.package_id == package.id)
-                .map(|file| file.id.clone())
-                .collect();
-        }
-
-        session.packages.retain(|package| !package.file_ids.is_empty());
+        rebuild_packages(session);
 
         let has_pending_urls = session.urls.iter().any(|tracked_url| {
             !session.files.iter().any(|file| {
@@ -258,19 +236,11 @@ impl SessionAdapter {
         } else {
             Self::ensure_url(session, submitted_url);
         }
-        let package_id = {
-            let package = Self::ensure_package(session, package_id, package_display_name);
-            package.id
-        };
-        if let Some(file) = session
-            .files
-            .iter_mut()
-            .find(|file| {
-                file.path == path
-                    && (file.package_id == package_id
-                        || file.source_url.as_deref() == Some(source_url))
-            })
-        {
+        let package_id = ensure_package_identity(session, package_id, package_display_name);
+        if let Some(file) = session.files.iter_mut().find(|file| {
+            file.path == path
+                && (file.package_id == package_id || file.source_url.as_deref() == Some(source_url))
+        }) {
             if matches!(file.lifecycle, FileLifecycle::Skipped) {
                 return false;
             }
@@ -278,18 +248,11 @@ impl SessionAdapter {
             file.source_url = Some(source_url.to_string());
             file.size = size;
             file.path = path.to_string();
+            rebuild_packages(session);
             return true;
         }
 
         let file_id = path.to_string();
-        if let Some(package) = session
-            .packages
-            .iter_mut()
-            .find(|package| package.id == package_id)
-            && !package.file_ids.contains(&file_id)
-        {
-            package.file_ids.push(file_id.clone());
-        }
         session.files.push(FileSnapshot {
             id: file_id,
             package_id,
@@ -307,13 +270,11 @@ impl SessionAdapter {
             },
             message: None,
         });
+        rebuild_packages(session);
         true
     }
 
-    fn ensure_url<'a>(
-        session: &'a mut SessionSnapshotV3,
-        url: &str,
-    ) -> &'a mut SessionUrlSnapshot {
+    fn ensure_url<'a>(session: &'a mut SessionSnapshotV3, url: &str) -> &'a mut SessionUrlSnapshot {
         if let Some(index) = session.urls.iter().position(|entry| entry.url == url) {
             return &mut session.urls[index];
         }
@@ -323,45 +284,6 @@ impl SessionAdapter {
             error: None,
         });
         session.urls.last_mut().expect("url was just pushed")
-    }
-
-    fn ensure_package<'a>(
-        session: &'a mut SessionSnapshotV3,
-        package_id: &str,
-        display_name: &str,
-    ) -> &'a mut crate::core::PackageSnapshot {
-        let package_key = PackageKey::new(display_name);
-        let package_id = PackageId::parse_or_key(package_id, &package_key);
-        if let Some(index) = session
-            .packages
-            .iter()
-            .position(|package| package.id == package_id || package.key == package_key)
-        {
-            let previous_id = session.packages[index].id;
-            if previous_id != package_id {
-                for file in &mut session.files {
-                    if file.package_id == previous_id {
-                        file.package_id = package_id;
-                    }
-                }
-            }
-            session.packages[index].id = package_id;
-            session.packages[index].key = package_key;
-            session.packages[index].display_name = display_name.to_string();
-            return &mut session.packages[index];
-        }
-
-        session.packages.push(crate::core::PackageSnapshot {
-            id: package_id,
-            key: package_key,
-            display_name: display_name.to_string(),
-            file_ids: Vec::new(),
-            error: None,
-        });
-        session
-            .packages
-            .last_mut()
-            .expect("package was just pushed")
     }
 
     fn snapshot_file_from_state(file: &crate::core::FileState) -> FileSnapshot {
@@ -380,9 +302,109 @@ impl SessionAdapter {
     }
 }
 
-fn prune_empty_packages(session: &mut SessionSnapshotV3) {
-    let active_package_ids: HashSet<_> = session.files.iter().map(|file| file.package_id).collect();
-    session
+fn ensure_package_identity(
+    session: &mut SessionSnapshotV3,
+    package_id: &str,
+    display_name: &str,
+) -> PackageId {
+    let package_key = PackageKey::new(display_name);
+    let package_id = PackageId::parse_or_key(package_id, &package_key);
+    let existing = session
         .packages
-        .retain(|package| active_package_ids.contains(&package.id));
+        .iter()
+        .find(|package| package.id == package_id || package.key == package_key)
+        .cloned();
+    let existing_error = existing.as_ref().and_then(|package| package.error.clone());
+
+    if let Some(previous) = existing
+        && previous.id != package_id
+    {
+        for file in &mut session.files {
+            if file.package_id == previous.id {
+                file.package_id = package_id;
+            }
+        }
+    }
+
+    upsert_package_metadata(
+        session,
+        package_id,
+        package_key,
+        display_name.to_string(),
+        existing_error,
+    );
+    package_id
+}
+
+fn upsert_package_metadata(
+    session: &mut SessionSnapshotV3,
+    package_id: PackageId,
+    package_key: PackageKey,
+    display_name: String,
+    error: Option<String>,
+) {
+    if let Some(package) = session
+        .packages
+        .iter_mut()
+        .find(|package| package.id == package_id || package.key == package_key)
+    {
+        package.id = package_id;
+        package.key = package_key;
+        package.display_name = display_name;
+        package.error = error;
+        return;
+    }
+
+    session.packages.push(crate::core::PackageSnapshot {
+        id: package_id,
+        key: package_key,
+        display_name,
+        file_ids: Vec::new(),
+        error,
+    });
+}
+
+fn rebuild_packages(session: &mut SessionSnapshotV3) {
+    let existing = session
+        .packages
+        .iter()
+        .cloned()
+        .map(|package| (package.id, package))
+        .collect::<IndexMap<_, _>>();
+    let mut grouped = IndexMap::<PackageId, Vec<String>>::new();
+    for file in &session.files {
+        grouped
+            .entry(file.package_id)
+            .or_default()
+            .push(file.id.clone());
+    }
+
+    let mut rebuilt = Vec::with_capacity(grouped.len());
+    for (package_id, file_ids) in grouped {
+        let existing_package = existing.get(&package_id);
+        let display_name = existing_package
+            .map(|package| package.display_name.clone())
+            .or_else(|| common_path_root(&file_ids))
+            .unwrap_or_else(|| package_id.to_string());
+        let key = existing_package
+            .map(|package| package.key.clone())
+            .unwrap_or_else(|| PackageKey::new(display_name.clone()));
+        rebuilt.push(crate::core::PackageSnapshot {
+            id: package_id,
+            key,
+            display_name,
+            file_ids,
+            error: existing_package.and_then(|package| package.error.clone()),
+        });
+    }
+    session.packages = rebuilt;
+}
+
+fn common_path_root(paths: &[String]) -> Option<String> {
+    let mut roots = paths.iter().filter_map(|path| {
+        let root = path.split('/').next()?;
+        (!root.is_empty()).then(|| root.to_string())
+    });
+    let first = roots.next()?;
+    roots.all(|root| root == first).then_some(first)
 }
