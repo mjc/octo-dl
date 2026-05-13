@@ -288,6 +288,35 @@ impl SessionSnapshotV3 {
     }
 }
 
+#[must_use]
+pub fn queued_file_snapshot(
+    file_id: impl Into<FileId>,
+    package_id: PackageId,
+    source_url: Option<UrlId>,
+    path: impl Into<String>,
+    size: u64,
+) -> FileSnapshot {
+    let file_id = file_id.into();
+    let path = path.into();
+    FileSnapshot {
+        id: file_id,
+        package_id,
+        source_url,
+        path,
+        size,
+        lifecycle: FileLifecycle::Queued,
+        progress: FileProgressState::default(),
+        desired: DesiredState::Present,
+        runtime: RuntimeState {
+            counts_in_run_totals: true,
+            active: false,
+            preexisting_complete: false,
+            reused_chunks: 0,
+        },
+        message: None,
+    }
+}
+
 fn preserve_rejected_session(path: &Path) {
     let backup = rejected_session_backup_path(path);
     if let Err(error) = std::fs::rename(path, &backup) {
