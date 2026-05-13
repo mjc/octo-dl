@@ -139,13 +139,9 @@ impl App {
         &mut self,
         file_id: &str,
         previous_downloaded: u64,
+        downloaded: u64,
         now: Instant,
     ) -> u64 {
-        let downloaded = self
-            .files
-            .iter()
-            .find(|file| file.id == file_id)
-            .map_or(previous_downloaded, |file| file.downloaded);
         let accepted = downloaded.saturating_sub(previous_downloaded);
         let state = self.file_ui.entry(file_id.to_string()).or_default();
         state.rate.record(downloaded, now);

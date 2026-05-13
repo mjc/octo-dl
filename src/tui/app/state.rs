@@ -45,14 +45,15 @@ impl App {
         self.recompute_totals();
     }
 
-    pub(crate) fn refresh_visible_core_file(&mut self, file_id: &str) {
+    pub(crate) fn refresh_visible_core_file(&mut self, file_id: &str) -> Option<(u64, u64)> {
         let Some(core_file) = self.core_state.files.get(file_id) else {
-            return;
+            return None;
         };
         let Some(visible_file) = self.files.iter_mut().find(|file| file.id == file_id) else {
-            return;
+            return None;
         };
 
+        let previous_downloaded = visible_file.downloaded;
         visible_file.name = core_file.path.clone();
         visible_file.size = core_file.size;
         visible_file.downloaded = match core_file.lifecycle {
@@ -78,6 +79,7 @@ impl App {
                 visible_file.status.clone()
             }
         };
+        Some((previous_downloaded, visible_file.downloaded))
     }
 
     pub(crate) fn apply_core_command(&mut self, command: CoreCommand) {
