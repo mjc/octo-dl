@@ -356,6 +356,37 @@ fn sync_visible_files_rebuilds_visible_file_positions_for_core_rows() {
 }
 
 #[test]
+fn visible_file_context_prefers_core_state_over_stale_visible_row() {
+    let mut app = test_app();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id("pkg", "https://mega.nz/file/root"),
+            source_url: "https://mega.nz/file/root".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+            display_name: "Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: "file.bin".to_string(),
+                path: "fresh.bin".to_string(),
+                size: 321,
+            }],
+            collision: None,
+        },
+    });
+    app.files[0].name = "stale.bin".to_string();
+    app.files[0].size = 999;
+    app.files[0].status = FileStatus::Error("stale".to_string());
+
+    let context = app
+        .visible_file_context("file.bin")
+        .expect("context should exist");
+
+    assert_eq!(context.artifact_path, "fresh.bin");
+    assert_eq!(context.size, 321);
+    assert!(matches!(context.status, FileStatus::Queued));
+    assert_eq!(context.source_url.as_deref(), Some("https://mega.nz/file/root"));
+}
+
+#[test]
 fn skipped_session_paths_groups_only_skipped_files_by_url() {
     let mut app = test_app();
     let mut session = session_snapshot(vec![

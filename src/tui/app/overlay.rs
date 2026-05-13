@@ -98,9 +98,7 @@ impl App {
                         .unwrap_or_else(|| "failed".to_string()),
                 ),
                 crate::core::FileLifecycle::Skipped | crate::core::FileLifecycle::Deleted => {
-                    self.files
-                        .iter()
-                        .find(|file| file.id == id)
+                    self.visible_file(id)
                         .map(|file| file.status.clone())
                         .unwrap_or(FileStatus::Queued)
                 }
@@ -127,7 +125,7 @@ impl App {
             });
         }
 
-        self.files.iter().find(|file| file.id == id).map(|file| VisibleFileContext {
+        self.visible_file(id).map(|file| VisibleFileContext {
             id: file.id.clone(),
             status: file.status.clone(),
             source_url: None,
