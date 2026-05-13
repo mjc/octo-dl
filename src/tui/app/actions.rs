@@ -575,6 +575,14 @@ impl App {
         }
     }
 
+    pub(crate) fn perform_move_package_action(&mut self, package_id: PackageId, delta: isize) {
+        self.apply_core_command(CoreCommand::MovePackage { package_id, delta });
+    }
+
+    pub(crate) fn perform_move_file_action(&mut self, file_id: FileId, delta: isize) {
+        self.apply_core_command(CoreCommand::MoveFile { file_id, delta });
+    }
+
     pub(crate) fn apply_config_update(
         &mut self,
         chunks_per_file: Option<usize>,
@@ -627,6 +635,10 @@ impl App {
             UiAction::RetryPackage(id) => self.perform_retry_package_action(id),
             UiAction::ResetFile(id) => self.perform_reset_file_action(&id),
             UiAction::ResetPackage(id) => self.perform_reset_package_action(id),
+            UiAction::MoveFile { file_id, delta } => self.perform_move_file_action(file_id, delta),
+            UiAction::MovePackage { package_id, delta } => {
+                self.perform_move_package_action(package_id, delta)
+            }
             UiAction::UpdateConfig {
                 chunks_per_file,
                 concurrent_files,

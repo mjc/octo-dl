@@ -347,6 +347,7 @@ fn upsert_package_metadata(
         id: package_id,
         key: package_key,
         display_name,
+        files: Vec::new(),
         file_ids: Vec::new(),
         error,
     });

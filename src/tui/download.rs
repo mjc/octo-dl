@@ -1,9 +1,10 @@
 //! Download task management and transport-side event emission.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
+use indexmap::{IndexMap, IndexSet};
 #[cfg(test)]
 #[path = "download_tests.rs"]
 mod tests;
@@ -138,9 +139,10 @@ struct FetchedNodeSet {
 #[derive(Clone)]
 enum RequestedFiles {
     All,
-    Only(HashSet<FileId>),
+    Only(IndexSet<FileId>),
 }
 
+#[derive(Clone)]
 struct QueuedDownload {
     resolved: ResolvedUrl,
     item: crate::OwnedDownloadItem,
@@ -227,26 +229,69 @@ struct CollectedNodeSet {
     partial_count: usize,
 }
 
-struct BatchContext<'a> {
-    downloader: &'a Arc<crate::Downloader>,
-    progress: &'a Arc<dyn DownloadProgress>,
-    semaphore: &'a Arc<tokio::sync::Semaphore>,
-    event_tx: &'a mpsc::UnboundedSender<DownloadEvent>,
-    token_tx: &'a mpsc::UnboundedSender<TokenMessage>,
-}
-
 struct DownloadRuntime {
     downloader: Arc<crate::Downloader>,
     http: Arc<reqwest::Client>,
     dlc_cache: Arc<DlcKeyCache>,
     progress: Arc<dyn DownloadProgress>,
-    semaphore: Arc<tokio::sync::Semaphore>,
+    concurrent_files: usize,
 }
 
 struct DownloadTaskResult {
     id: FileId,
     attempt_id: u64,
     result: crate::Result<crate::FileStats>,
+}
+
+struct SchedulerState {
+    desired_pending_order: Vec<FileId>,
+    pending_queue: VecDeque<FileId>,
+    available_downloads: HashMap<FileId, QueuedDownload>,
+    active_downloads: HashSet<FileId>,
+    join_set: tokio::task::JoinSet<DownloadTaskResult>,
+}
+
+impl SchedulerState {
+    fn new() -> Self {
+        Self {
+            desired_pending_order: Vec::new(),
+            pending_queue: VecDeque::new(),
+            available_downloads: HashMap::new(),
+            active_downloads: HashSet::new(),
+            join_set: tokio::task::JoinSet::new(),
+        }
+    }
+
+    fn sync_pending_order(&mut self, file_ids: Vec<FileId>) {
+        self.desired_pending_order = file_ids;
+        self.rebuild_pending_queue();
+    }
+
+    fn register_resolved_batch(&mut self, batch: CollectedBatch) -> CollectedBatch {
+        for item in &batch.queued_items {
+            self.available_downloads
+                .insert(item.item.path.clone().into(), item.clone());
+        }
+        self.rebuild_pending_queue();
+        batch
+    }
+
+    fn finish_download(&mut self, file_id: &FileId) {
+        self.active_downloads.remove(file_id);
+        self.available_downloads.remove(file_id);
+        self.rebuild_pending_queue();
+    }
+
+    fn rebuild_pending_queue(&mut self) {
+        self.pending_queue = self
+            .desired_pending_order
+            .iter()
+            .filter(|file_id| {
+                self.available_downloads.contains_key(*file_id) && !self.active_downloads.contains(*file_id)
+            })
+            .cloned()
+            .collect();
+    }
 }
 
 struct FileProgress {
@@ -335,101 +380,97 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
         http: Arc::new(http),
         dlc_cache: Arc::new(dlc_cache),
         progress,
-        // Shared semaphore across all batches so concurrent_files is a global limit
-        semaphore: Arc::new(tokio::sync::Semaphore::new(config.concurrent_files)),
+        concurrent_files: config.concurrent_files.max(1),
     };
-    let mut join_set = tokio::task::JoinSet::new();
+    let mut scheduler = SchedulerState::new();
+    let mut pause_rx = pause_rx;
 
     loop {
         tokio::select! {
             request_opt = url_rx.recv() => {
-                let Some(first_request) = request_opt else { break };
-                let batch = collect_download_requests(first_request, &mut url_rx);
-                queue_download_batch_events(&batch, &tx);
-                spawn_download_batch(
-                    &mut join_set,
-                    batch,
+                let Some(request) = request_opt else { break };
+                if !handle_download_request(
+                    request,
                     &runtime,
+                    &mut scheduler,
                     &tx,
                     &token_tx,
-                    &pause_rx,
                     &skipped_session_paths,
-                );
+                ).await {
+                    break;
+                }
+                start_pending_downloads(&runtime, &mut scheduler, &tx, &token_tx, &pause_rx);
             }
-            Some(result) = join_set.join_next() => {
-                handle_batch_join_result(result, &tx);
+            Some(result) = scheduler.join_set.join_next(), if !scheduler.active_downloads.is_empty() => {
+                handle_download_join_result(result, &mut scheduler, &tx);
+                start_pending_downloads(&runtime, &mut scheduler, &tx, &token_tx, &pause_rx);
+            }
+            changed = pause_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                if !*pause_rx.borrow() {
+                    start_pending_downloads(&runtime, &mut scheduler, &tx, &token_tx, &pause_rx);
+                }
             }
         }
     }
 
-    // Drain remaining batch tasks
-    while let Some(result) = join_set.join_next().await {
-        handle_batch_join_result(result, &tx);
+    while let Some(result) = scheduler.join_set.join_next().await {
+        handle_download_join_result(result, &mut scheduler, &tx);
     }
 }
 
-fn collect_download_requests(
-    first_request: DownloadRequest,
-    url_rx: &mut mpsc::UnboundedReceiver<DownloadRequest>,
-) -> Vec<DownloadRequest> {
-    let mut batch = vec![first_request];
-    while let Ok(request) = url_rx.try_recv() {
-        batch.push(request);
-    }
-    batch
-}
-
-fn queue_download_batch_events(
-    batch: &[DownloadRequest],
+fn queue_download_request_events(
+    request: &DownloadRequest,
     tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) {
-    for url in batch {
-        if let DownloadRequest::SubmitUrl { url } = url {
+    match request {
+        DownloadRequest::SubmitUrl { url } => {
             let _ = tx.send(DownloadEvent::UrlQueued { url: url.clone() });
+            let _ = tx.send(DownloadEvent::StatusMessage("Processing 1 URL(s)...".to_string()));
         }
+        DownloadRequest::ResumeFileIds { file_ids, .. } => {
+            let _ = tx.send(DownloadEvent::StatusMessage(format!(
+                "Refreshing {} queued file(s)...",
+                file_ids.len()
+            )));
+        }
+        DownloadRequest::SyncPendingOrder { .. } => {}
     }
-
-    let _ = tx.send(DownloadEvent::StatusMessage(format!(
-        "Processing {} URL(s)...",
-        batch.iter().count()
-    )));
 }
 
-fn spawn_download_batch(
-    join_set: &mut tokio::task::JoinSet<()>,
-    batch: Vec<DownloadRequest>,
+async fn handle_download_request(
+    request: DownloadRequest,
     runtime: &DownloadRuntime,
+    scheduler: &mut SchedulerState,
     tx: &mpsc::UnboundedSender<DownloadEvent>,
     token_tx: &mpsc::UnboundedSender<TokenMessage>,
-    pause_rx: &watch::Receiver<bool>,
     skipped_session_paths: &HashMap<String, HashSet<String>>,
-) {
-    let downloader = Arc::clone(&runtime.downloader);
-    let progress = Arc::clone(&runtime.progress);
-    let http = Arc::clone(&runtime.http);
-    let dlc_cache = Arc::clone(&runtime.dlc_cache);
-    let semaphore = Arc::clone(&runtime.semaphore);
-    let event_tx = tx.clone();
-    let token_tx = token_tx.clone();
-    let pause_rx = pause_rx.clone();
-    let skipped_paths = skipped_session_paths.clone();
-
-    join_set.spawn(async move {
-        let resolved = resolve_download_requests(&batch, &http, &dlc_cache, &event_tx).await;
-        download_batch(
-            &resolved,
-            pause_rx,
-            &skipped_paths,
-            BatchContext {
-                downloader: &downloader,
-                progress: &progress,
-                semaphore: &semaphore,
-                event_tx: &event_tx,
-                token_tx: &token_tx,
-            },
-        )
-        .await;
-    });
+) -> bool {
+    match request {
+        DownloadRequest::SubmitUrl { .. } | DownloadRequest::ResumeFileIds { .. } => {
+            queue_download_request_events(&request, tx);
+            let batch = vec![request];
+            let resolved =
+                resolve_download_requests(&batch, &runtime.http, &runtime.dlc_cache, tx).await;
+            let collected = collect_batch(
+                &resolved,
+                &runtime.downloader,
+                &runtime.progress,
+                skipped_session_paths,
+            )
+            .await;
+            let collected = scheduler.register_resolved_batch(collected);
+            collected.emit_events(tx);
+            let _ = token_tx;
+            true
+        }
+        DownloadRequest::SyncPendingOrder { file_ids } => {
+            scheduler.sync_pending_order(file_ids);
+            true
+        }
+    }
 }
 
 /// Resolves download requests (including DLC files) into MEGA URLs.
@@ -439,8 +480,8 @@ async fn resolve_download_requests(
     dlc_cache: &Arc<DlcKeyCache>,
     tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) -> Vec<FetchedNodeSet> {
-    let mut by_source: HashMap<String, (RequestedFiles, HashMap<FileId, u64>, bool)> =
-        HashMap::new();
+    let mut by_source: IndexMap<String, (RequestedFiles, HashMap<FileId, u64>, bool)> =
+        IndexMap::new();
 
     for request in requests {
         match request {
@@ -459,10 +500,12 @@ async fn resolve_download_requests(
                 file_ids,
                 attempt_ids,
             } => {
-                let file_ids = file_ids.iter().cloned().collect::<HashSet<_>>();
+                let file_ids = file_ids.iter().cloned().collect::<IndexSet<_>>();
                 let entry = by_source
                     .entry(source_url.clone())
-                    .or_insert_with(|| (RequestedFiles::Only(HashSet::new()), HashMap::new(), false));
+                    .or_insert_with(|| {
+                        (RequestedFiles::Only(IndexSet::new()), HashMap::new(), false)
+                    });
                 match &mut entry.0 {
                     RequestedFiles::Only(existing) => {
                         existing.extend(file_ids);
@@ -474,6 +517,7 @@ async fn resolve_download_requests(
                 }
                 entry.1.extend(attempt_ids.clone());
             }
+            DownloadRequest::SyncPendingOrder { .. } => {}
         }
     }
 
@@ -577,58 +621,64 @@ fn expand_dlc_path(url: &str) -> Result<String, String> {
     Ok(url.replacen('~', home.to_string_lossy().as_ref(), 1))
 }
 
-fn handle_batch_join_result(
-    result: Result<(), tokio::task::JoinError>,
+fn handle_download_join_result(
+    result: Result<DownloadTaskResult, tokio::task::JoinError>,
+    scheduler: &mut SchedulerState,
     tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) {
-    if let Err(e) = result {
-        let _ = tx.send(DownloadEvent::ScopeError {
-            scope: "download".to_string(),
-            error: format!("Batch task panicked: {e}"),
-        });
+    match result {
+        Ok(task) => {
+            scheduler.finish_download(&task.id);
+            if let Err(error) = task.result
+                && !matches!(error, crate::Error::Cancelled)
+            {
+                let _ = tx.send(DownloadEvent::FileError {
+                    id: task.id,
+                    error: format!("Download failed: {error}"),
+                    attempt_id: task.attempt_id,
+                });
+            }
+        }
+        Err(error) => {
+            let _ = tx.send(DownloadEvent::ScopeError {
+                scope: "download".to_string(),
+                error: format!("Download task panicked: {error}"),
+            });
+        }
     }
 }
 
-/// Fetches nodes from URLs, collects files, and downloads them.
-///
-/// The semaphore is shared across all batches to enforce a global concurrency
-/// limit for file downloads.
-
-async fn download_batch(
-    node_sets: &[FetchedNodeSet],
-    mut pause_rx: watch::Receiver<bool>,
-    skipped_session_paths: &HashMap<String, HashSet<String>>,
-    ctx: BatchContext<'_>,
+fn start_pending_downloads(
+    runtime: &DownloadRuntime,
+    scheduler: &mut SchedulerState,
+    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
+    token_tx: &mpsc::UnboundedSender<TokenMessage>,
+    pause_rx: &watch::Receiver<bool>,
 ) {
-    let collected = collect_batch(
-        &node_sets,
-        ctx.downloader,
-        ctx.progress,
-        skipped_session_paths,
-    )
-    .await;
+    if *pause_rx.borrow() {
+        return;
+    }
 
-    collected.emit_events(ctx.event_tx);
-
-    let mut join_set = tokio::task::JoinSet::new();
-    for item in collected.queued_items {
-        let cancel_token = register_download_token(&item, ctx.token_tx);
-        if wait_until_resumed(&mut pause_rx).await.is_err() {
-            return;
+    while scheduler.active_downloads.len() < runtime.concurrent_files {
+        let Some(file_id) = scheduler.pending_queue.pop_front() else {
+            break;
+        };
+        let Some(item) = scheduler.available_downloads.get(&file_id).cloned() else {
+            continue;
+        };
+        if !scheduler.active_downloads.insert(file_id.clone()) {
+            continue;
         }
-        let permit = acquire_download_permit(ctx.semaphore).await;
+        let cancel_token = register_download_token(&item, token_tx);
         spawn_file_download(
-            &mut join_set,
+            &mut scheduler.join_set,
             item,
-            permit,
-            Arc::clone(ctx.downloader),
-            ctx.event_tx.clone(),
+            Arc::clone(&runtime.downloader),
+            event_tx.clone(),
             pause_rx.clone(),
             cancel_token,
         );
     }
-
-    drain_download_join_set(join_set, ctx.event_tx).await;
 }
 
 fn register_download_token(
@@ -643,35 +693,15 @@ fn register_download_token(
     cancel_token
 }
 
-async fn wait_until_resumed(pause_rx: &mut watch::Receiver<bool>) -> Result<(), ()> {
-    while *pause_rx.borrow() {
-        if pause_rx.changed().await.is_err() {
-            return Err(());
-        }
-    }
-    Ok(())
-}
-
-async fn acquire_download_permit(
-    semaphore: &Arc<tokio::sync::Semaphore>,
-) -> tokio::sync::OwnedSemaphorePermit {
-    Arc::clone(semaphore)
-        .acquire_owned()
-        .await
-        .expect("semaphore not closed")
-}
-
 fn spawn_file_download(
     join_set: &mut tokio::task::JoinSet<DownloadTaskResult>,
     item: QueuedDownload,
-    permit: tokio::sync::OwnedSemaphorePermit,
     downloader: Arc<crate::Downloader>,
     event_tx: mpsc::UnboundedSender<DownloadEvent>,
     pause_rx: watch::Receiver<bool>,
     cancel_token: CancellationToken,
 ) {
     join_set.spawn(async move {
-        let _permit = permit;
         let file_id: FileId = item.item.path.clone().into();
         let attempt_id = item.attempt_id;
         let progress = file_progress(&file_id, attempt_id, &event_tx);
@@ -837,6 +867,9 @@ async fn collect_node_set(
             was_partial: item.was_partial,
         })
         .collect::<Vec<_>>();
+
+    let to_download = order_items_by_request(to_download, &node_set.requested_files);
+    let completed = order_items_by_request(completed, &node_set.requested_files);
 
     let queued_items = visible_downloads(
         to_download,
@@ -1148,43 +1181,20 @@ fn visible_downloads(
         .collect()
 }
 
-async fn drain_download_join_set(
-    mut join_set: tokio::task::JoinSet<DownloadTaskResult>,
-    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
-) {
-    while let Some(result) = join_set.join_next().await {
-        handle_download_join_result(result, event_tx);
-    }
-}
+fn order_items_by_request(
+    items: Vec<crate::OwnedDownloadItem>,
+    requested_files: &RequestedFiles,
+) -> Vec<crate::OwnedDownloadItem> {
+    let RequestedFiles::Only(requested) = requested_files else {
+        return items;
+    };
 
-fn handle_download_join_result(
-    result: Result<DownloadTaskResult, tokio::task::JoinError>,
-    event_tx: &mpsc::UnboundedSender<DownloadEvent>,
-) {
-    match result {
-        Ok(DownloadTaskResult {
-            result: Ok(_stats), ..
-        }) => {}
-        Ok(DownloadTaskResult {
-            result: Err(crate::Error::Cancelled),
-            ..
-        }) => {} // user cancelled
-        Ok(DownloadTaskResult {
-            id,
-            attempt_id,
-            result: Err(e),
-        }) => {
-            let _ = event_tx.send(DownloadEvent::FileError {
-                id: id.clone(),
-                error: format!("Download failed: {e}"),
-                attempt_id,
-            });
-        }
-        Err(e) => {
-            let _ = event_tx.send(DownloadEvent::ScopeError {
-                scope: "download".to_string(),
-                error: format!("Task panicked: {e}"),
-            });
-        }
-    }
+    let mut by_id = items
+        .into_iter()
+        .map(|item| (FileId::from(item.path.clone()), item))
+        .collect::<HashMap<_, _>>();
+    requested
+        .iter()
+        .filter_map(|file_id| by_id.remove(file_id))
+        .collect()
 }

@@ -637,6 +637,7 @@ mod tests {
                     "https://mega.nz/folder/failed".to_string().clone(),
                 ),
                 display_name: "Failed".to_string(),
+                file_ids: Vec::new(),
                 status: PackageStatus::Failed,
                 error: Some("boom".to_string()),
             },

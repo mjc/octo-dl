@@ -133,6 +133,7 @@ fn save_rejects_empty_synthetic_package_placeholders() {
         id: package_id("batch-folder", "https://mega.nz/file/stale-error"),
         key: crate::core::PackageKey::new("https://mega.nz/file/stale-error".to_string().clone()),
         display_name: "Batch Folder".to_string(),
+        files: Vec::new(),
         file_ids: Vec::new(),
         error: Some("boom".to_string()),
     });
@@ -325,6 +326,7 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
         id: package_id,
         key: crate::core::PackageKey::new("Merged Folder"),
         display_name: "Merged Folder".to_string(),
+        files: Vec::new(),
         file_ids: vec![
             "Merged Folder/a.mkv".to_string().into(),
             "Merged Folder/b.mkv".to_string().into(),
@@ -656,6 +658,7 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
             id: package_id.clone(),
             key: crate::core::PackageKey::new(source_url.clone().clone()),
             display_name: "Retry Folder".to_string(),
+            files: Vec::new(),
             file_ids: Vec::new(),
             error: Some("boom".to_string()),
         });
@@ -666,6 +669,7 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
             id: package_id.clone(),
             key: crate::core::PackageKey::new(source_url.clone().clone()),
             display_name: "Retry Folder".to_string(),
+            file_ids: Vec::new(),
             status: PackageStatus::Failed,
             error: Some("boom".to_string()),
         },

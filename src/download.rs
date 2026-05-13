@@ -221,6 +221,7 @@ impl CollectedFiles<'_> {
 ///
 /// Use this instead of [`DownloadItem`] when the items need to cross
 /// `tokio::spawn` boundaries (which require `'static` data).
+#[derive(Clone)]
 pub struct OwnedDownloadItem {
     /// Local file path where the file will be saved.
     pub path: String,
@@ -568,14 +569,21 @@ impl<F: FileSystem> Downloader<F> {
         nodes: &'a mega::Nodes,
         progress: &Arc<dyn DownloadProgress>,
     ) -> CollectedFiles<'a> {
-        let all_items: Vec<_> = nodes
-            .roots()
+        let roots = nodes.roots().collect::<Vec<_>>();
+        let single_root_file = roots.len() == 1 && roots[0].kind().is_file();
+        let all_items: Vec<_> = roots
+            .into_iter()
             .flat_map(|root| {
                 if root.kind().is_folder() {
                     collect_files_recursive(nodes, root)
                 } else {
+                    let path = if single_root_file {
+                        single_file_package_path(root.name())
+                    } else {
+                        root.name().to_string()
+                    };
                     vec![DownloadItem {
-                        path: root.name().to_string(),
+                        path,
                         node: root,
                         was_partial: false,
                     }]
@@ -1157,10 +1165,14 @@ where
 
 #[must_use]
 pub fn infer_package_display_name(nodes: &mega::Nodes, collected: &CollectedFiles<'_>) -> String {
-    nodes
-        .roots()
+    let roots = nodes.roots().collect::<Vec<_>>();
+    roots.iter()
         .find(|root| root.kind().is_folder())
         .map(|root| root.name().to_string())
+        .or_else(|| {
+            (roots.len() == 1 && roots[0].kind().is_file())
+                .then(|| stemmed_package_name(roots[0].name()))
+        })
         .or_else(|| common_collected_root(collected))
         .unwrap_or_else(|| "root".to_string())
 }
@@ -1181,6 +1193,19 @@ fn common_collected_root(collected: &CollectedFiles<'_>) -> Option<String> {
         .map(str::to_string);
     let first = roots.next()?;
     roots.all(|root| root == first).then_some(first)
+}
+
+fn single_file_package_path(file_name: &str) -> String {
+    format!("{}/{}", stemmed_package_name(file_name), file_name)
+}
+
+fn stemmed_package_name(file_name: &str) -> String {
+    Path::new(file_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or(file_name)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -1847,14 +1872,15 @@ mod tests {
     }
 
     #[test]
-    fn build_relative_path_keeps_root_level_files_flat() {
-        let mut parents = std::collections::HashMap::new();
-        parents.insert("root".to_string(), ("ignored-root".to_string(), None));
+    fn single_file_package_path_wraps_file_in_stemmed_folder() {
+        assert_eq!(single_file_package_path("file.bin"), "file/file.bin");
+        assert_eq!(single_file_package_path("archive.tar.gz"), "archive.tar/archive.tar.gz");
+    }
 
-        let path = build_relative_path("file.bin", Some("root"), |handle| {
-            parents.get(handle).cloned()
-        });
-
-        assert_eq!(path, "file.bin");
+    #[test]
+    fn stemmed_package_name_uses_file_name_without_extension() {
+        assert_eq!(stemmed_package_name("file.bin"), "file");
+        assert_eq!(stemmed_package_name("archive.tar.gz"), "archive.tar");
+        assert_eq!(stemmed_package_name(".env"), ".env");
     }
 }

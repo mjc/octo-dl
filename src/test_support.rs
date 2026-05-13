@@ -113,6 +113,7 @@ pub fn push_file(
             id: package_id,
             key: PackageKey::new(package_display_name.clone()),
             display_name: package_display_name.clone(),
+            files: Vec::new(),
             file_ids: Vec::new(),
             error: None,
         });

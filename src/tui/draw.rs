@@ -516,8 +516,8 @@ mod tests {
         assert!(rendered.contains("a.bin"));
         assert!(rendered.contains("b.bin"));
         assert!(
-            rendered.find("a.bin").expect("a.bin should render")
-                < rendered.find("b.bin").expect("b.bin should render")
+            rendered.find("b.bin").expect("b.bin should render")
+                < rendered.find("a.bin").expect("a.bin should render")
         );
     }
 

@@ -78,6 +78,9 @@ pub struct PackageSnapshot {
     pub id: PackageId,
     pub key: PackageKey,
     pub display_name: String,
+    #[serde(default)]
+    pub files: Vec<FileSnapshot>,
+    #[serde(skip)]
     pub file_ids: Vec<FileId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -115,6 +118,35 @@ pub struct SessionSnapshotV3 {
     #[serde(default)]
     pub urls: Vec<SessionUrlSnapshot>,
     pub packages: Vec<PackageSnapshot>,
+    #[serde(skip)]
+    pub files: Vec<FileSnapshot>,
+    pub config: DownloadConfig,
+    pub credentials: SavedCredentials,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionVersionProbe {
+    version: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyPackageSnapshotV4 {
+    pub id: PackageId,
+    pub key: PackageKey,
+    pub display_name: String,
+    pub file_ids: Vec<FileId>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacySessionSnapshotV4 {
+    pub id: String,
+    pub created: DateTime<Utc>,
+    pub status: SessionRunStatus,
+    #[serde(default)]
+    pub urls: Vec<SessionUrlSnapshot>,
+    pub packages: Vec<LegacyPackageSnapshotV4>,
     pub files: Vec<FileSnapshot>,
     pub config: DownloadConfig,
     pub credentials: SavedCredentials,
@@ -124,7 +156,7 @@ impl SessionSnapshotV3 {
     #[must_use]
     pub fn new(config: DownloadConfig, credentials: SavedCredentials) -> Self {
         Self {
-            version: 4,
+            version: 5,
             id: uuid::Uuid::new_v4().to_string(),
             created: Utc::now(),
             status: SessionRunStatus::InProgress,
@@ -160,7 +192,7 @@ impl SessionSnapshotV3 {
 
     #[must_use]
     pub fn state_path(&self) -> PathBuf {
-        Self::state_dir().join(format!("session-v4-{}.toml", self.id))
+        Self::state_dir().join(format!("session-v5-{}.toml", self.id))
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -187,14 +219,23 @@ impl SessionSnapshotV3 {
 
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let contents = std::fs::read_to_string(path)?;
-        let mut snapshot: Self = toml::from_str(&contents)
+        let probe: SessionVersionProbe = toml::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if snapshot.version != 4 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "session is not canonical version 4",
-            ));
-        }
+        let mut snapshot = match probe.version {
+            5 => toml::from_str(&contents)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+            4 => {
+                let legacy: LegacySessionSnapshotV4 = toml::from_str(&contents)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                from_legacy_snapshot(legacy)
+            }
+            version => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unsupported session version {version}"),
+                ));
+            }
+        };
         normalize_snapshot(&mut snapshot)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         validate_snapshot(&snapshot)
@@ -345,77 +386,124 @@ fn session_resume_priority(snapshot: &SessionSnapshotV3) -> u8 {
     }
 }
 
+fn from_legacy_snapshot(legacy: LegacySessionSnapshotV4) -> SessionSnapshotV3 {
+    let files_by_id: IndexMap<_, _> = legacy
+        .files
+        .into_iter()
+        .map(|file| (file.id.clone(), file))
+        .collect();
+    let packages = legacy
+        .packages
+        .into_iter()
+        .map(|package| PackageSnapshot {
+            id: package.id.clone(),
+            key: package.key,
+            display_name: package.display_name,
+            files: package
+                .file_ids
+                .into_iter()
+                .filter_map(|file_id| files_by_id.get(&file_id).cloned())
+                .collect(),
+            file_ids: Vec::new(),
+            error: package.error,
+        })
+        .collect::<Vec<_>>();
+    let mut snapshot = SessionSnapshotV3 {
+        version: 5,
+        id: legacy.id,
+        created: legacy.created,
+        status: legacy.status,
+        urls: legacy.urls,
+        packages,
+        files: files_by_id.into_values().collect(),
+        config: legacy.config,
+        credentials: legacy.credentials,
+    };
+    normalize_snapshot(&mut snapshot).expect("legacy sessions should normalize during migration");
+    snapshot
+}
+
 pub fn normalize_snapshot(snapshot: &mut SessionSnapshotV3) -> Result<(), String> {
-    if snapshot.version != 4 {
+    if snapshot.version != 4 && snapshot.version != 5 {
         return Err(format!("unsupported session version {}", snapshot.version));
     }
+    snapshot.version = 5;
 
-    let existing_packages: IndexMap<_, _> = snapshot
-        .packages
+    let grouped_files = snapshot
+        .files
         .iter()
         .cloned()
-        .map(|package| (package.id.clone(), package))
-        .collect();
-    let mut grouped_files = IndexMap::<PackageId, Vec<FileId>>::new();
-    let mut grouped_paths = IndexMap::<PackageId, Vec<String>>::new();
+        .fold(IndexMap::<PackageId, Vec<FileSnapshot>>::new(), |mut grouped, file| {
+            grouped.entry(file.package_id).or_default().push(file);
+            grouped
+        });
 
-    for file in &snapshot.files {
-        grouped_files
-            .entry(file.package_id.clone())
-            .or_default()
-            .push(file.id.clone());
-        grouped_paths
-            .entry(file.package_id.clone())
-            .or_default()
-            .push(file.path.clone());
+    let rebuild_from_flat_files = !snapshot.files.is_empty();
+    for package in &mut snapshot.packages {
+        if rebuild_from_flat_files || package.files.is_empty() {
+            if rebuild_from_flat_files {
+                package.files = grouped_files.get(&package.id).cloned().unwrap_or_default();
+            } else if !package.file_ids.is_empty() {
+                let mut files_by_id = grouped_files
+                    .get(&package.id)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|file| (file.id.clone(), file))
+                    .collect::<IndexMap<_, _>>();
+                package.files = package
+                    .file_ids
+                    .iter()
+                    .filter_map(|file_id| files_by_id.shift_remove(file_id))
+                    .collect();
+            } else {
+                package.files = grouped_files.get(&package.id).cloned().unwrap_or_default();
+            }
+        }
     }
 
-    let mut normalized_packages = Vec::new();
-    let mut emitted_package_ids = std::collections::HashSet::new();
-    for package in &snapshot.packages {
-        let Some(file_ids) = grouped_files.get(&package.id) else {
-            continue;
-        };
-        let mut normalized = package.clone();
-        let paths = grouped_paths.get(&package.id).cloned().unwrap_or_default();
-        normalized.display_name = canonical_package_display_name(&package.display_name, &paths);
-        normalized.key = PackageKey::new(normalized.display_name.clone());
-        normalized.file_ids = file_ids.clone();
-        emitted_package_ids.insert(normalized.id.clone());
-        normalized_packages.push(normalized);
-    }
-
-    for (package_id, file_ids) in grouped_files {
-        if emitted_package_ids.contains(&package_id) {
+    let existing_packages = snapshot
+        .packages
+        .iter()
+        .map(|package| package.id)
+        .collect::<std::collections::HashSet<_>>();
+    for (package_id, files) in grouped_files {
+        if existing_packages.contains(&package_id) {
             continue;
         }
-        let paths = grouped_paths.get(&package_id).cloned().unwrap_or_default();
-        let display_name = canonical_package_display_name(
-            existing_packages
-                .get(&package_id)
-                .map(|package| package.display_name.clone())
-                .as_deref()
-                .unwrap_or(""),
-            &paths,
-        );
-        let error = existing_packages
-            .get(&package_id)
-            .and_then(|package| package.error.clone());
-        normalized_packages.push(PackageSnapshot {
+        let paths = files.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
+        let display_name = canonical_package_display_name("", &paths);
+        snapshot.packages.push(PackageSnapshot {
             id: package_id,
             key: PackageKey::new(display_name.clone()),
             display_name,
-            file_ids,
-            error,
+            file_ids: files.iter().map(|file| file.id.clone()).collect(),
+            files,
+            error: None,
         });
     }
 
-    snapshot.packages = normalized_packages;
+    snapshot.files.clear();
+    snapshot.packages.retain(|package| !package.files.is_empty());
+    for package in &mut snapshot.packages {
+        let paths = package
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        package.display_name = canonical_package_display_name(&package.display_name, &paths);
+        package.key = PackageKey::new(package.display_name.clone());
+        for file in &mut package.files {
+            file.package_id = package.id;
+        }
+        package.file_ids = package.files.iter().map(|file| file.id.clone()).collect();
+        snapshot.files.extend(package.files.iter().cloned());
+    }
     Ok(())
 }
 
 pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
-    if snapshot.version != 4 {
+    if snapshot.version != 5 {
         return Err(format!("unsupported session version {}", snapshot.version));
     }
     if snapshot.urls.is_empty() && snapshot.packages.is_empty() && snapshot.files.is_empty() {
@@ -440,43 +528,42 @@ pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
         }
     }
 
-    let mut grouped_files = IndexMap::<PackageId, Vec<FileId>>::new();
     let mut file_ids = std::collections::HashSet::new();
-    for file in &snapshot.files {
-        if !file_ids.insert(file.id.clone()) {
-            return Err(format!("duplicate file id {}", file.id));
-        }
-        let Some(_package) = packages_by_id.get(&file.package_id) else {
-            return Err(format!(
-                "file {} references unknown package {}",
-                file.id, file.package_id
-            ));
-        };
-        if let Some(source_url) = &file.source_url
-            && !tracked_urls.contains(source_url)
-        {
-            return Err(format!(
-                "file {} references untracked source_url {}",
-                file.id, source_url
-            ));
-        }
-        grouped_files
-            .entry(file.package_id.clone())
-            .or_default()
-            .push(file.id.clone());
-    }
-
     for package in &snapshot.packages {
-        let grouped = grouped_files.get(&package.id).cloned().unwrap_or_default();
-        if grouped != package.file_ids {
-            return Err(format!(
-                "package {} file_ids do not match grouped files",
-                package.id
-            ));
-        }
-        if grouped.is_empty() {
+        if package.files.is_empty() {
             return Err(format!("empty package {} is unsupported", package.id));
         }
+        if package.file_ids != package.files.iter().map(|file| file.id.clone()).collect::<Vec<_>>() {
+            return Err(format!("package {} file_ids do not match nested files", package.id));
+        }
+        for file in &package.files {
+            if !file_ids.insert(file.id.clone()) {
+                return Err(format!("duplicate file id {}", file.id));
+            }
+            if file.package_id != package.id {
+                return Err(format!(
+                    "file {} package_id {} does not match package {}",
+                    file.id, file.package_id, package.id
+                ));
+            }
+            if let Some(source_url) = &file.source_url
+                && !tracked_urls.contains(source_url)
+            {
+                return Err(format!(
+                    "file {} references untracked source_url {}",
+                    file.id, source_url
+                ));
+            }
+        }
+    }
+
+    let flattened = snapshot
+        .packages
+        .iter()
+        .flat_map(|package| package.files.iter().cloned())
+        .collect::<Vec<_>>();
+    if flattened != snapshot.files {
+        return Err("session.files must mirror the flattened package file order".to_string());
     }
 
     Ok(())
@@ -659,6 +746,7 @@ mod tests {
             id: PackageId::for_package_key(&PackageKey::new("Folder")),
             key: PackageKey::new("Folder"),
             display_name: "Folder".to_string(),
+            files: Vec::new(),
             file_ids: vec!["folder/file.bin".to_string().into()],
             error: None,
         });
@@ -719,6 +807,7 @@ mod tests {
             id: package_id,
             key: package_key,
             display_name: "Folder".to_string(),
+            files: Vec::new(),
             file_ids: vec!["folder/a.bin".to_string().into(), "folder/b.bin".to_string().into()],
             error: None,
         });

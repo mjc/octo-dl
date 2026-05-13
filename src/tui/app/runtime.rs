@@ -134,6 +134,7 @@ impl App {
             .expect("start_download_task called twice");
 
         self.ensure_download_session(&config);
+        self.download_task_running = true;
 
         let channels = super::super::event::DownloadChannels {
             client_rx: self.client_rx.take(),

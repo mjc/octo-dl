@@ -99,6 +99,7 @@ pub struct App {
     pub(super) token_tx: Option<mpsc::UnboundedSender<TokenMessage>>,
     /// Receives the authenticated client from the login task.
     pub client_rx: Option<tokio::sync::oneshot::Receiver<(mega::Client, reqwest::Client)>>,
+    pub(super) download_task_running: bool,
     // Cancellation tokens for active downloads (maps file path to token)
     pub cancellation_tokens: HashMap<FileId, CancellationToken>,
     // Per-file download attempt IDs for retry/reset flows

@@ -360,6 +360,7 @@ fn register_cli_package_in_session(
             id: package.id,
             key: PackageKey::new(package.display_name.clone()),
             display_name: package.display_name.clone(),
+            files: Vec::new(),
             file_ids: Vec::new(),
             error: None,
         });

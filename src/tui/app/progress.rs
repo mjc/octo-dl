@@ -114,6 +114,10 @@ fn throughput_weight(elapsed: Duration) -> f64 {
 }
 
 impl App {
+    pub(crate) fn core_file_network_downloaded(file: &crate::core::FileState) -> u64 {
+        file.progress.downloaded_network_bytes.min(file.size)
+    }
+
     pub(crate) fn apply_cached_totals(&mut self) {
         self.total_size = self
             .core_state
@@ -169,10 +173,7 @@ impl App {
             .core_state
             .files
             .get(file_id)
-            .map(|file| match file.lifecycle {
-                crate::core::FileLifecycle::Complete => file.size,
-                _ => file.progress.visible_completed_bytes.min(file.size),
-            })
+            .map(Self::core_file_network_downloaded)
             .or_else(|| self.overlay_files.get(file_id).map(|file| file.file.downloaded))
             .or_else(|| self.visible_file(file_id).map(|file| file.downloaded))
             .unwrap_or(0);
