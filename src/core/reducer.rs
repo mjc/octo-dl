@@ -415,11 +415,31 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
 }
 
 pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
+    let package_aggregates = package_file_aggregates(state);
+    let mut url_errors = std::collections::HashMap::<UrlId, String>::new();
+    for file in state.files.values() {
+        let Some(source_url) = file.source_url.as_ref() else {
+            continue;
+        };
+        if url_errors.contains_key(source_url) {
+            continue;
+        }
+        let Some(package) = state.packages.get(&file.package_id) else {
+            continue;
+        };
+        let Some(error) = package.error.as_ref() else {
+            continue;
+        };
+        url_errors.insert(source_url.clone(), error.clone());
+    }
     let packages = state
         .packages
         .values()
         .filter_map(|package| {
-            let file_ids = state.package_file_ids(&package.id);
+            let file_ids = package_aggregates
+                .get(&package.id)
+                .map(|aggregate| aggregate.file_ids.clone())
+                .unwrap_or_default();
             if file_ids.is_empty() {
                 return None;
             }
@@ -442,11 +462,7 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
             .iter()
             .map(|url| crate::core::SessionUrlSnapshot {
                 url: url.clone(),
-                error: state
-                    .packages
-                    .values()
-                    .find(|package| package_has_source_url(state, &package.id, url))
-                    .and_then(|package| package.error.clone()),
+                error: url_errors.get(url).cloned(),
             })
             .collect(),
         packages,
@@ -471,69 +487,76 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
     }
 }
 
-fn package_has_source_url(state: &DownloadState, package_id: &PackageId, source_url: &str) -> bool {
-    state.files.values().any(|file| {
-        &file.package_id == package_id && file.source_url.as_deref() == Some(source_url)
-    })
+#[derive(Debug, Default)]
+struct PackageFileAggregate {
+    file_ids: Vec<FileId>,
+    has_downloading: bool,
+    has_failed: bool,
+    has_queued: bool,
+    has_complete: bool,
+    all_skipped: bool,
+    all_deleted: bool,
+}
+
+impl PackageFileAggregate {
+    fn observe(&mut self, file: &FileState) {
+        self.file_ids.push(file.id.clone());
+        if self.file_ids.len() == 1 {
+            self.all_skipped = true;
+            self.all_deleted = true;
+        }
+        match file.lifecycle {
+            FileLifecycle::Downloading => self.has_downloading = true,
+            FileLifecycle::Failed => self.has_failed = true,
+            FileLifecycle::Queued | FileLifecycle::Planned => self.has_queued = true,
+            FileLifecycle::Complete => self.has_complete = true,
+            FileLifecycle::Skipped => self.all_deleted = false,
+            FileLifecycle::Deleted => self.all_skipped = false,
+        }
+        if !matches!(file.lifecycle, FileLifecycle::Skipped) {
+            self.all_skipped = false;
+        }
+        if !matches!(file.lifecycle, FileLifecycle::Deleted) {
+            self.all_deleted = false;
+        }
+    }
+}
+
+fn package_file_aggregates(
+    state: &DownloadState,
+) -> std::collections::HashMap<PackageId, PackageFileAggregate> {
+    let mut aggregates: std::collections::HashMap<PackageId, PackageFileAggregate> =
+        std::collections::HashMap::with_capacity(state.packages.len());
+    for file in state.files.values() {
+        aggregates
+            .entry(file.package_id)
+            .or_default()
+            .observe(file);
+    }
+    aggregates
 }
 
 fn recompute_derived(state: &mut DownloadState) {
-    let package_ids: Vec<_> = state.packages.keys().cloned().collect();
-    for package_id in package_ids {
-        let file_ids = state.package_file_ids(&package_id);
-        let Some(package) = state.packages.get_mut(&package_id) else {
-            continue;
-        };
-        let mut has_downloading = false;
-        let mut has_failed = false;
-        let mut has_queued = false;
-        let mut has_complete = false;
-        let mut has_present = false;
-        let mut all_skipped = !file_ids.is_empty();
-        let mut all_deleted = !file_ids.is_empty();
-
-        for file_id in &file_ids {
-            let Some(file) = state.files.get(file_id) else {
-                continue;
-            };
-            has_present = true;
-            match file.lifecycle {
-                FileLifecycle::Downloading => has_downloading = true,
-                FileLifecycle::Failed => has_failed = true,
-                FileLifecycle::Queued | FileLifecycle::Planned => has_queued = true,
-                FileLifecycle::Complete => has_complete = true,
-                FileLifecycle::Skipped => all_deleted = false,
-                FileLifecycle::Deleted => all_skipped = false,
-            }
-            if !matches!(file.lifecycle, FileLifecycle::Skipped) {
-                all_skipped = false;
-            }
-            if !matches!(file.lifecycle, FileLifecycle::Deleted) {
-                all_deleted = false;
-            }
-        }
-
-        package.status = if package.error.is_some() || has_failed {
+    let package_aggregates = package_file_aggregates(state);
+    for (package_id, package) in &mut state.packages {
+        let aggregate = package_aggregates.get(package_id);
+        let has_present = aggregate.is_some_and(|files| !files.file_ids.is_empty());
+        package.status = if package.error.is_some() || aggregate.is_some_and(|files| files.has_failed)
+        {
             PackageStatus::Failed
-        } else if has_downloading {
+        } else if aggregate.is_some_and(|files| files.has_downloading) {
             PackageStatus::Downloading
-        } else if all_deleted && has_present {
+        } else if aggregate.is_some_and(|files| files.all_deleted) && has_present {
             PackageStatus::Deleted
-        } else if all_skipped && has_present {
+        } else if aggregate.is_some_and(|files| files.all_skipped) && has_present {
             PackageStatus::Skipped
-        } else if has_complete
-            && (has_queued
-                || file_ids.iter().any(|file_id| {
-                    state
-                        .files
-                        .get(file_id)
-                        .is_some_and(|file| matches!(file.lifecycle, FileLifecycle::Downloading))
-                }))
+        } else if aggregate.is_some_and(|files| files.has_complete)
+            && aggregate.is_some_and(|files| files.has_queued || files.has_downloading)
         {
             PackageStatus::Partial
-        } else if has_complete && has_present {
+        } else if aggregate.is_some_and(|files| files.has_complete) && has_present {
             PackageStatus::Complete
-        } else if has_queued {
+        } else if aggregate.is_some_and(|files| files.has_queued) {
             PackageStatus::Queued
         } else {
             PackageStatus::Pending
@@ -576,6 +599,13 @@ fn recompute_derived(state: &mut DownloadState) {
 
 fn debug_assert_invariants(state: &DownloadState) {
     let mut package_keys = std::collections::HashSet::new();
+    let package_file_counts = state.files.values().fold(
+        std::collections::HashMap::<PackageId, usize>::new(),
+        |mut counts, file| {
+            *counts.entry(file.package_id).or_default() += 1;
+            counts
+        },
+    );
     for (package_id, package) in &state.packages {
         debug_assert_eq!(
             package_id, &package.id,
@@ -585,9 +615,10 @@ fn debug_assert_invariants(state: &DownloadState) {
             package_keys.insert(package.key.clone()),
             "only one package may exist per package key"
         );
-        let file_ids = state.package_file_ids(package_id);
         debug_assert!(
-            !file_ids.is_empty(),
+            package_file_counts
+                .get(package_id)
+                .is_some_and(|count| *count > 0),
             "packages without files are invalid in canonical state"
         );
     }
