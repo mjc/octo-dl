@@ -80,8 +80,6 @@ pub struct PackageSnapshot {
     pub display_name: String,
     #[serde(default)]
     pub files: Vec<FileSnapshot>,
-    #[serde(skip)]
-    pub file_ids: Vec<FileId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -119,35 +117,7 @@ pub struct SessionSnapshot {
     pub urls: Vec<SessionUrlSnapshot>,
     pub packages: Vec<PackageSnapshot>,
     #[serde(skip)]
-    pub files: Vec<FileSnapshot>,
-    pub config: DownloadConfig,
-    pub credentials: SavedCredentials,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionVersionProbe {
-    version: u32,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct LegacyPackageSnapshotV4 {
-    pub id: PackageId,
-    pub key: PackageKey,
-    pub display_name: String,
-    pub file_ids: Vec<FileId>,
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct LegacySessionSnapshotV4 {
-    pub id: String,
-    pub created: DateTime<Utc>,
-    pub status: SessionRunStatus,
-    #[serde(default)]
-    pub urls: Vec<SessionUrlSnapshot>,
-    pub packages: Vec<LegacyPackageSnapshotV4>,
-    pub files: Vec<FileSnapshot>,
+    pub(crate) files: Vec<FileSnapshot>,
     pub config: DownloadConfig,
     pub credentials: SavedCredentials,
 }
@@ -196,16 +166,16 @@ impl SessionSnapshot {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        let mut normalized = self.clone();
-        normalize_snapshot(&mut normalized)
+        let mut canonical = self.clone();
+        canonicalize_snapshot(&mut canonical)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        validate_snapshot(&normalized)
+        validate_snapshot(&canonical)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let dir = Self::state_dir();
         std::fs::create_dir_all(&dir)?;
         let path = self.state_path();
         let tmp = path.with_extension("toml.tmp");
-        let toml = toml::to_string(&normalized)
+        let toml = toml::to_string(&canonical)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(&tmp, toml)?;
         #[cfg(unix)]
@@ -219,24 +189,9 @@ impl SessionSnapshot {
 
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let contents = std::fs::read_to_string(path)?;
-        let probe: SessionVersionProbe = toml::from_str(&contents)
+        let mut snapshot: SessionSnapshot = toml::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let mut snapshot = match probe.version {
-            5 => toml::from_str(&contents)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
-            4 => {
-                let legacy: LegacySessionSnapshotV4 = toml::from_str(&contents)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                from_legacy_snapshot(legacy)
-            }
-            version => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("unsupported session version {version}"),
-                ));
-            }
-        };
-        normalize_snapshot(&mut snapshot)
+        canonicalize_snapshot(&mut snapshot)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         validate_snapshot(&snapshot)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
@@ -291,34 +246,39 @@ impl SessionSnapshot {
     }
 
     pub fn mark_file_complete(&mut self, file_id: &str) {
-        if let Some(file) = self.files.iter_mut().find(|file| file.id == file_id) {
+        if let Some(file) = self.find_file_mut(file_id) {
             file.lifecycle = FileLifecycle::Complete;
             file.progress.visible_completed_bytes = file.size;
             file.runtime.active = false;
             file.runtime.counts_in_run_totals = false;
+            self.sync_flat_files_from_packages();
         }
     }
 
     pub fn mark_file_error(&mut self, file_id: &str, error: &str) {
-        if let Some(file) = self.files.iter_mut().find(|file| file.id == file_id) {
+        if let Some(file) = self.find_file_mut(file_id) {
             file.lifecycle = FileLifecycle::Failed;
             file.message = Some(error.to_string());
             file.runtime.active = false;
+            self.sync_flat_files_from_packages();
         }
     }
 
     #[must_use]
     pub fn completed_count(&self) -> usize {
-        self.files
-            .iter()
+        self.iter_files()
             .filter(|file| matches!(file.lifecycle, FileLifecycle::Complete))
             .count()
     }
 
     #[must_use]
+    pub fn file_count(&self) -> usize {
+        self.iter_files().count()
+    }
+
+    #[must_use]
     pub fn remaining_count(&self) -> usize {
-        self.files
-            .iter()
+        self.iter_files()
             .filter(|file| {
                 !matches!(
                     file.lifecycle,
@@ -326,6 +286,33 @@ impl SessionSnapshot {
                 )
             })
             .count()
+    }
+
+    pub fn find_file(&self, file_id: &str) -> Option<&FileSnapshot> {
+        self.iter_files().find(|file| file.id == file_id)
+    }
+
+    pub fn find_file_mut(&mut self, file_id: &str) -> Option<&mut FileSnapshot> {
+        self.packages
+            .iter_mut()
+            .find_map(|package| package.files.iter_mut().find(|file| file.id == file_id))
+    }
+
+    pub fn iter_files(&self) -> impl Iterator<Item = &FileSnapshot> {
+        self.packages.iter().flat_map(|package| package.files.iter())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_flat_files_cache(&mut self) {
+        self.files.clear();
+    }
+
+    pub fn sync_flat_files_from_packages(&mut self) {
+        self.packages.retain(|package| !package.files.is_empty());
+        self.files.clear();
+        for package in &mut self.packages {
+            self.files.extend(package.files.iter().cloned());
+        }
     }
 }
 
@@ -385,105 +372,10 @@ fn session_resume_priority(snapshot: &SessionSnapshot) -> u8 {
         SessionRunStatus::Completed => 0,
     }
 }
-
-fn from_legacy_snapshot(legacy: LegacySessionSnapshotV4) -> SessionSnapshot {
-    let files_by_id: IndexMap<_, _> = legacy
-        .files
-        .into_iter()
-        .map(|file| (file.id.clone(), file))
-        .collect();
-    let packages = legacy
-        .packages
-        .into_iter()
-        .map(|package| PackageSnapshot {
-            id: package.id.clone(),
-            key: package.key,
-            display_name: package.display_name,
-            files: package
-                .file_ids
-                .into_iter()
-                .filter_map(|file_id| files_by_id.get(&file_id).cloned())
-                .collect(),
-            file_ids: Vec::new(),
-            error: package.error,
-        })
-        .collect::<Vec<_>>();
-    let mut snapshot = SessionSnapshot {
-        version: 5,
-        id: legacy.id,
-        created: legacy.created,
-        status: legacy.status,
-        urls: legacy.urls,
-        packages,
-        files: files_by_id.into_values().collect(),
-        config: legacy.config,
-        credentials: legacy.credentials,
-    };
-    normalize_snapshot(&mut snapshot).expect("legacy sessions should normalize during migration");
-    snapshot
-}
-
-pub fn normalize_snapshot(snapshot: &mut SessionSnapshot) -> Result<(), String> {
-    if snapshot.version != 4 && snapshot.version != 5 {
+pub(crate) fn canonicalize_snapshot(snapshot: &mut SessionSnapshot) -> Result<(), String> {
+    if snapshot.version != 5 {
         return Err(format!("unsupported session version {}", snapshot.version));
     }
-    snapshot.version = 5;
-
-    let grouped_files = snapshot
-        .files
-        .iter()
-        .cloned()
-        .fold(IndexMap::<PackageId, Vec<FileSnapshot>>::new(), |mut grouped, file| {
-            grouped.entry(file.package_id).or_default().push(file);
-            grouped
-        });
-
-    let rebuild_from_flat_files = !snapshot.files.is_empty();
-    for package in &mut snapshot.packages {
-        if rebuild_from_flat_files || package.files.is_empty() {
-            if rebuild_from_flat_files {
-                package.files = grouped_files.get(&package.id).cloned().unwrap_or_default();
-            } else if !package.file_ids.is_empty() {
-                let mut files_by_id = grouped_files
-                    .get(&package.id)
-                    .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|file| (file.id.clone(), file))
-                    .collect::<IndexMap<_, _>>();
-                package.files = package
-                    .file_ids
-                    .iter()
-                    .filter_map(|file_id| files_by_id.shift_remove(file_id))
-                    .collect();
-            } else {
-                package.files = grouped_files.get(&package.id).cloned().unwrap_or_default();
-            }
-        }
-    }
-
-    let existing_packages = snapshot
-        .packages
-        .iter()
-        .map(|package| package.id)
-        .collect::<std::collections::HashSet<_>>();
-    for (package_id, files) in grouped_files {
-        if existing_packages.contains(&package_id) {
-            continue;
-        }
-        let paths = files.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
-        let display_name = canonical_package_display_name("", &paths);
-        snapshot.packages.push(PackageSnapshot {
-            id: package_id,
-            key: PackageKey::new(display_name.clone()),
-            display_name,
-            file_ids: files.iter().map(|file| file.id.clone()).collect(),
-            files,
-            error: None,
-        });
-    }
-
-    snapshot.files.clear();
     snapshot.packages.retain(|package| !package.files.is_empty());
     for package in &mut snapshot.packages {
         let paths = package
@@ -496,9 +388,8 @@ pub fn normalize_snapshot(snapshot: &mut SessionSnapshot) -> Result<(), String> 
         for file in &mut package.files {
             file.package_id = package.id;
         }
-        package.file_ids = package.files.iter().map(|file| file.id.clone()).collect();
-        snapshot.files.extend(package.files.iter().cloned());
     }
+    snapshot.sync_flat_files_from_packages();
     Ok(())
 }
 
@@ -532,9 +423,6 @@ pub fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), String> {
     for package in &snapshot.packages {
         if package.files.is_empty() {
             return Err(format!("empty package {} is unsupported", package.id));
-        }
-        if package.file_ids != package.files.iter().map(|file| file.id.clone()).collect::<Vec<_>>() {
-            return Err(format!("package {} file_ids do not match nested files", package.id));
         }
         for file in &package.files {
             if !file_ids.insert(file.id.clone()) {
@@ -747,10 +635,9 @@ mod tests {
             key: PackageKey::new("Folder"),
             display_name: "Folder".to_string(),
             files: Vec::new(),
-            file_ids: vec!["folder/file.bin".to_string().into()],
             error: None,
         });
-        paused.files.push(FileSnapshot {
+        paused.packages[0].files.push(FileSnapshot {
             id: "folder/file.bin".to_string().into(),
             package_id: PackageId::for_package_key(&PackageKey::new("Folder")),
             source_url: Some("https://mega.nz/folder/root".to_string()),
@@ -762,6 +649,7 @@ mod tests {
             runtime: RuntimeState::default(),
             message: None,
         });
+        paused.sync_flat_files_from_packages();
         paused.save().unwrap();
 
         let mut completed = SessionSnapshot::new(
@@ -777,7 +665,7 @@ mod tests {
 
         let latest = SessionSnapshot::latest().unwrap();
         assert_eq!(latest.status, SessionRunStatus::Paused);
-        assert_eq!(latest.files.len(), 1);
+        assert_eq!(latest.file_count(), 1);
         assert!(!completed.state_path().exists());
         assert!(paused.state_path().exists());
     }
@@ -808,10 +696,9 @@ mod tests {
             key: package_key,
             display_name: "Folder".to_string(),
             files: Vec::new(),
-            file_ids: vec!["folder/a.bin".to_string().into(), "folder/b.bin".to_string().into()],
             error: None,
         });
-        session.files = vec![
+        session.packages[0].files = vec![
             FileSnapshot {
                 id: "folder/a.bin".to_string().into(),
                 package_id,
@@ -837,11 +724,12 @@ mod tests {
                 message: None,
             },
         ];
+        session.sync_flat_files_from_packages();
         session.save().unwrap();
 
         let latest = SessionSnapshot::latest().unwrap();
         assert_eq!(latest.packages.len(), 1);
-        assert_eq!(latest.files.len(), 2);
+        assert_eq!(latest.file_count(), 2);
         assert_eq!(latest.packages[0].display_name, "Folder");
     }
 
@@ -850,12 +738,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
 
-        let path = SessionSnapshot::state_dir().join("session-v4-empty.toml");
+        let path = SessionSnapshot::state_dir().join("session-v5-empty.toml");
         std::fs::create_dir_all(SessionSnapshot::state_dir()).unwrap();
         std::fs::write(
             &path,
             toml::to_string(&SessionSnapshot {
-                version: 4,
+                version: 5,
                 id: "empty".to_string().into(),
                 created: Utc::now(),
                 status: SessionRunStatus::Completed,
@@ -873,7 +761,7 @@ mod tests {
         assert!(!path.exists());
         assert!(
             SessionSnapshot::state_dir()
-                .join("session-v4-empty.invalid.bak")
+                .join("session-v5-empty.invalid.bak")
                 .exists()
         );
     }

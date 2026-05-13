@@ -779,7 +779,6 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
                 key: package.key.clone(),
                 display_name: package.display_name.clone(),
                 files,
-                file_ids: package.file_ids.clone(),
                 error: package.error.clone(),
             })
         })

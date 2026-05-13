@@ -134,7 +134,6 @@ fn save_rejects_empty_synthetic_package_placeholders() {
         key: crate::core::PackageKey::new("https://mega.nz/file/stale-error".to_string().clone()),
         display_name: "Batch Folder".to_string(),
         files: Vec::new(),
-        file_ids: Vec::new(),
         error: Some("boom".to_string()),
     });
     session.save().unwrap();
@@ -256,9 +255,9 @@ fn resume_session_restores_files_and_only_requeues_remaining_urls() {
 
     let session_state = app.session.as_ref().expect("session should be present");
     assert!(session_state.packages[0].error.is_none());
-    assert!(!session_state.packages[0].file_ids.is_empty());
+    assert!(!session_state.packages[0].files.is_empty());
     assert!(session_state.packages[1].error.is_none());
-    assert!(!session_state.packages[1].file_ids.is_empty());
+    assert!(!session_state.packages[1].files.is_empty());
 }
 
 #[test]
@@ -327,13 +326,9 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
         key: crate::core::PackageKey::new("Merged Folder"),
         display_name: "Merged Folder".to_string(),
         files: Vec::new(),
-        file_ids: vec![
-            "Merged Folder/a.mkv".to_string().into(),
-            "Merged Folder/b.mkv".to_string().into(),
-        ],
         error: None,
     });
-    session.files = vec![
+    session.packages[0].files = vec![
         crate::core::FileSnapshot {
             id: "Merged Folder/a.mkv".to_string().into(),
             package_id,
@@ -365,6 +360,7 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
             message: None,
         },
     ];
+    session.sync_flat_files_from_packages();
     session.save().unwrap();
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -475,7 +471,10 @@ fn resume_session_does_not_restore_or_requeue_skipped_files() {
 
     let session_state = app.session.as_ref().expect("session should be present");
     assert!(session_state.packages[0].error.is_none());
-    assert_eq!(session_state.files[0].lifecycle, FileLifecycle::Skipped);
+    assert_eq!(
+        session_state.find_file("skipped.mkv").unwrap().lifecycle,
+        FileLifecycle::Skipped
+    );
 }
 
 #[test]
@@ -526,14 +525,9 @@ fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
 
     let session = app.session.as_ref().expect("session should remain");
     assert_eq!(session.status, SessionRunStatus::Paused);
-    assert_eq!(session.files.len(), 2);
-    assert!(
-        session
-            .files
-            .iter()
-            .any(|file| file.path == "completed.mkv")
-    );
-    assert!(session.files.iter().any(|file| file.path == "pending.mkv"));
+    assert_eq!(session.file_count(), 2);
+    assert!(session.iter_files().any(|file| file.path == "completed.mkv"));
+    assert!(session.iter_files().any(|file| file.path == "pending.mkv"));
 }
 
 #[test]
@@ -659,7 +653,6 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
             key: crate::core::PackageKey::new(source_url.clone().clone()),
             display_name: "Retry Folder".to_string(),
             files: Vec::new(),
-            file_ids: Vec::new(),
             error: Some("boom".to_string()),
         });
     app.urls.push(source_url.clone());

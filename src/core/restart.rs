@@ -110,7 +110,7 @@ where
 pub fn build_restart_snapshot(session: &SessionSnapshot) -> RestartSnapshot {
     reconcile_restart(
         Some(canonical_restart_session(session.clone())),
-        scan_filesystem(session.files.iter().map(|file| file.path.clone())),
+        scan_filesystem(session.iter_files().map(|file| file.path.clone())),
         session.urls.iter().map(|entry| entry.url.clone()).collect(),
     )
 }
@@ -159,7 +159,8 @@ pub fn reconcile_restart(
         .collect();
 
     if let Some(snapshot) = session.map(canonical_restart_session) {
-        for tracked_url in snapshot.urls {
+        let SessionSnapshot { urls, packages: snapshot_packages, .. } = snapshot;
+        for tracked_url in urls {
             if !state
                 .url_order
                 .iter()
@@ -168,7 +169,7 @@ pub fn reconcile_restart(
                 state.url_order.push(tracked_url.url);
             }
         }
-        for package in snapshot.packages {
+        for package in &snapshot_packages {
             packages.insert(
                 package.id.clone(),
                 PackageState {
@@ -182,7 +183,10 @@ pub fn reconcile_restart(
             );
         }
 
-        for file in snapshot.files {
+        for file in snapshot_packages
+            .into_iter()
+            .flat_map(|package| package.files.into_iter())
+        {
             let file_id = file.id.clone();
             let mut file = FileState {
                 id: file.id.clone(),
@@ -280,8 +284,9 @@ pub fn reconcile_restart(
 }
 
 fn canonical_restart_session(mut snapshot: SessionSnapshot) -> SessionSnapshot {
-    crate::core::normalize_snapshot(&mut snapshot)
-        .expect("restart snapshots should be canonicalizable");
+    crate::core::session::canonicalize_snapshot(&mut snapshot)
+        .expect("restart snapshots should already be canonical");
+    crate::core::validate_snapshot(&snapshot).expect("restart snapshots should stay valid");
     snapshot
 }
 
@@ -299,8 +304,8 @@ mod tests {
     }
 
     fn sample_snapshot() -> SessionSnapshot {
-        SessionSnapshot {
-            version: 4,
+        let mut snapshot = SessionSnapshot {
+            version: 5,
             id: "session".to_string().into(),
             created: Utc::now(),
             status: SessionRunStatus::InProgress,
@@ -313,7 +318,6 @@ mod tests {
                 key: crate::core::PackageKey::new("https://mega.nz/file/test".to_string().clone()),
                 display_name: "pkg".to_string(),
                 files: Vec::new(),
-                file_ids: vec!["a.bin".to_string().into()],
                 error: None,
             }],
             files: vec![FileSnapshot {
@@ -333,7 +337,10 @@ mod tests {
             }],
             config: crate::config::DownloadConfig::default(),
             credentials: SavedCredentials::encrypt("u", "p", None),
-        }
+        };
+        snapshot.packages[0].files = snapshot.files.clone();
+        snapshot.sync_flat_files_from_packages();
+        snapshot
     }
 
     #[test]
@@ -403,13 +410,15 @@ mod tests {
     #[test]
     fn restart_clears_stale_progress_for_missing_partial_files() {
         let mut snapshot = sample_snapshot();
-        snapshot.files[0].progress = FileProgressState {
+        let file = snapshot.find_file_mut("a.bin").unwrap();
+        file.progress = FileProgressState {
             verified_existing_bytes: 0,
             downloaded_network_bytes: 0,
             visible_completed_bytes: 95,
         };
-        snapshot.files[0].lifecycle = FileLifecycle::Failed;
-        snapshot.files[0].message = Some("corrupt".to_string());
+        file.lifecycle = FileLifecycle::Failed;
+        file.message = Some("corrupt".to_string());
+        snapshot.sync_flat_files_from_packages();
 
         let restart = reconcile_restart(
             Some(snapshot),
@@ -477,45 +486,40 @@ mod tests {
                 id: package_id(&source_url, &source_url),
                 key: crate::core::PackageKey::new(source_url.clone().clone()),
                 display_name: source_url.clone(),
-                files: Vec::new(),
-                file_ids: vec!["a.bin".to_string().into()],
+                files: vec![FileSnapshot {
+                    id: "a.bin".to_string().into(),
+                    package_id: package_id(&source_url, &source_url),
+                    source_url: Some(source_url.clone()),
+                    path: "folder/a.bin".to_string(),
+                    size: 10,
+                    lifecycle: FileLifecycle::Queued,
+                    progress: FileProgressState::default(),
+                    desired: DesiredState::Present,
+                    runtime: RuntimeState::default(),
+                    message: None,
+                }],
                 error: None,
             },
             PackageSnapshot {
                 id: package_id("batch-dup", &source_url),
                 key: crate::core::PackageKey::new(source_url.clone().clone()),
                 display_name: "Folder".to_string(),
-                files: Vec::new(),
-                file_ids: vec!["b.bin".to_string().into()],
+                files: vec![FileSnapshot {
+                    id: "b.bin".to_string().into(),
+                    package_id: package_id("batch-dup", &source_url),
+                    source_url: Some(source_url.clone()),
+                    path: "folder/b.bin".to_string(),
+                    size: 20,
+                    lifecycle: FileLifecycle::Queued,
+                    progress: FileProgressState::default(),
+                    desired: DesiredState::Present,
+                    runtime: RuntimeState::default(),
+                    message: None,
+                }],
                 error: None,
             },
         ];
-        snapshot.files = vec![
-            FileSnapshot {
-                id: "a.bin".to_string().into(),
-                package_id: package_id(&source_url, &source_url),
-                source_url: Some(source_url.clone()),
-                path: "folder/a.bin".to_string(),
-                size: 10,
-                lifecycle: FileLifecycle::Queued,
-                progress: FileProgressState::default(),
-                desired: DesiredState::Present,
-                runtime: RuntimeState::default(),
-                message: None,
-            },
-            FileSnapshot {
-                id: "b.bin".to_string().into(),
-                package_id: package_id("batch-dup", &source_url),
-                source_url: Some(source_url.clone()),
-                path: "folder/b.bin".to_string(),
-                size: 20,
-                lifecycle: FileLifecycle::Queued,
-                progress: FileProgressState::default(),
-                desired: DesiredState::Present,
-                runtime: RuntimeState::default(),
-                message: None,
-            },
-        ];
+        snapshot.sync_flat_files_from_packages();
         assert!(crate::core::session::validate_snapshot(&snapshot).is_err());
     }
 
@@ -527,10 +531,8 @@ mod tests {
             key: crate::core::PackageKey::new("https://mega.nz/file/test".to_string().clone()),
             display_name: "Batch Folder".to_string(),
             files: Vec::new(),
-            file_ids: Vec::new(),
             error: Some("boom".to_string()),
         });
-        snapshot.files.clear();
         assert!(crate::core::session::validate_snapshot(&snapshot).is_err());
     }
 
@@ -542,10 +544,8 @@ mod tests {
             key: crate::core::PackageKey::new("Stale Package"),
             display_name: "Stale Package".to_string(),
             files: Vec::new(),
-            file_ids: vec!["ghost.bin".to_string().into()],
             error: Some("boom".to_string()),
         });
-        snapshot.packages[0].file_ids.clear();
 
         let restart = build_restart_snapshot(&snapshot);
 
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn restart_suppresses_deleted_and_skipped_files() {
         let mut snapshot = sample_snapshot();
-        snapshot.files = vec![FileSnapshot {
+        snapshot.packages[0].files = vec![FileSnapshot {
             id: "a.bin".to_string().into(),
             package_id: package_id("pkg", "https://mega.nz/file/test"),
             source_url: Some("https://mega.nz/file/test".to_string()),
@@ -637,47 +637,12 @@ mod tests {
             runtime: RuntimeState::default(),
             message: None,
         }];
+        snapshot.sync_flat_files_from_packages();
         let restart = reconcile_restart(Some(snapshot), FilesystemSnapshot::default(), vec![]);
         assert_eq!(restart.suppressed_file_ids, vec!["a.bin".to_string()]);
         assert_eq!(
             restart.state.files["a.bin"].lifecycle,
             FileLifecycle::Deleted
-        );
-    }
-
-    #[test]
-    fn duplicate_rows_collapse_by_precedence() {
-        let mut snapshot = sample_snapshot();
-        snapshot.files = vec![
-            FileSnapshot {
-                id: "a.bin".to_string().into(),
-                package_id: package_id("pkg", "https://mega.nz/file/test"),
-                source_url: Some("https://mega.nz/file/test".to_string()),
-                path: "a.bin".to_string(),
-                size: 100,
-                lifecycle: FileLifecycle::Failed,
-                progress: FileProgressState::default(),
-                desired: DesiredState::Present,
-                runtime: RuntimeState::default(),
-                message: Some("boom".to_string()),
-            },
-            FileSnapshot {
-                id: "a.bin".to_string().into(),
-                package_id: package_id("pkg", "https://mega.nz/file/test"),
-                source_url: Some("https://mega.nz/file/test".to_string()),
-                path: "a.bin".to_string(),
-                size: 100,
-                lifecycle: FileLifecycle::Complete,
-                progress: FileProgressState::default(),
-                desired: DesiredState::Present,
-                runtime: RuntimeState::default(),
-                message: None,
-            },
-        ];
-        let restart = reconcile_restart(Some(snapshot), FilesystemSnapshot::default(), vec![]);
-        assert_eq!(
-            restart.state.files["a.bin"].lifecycle,
-            FileLifecycle::Complete
         );
     }
 }

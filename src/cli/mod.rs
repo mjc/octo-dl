@@ -15,7 +15,7 @@ use crate::{
     SessionStats, SessionStatsBuilder,
     core::{
         PackageId, PackageKey, PackageSnapshot, ProgressDelta, SavedCredentials, SessionRunStatus,
-        SessionSnapshot, SessionUrlSnapshot, build_restart_snapshot, normalize_snapshot,
+        SessionSnapshot, SessionUrlSnapshot, build_restart_snapshot,
     },
     download::{infer_package_display_name, infer_package_id},
     format_bytes, format_duration, is_dlc_path,
@@ -361,13 +361,17 @@ fn register_cli_package_in_session(
             key: PackageKey::new(package.display_name.clone()),
             display_name: package.display_name.clone(),
             files: Vec::new(),
-            file_ids: Vec::new(),
             error: None,
         });
     }
 
+    let package_entry = session
+        .packages
+        .iter_mut()
+        .find(|entry| entry.id == package.id)
+        .expect("package should exist before registering package files");
     for item in &package.files {
-        session.files.push(crate::core::queued_file_snapshot(
+        package_entry.files.push(crate::core::queued_file_snapshot(
             item.path.clone(),
             package.id,
             Some(source_url.to_string()),
@@ -375,7 +379,8 @@ fn register_cli_package_in_session(
             item.node.size(),
         ));
     }
-    normalize_snapshot(session).expect("cli session snapshots should stay canonical");
+    session.sync_flat_files_from_packages();
+    crate::core::validate_snapshot(session).expect("cli session snapshots should stay canonical");
 }
 
 #[cfg(test)]
@@ -411,8 +416,7 @@ async fn download_all(
         .as_ref()
         .map(|session| {
             session
-                .files
-                .iter()
+                .iter_files()
                 .map(|file| file.id.clone())
                 .collect::<std::collections::HashSet<_>>()
         })
@@ -573,7 +577,7 @@ pub async fn run() -> crate::Result<()> {
             println!(
                 "Resuming session {} ({} files, {} completed)",
                 session.id,
-                session.files.len(),
+                session.file_count(),
                 session_completed_count(&session)
             );
             return resume_session(session, &config).await;
@@ -894,15 +898,15 @@ mod tests {
             128,
             FileFixtureStatus::Pending,
         );
-        session.packages[0].file_ids.clear();
+        session.clear_flat_files_cache();
 
-        persist_session(&mut session).unwrap();
+    persist_session(&mut session).unwrap();
 
-        assert_eq!(
-            session.packages[0].file_ids,
-            vec!["episode-1.mkv".to_string()]
-        );
-    }
+    assert_eq!(
+        session.iter_files().map(|file| file.id.clone()).collect::<Vec<_>>(),
+        vec![crate::core::FileId::from("episode-1.mkv")]
+    );
+}
 
     #[test]
     fn resume_url_selection_includes_pending_and_fetched() {

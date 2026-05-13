@@ -2,7 +2,6 @@ use crate::config::DownloadConfig;
 use crate::core::{
     DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
     PackageSnapshot, RuntimeState, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
-    normalize_snapshot,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -114,7 +113,6 @@ pub fn push_file(
             key: PackageKey::new(package_display_name.clone()),
             display_name: package_display_name.clone(),
             files: Vec::new(),
-            file_ids: Vec::new(),
             error: None,
         });
         package_id
@@ -156,7 +154,7 @@ pub fn push_file(
             ),
         };
 
-    session.files.push(FileSnapshot {
+    let file = FileSnapshot {
         id: path.to_string().into(),
         package_id,
         source_url: Some(source_url.clone()),
@@ -175,6 +173,12 @@ pub fn push_file(
             reused_chunks: 0,
         },
         message,
-    });
-    normalize_snapshot(session).expect("test fixture sessions should stay canonical");
+    };
+    let package = session
+        .packages
+        .iter_mut()
+        .find(|package| package.id == package_id)
+        .expect("package should exist before pushing fixture file");
+    package.files.push(file);
+    session.sync_flat_files_from_packages();
 }
