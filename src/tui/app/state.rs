@@ -51,6 +51,13 @@ impl App {
         self.recompute_totals();
     }
 
+    pub(crate) fn apply_core_progress_event(&mut self, event: CoreEvent) {
+        self.seed_core_session_from_session();
+        let effects = reduce(&mut self.core_state, event);
+        self.apply_core_effects(effects);
+        self.apply_cached_totals();
+    }
+
     pub(crate) fn refresh_visible_core_file(&mut self, file_id: &FileId) -> Option<(u64, u64)> {
         let Some(core_file) = self.core_state.files.get(file_id) else {
             return None;
@@ -89,6 +96,38 @@ impl App {
             }
         };
         Some((previous_downloaded, visible_file.downloaded))
+    }
+
+    pub(crate) fn refresh_visible_progress_file(
+        &mut self,
+        file_id: &FileId,
+        now: std::time::Instant,
+    ) -> Option<u64> {
+        let core_file = self.core_state.files.get(file_id)?;
+        let downloaded = match core_file.lifecycle {
+            crate::core::FileLifecycle::Complete => core_file.size,
+            _ => core_file.progress.visible_completed_bytes.min(core_file.size),
+        };
+        let lifecycle = core_file.lifecycle;
+        let failure_message = core_file.message.clone();
+
+        let &visible_index = self.visible_file_positions.get(file_id)?;
+        let visible_file = self.files.get_mut(visible_index)?;
+        let previous_downloaded = visible_file.downloaded;
+        visible_file.downloaded = downloaded;
+        visible_file.status = match lifecycle {
+            crate::core::FileLifecycle::Complete => FileStatus::Complete,
+            crate::core::FileLifecycle::Failed => {
+                FileStatus::Error(failure_message.unwrap_or_else(|| "failed".to_string()))
+            }
+            _ => FileStatus::Downloading,
+        };
+
+        let accepted = downloaded.saturating_sub(previous_downloaded);
+        let state = self.file_ui.entry(file_id.clone()).or_default();
+        state.rate.record(downloaded, now);
+        state.speed = state.rate.bytes_per_sec(now);
+        Some(accepted)
     }
 
     pub(crate) fn apply_core_command(&mut self, command: CoreCommand) {

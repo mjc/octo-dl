@@ -114,6 +114,44 @@ fn throughput_weight(elapsed: Duration) -> f64 {
 }
 
 impl App {
+    pub(crate) fn apply_cached_totals(&mut self) {
+        self.total_size = self
+            .core_state
+            .totals
+            .run_total_bytes
+            .saturating_add(self.overlay_total_size);
+        self.total_downloaded = self
+            .core_state
+            .totals
+            .run_completed_bytes
+            .saturating_add(self.overlay_total_downloaded);
+        self.files_completed = self
+            .core_state
+            .totals
+            .run_file_completed
+            .saturating_add(self.overlay_files_completed);
+        self.files_total = self
+            .core_state
+            .totals
+            .run_file_total
+            .saturating_add(self.overlay_files_total);
+        self.total_network_downloaded = self
+            .core_state
+            .totals
+            .displayed_network_bytes
+            .saturating_add(self.overlay_total_network_downloaded);
+
+        if self.total_downloaded > self.total_size || self.files_completed > self.files_total {
+            self.log_state_diagnostics("recompute_totals_impossible");
+        } else if self.files.iter().any(|file| {
+            file.size > 0
+                && file.downloaded >= file.size
+                && !matches!(file.status, FileStatus::Complete)
+        }) {
+            self.log_state_diagnostics("recompute_totals_full_not_complete");
+        }
+    }
+
     pub(crate) fn file_speed(&self, file_id: &crate::core::FileId) -> u64 {
         self.file_ui.get(file_id).map_or(0, |state| state.speed)
     }
@@ -141,6 +179,7 @@ impl App {
         self.ensure_file_ui(file_id, downloaded, true);
     }
 
+    #[cfg(test)]
     pub(crate) fn update_file_ui_progress(
         &mut self,
         file_id: &crate::core::FileId,
@@ -188,11 +227,11 @@ impl App {
     }
 
     pub fn recompute_totals(&mut self) {
-        let mut total_size = self.core_state.totals.run_total_bytes;
-        let mut total_downloaded = self.core_state.totals.run_completed_bytes;
-        let mut files_completed = self.core_state.totals.run_file_completed;
-        let mut files_total = self.core_state.totals.run_file_total;
-        let mut total_network_downloaded = self.core_state.totals.displayed_network_bytes;
+        let mut total_size = 0_u64;
+        let mut total_downloaded = 0_u64;
+        let mut files_completed = 0_usize;
+        let mut files_total = 0_usize;
+        let mut total_network_downloaded = 0_u64;
 
         for (id, overlay) in &self.overlay_files {
             if self.core_state.files.contains_key(id) || !overlay.counts_toward_progress {
@@ -210,21 +249,12 @@ impl App {
             }
         }
 
-        self.total_size = total_size;
-        self.total_downloaded = total_downloaded;
-        self.files_completed = files_completed;
-        self.files_total = files_total;
-        self.total_network_downloaded = total_network_downloaded;
-
-        if self.total_downloaded > self.total_size || self.files_completed > self.files_total {
-            self.log_state_diagnostics("recompute_totals_impossible");
-        } else if self.files.iter().any(|file| {
-            file.size > 0
-                && file.downloaded >= file.size
-                && !matches!(file.status, FileStatus::Complete)
-        }) {
-            self.log_state_diagnostics("recompute_totals_full_not_complete");
-        }
+        self.overlay_total_size = total_size;
+        self.overlay_total_downloaded = total_downloaded;
+        self.overlay_files_completed = files_completed;
+        self.overlay_files_total = files_total;
+        self.overlay_total_network_downloaded = total_network_downloaded;
+        self.apply_cached_totals();
     }
 
     pub(crate) fn reset_aggregate_rate(&mut self) {
