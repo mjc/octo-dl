@@ -880,7 +880,7 @@ impl<F: FileSystem> Downloader<F> {
 
         // Download with progress callback, optionally with cancellation support
         let download_result = if let Some(token) = cancellation_token {
-            let download_fut = self.client.download_node_parallel_resumable_with_progress(
+            let download_fut = self.client.download_node_parallel_resumable_to_file_with_progress(
                 node,
                 file,
                 self.config.chunks_per_file,
@@ -896,7 +896,7 @@ impl<F: FileSystem> Downloader<F> {
             }
         } else {
             self.client
-                .download_node_parallel_resumable_with_progress(
+                .download_node_parallel_resumable_to_file_with_progress(
                     node,
                     file,
                     self.config.chunks_per_file,
