@@ -7,6 +7,8 @@ pub fn bookmarklet_html(
     fallback_host: &str,
     api_key_header: &str,
 ) -> String {
+    let href = html_escape_attr(&bookmarklet_href(fallback_origin, api_key_header));
+    let fallback_host = html_escape_text(fallback_host);
     r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -29,14 +31,34 @@ pub fn bookmarklet_html(
 <body>
 <h1>octo-dl bookmarklet</h1>
 <p>Drag this link to your bookmarks bar:</p>
-<a class="bookmarklet" href="javascript:void(function(){var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var h='__FALLBACK_ORIGIN__';var headers=Object.assign({'Content-Type':'application/json'},__API_KEY_HEADER__);fetch(h+'/api/parse',{method:'POST',headers:headers,body:JSON.stringify({page:page,fallback:selected})}).then(function(r){if(!r.ok){return r.text().then(function(t){throw new Error('HTTP '+r.status+(t?': '+t:''))})}return r.json()}).then(function(d){if(d.count>0){alert('Sent '+d.count+' URL(s) to octo-dl')}else{alert('No URLs found on this page')}}).catch(function(e){alert('Error: '+e)})})()">Send to octo-dl</a>
+<a class="bookmarklet" href="__BOOKMARKLET_HREF__">Send to octo-dl</a>
 <p>Click it on any page to send the page HTML (with selected text as fallback) to octo-dl for download.</p>
 <p>Configured to use <code>__FALLBACK_HOST__</code></p>
 </body>
 </html>"#
-        .replace("__FALLBACK_ORIGIN__", fallback_origin)
-        .replace("__FALLBACK_HOST__", fallback_host)
-        .replace("__API_KEY_HEADER__", api_key_header)
+    .replace("__BOOKMARKLET_HREF__", &href)
+    .replace("__FALLBACK_HOST__", &fallback_host)
+}
+
+fn bookmarklet_href(fallback_origin: &str, api_key_header: &str) -> String {
+    format!(
+        "javascript:void(function(){{var page=document.documentElement.outerHTML;var selected=window.getSelection().toString();var h={fallback_origin:?};var headers=Object.assign({{'Content-Type':'application/json'}},{api_key_header});fetch(h+'/api/parse',{{method:'POST',headers:headers,body:JSON.stringify({{page:page,fallback:selected}})}}).then(function(r){{if(!r.ok){{return r.text().then(function(t){{throw new Error('HTTP '+r.status+(t?': '+t:''))}})}}return r.json()}}).then(function(d){{if(d.count>0){{alert('Sent '+d.count+' URL(s) to octo-dl')}}else{{alert('No URLs found on this page')}}}}).catch(function(e){{alert('Error: '+e)}})}})()"
+    )
+}
+
+fn html_escape_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn html_escape_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
@@ -54,12 +76,33 @@ mod tests {
         );
         assert!(html.contains("proxy.host"));
         assert!(html.contains("bookmarklet"));
-        assert!(html.contains(r#""x-api-key":"secret""#));
+        assert!(html.contains("&quot;x-api-key&quot;:&quot;secret&quot;"));
         assert!(html.contains("https://proxy.host"));
         assert!(html.contains("HTTP '+r.status"));
         assert!(!html.contains("__FALLBACK_HOST__"));
         assert!(!html.contains("__FALLBACK_ORIGIN__"));
         assert!(!html.contains("__API_KEY_HEADER__"));
+    }
+
+    #[test]
+    fn bookmarklet_href_is_html_attribute_escaped() {
+        let html = bookmarklet_html(
+            "https://proxy.host",
+            "proxy.host",
+            r#"{"x-api-key":"secret"}"#,
+        );
+        let start = html.find(r#"href=""#).expect("href should exist") + r#"href=""#.len();
+        let end = html[start..]
+            .find('"')
+            .map(|offset| start + offset)
+            .expect("href attribute should close");
+        let href = &html[start..end];
+
+        assert!(href.starts_with("javascript:void"));
+        assert!(href.contains("d.count&gt;0"));
+        assert!(href.contains("&quot;x-api-key&quot;:&quot;secret&quot;"));
+        assert!(!href.contains('"'));
+        assert!(!href.contains('>'));
     }
 
     #[test]
