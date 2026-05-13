@@ -9,7 +9,7 @@ pub use commands::CoreCommand;
 pub use model::{
     DesiredState, DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
     PackageKey, PackageState, PackageStatus, RuntimeState, SessionMeta, SessionRunStatus,
-    TotalsState, UrlId,
+    TotalsState, UrlId, visible_completed_bytes_for_display,
 };
 pub use progress::{DownloadProgressSink, ProgressDelta, RateEstimator};
 pub use reducer::{

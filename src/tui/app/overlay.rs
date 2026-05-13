@@ -90,11 +90,10 @@ impl App {
                         .clone()
                         .unwrap_or_else(|| "failed".to_string()),
                 ),
-                crate::core::FileLifecycle::Skipped | crate::core::FileLifecycle::Deleted => {
-                    self.visible_file(id)
-                        .map(|file| file.status.clone())
-                        .unwrap_or(FileStatus::Queued)
-                }
+                crate::core::FileLifecycle::Skipped | crate::core::FileLifecycle::Deleted => self
+                    .visible_file(id)
+                    .map(|file| file.status.clone())
+                    .unwrap_or(FileStatus::Queued),
             };
             return Some(VisibleFileContext {
                 id: core_file.id.clone(),

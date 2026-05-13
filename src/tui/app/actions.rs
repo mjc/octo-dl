@@ -327,7 +327,32 @@ impl App {
             total_bytes_delta: delta.total_bytes_delta,
             network_bytes_delta: delta.network_bytes_delta,
         });
-        let _ = self.refresh_visible_progress_file(&id, Instant::now());
+        match self.refresh_visible_progress_file(&id, Instant::now()) {
+            Some(accepted) => {
+                if accepted == 0 && delta.total_bytes_delta > 0 {
+                    let core_bytes = self
+                        .core_state
+                        .files
+                        .get(&id)
+                        .map(crate::core::visible_completed_bytes_for_display)
+                        .unwrap_or(0);
+                    log::debug!(
+                        "Visible progress row for {id} did not advance despite delta={} network_delta={} core_visible={core_bytes}",
+                        delta.total_bytes_delta,
+                        delta.network_bytes_delta,
+                    );
+                }
+            }
+            None => {
+                let visible_known = self.visible_file_positions.contains_key(&id);
+                let core_known = self.core_state.files.contains_key(&id);
+                log::debug!(
+                    "Visible progress refresh skipped for {id}: core_known={core_known} visible_known={visible_known} delta={} network_delta={}",
+                    delta.total_bytes_delta,
+                    delta.network_bytes_delta,
+                );
+            }
+        }
     }
 
     pub(crate) fn handle_resume_reused_event(

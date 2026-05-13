@@ -106,10 +106,7 @@ impl App {
         visible_file.size = core_file.size;
         visible_file.downloaded = match core_file.lifecycle {
             crate::core::FileLifecycle::Complete => core_file.size,
-            _ => core_file
-                .progress
-                .visible_completed_bytes
-                .min(core_file.size),
+            _ => crate::core::visible_completed_bytes_for_display(core_file),
         };
         visible_file.status = match core_file.lifecycle {
             crate::core::FileLifecycle::Planned | crate::core::FileLifecycle::Queued => {
@@ -138,7 +135,7 @@ impl App {
         let core_file = self.core_state.files.get(file_id)?;
         let downloaded = match core_file.lifecycle {
             crate::core::FileLifecycle::Complete => core_file.size,
-            _ => core_file.progress.visible_completed_bytes.min(core_file.size),
+            _ => crate::core::visible_completed_bytes_for_display(core_file),
         };
         let network_downloaded = crate::tui::app::App::core_file_network_downloaded(core_file);
         let lifecycle = core_file.lifecycle;
@@ -219,6 +216,11 @@ impl App {
             }
         }
 
+        self.enqueue_batched_file_downloads(queued_file_map);
+        self.sync_scheduler_pending_order(should_sync_pending);
+    }
+
+    fn enqueue_batched_file_downloads(&mut self, queued_file_map: IndexMap<String, Vec<FileId>>) {
         for (source_url, file_ids) in queued_file_map {
             if file_ids.is_empty() {
                 continue;
@@ -239,7 +241,9 @@ impl App {
                 attempt_ids,
             });
         }
+    }
 
+    fn sync_scheduler_pending_order(&mut self, should_sync_pending: bool) {
         if self.download_task_running && should_sync_pending {
             let _ = self.url_tx.send(DownloadRequest::SyncPendingOrder {
                 file_ids: self.core_state.pending_file_ids(),
@@ -445,11 +449,7 @@ impl App {
 
     pub(crate) fn sync_session_for_shutdown(&mut self) {
         self.refresh_session_from_core_state();
-        let visible: HashSet<String> = self
-            .files
-            .iter()
-            .map(|file| file.id.to_string())
-            .collect();
+        let visible: HashSet<String> = self.files.iter().map(|file| file.id.to_string()).collect();
         let _ = self.mutate_session_and_save(|session| {
             SessionAdapter::sync_for_shutdown(session, &visible)
         });

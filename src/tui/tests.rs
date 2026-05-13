@@ -526,7 +526,11 @@ fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
     let session = app.session.as_ref().expect("session should remain");
     assert_eq!(session.status, SessionRunStatus::Paused);
     assert_eq!(session.file_count(), 2);
-    assert!(session.iter_files().any(|file| file.path == "completed.mkv"));
+    assert!(
+        session
+            .iter_files()
+            .any(|file| file.path == "completed.mkv")
+    );
     assert!(session.iter_files().any(|file| file.path == "pending.mkv"));
 }
 

@@ -8,9 +8,9 @@ pub struct CumulativeProgress {
 
 impl CumulativeProgress {
     #[must_use]
-    pub const fn new() -> Self {
+    pub const fn with_high_water(high_water: u64) -> Self {
         Self {
-            high_water: AtomicU64::new(0),
+            high_water: AtomicU64::new(high_water),
         }
     }
 
@@ -27,7 +27,7 @@ mod tests {
 
     #[test]
     fn cumulative_progress_yields_true_deltas() {
-        let tracker = CumulativeProgress::new();
+        let tracker = CumulativeProgress::with_high_water(0);
         assert_eq!(tracker.delta(100), 100);
         assert_eq!(tracker.delta(350), 250);
         assert_eq!(tracker.delta(700), 350);
@@ -36,9 +36,16 @@ mod tests {
 
     #[test]
     fn cumulative_progress_ignores_regressions() {
-        let tracker = CumulativeProgress::new();
+        let tracker = CumulativeProgress::with_high_water(0);
         assert_eq!(tracker.delta(200), 200);
         assert_eq!(tracker.delta(150), 0);
         assert_eq!(tracker.delta(250), 50);
+    }
+
+    #[test]
+    fn cumulative_progress_can_start_after_reused_bytes() {
+        let tracker = CumulativeProgress::with_high_water(500);
+        assert_eq!(tracker.delta(500), 0);
+        assert_eq!(tracker.delta(700), 200);
     }
 }

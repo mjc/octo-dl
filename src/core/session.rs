@@ -299,7 +299,9 @@ impl SessionSnapshot {
     }
 
     pub fn iter_files(&self) -> impl Iterator<Item = &FileSnapshot> {
-        self.packages.iter().flat_map(|package| package.files.iter())
+        self.packages
+            .iter()
+            .flat_map(|package| package.files.iter())
     }
 
     #[cfg(test)]
@@ -376,7 +378,9 @@ pub(crate) fn canonicalize_snapshot(snapshot: &mut SessionSnapshot) -> Result<()
     if snapshot.version != 5 {
         return Err(format!("unsupported session version {}", snapshot.version));
     }
-    snapshot.packages.retain(|package| !package.files.is_empty());
+    snapshot
+        .packages
+        .retain(|package| !package.files.is_empty());
     for package in &mut snapshot.packages {
         let paths = package
             .files

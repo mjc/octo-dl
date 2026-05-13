@@ -3,12 +3,26 @@ use crate::core::reducer::CoreEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreCommand {
-    SubmitUrl { url: UrlId },
-    DeleteFile { file_id: FileId },
-    RetryFile { file_id: FileId },
-    ResetFile { file_id: FileId },
-    MovePackage { package_id: crate::core::model::PackageId, delta: isize },
-    MoveFile { file_id: FileId, delta: isize },
+    SubmitUrl {
+        url: UrlId,
+    },
+    DeleteFile {
+        file_id: FileId,
+    },
+    RetryFile {
+        file_id: FileId,
+    },
+    ResetFile {
+        file_id: FileId,
+    },
+    MovePackage {
+        package_id: crate::core::model::PackageId,
+        delta: isize,
+    },
+    MoveFile {
+        file_id: FileId,
+        delta: isize,
+    },
 }
 
 impl CoreCommand {

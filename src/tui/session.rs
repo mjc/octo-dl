@@ -386,7 +386,10 @@ fn rebuild_packages(session: &mut SessionSnapshot) {
     validate_snapshot(session).expect("live session snapshots should stay canonical");
 }
 
-fn find_file_mut<'a>(session: &'a mut SessionSnapshot, file_id: &str) -> Option<&'a mut FileSnapshot> {
+fn find_file_mut<'a>(
+    session: &'a mut SessionSnapshot,
+    file_id: &str,
+) -> Option<&'a mut FileSnapshot> {
     session
         .packages
         .iter_mut()

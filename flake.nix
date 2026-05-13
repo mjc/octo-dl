@@ -152,6 +152,7 @@
               par2cmdline
               xxd
               gh
+              cargo-bloat
               gnuplot
               bc
               sccache

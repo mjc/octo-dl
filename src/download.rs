@@ -4,6 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -350,7 +351,7 @@ impl ResumeTracker {
                         })
                     })
                 })
-            .collect(),
+                .collect(),
         }
     }
 
@@ -400,7 +401,7 @@ async fn load_sidecar(path: &Path) -> Option<ResumeSidecar> {
 }
 
 async fn save_sidecar_atomic(path: &Path, sidecar: &ResumeSidecar) -> io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
+    let tmp = sidecar_tmp_path(path);
     let data = serde_json::to_vec(sidecar)?;
     let mut file = tokio::fs::File::create(&tmp).await?;
     file.write_all(&data).await?;
@@ -419,6 +420,10 @@ async fn save_sidecar_atomic(path: &Path, sidecar: &ResumeSidecar) -> io::Result
     }
 
     Ok(())
+}
+
+fn sidecar_tmp_path(path: &Path) -> PathBuf {
+    path.with_extension("json.tmp")
 }
 
 async fn remove_file_if_exists(path: &Path) -> io::Result<()> {
@@ -459,13 +464,77 @@ fn spawn_sidecar_writer(
     (tx, handle)
 }
 
-async fn finish_sidecar_writer(path: &Path, handle: JoinHandle<()>) {
-    if let Err(err) = handle.await {
-        log::warn!(
-            "Resume sidecar writer task failed for {}: {err}",
-            path.display()
-        );
+enum SidecarWriterShutdown {
+    Flush,
+    Abort,
+}
+
+async fn finish_sidecar_writer(
+    path: &Path,
+    handle: JoinHandle<()>,
+    shutdown: SidecarWriterShutdown,
+) {
+    match shutdown {
+        SidecarWriterShutdown::Flush => {
+            if let Err(err) = handle.await {
+                log::warn!(
+                    "Resume sidecar writer task failed for {}: {err}",
+                    path.display()
+                );
+            }
+        }
+        SidecarWriterShutdown::Abort => {
+            handle.abort();
+            match handle.await {
+                Ok(()) => {}
+                Err(err) if err.is_cancelled() => {}
+                Err(err) => {
+                    log::warn!(
+                        "Resume sidecar writer abort failed for {}: {err}",
+                        path.display()
+                    );
+                }
+            }
+            let _ = remove_file_if_exists(&sidecar_tmp_path(path)).await;
+        }
     }
+}
+
+fn spawn_progress_stall_watchdog(
+    path: String,
+    file_size: u64,
+    last_progress_at: Arc<Mutex<Instant>>,
+    last_progress_bytes: Arc<AtomicU64>,
+) -> CancellationToken {
+    const STALL_THRESHOLD: Duration = Duration::from_secs(30);
+
+    let cancel = CancellationToken::new();
+    let cancel_for_task = cancel.clone();
+    tokio::spawn(async move {
+        let mut last_reported_stall = Duration::ZERO;
+        loop {
+            tokio::select! {
+                () = cancel_for_task.cancelled() => break,
+                () = tokio::time::sleep(STALL_THRESHOLD) => {
+                    let stalled_for = last_progress_at.lock().unwrap().elapsed();
+                    if stalled_for < STALL_THRESHOLD || stalled_for <= last_reported_stall {
+                        continue;
+                    }
+
+                    let completed = last_progress_bytes.load(Ordering::Relaxed).min(file_size);
+                    let percent = if file_size == 0 {
+                        0
+                    } else {
+                        completed.saturating_mul(100).saturating_div(file_size).min(100)
+                    };
+                    log::debug!("download stalled for {path}: no progress for {stalled_for:?}, completed={completed}/{file_size} bytes ({percent}%)"
+                    );
+                    last_reported_stall = stalled_for;
+                }
+            }
+        }
+    });
+    cancel
 }
 
 fn encode_expected_mac(node: &mega::Node) -> Result<String> {
@@ -864,14 +933,29 @@ impl<F: FileSystem> Downloader<F> {
         // total bytes downloaded so far, NOT a delta.  We use fetch_max (not
         // swap) so that out-of-order callbacks from parallel workers never
         // regress the high-water mark.
-        let cumulative = Arc::new(CumulativeProgress::new());
-        let reused_remaining = Arc::new(AtomicU64::new(trusted_bytes));
+        let download_started_at = Instant::now();
+        let last_progress_at = Arc::new(Mutex::new(download_started_at));
+        let last_progress_bytes = Arc::new(AtomicU64::new(trusted_bytes));
+        let stall_watchdog = spawn_progress_stall_watchdog(
+            path.to_string(),
+            node.size(),
+            Arc::clone(&last_progress_at),
+            Arc::clone(&last_progress_bytes),
+        );
+        let cumulative = Arc::new(CumulativeProgress::with_high_water(trusted_bytes));
+        // Reused bytes are reported once through on_resume_reused. The MEGA callback
+        // high-water starts after them, so every subsequent delta is fresh network data.
+        let reused_remaining = Arc::new(AtomicU64::new(0));
         let stats_clone = Arc::clone(&stats);
         let progress_clone = Arc::clone(progress);
         let name_for_cb = name.clone();
+        let last_progress_at_for_cb = Arc::clone(&last_progress_at);
+        let last_progress_bytes_for_cb = Arc::clone(&last_progress_bytes);
         let progress_cb = move |cumulative_bytes: u64| {
             let delta = cumulative.delta(cumulative_bytes);
             if delta > 0 {
+                *last_progress_at_for_cb.lock().unwrap() = Instant::now();
+                last_progress_bytes_for_cb.store(cumulative_bytes, Ordering::Relaxed);
                 let reused_delta = consume_reused_bytes(&reused_remaining, delta);
                 let fresh_delta = delta.saturating_sub(reused_delta);
                 if fresh_delta > 0 {
@@ -901,14 +985,16 @@ impl<F: FileSystem> Downloader<F> {
 
         // Download with progress callback, optionally with cancellation support
         let download_result = if let Some(token) = cancellation_token {
-            let download_fut = self.client.download_node_parallel_resumable_to_file_with_progress(
-                node,
-                file,
-                self.config.chunks_per_file,
-                &trusted_for_download,
-                Some(progress_cb),
-                Some(chunk_verified_cb),
-            );
+            let download_fut = self
+                .client
+                .download_node_parallel_resumable_to_file_with_progress(
+                    node,
+                    file,
+                    self.config.chunks_per_file,
+                    &trusted_for_download,
+                    Some(progress_cb),
+                    Some(chunk_verified_cb),
+                );
             tokio::select! {
                 res = download_fut => res.map_err(Error::Mega),
                 () = token.cancelled() => {
@@ -928,23 +1014,53 @@ impl<F: FileSystem> Downloader<F> {
                 .await
                 .map_err(Error::Mega)
         };
+        let mega_returned_at = Instant::now();
+        stall_watchdog.cancel();
         drop(sidecar_updates_tx);
-        finish_sidecar_writer(&sp, sidecar_writer).await;
-        self.finish_download_result(
-            DownloadFinishContext {
-                node,
-                path,
-                part_path: &pp,
-                sidecar_path: &sp,
-                reused_bytes: trusted_bytes,
-                stats: &stats,
-                tracker: &tracker,
-                progress,
-                name: &name_clone,
-            },
-            download_result,
-        )
-        .await
+        let sidecar_shutdown = if download_result.is_ok() {
+            SidecarWriterShutdown::Abort
+        } else {
+            SidecarWriterShutdown::Flush
+        };
+        let sidecar_started_at = Instant::now();
+        finish_sidecar_writer(&sp, sidecar_writer, sidecar_shutdown).await;
+        let sidecar_finished_at = Instant::now();
+        let finish_result = self
+            .finish_download_result(
+                DownloadFinishContext {
+                    node,
+                    path,
+                    part_path: &pp,
+                    sidecar_path: &sp,
+                    reused_bytes: trusted_bytes,
+                    stats: &stats,
+                    tracker: &tracker,
+                    progress,
+                    name: &name_clone,
+                },
+                download_result,
+            )
+            .await;
+        let finished_at = Instant::now();
+
+        let last_progress_gap = mega_returned_at.duration_since(*last_progress_at.lock().unwrap());
+        let mega_elapsed = mega_returned_at.duration_since(download_started_at);
+        let sidecar_elapsed = sidecar_finished_at.duration_since(sidecar_started_at);
+        let finish_elapsed = finished_at.duration_since(sidecar_finished_at);
+        let total_elapsed = finished_at.duration_since(download_started_at);
+
+        log::debug!(
+            "download completion timings for {path}: \
+mega_return={mega_elapsed:?}, \
+gap_since_last_progress={last_progress_gap:?}, \
+sidecar_shutdown={sidecar_elapsed:?}, \
+finalize={finish_elapsed:?}, \
+total={total_elapsed:?}, \
+result={}",
+            if finish_result.is_ok() { "ok" } else { "error" }
+        );
+
+        finish_result
     }
 
     async fn finish_download_result(
@@ -1179,7 +1295,8 @@ where
 #[must_use]
 pub fn infer_package_display_name(nodes: &mega::Nodes, collected: &CollectedFiles<'_>) -> String {
     let roots = nodes.roots().collect::<Vec<_>>();
-    roots.iter()
+    roots
+        .iter()
         .find(|root| root.kind().is_folder())
         .map(|root| root.name().to_string())
         .or_else(|| {
@@ -1398,6 +1515,41 @@ mod tests {
         assert_eq!(consume_reused_bytes(&remaining, 60), 40);
         assert_eq!(remaining.load(Ordering::Relaxed), 0);
         assert_eq!(consume_reused_bytes(&remaining, 60), 0);
+    }
+
+    #[test]
+    fn resume_progress_high_water_ignores_initial_trusted_callback() {
+        let trusted_bytes = 1_024;
+        let cumulative = CumulativeProgress::with_high_water(trusted_bytes);
+
+        assert_eq!(cumulative.delta(trusted_bytes), 0);
+    }
+
+    #[test]
+    fn resume_progress_after_high_water_counts_fresh_bytes_as_network() {
+        let trusted_bytes = 1_024;
+        let cumulative = CumulativeProgress::with_high_water(trusted_bytes);
+        let reused_remaining = AtomicU64::new(0);
+
+        let delta = cumulative.delta(trusted_bytes + 512);
+        let reused_delta = consume_reused_bytes(&reused_remaining, delta);
+        let fresh_delta = delta.saturating_sub(reused_delta);
+
+        assert_eq!(delta, 512);
+        assert_eq!(reused_delta, 0);
+        assert_eq!(fresh_delta, 512);
+    }
+
+    #[test]
+    fn resume_progress_ignores_duplicate_or_out_of_order_totals() {
+        let trusted_bytes = 1_024;
+        let cumulative = CumulativeProgress::with_high_water(trusted_bytes);
+
+        assert_eq!(cumulative.delta(trusted_bytes), 0);
+        assert_eq!(cumulative.delta(trusted_bytes - 1), 0);
+        assert_eq!(cumulative.delta(trusted_bytes + 256), 256);
+        assert_eq!(cumulative.delta(trusted_bytes + 128), 0);
+        assert_eq!(cumulative.delta(trusted_bytes + 512), 256);
     }
 
     #[test]
@@ -1783,7 +1935,7 @@ mod tests {
         tx.send(first).unwrap();
         tx.send(second.clone()).unwrap();
         drop(tx);
-        finish_sidecar_writer(&sidecar_path, handle).await;
+        finish_sidecar_writer(&sidecar_path, handle, SidecarWriterShutdown::Flush).await;
 
         let loaded = load_sidecar(&sidecar_path).await.unwrap();
         assert_eq!(loaded.verified_chunks, second.verified_chunks);
@@ -1887,7 +2039,10 @@ mod tests {
     #[test]
     fn single_file_package_path_wraps_file_in_stemmed_folder() {
         assert_eq!(single_file_package_path("file.bin"), "file/file.bin");
-        assert_eq!(single_file_package_path("archive.tar.gz"), "archive.tar/archive.tar.gz");
+        assert_eq!(
+            single_file_package_path("archive.tar.gz"),
+            "archive.tar/archive.tar.gz"
+        );
     }
 
     #[test]
