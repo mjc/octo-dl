@@ -34,7 +34,7 @@ impl App {
             .packages
             .values()
             .filter(|package| {
-                self.core_state.package_file_ids(&package.id).is_empty()
+                !self.core_state.package_has_files(&package.id)
                     && (package.error.is_some()
                         || matches!(package.status, crate::core::PackageStatus::Failed))
             })

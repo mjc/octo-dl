@@ -434,21 +434,13 @@ impl App {
     }
 
     pub(crate) fn perform_delete_package_action(&mut self, package_id: PackageId) {
-        let file_ids = self.core_state.package_file_ids(&package_id);
+        let file_ids: Vec<_> = self
+            .core_state
+            .package_files(&package_id)
+            .map(|file| file.id.clone())
+            .collect();
         if file_ids.is_empty() {
-            let source_urls: Vec<_> = self
-                .core_state
-                .files
-                .values()
-                .filter(|file| file.package_id == package_id)
-                .filter_map(|file| file.source_url.clone())
-                .collect();
             self.deleted_files.insert(package_id.to_string());
-            for source_url in source_urls {
-                self.deleted_files.insert(source_url.clone());
-                self.remove_session_url(&source_url);
-                self.urls.retain(|url| url != &source_url);
-            }
             self.core_state.packages.shift_remove(&package_id);
             self.sync_visible_files();
             self.recompute_totals();
@@ -498,20 +490,26 @@ impl App {
         let package_key = package.key.clone();
         let package_failed =
             package.error.is_some() || matches!(package.status, crate::core::PackageStatus::Failed);
-        let file_ids = self.core_state.package_file_ids(&package_id);
+        let package_files: Vec<_> = self
+            .core_state
+            .package_files(&package_id)
+            .map(|file| {
+                (
+                    file.id.clone(),
+                    file.source_url.clone(),
+                    matches!(file.lifecycle, crate::core::FileLifecycle::Failed),
+                )
+            })
+            .collect();
         let mut source_urls = std::collections::BTreeSet::new();
         let mut retried_file = false;
 
-        for file_id in file_ids {
-            if let Some(file) = self.core_state.files.get(&file_id)
-                && let Some(source_url) = file.source_url.clone()
-            {
+        for (file_id, source_url, core_failed) in package_files {
+            if let Some(source_url) = source_url {
                 source_urls.insert(source_url);
             }
-            let retryable =
-                self.core_state.files.get(&file_id).is_some_and(|file| {
-                    matches!(file.lifecycle, crate::core::FileLifecycle::Failed)
-                }) || self
+            let retryable = core_failed
+                || self
                     .visible_file_context(&file_id)
                     .is_some_and(|context| matches!(context.status, super::FileStatus::Error(_)));
             if retryable {
@@ -567,7 +565,12 @@ impl App {
     }
 
     pub(crate) fn perform_reset_package_action(&mut self, package_id: PackageId) {
-        for file_id in self.core_state.package_file_ids(&package_id) {
+        let file_ids: Vec<_> = self
+            .core_state
+            .package_files(&package_id)
+            .map(|file| file.id.clone())
+            .collect();
+        for file_id in file_ids {
             self.perform_reset_file_action(&file_id);
         }
     }
