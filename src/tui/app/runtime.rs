@@ -175,7 +175,7 @@ impl App {
                 error: None,
             })
             .collect();
-        self.save_and_install_session(session);
+        self.save_session(session);
     }
 
     pub(crate) fn set_collection_status(
