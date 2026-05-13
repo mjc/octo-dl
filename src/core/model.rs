@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
+use std::sync::Arc;
 use std::str::FromStr;
 
 use crate::config::DownloadConfig;
@@ -123,7 +124,81 @@ impl PartialEq<String> for PackageId {
     }
 }
 
-pub type FileId = String;
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FileId(Arc<str>);
+
+impl FileId {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for FileId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<String> for FileId {
+    fn from(value: String) -> Self {
+        Self(Arc::<str>::from(value))
+    }
+}
+
+impl From<&str> for FileId {
+    fn from(value: &str) -> Self {
+        Self(Arc::<str>::from(value))
+    }
+}
+
+impl From<Arc<str>> for FileId {
+    fn from(value: Arc<str>) -> Self {
+        Self(value)
+    }
+}
+
+impl AsRef<str> for FileId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::borrow::Borrow<str> for FileId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq<&str> for FileId {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for FileId {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Serialize for FileId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for FileId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
 pub type UrlId = String;
 
 #[cfg(test)]
