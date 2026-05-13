@@ -2,6 +2,7 @@ use crate::config::DownloadConfig;
 use crate::core::{
     DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
     PackageSnapshot, RuntimeState, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
+    normalize_snapshot,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -100,29 +101,23 @@ pub fn push_file(
         .next()
         .unwrap_or(source_url.as_str())
         .to_string();
-    let package_index = if let Some(index) = session
+    let package_id = if let Some(package) = session
         .packages
         .iter()
-        .position(|package| package.display_name == package_display_name)
+        .find(|package| package.display_name == package_display_name)
     {
-        index
+        package.id
     } else {
+        let package_id = package_id(&package_display_name, &package_display_name);
         session.packages.push(PackageSnapshot {
-            id: package_id(&package_display_name, &package_display_name),
+            id: package_id,
             key: PackageKey::new(package_display_name.clone()),
             display_name: package_display_name.clone(),
             file_ids: Vec::new(),
             error: None,
         });
-        session.packages.len() - 1
+        package_id
     };
-    let package = session
-        .packages
-        .get_mut(package_index)
-        .expect("package_index should exist");
-    if !package.file_ids.iter().any(|file_id| file_id == path) {
-        package.file_ids.push(path.to_string());
-    }
 
     let (lifecycle, desired, active, counts_in_run_totals, visible_completed_bytes, message) =
         match status {
@@ -162,7 +157,7 @@ pub fn push_file(
 
     session.files.push(FileSnapshot {
         id: path.to_string(),
-        package_id: package.id.clone(),
+        package_id,
         source_url: Some(source_url.clone()),
         path: path.to_string(),
         size,
@@ -180,4 +175,5 @@ pub fn push_file(
         },
         message,
     });
+    normalize_snapshot(session).expect("test fixture sessions should stay canonical");
 }
