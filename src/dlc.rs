@@ -317,23 +317,14 @@ fn extract_mega_links_from_xml(xml: &str) -> Vec<String> {
                 .decode(encoded)
                 .ok()?;
             let raw_url = String::from_utf8(bytes).ok()?;
-            if !is_modern_mega_link(&raw_url) {
-                return None;
-            }
-            if seen.insert(raw_url.clone()) {
-                Some(raw_url)
+            let url = crate::url::normalize_mega_url(&raw_url)?;
+            if seen.insert(url.clone()) {
+                Some(url)
             } else {
                 None
             }
         })
         .collect()
-}
-
-fn is_modern_mega_link(url: &str) -> bool {
-    url.starts_with("https://mega.nz/file/")
-        || url.starts_with("https://mega.nz/folder/")
-        || url.starts_with("http://mega.nz/file/")
-        || url.starts_with("http://mega.nz/folder/")
 }
 
 /// Check if a string is valid base64
@@ -709,14 +700,20 @@ mod tests {
     }
 
     #[test]
-    fn extract_ignores_legacy_mega_links() {
+    fn extract_normalizes_legacy_mega_links() {
         let file = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/#!abc!key");
         let folder = base64::engine::general_purpose::STANDARD.encode("https://mega.nz/#F!def!key");
         let xml = format!("<dlc><url>{file}</url><url>{folder}</url></dlc>");
 
         let urls = extract_mega_links_from_xml(&xml);
 
-        assert!(urls.is_empty());
+        assert_eq!(
+            urls,
+            vec![
+                "https://mega.nz/file/abc#key",
+                "https://mega.nz/folder/def#key",
+            ]
+        );
     }
 
     #[test]
