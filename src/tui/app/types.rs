@@ -280,6 +280,14 @@ pub enum UiAction {
     RetryPackage(PackageId),
     ResetFile(FileId),
     ResetPackage(PackageId),
+    MoveFile {
+        file_id: FileId,
+        delta: isize,
+    },
+    MovePackage {
+        package_id: PackageId,
+        delta: isize,
+    },
     UpdateConfig {
         chunks_per_file: Option<usize>,
         concurrent_files: Option<usize>,

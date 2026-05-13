@@ -52,6 +52,9 @@ pub enum DownloadRequest {
         file_ids: Vec<FileId>,
         attempt_ids: HashMap<FileId, u64>,
     },
+    SyncPendingOrder {
+        file_ids: Vec<FileId>,
+    },
 }
 
 #[derive(Debug)]

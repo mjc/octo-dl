@@ -37,7 +37,7 @@ print_usage() {
     echo "  -j, --chunks <N>    Chunks per file (default: $CHUNKS)"
     echo "  -p, --parallel <N>  Concurrent file downloads (default: $PARALLEL)"
     echo "  -f, --force         Overwrite existing files"
-    echo "  --tui               Launch the TUI binary instead of the CLI"
+    echo "  --tui               Launch interactive TUI mode instead of CLI download mode"
     echo "  -h, --help          Show this help"
     echo ""
     echo "Arguments:"
@@ -53,7 +53,7 @@ print_usage() {
     echo "  2. Record CPU samples with perf"
     echo "  3. Generate flamegraph.svg showing where time is spent"
     echo ""
-    echo "For --tui mode: API server will be available on 0.0.0.0:9723"
+    echo "For --tui mode: the local TUI starts, and the API binds to 0.0.0.0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -88,8 +88,8 @@ RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" cargo build --profi
 # Select binary and build args
 BINARY="$PROJECT_DIR/target/profiling/octo"
 if [ "$TUI" = true ]; then
-    # TUI enables the API server and binds it to all interfaces for profiling.
-    BIN_ARGS=(--tui --api --host 0.0.0.0)
+    # Explicit host in TUI mode enables the API server and binds it to all interfaces.
+    BIN_ARGS=(--tui --host 0.0.0.0)
 else
     BIN_ARGS=(-j "$CHUNKS" -p "$PARALLEL")
     if [ "$FORCE" = true ]; then

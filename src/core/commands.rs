@@ -7,6 +7,8 @@ pub enum CoreCommand {
     DeleteFile { file_id: FileId },
     RetryFile { file_id: FileId },
     ResetFile { file_id: FileId },
+    MovePackage { package_id: crate::core::model::PackageId, delta: isize },
+    MoveFile { file_id: FileId, delta: isize },
 }
 
 impl CoreCommand {
@@ -17,6 +19,10 @@ impl CoreCommand {
             Self::DeleteFile { file_id } => CoreEvent::FileDeleted { file_id },
             Self::RetryFile { file_id } => CoreEvent::FileRetryRequested { file_id },
             Self::ResetFile { file_id } => CoreEvent::FileResetRequested { file_id },
+            Self::MovePackage { package_id, delta } => {
+                CoreEvent::PackageMoveRequested { package_id, delta }
+            }
+            Self::MoveFile { file_id, delta } => CoreEvent::FileMoveRequested { file_id, delta },
         }
     }
 }

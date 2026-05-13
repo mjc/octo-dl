@@ -807,6 +807,7 @@ fn visible_rows_hide_empty_failed_packages() {
             id: package_id,
             key: crate::core::PackageKey::new("https://mega.nz/folder/failed".to_string().clone()),
             display_name: "Failed".to_string(),
+            file_ids: Vec::new(),
             status: crate::core::PackageStatus::Failed,
             error: Some("boom".to_string()),
         },
@@ -1062,6 +1063,7 @@ fn session_adapter_replace_state_replaces_stale_package_rows() {
         id: package_id("batch-stale", "https://mega.nz/file/a"),
         key: crate::core::PackageKey::new("https://mega.nz/file/a".to_string().clone()),
         display_name: "Stale Batch".to_string(),
+        files: Vec::new(),
         file_ids: vec!["old.bin".to_string().into()],
         error: None,
     });
@@ -1085,6 +1087,7 @@ fn session_adapter_register_queued_file_rebuilds_package_membership_immediately(
         id: package_id("stale", "Stale Folder"),
         key: crate::core::PackageKey::new("Stale Folder"),
         display_name: "Stale Folder".to_string(),
+        files: Vec::new(),
         file_ids: vec!["ghost.bin".to_string().into()],
         error: Some("boom".to_string()),
     });
@@ -1299,7 +1302,11 @@ fn expanded_package_orders_files_error_downloading_queued_complete() {
             TuiRow::Package(package_id),
             TuiRow::File {
                 package_id: Some(package_id),
-                file_id: "error.bin".to_string().into(),
+                file_id: "queued.bin".to_string().into(),
+            },
+            TuiRow::File {
+                package_id: Some(package_id),
+                file_id: "complete.bin".to_string().into(),
             },
             TuiRow::File {
                 package_id: Some(package_id),
@@ -1307,11 +1314,7 @@ fn expanded_package_orders_files_error_downloading_queued_complete() {
             },
             TuiRow::File {
                 package_id: Some(package_id),
-                file_id: "queued.bin".to_string().into(),
-            },
-            TuiRow::File {
-                package_id: Some(package_id),
-                file_id: "complete.bin".to_string().into(),
+                file_id: "error.bin".to_string().into(),
             },
         ]
     );

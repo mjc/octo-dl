@@ -33,7 +33,7 @@ print_usage() {
     echo "  -j, --chunks <N>    Chunks per file (default: $CHUNKS)"
     echo "  -p, --parallel <N>  Concurrent file downloads (default: $PARALLEL)"
     echo "  -f, --force         Overwrite existing files"
-    echo "  --tui               Launch the TUI binary instead of the CLI"
+    echo "  --tui               Launch interactive TUI mode instead of CLI download mode"
     echo "  -h, --help          Show this help"
     echo ""
     echo "Modes:"
@@ -47,6 +47,8 @@ print_usage() {
     echo "  $0 -j 8 'https://mega.nz/file/xxxxx#yyyyy'"
     echo "  $0 -m offcpu -j 4 'https://mega.nz/folder/aaa#bbb'"
     echo "  $0 --tui -m strace"
+    echo ""
+    echo "In --tui mode this profiles the local interactive TUI process."
 }
 
 while [[ $# -gt 0 ]]; do

@@ -315,6 +315,8 @@ pub struct PackageState {
     pub id: PackageId,
     pub key: PackageKey,
     pub display_name: String,
+    #[serde(default)]
+    pub file_ids: Vec<FileId>,
     pub status: PackageStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -350,8 +352,6 @@ pub struct TotalsState {
 pub struct DownloadState {
     pub packages: IndexMap<PackageId, PackageState>,
     pub files: IndexMap<FileId, FileState>,
-    #[serde(skip)]
-    pub package_file_index: IndexMap<PackageId, Vec<FileId>>,
     pub url_order: Vec<UrlId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<FileId>,
@@ -368,43 +368,78 @@ impl DownloadState {
         }
     }
 
-    pub fn rebuild_package_file_index(&mut self) {
-        self.package_file_index.clear();
-        for file in self.files.values() {
-            self.package_file_index
-                .entry(file.package_id)
-                .or_default()
-                .push(file.id.clone());
+    pub fn move_package_by(&mut self, package_id: &PackageId, delta: isize) -> bool {
+        let Some(index) = self.packages.get_index_of(package_id) else {
+            return false;
+        };
+        let target = index.saturating_add_signed(delta);
+        if target >= self.packages.len() || target == index {
+            return false;
         }
+        self.packages.swap_indices(index, target);
+        true
     }
 
-    pub fn ensure_package_file_index(&mut self) {
-        if self.package_file_index.is_empty() && !self.files.is_empty() {
-            self.rebuild_package_file_index();
+    pub fn move_file_within_package_by(&mut self, file_id: &FileId, delta: isize) -> bool {
+        let Some(file) = self.files.get(file_id) else {
+            return false;
+        };
+        let Some(package) = self.packages.get_mut(&file.package_id) else {
+            return false;
+        };
+        let file_ids = &mut package.file_ids;
+        let Some(index) = file_ids.iter().position(|existing| existing == file_id) else {
+            return false;
+        };
+        let target = index.saturating_add_signed(delta);
+        if target >= file_ids.len() || target == index {
+            return false;
         }
+        file_ids.swap(index, target);
+        true
     }
 
     pub fn package_files(&self, package_id: &PackageId) -> impl Iterator<Item = &FileState> + '_ {
-        self.package_file_index
+        self.packages
             .get(package_id)
             .into_iter()
-            .flat_map(|file_ids| file_ids.iter())
+            .flat_map(|package| package.file_ids.iter())
             .filter_map(|file_id| self.files.get(file_id))
     }
 
     #[must_use]
     pub fn package_has_files(&self, package_id: &PackageId) -> bool {
-        self.package_file_index
+        self.packages
             .get(package_id)
-            .is_some_and(|file_ids| !file_ids.is_empty())
+            .is_some_and(|package| !package.file_ids.is_empty())
     }
 
     #[must_use]
     pub fn package_file_ids(&self, package_id: &PackageId) -> Vec<FileId> {
-        self.package_file_index
+        self.packages
             .get(package_id)
-            .cloned()
+            .map(|package| package.file_ids.clone())
             .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn pending_file_ids(&self) -> Vec<FileId> {
+        self.packages
+            .values()
+            .flat_map(|package| package.file_ids.iter())
+            .filter_map(|file_id| self.files.get(file_id))
+            .filter(|file| {
+                !file.runtime.active
+                    && !matches!(
+                        file.lifecycle,
+                        FileLifecycle::Complete
+                            | FileLifecycle::Skipped
+                            | FileLifecycle::Deleted
+                            | FileLifecycle::Failed
+                    )
+            })
+            .map(|file| file.id.clone())
+            .collect()
     }
 
     #[must_use]

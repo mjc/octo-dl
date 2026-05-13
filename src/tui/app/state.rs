@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use indexmap::IndexMap;
+
 use crate::core::{
     CoreCommand, CoreEffect, CoreEvent, FileId, PackageId, ResolvedFile, ResolvedPackage,
     RestartSnapshot, SavedCredentials, SessionSnapshotV3, build_restart_snapshot, reduce,
@@ -108,6 +110,7 @@ impl App {
             crate::core::FileLifecycle::Complete => core_file.size,
             _ => core_file.progress.visible_completed_bytes.min(core_file.size),
         };
+        let network_downloaded = crate::tui::app::App::core_file_network_downloaded(core_file);
         let lifecycle = core_file.lifecycle;
         let failure_message = core_file.message.clone();
 
@@ -125,7 +128,7 @@ impl App {
 
         let accepted = downloaded.saturating_sub(previous_downloaded);
         let state = self.file_ui.entry(file_id.clone()).or_default();
-        state.rate.record(downloaded, now);
+        state.rate.record(network_downloaded, now);
         state.speed = state.rate.bytes_per_sec(now);
         Some(accepted)
     }
@@ -135,7 +138,7 @@ impl App {
     }
 
     fn apply_core_effects(&mut self, effects: Vec<CoreEffect>) {
-        let mut queued_file_map: HashMap<String, HashSet<FileId>> = HashMap::new();
+        let mut queued_file_map: IndexMap<String, Vec<FileId>> = IndexMap::new();
         for effect in effects {
             match effect {
                 CoreEffect::PersistSession(snapshot) => {
@@ -162,10 +165,10 @@ impl App {
                     else {
                         continue;
                     };
-                    queued_file_map
-                        .entry(source_url)
-                        .or_default()
-                        .insert(file_id.clone());
+                    let entry = queued_file_map.entry(source_url).or_default();
+                    if !entry.contains(&file_id) {
+                        entry.push(file_id.clone());
+                    }
                 }
                 CoreEffect::PublishViewSnapshot => {}
             }
@@ -175,7 +178,6 @@ impl App {
             if file_ids.is_empty() {
                 continue;
             }
-            let file_ids = file_ids.into_iter().collect::<Vec<_>>();
             let attempt_ids = file_ids
                 .iter()
                 .filter_map(|file_id| {
@@ -190,6 +192,12 @@ impl App {
                 source_url,
                 file_ids,
                 attempt_ids,
+            });
+        }
+
+        if self.download_task_running {
+            let _ = self.url_tx.send(DownloadRequest::SyncPendingOrder {
+                file_ids: self.core_state.pending_file_ids(),
             });
         }
     }

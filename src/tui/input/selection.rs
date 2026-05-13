@@ -111,3 +111,22 @@ pub(super) fn toggle_selected_package(app: &mut App) {
         }
     }
 }
+
+pub(super) fn move_selected_queue_item(app: &mut App, delta: isize) {
+    let selected = app.selected_row();
+    if !matches!(app.sort.key, crate::tui::app::SortKey::Queue) {
+        app.sort.key = crate::tui::app::SortKey::Queue;
+    }
+    match selected {
+        Some(TuiRow::Package(package_id)) => {
+            app.handle_ui_action(UiAction::MovePackage { package_id, delta });
+        }
+        Some(TuiRow::File {
+            package_id: Some(_),
+            file_id,
+        }) => {
+            app.handle_ui_action(UiAction::MoveFile { file_id, delta });
+        }
+        _ => {}
+    }
+}

@@ -12,7 +12,8 @@ use crate::extract_urls;
 
 use self::popup::handle_popup_input;
 use self::selection::{
-    delete_selected, delete_selected_immediately, move_file_selection, reset_selected,
+    delete_selected, delete_selected_immediately, move_file_selection, move_selected_queue_item,
+    reset_selected,
     retry_selected, select_first_file, select_last_file, select_next_file, select_previous_file,
     toggle_selected_package,
 };
@@ -62,6 +63,8 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('s') => {
             app.popup = Popup::Sort;
         }
+        KeyCode::Char('+') | KeyCode::Char('=') => move_selected_queue_item(app, -1),
+        KeyCode::Char('-') => move_selected_queue_item(app, 1),
         KeyCode::Enter | KeyCode::Char(' ') => toggle_selected_package(app),
         KeyCode::Up | KeyCode::Char('k') => select_previous_file(app),
         KeyCode::Down | KeyCode::Char('j') => select_next_file(app),

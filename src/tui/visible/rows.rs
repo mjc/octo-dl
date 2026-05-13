@@ -37,10 +37,16 @@ fn package_projections(
         .collect::<IndexMap<_, _>>();
     let mut file_sort_keys = HashMap::new();
 
-    for file in core_state.files.values() {
-        if let Some(package) = projections.get_mut(&file.package_id) {
-            package.files.push(file);
-            file_sort_keys.insert(file.id.as_str(), (package.order, package.display_name));
+    let package_ids = projections.keys().cloned().collect::<Vec<_>>();
+    for package_id in package_ids {
+        for file_id in core_state.package_file_ids(&package_id) {
+            let Some(file) = core_state.files.get(&file_id) else {
+                continue;
+            };
+            if let Some(package) = projections.get_mut(&package_id) {
+                package.files.push(file);
+                file_sort_keys.insert(file.id.as_str(), (package.order, package.display_name));
+            }
         }
     }
 
@@ -244,9 +250,15 @@ pub(super) fn visible_rows_for(
                 .cmp(&package_status_rank(right_package.status)),
             SortKey::Name => left_package.display_name.cmp(&right_package.display_name),
             SortKey::Percent => package_percents.get(left).cmp(&package_percents.get(right)),
-        }
-        .then_with(|| left_package.display_name.cmp(&right_package.display_name))
-        .then_with(|| left.cmp(right));
+        };
+
+        let ordering = if matches!(sort.key, SortKey::Queue) {
+            ordering
+        } else {
+            ordering
+                .then_with(|| left_package.display_name.cmp(&right_package.display_name))
+                .then_with(|| left.cmp(right))
+        };
 
         match sort.direction {
             SortDirection::Asc => ordering,
@@ -272,14 +284,19 @@ pub(super) fn visible_rows_for(
                 .get(&package_id)
                 .map(|package| package.files.clone())
                 .unwrap_or_default();
-            package_files.sort_by(|left, right| {
-                let left_status = file_status_from_core(left);
-                let right_status = file_status_from_core(right);
-                file_status_rank(&left_status)
-                    .cmp(&file_status_rank(&right_status))
-                    .then_with(|| natural_cmp(&left.path, &right.path))
-                    .then_with(|| left.id.cmp(&right.id))
-            });
+            if !matches!(sort.key, SortKey::Queue) {
+                package_files.sort_by(|left, right| {
+                    let left_status = file_status_from_core(left);
+                    let right_status = file_status_from_core(right);
+                    file_status_rank(&left_status)
+                        .cmp(&file_status_rank(&right_status))
+                        .then_with(|| natural_cmp(&left.path, &right.path))
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+            }
+            if matches!(sort.direction, SortDirection::Desc) {
+                package_files.reverse();
+            }
             rows.extend(
                 package_files
                     .into_iter()

@@ -75,6 +75,14 @@ pub enum CoreEvent {
     FileResetRequested {
         file_id: FileId,
     },
+    PackageMoveRequested {
+        package_id: PackageId,
+        delta: isize,
+    },
+    FileMoveRequested {
+        file_id: FileId,
+        delta: isize,
+    },
     RestartReconciled {
         snapshot: RestartSnapshot,
     },
@@ -178,11 +186,11 @@ fn insert_file_into_package_index(
     file_id: &FileId,
     package_id: PackageId,
 ) {
-    state
-        .package_file_index
-        .entry(package_id)
-        .or_default()
-        .push(file_id.clone());
+    if let Some(package) = state.packages.get_mut(&package_id)
+        && !package.file_ids.contains(file_id)
+    {
+        package.file_ids.push(file_id.clone());
+    }
 }
 
 fn remove_file_from_package_index(
@@ -190,23 +198,19 @@ fn remove_file_from_package_index(
     file_id: &FileId,
     package_id: PackageId,
 ) {
-    if let Some(file_ids) = state.package_file_index.get_mut(&package_id) {
+    if let Some(package) = state.packages.get_mut(&package_id) {
+        let file_ids = &mut package.file_ids;
         if let Some(index) = file_ids.iter().position(|existing| existing == file_id) {
             file_ids.swap_remove(index);
-        }
-        if file_ids.is_empty() {
-            state.package_file_index.shift_remove(&package_id);
         }
     }
 }
 
 fn package_status_from_files(state: &DownloadState, package_id: PackageId) -> PackageStatus {
-    let Some(file_ids) = state.package_file_index.get(&package_id) else {
-        return PackageStatus::Pending;
-    };
     let Some(package) = state.packages.get(&package_id) else {
         return PackageStatus::Pending;
     };
+    let file_ids = &package.file_ids;
 
     let mut has_downloading = false;
     let mut has_failed = false;
@@ -313,7 +317,6 @@ fn maybe_debug_assert_invariants(state: &DownloadState) {
 fn maybe_debug_assert_invariants(_state: &DownloadState) {}
 
 pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
-    state.ensure_package_file_index();
     let mut effects = Vec::new();
     let persist_session = should_persist_session(&event);
     let mut full_refresh = false;
@@ -344,10 +347,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 state
                     .packages
                     .retain(|_, existing| existing.key != package.key);
-                if full_refresh {
-                    state.rebuild_package_file_index();
-                    recompute_derived(state);
-                }
                 if persist_session {
                     effects.push(CoreEffect::PersistSession(snapshot_from_state(state)));
                 }
@@ -356,6 +355,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 return effects;
             }
             let incoming_package_id = package.id.clone();
+            let mut reassigned_file_ids = Vec::new();
             let previous_package = state
                 .packages
                 .iter()
@@ -365,14 +365,13 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             if let Some((previous_package_id, _)) = previous_package.as_ref()
                 && previous_package_id != &incoming_package_id
             {
-                state.packages.shift_remove(previous_package_id);
-                if let Some(file_ids) = state.package_file_index.shift_remove(previous_package_id) {
-                    for file_id in &file_ids {
+                if let Some(previous_state) = state.packages.shift_remove(previous_package_id) {
+                    reassigned_file_ids = previous_state.file_ids;
+                    for file_id in &reassigned_file_ids {
                         if let Some(file) = state.files.get_mut(file_id) {
                             file.package_id = incoming_package_id;
                         }
                     }
-                    state.package_file_index.insert(incoming_package_id, file_ids);
                 }
             }
 
@@ -404,12 +403,18 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                         id: incoming_package_id.clone(),
                         key: package.key.clone(),
                         display_name: package_display_name.clone(),
+                        file_ids: Vec::new(),
                         status: PackageStatus::Pending,
                         error: None,
                     });
                 package_entry.key = package.key.clone();
                 if !preserve_display_name {
                     package_entry.display_name = package_display_name;
+                }
+                for file_id in &reassigned_file_ids {
+                    if !package_entry.file_ids.contains(file_id) {
+                        package_entry.file_ids.push(file_id.clone());
+                    }
                 }
             }
 
@@ -699,6 +704,12 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 apply_file_change(state, &file_id, before, after);
             }
         }
+        CoreEvent::PackageMoveRequested { package_id, delta } => {
+            let _ = state.move_package_by(&package_id, delta);
+        }
+        CoreEvent::FileMoveRequested { file_id, delta } => {
+            let _ = state.move_file_within_package_by(&file_id, delta);
+        }
         CoreEvent::RestartReconciled { snapshot } => {
             *state = snapshot.state;
             full_refresh = true;
@@ -712,7 +723,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
     }
 
     if full_refresh {
-        state.rebuild_package_file_index();
         recompute_derived(state);
     }
     if persist_session {
@@ -744,21 +754,38 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
         .packages
         .values()
         .filter_map(|package| {
-            let file_ids = state.package_file_ids(&package.id);
-            if file_ids.is_empty() {
+            let files = package
+                .file_ids
+                .iter()
+                .filter_map(|file_id| state.files.get(file_id))
+                .map(|file| FileSnapshot {
+                    id: file.id.clone(),
+                    package_id: file.package_id.clone(),
+                    source_url: file.source_url.clone(),
+                    path: file.path.clone(),
+                    size: file.size,
+                    lifecycle: file.lifecycle,
+                    progress: file.progress.clone(),
+                    desired: file.desired,
+                    runtime: file.runtime.clone(),
+                    message: file.message.clone(),
+                })
+                .collect::<Vec<_>>();
+            if files.is_empty() {
                 return None;
             }
             Some(PackageSnapshot {
                 id: package.id.clone(),
                 key: package.key.clone(),
                 display_name: package.display_name.clone(),
-                file_ids,
+                files,
+                file_ids: package.file_ids.clone(),
                 error: package.error.clone(),
             })
         })
         .collect();
     SessionSnapshotV3 {
-        version: 4,
+        version: 5,
         id: state.session_meta.session_id.clone(),
         created: state.session_meta.created,
         status: state.session_meta.status,
@@ -771,22 +798,7 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
             })
             .collect(),
         packages,
-        files: state
-            .files
-            .values()
-            .map(|file| FileSnapshot {
-                id: file.id.clone(),
-                package_id: file.package_id.clone(),
-                source_url: file.source_url.clone(),
-                path: file.path.clone(),
-                size: file.size,
-                lifecycle: file.lifecycle,
-                progress: file.progress.clone(),
-                desired: file.desired,
-                runtime: file.runtime.clone(),
-                message: file.message.clone(),
-            })
-            .collect(),
+        files: Vec::new(),
         config: state.session_meta.config.clone(),
         credentials: state.session_meta.credentials.clone(),
     }
@@ -835,13 +847,6 @@ fn recompute_derived(state: &mut DownloadState) {
 #[cfg(debug_assertions)]
 fn debug_assert_invariants(state: &DownloadState) {
     let mut package_keys = std::collections::HashSet::new();
-    let package_file_counts = state.files.values().fold(
-        std::collections::HashMap::<PackageId, usize>::new(),
-        |mut counts, file| {
-            *counts.entry(file.package_id).or_default() += 1;
-            counts
-        },
-    );
     for (package_id, package) in &state.packages {
         debug_assert_eq!(
             package_id, &package.id,
@@ -852,17 +857,28 @@ fn debug_assert_invariants(state: &DownloadState) {
             "only one package may exist per package key"
         );
         debug_assert!(
-            package_file_counts
-                .get(package_id)
-                .is_some_and(|count| *count > 0),
+            !package.file_ids.is_empty(),
             "packages without files are invalid in canonical state"
         );
+        for file_id in &package.file_ids {
+            debug_assert!(
+                state.files.contains_key(file_id),
+                "package file_ids must reference known files"
+            );
+        }
     }
     for (file_id, file) in &state.files {
         debug_assert_eq!(file_id, &file.id, "file map key must equal file.id");
         debug_assert!(
             state.packages.contains_key(&file.package_id),
             "every file must belong to a known package"
+        );
+        debug_assert!(
+            state
+                .packages
+                .get(&file.package_id)
+                .is_some_and(|package| package.file_ids.contains(file_id)),
+            "every file must appear in its package file_ids"
         );
         debug_assert!(
             !matches!(file.lifecycle, FileLifecycle::Complete) || !file.runtime.active,
@@ -898,6 +914,7 @@ mod tests {
                 id: pkg_id,
                 key: crate::core::PackageKey::new("pkg".to_string().clone()),
                 display_name: "pkg".to_string(),
+                file_ids: vec!["file.bin".to_string().into()],
                 status: PackageStatus::Pending,
                 error: None,
             },
@@ -1087,6 +1104,7 @@ mod tests {
                     "https://mega.nz/folder/test".to_string().clone(),
                 ),
                 display_name: "Folder".to_string(),
+                file_ids: vec!["a.bin".to_string().into()],
                 status: PackageStatus::Queued,
                 error: None,
             },
@@ -1155,6 +1173,7 @@ mod tests {
                     "https://mega.nz/folder/pkg-a".to_string().clone(),
                 ),
                 display_name: "Package A".to_string(),
+                file_ids: vec!["a.bin".to_string().into()],
                 status: PackageStatus::Queued,
                 error: None,
             },
@@ -1227,6 +1246,7 @@ mod tests {
                     "https://mega.nz/folder/test".to_string().clone(),
                 ),
                 display_name: "https://mega.nz/folder/test".to_string(),
+                file_ids: vec!["a.bin".to_string().into()],
                 status: PackageStatus::Queued,
                 error: None,
             },
