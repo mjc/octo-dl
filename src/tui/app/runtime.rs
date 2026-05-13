@@ -58,13 +58,8 @@ impl App {
             .map(|file| format!("{} status={:?}", file.id, file.status))
             .collect::<Vec<_>>();
         let counted_overlay_files = self
-            .files
-            .iter()
-            .filter(|file| {
-                !self.core_state.files.contains_key(&file.id)
-                    && self.overlay_counts_toward_progress(&file.id)
-            })
-            .map(|file| format!("{} {} / {}", file.id, file.downloaded, file.size))
+            .counted_overlay_files()
+            .map(|(id, overlay)| format!("{id} {} / {}", overlay.file.downloaded, overlay.file.size))
             .collect::<Vec<_>>();
 
         log::warn!(
