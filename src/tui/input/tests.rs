@@ -467,6 +467,12 @@ fn handle_main_input_delete_removes_session_entry_and_keeps_selection() {
             ("second.bin", &crate::core::FileLifecycle::Queued),
         ]
     );
+    let saved = crate::core::SessionSnapshot::load(&session_path).unwrap();
+    assert_eq!(
+        saved.find_file("first.bin").unwrap().lifecycle,
+        crate::core::FileLifecycle::Skipped
+    );
+    assert!(saved.find_file("second.bin").is_some());
 }
 
 #[test]

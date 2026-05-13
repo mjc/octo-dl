@@ -359,6 +359,7 @@ impl App {
         path: &FileId,
         size: u64,
     ) -> bool {
+        self.ensure_session_for_pending_urls();
         self.mutate_session_and_save(|session| {
             SessionAdapter::register_queued_file(
                 session,

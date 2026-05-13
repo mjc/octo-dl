@@ -117,7 +117,10 @@ impl SessionAdapter {
     ) -> HashMap<String, HashSet<String>> {
         let mut skipped = HashMap::<String, HashSet<String>>::new();
         for file in session.iter_files() {
-            if !matches!(file.lifecycle, FileLifecycle::Skipped) {
+            if !matches!(
+                file.lifecycle,
+                FileLifecycle::Skipped | FileLifecycle::Deleted
+            ) {
                 continue;
             }
             let Some(url) = file.source_url.as_ref() else {

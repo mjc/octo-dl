@@ -391,6 +391,12 @@ pub(crate) fn canonicalize_snapshot(snapshot: &mut SessionSnapshot) -> Result<()
         package.key = PackageKey::new(package.display_name.clone());
         for file in &mut package.files {
             file.package_id = package.id;
+            if matches!(file.lifecycle, FileLifecycle::Deleted) {
+                file.lifecycle = FileLifecycle::Skipped;
+                file.desired = DesiredState::Suppressed;
+                file.runtime.active = false;
+                file.runtime.counts_in_run_totals = false;
+            }
         }
     }
     snapshot.sync_flat_files_from_packages();
@@ -735,6 +741,56 @@ mod tests {
         assert_eq!(latest.packages.len(), 1);
         assert_eq!(latest.file_count(), 2);
         assert_eq!(latest.packages[0].display_name, "Folder");
+    }
+
+    #[test]
+    fn save_canonicalizes_deleted_files_to_skipped_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+
+        let package_key = PackageKey::new("Folder");
+        let package_id = PackageId::for_package_key(&package_key);
+        let mut session = SessionSnapshot::new(
+            DownloadConfig::default(),
+            SavedCredentials::encrypt("a", "b", None),
+        );
+        session.urls.push(SessionUrlSnapshot {
+            url: "https://mega.nz/folder/root".to_string(),
+            error: None,
+        });
+        session.packages.push(PackageSnapshot {
+            id: package_id,
+            key: package_key,
+            display_name: "Folder".to_string(),
+            files: vec![FileSnapshot {
+                id: "folder/deleted.bin".to_string().into(),
+                package_id,
+                source_url: Some("https://mega.nz/folder/root".to_string()),
+                path: "folder/deleted.bin".to_string(),
+                size: 10,
+                lifecycle: FileLifecycle::Deleted,
+                progress: FileProgressState::default(),
+                desired: DesiredState::Suppressed,
+                runtime: RuntimeState {
+                    active: true,
+                    counts_in_run_totals: true,
+                    ..RuntimeState::default()
+                },
+                message: Some("deleted".to_string()),
+            }],
+            error: None,
+        });
+
+        session.save().unwrap();
+
+        let saved_toml = std::fs::read_to_string(session.state_path()).unwrap();
+        assert!(!saved_toml.contains("lifecycle = \"deleted\""));
+        let loaded = SessionSnapshot::load(&session.state_path()).unwrap();
+        let file = loaded.find_file("folder/deleted.bin").unwrap();
+        assert_eq!(file.lifecycle, FileLifecycle::Skipped);
+        assert_eq!(file.desired, DesiredState::Suppressed);
+        assert!(!file.runtime.active);
+        assert!(!file.runtime.counts_in_run_totals);
     }
 
     #[test]
