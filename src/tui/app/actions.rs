@@ -525,10 +525,12 @@ impl App {
 
         if !retried_file && package_failed {
             if source_urls.is_empty()
-                && self
-                    .session
-                    .as_ref()
-                    .is_some_and(|session| session.urls.iter().any(|url| url.url == package_key.as_str()))
+                && self.session.as_ref().is_some_and(|session| {
+                    session
+                        .urls
+                        .iter()
+                        .any(|url| url.url == package_key.as_str())
+                })
             {
                 source_urls.insert(package_key.to_string());
             }

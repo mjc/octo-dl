@@ -191,7 +191,10 @@ fn file_queued_from_deleted_url_is_ignored() {
         size: 128,
         count_toward_progress: true,
         origin: FileOrigin {
-            package_id: Some(crate::test_support::package_id("batch-folder", "Batch Folder")),
+            package_id: Some(crate::test_support::package_id(
+                "batch-folder",
+                "Batch Folder",
+            )),
             package_display_name: Some("Batch Folder".to_string()),
             source_url: url.clone(),
             submitted_url: url.clone(),

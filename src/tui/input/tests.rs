@@ -255,9 +255,10 @@ fn handle_main_input_delete_core_backed_entry() {
     handle_input(&mut app, key(KeyCode::Delete));
     assert_eq!(
         app.pending_confirmation,
-        Some(ConfirmAction::DeletePackage(
-            package_id("https://mega.nz/file/core", "https://mega.nz/file/core")
-        ))
+        Some(ConfirmAction::DeletePackage(package_id(
+            "https://mega.nz/file/core",
+            "https://mega.nz/file/core"
+        )))
     );
     confirm(&mut app);
 
@@ -363,7 +364,9 @@ fn handle_sort_popup_keeps_selected_row_identity_when_order_changes() {
                     &format!("https://mega.nz/folder/{raw_package_id}"),
                 ),
                 source_url: format!("https://mega.nz/folder/{raw_package_id}"),
-                key: crate::core::PackageKey::new(format!("https://mega.nz/folder/{raw_package_id}").clone()),
+                key: crate::core::PackageKey::new(
+                    format!("https://mega.nz/folder/{raw_package_id}").clone(),
+                ),
                 display_name: display_name.to_string(),
                 files: vec![ResolvedFile {
                     file_id: format!("{raw_package_id}.bin"),
@@ -542,14 +545,10 @@ fn handle_main_input_delete_does_not_surface_failed_package_without_files() {
         },
     });
     assert!(app.visible_rows().is_empty());
-    assert!(
-        !app.core_state
-            .packages
-            .contains_key(&package_id(
-                "https://mega.nz/folder/failed",
-                "https://mega.nz/folder/failed"
-            ))
-    );
+    assert!(!app.core_state.packages.contains_key(&package_id(
+        "https://mega.nz/folder/failed",
+        "https://mega.nz/folder/failed"
+    )));
     handle_input(&mut app, key(KeyCode::Delete));
     assert_eq!(app.pending_confirmation, None);
 }
@@ -627,14 +626,10 @@ fn handle_main_input_shift_d_does_not_surface_failed_package_without_files() {
         },
     });
     assert!(app.visible_rows().is_empty());
-    assert!(
-        !app.core_state
-            .packages
-            .contains_key(&package_id(
-                "https://mega.nz/folder/failed",
-                "https://mega.nz/folder/failed"
-            ))
-    );
+    assert!(!app.core_state.packages.contains_key(&package_id(
+        "https://mega.nz/folder/failed",
+        "https://mega.nz/folder/failed"
+    )));
     handle_input(&mut app, key(KeyCode::Char('D')));
     assert!(app.visible_rows().is_empty());
 }

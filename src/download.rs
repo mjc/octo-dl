@@ -798,12 +798,19 @@ impl<F: FileSystem> Downloader<F> {
         let sp = sidecar_path(path);
         let expected_condensed_mac_b64 = encode_expected_mac(node)?;
         let boundaries = mega::mega_chunk_boundaries(node.size());
-        let resume_validation = if !should_reuse_resume_state(self.config.force_overwrite, trust_resume_state) {
-            ResumeValidation::empty(boundaries.len())
-        } else {
-            self.revalidate_resume_chunks(node, &boundaries, &pp, &sp, &expected_condensed_mac_b64)
+        let resume_validation =
+            if !should_reuse_resume_state(self.config.force_overwrite, trust_resume_state) {
+                ResumeValidation::empty(boundaries.len())
+            } else {
+                self.revalidate_resume_chunks(
+                    node,
+                    &boundaries,
+                    &pp,
+                    &sp,
+                    &expected_condensed_mac_b64,
+                )
                 .await?
-        };
+            };
         let preserve_existing = resume_validation.trusted_count > 0;
         if !preserve_existing {
             let _ = delete_sidecar(&sp).await;
@@ -1154,7 +1161,8 @@ where
 
 #[must_use]
 pub fn infer_package_display_name(nodes: &mega::Nodes, collected: &CollectedFiles<'_>) -> String {
-    nodes.roots()
+    nodes
+        .roots()
         .find(|root| root.kind().is_folder())
         .map(|root| root.name().to_string())
         .or_else(|| common_collected_root(collected))

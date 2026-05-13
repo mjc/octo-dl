@@ -3,7 +3,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use crate::{DownloadProgress, FileStats, core::{PackageId, ProgressDelta}};
+use crate::{
+    DownloadProgress, FileStats,
+    core::{PackageId, ProgressDelta},
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 

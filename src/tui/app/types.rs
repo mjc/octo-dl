@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
-use crate::core::PackageId;
 use crate::DownloadConfig;
+use crate::core::PackageId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

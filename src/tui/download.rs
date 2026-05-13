@@ -890,7 +890,12 @@ impl BatchDuplicateResolver {
         items: Vec<QueuedDownload>,
     ) {
         for item in items {
-            self.insert(queued_items, completed_items, item, BatchDestination::Queued);
+            self.insert(
+                queued_items,
+                completed_items,
+                item,
+                BatchDestination::Queued,
+            );
         }
     }
 
@@ -901,7 +906,12 @@ impl BatchDuplicateResolver {
         items: Vec<QueuedDownload>,
     ) {
         for item in items {
-            self.insert(queued_items, completed_items, item, BatchDestination::Completed);
+            self.insert(
+                queued_items,
+                completed_items,
+                item,
+                BatchDestination::Completed,
+            );
         }
     }
 
@@ -927,8 +937,11 @@ impl BatchDuplicateResolver {
             }
 
             if snapshot.size > existing_snapshot.size {
-                let renamed_existing =
-                    next_available_duplicate_path(&package_id, &original_path, &mut self.used_paths);
+                let renamed_existing = next_available_duplicate_path(
+                    &package_id,
+                    &original_path,
+                    &mut self.used_paths,
+                );
                 self.rename_item(
                     queued_items,
                     completed_items,
@@ -938,15 +951,19 @@ impl BatchDuplicateResolver {
                     &renamed_existing,
                 );
             } else {
-                let renamed_incoming =
-                    next_available_duplicate_path(&package_id, &original_path, &mut self.used_paths);
+                let renamed_incoming = next_available_duplicate_path(
+                    &package_id,
+                    &original_path,
+                    &mut self.used_paths,
+                );
                 item.item.path = renamed_incoming;
             }
         }
 
         let final_path = item.item.path.clone();
         let item_ref = self.push_item(queued_items, completed_items, item, destination);
-        self.used_paths.insert((package_id.clone(), final_path.clone()));
+        self.used_paths
+            .insert((package_id.clone(), final_path.clone()));
         self.item_paths.insert((package_id, final_path), item_ref);
     }
 
@@ -977,11 +994,10 @@ impl BatchDuplicateResolver {
             BatchDestination::Completed => &mut completed_items[item_ref.index],
         };
         item.item.path = new_path.to_string();
-        self.item_paths.remove(&(package_id.to_string(), old_path.to_string()));
-        self.item_paths.insert(
-            (package_id.to_string(), new_path.to_string()),
-            item_ref,
-        );
+        self.item_paths
+            .remove(&(package_id.to_string(), old_path.to_string()));
+        self.item_paths
+            .insert((package_id.to_string(), new_path.to_string()), item_ref);
     }
 
     fn push_item(

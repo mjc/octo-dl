@@ -531,7 +531,9 @@ mod tests {
                     "https://mega.nz/folder/abc#secret",
                 ),
                 source_url: "https://mega.nz/folder/abc#secret".to_string(),
-                key: crate::core::PackageKey::new("https://mega.nz/folder/abc#secret".to_string().clone()),
+                key: crate::core::PackageKey::new(
+                    "https://mega.nz/folder/abc#secret".to_string().clone(),
+                ),
                 display_name: "https://mega.nz/folder/abc#secret".to_string(),
                 files: vec![ResolvedFile {
                     file_id: "file.bin".to_string(),
@@ -617,7 +619,10 @@ mod tests {
             }
         }
 
-        assert!(saw_yellow_progress, "active file progress should render in yellow");
+        assert!(
+            saw_yellow_progress,
+            "active file progress should render in yellow"
+        );
     }
 
     #[test]

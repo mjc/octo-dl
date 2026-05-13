@@ -113,11 +113,9 @@ fn resolve_file_id_by_name_reports_all_lookup_cases() {
 fn resolve_package_id_matches_package_rows() {
     let package_id_str = package_id("pkg", "https://mega.nz/folder/pkg").to_string();
     let other_package_id_str = package_id("other", "https://mega.nz/folder/other").to_string();
-    let (state, _rx) = state_with_snapshot(
-        &format!(
-            r#"{{"packages":[{{"id":"{package_id_str}","source_url":"https://mega.nz/folder/pkg","display_name":"Package"}},{{"id":"{other_package_id_str}","source_url":"https://mega.nz/folder/other","display_name":"Other"}}],"files":[]}}"#
-        ),
-    );
+    let (state, _rx) = state_with_snapshot(&format!(
+        r#"{{"packages":[{{"id":"{package_id_str}","source_url":"https://mega.nz/folder/pkg","display_name":"Package"}},{{"id":"{other_package_id_str}","source_url":"https://mega.nz/folder/other","display_name":"Other"}}],"files":[]}}"#
+    ));
 
     let by_id = selection::resolve_package_id(&state, Some(&package_id_str), None)
         .expect("package lookup should succeed")
@@ -133,11 +131,9 @@ fn resolve_package_id_matches_package_rows() {
 #[tokio::test]
 async fn retry_api_dispatches_package_action_for_package_id() {
     let package_id_str = package_id("pkg", "https://mega.nz/folder/pkg").to_string();
-    let (state, mut rx) = state_with_snapshot(
-        &format!(
-            r#"{{"packages":[{{"id":"{package_id_str}","source_url":"https://mega.nz/folder/pkg","display_name":"Package"}}],"files":[]}}"#
-        ),
-    );
+    let (state, mut rx) = state_with_snapshot(&format!(
+        r#"{{"packages":[{{"id":"{package_id_str}","source_url":"https://mega.nz/folder/pkg","display_name":"Package"}}],"files":[]}}"#
+    ));
 
     let _ = api_retry(
         State(state),

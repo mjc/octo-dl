@@ -125,7 +125,9 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 if let Some(collision) = package.collision {
                     effects.push(CoreEffect::PublishStatusMessage(format!(
                         "Package {} rejected file {} because it collides with {}",
-                        collision.incoming_package_id, collision.file_id, collision.existing_package_id
+                        collision.incoming_package_id,
+                        collision.file_id,
+                        collision.existing_package_id
                     )));
                 }
                 state
@@ -520,12 +522,13 @@ fn recompute_derived(state: &mut DownloadState) {
         } else if all_skipped && has_present {
             PackageStatus::Skipped
         } else if has_complete
-            && (has_queued || file_ids.iter().any(|file_id| {
-                state
-                    .files
-                    .get(file_id)
-                    .is_some_and(|file| matches!(file.lifecycle, FileLifecycle::Downloading))
-            }))
+            && (has_queued
+                || file_ids.iter().any(|file_id| {
+                    state
+                        .files
+                        .get(file_id)
+                        .is_some_and(|file| matches!(file.lifecycle, FileLifecycle::Downloading))
+                }))
         {
             PackageStatus::Partial
         } else if has_complete && has_present {
@@ -574,7 +577,10 @@ fn recompute_derived(state: &mut DownloadState) {
 fn debug_assert_invariants(state: &DownloadState) {
     let mut package_keys = std::collections::HashSet::new();
     for (package_id, package) in &state.packages {
-        debug_assert_eq!(package_id, &package.id, "package map key must equal package.id");
+        debug_assert_eq!(
+            package_id, &package.id,
+            "package map key must equal package.id"
+        );
         debug_assert!(
             package_keys.insert(package.key.clone()),
             "only one package may exist per package key"
@@ -700,7 +706,9 @@ mod tests {
                 package: ResolvedPackage {
                     id: package_id("resolved-folder", "https://mega.nz/folder/test"),
                     source_url: "https://mega.nz/folder/test".to_string(),
-                    key: crate::core::PackageKey::new("https://mega.nz/folder/test".to_string().clone()),
+                    key: crate::core::PackageKey::new(
+                        "https://mega.nz/folder/test".to_string().clone(),
+                    ),
                     display_name: "Resolved Folder".to_string(),
                     files: vec![ResolvedFile {
                         file_id: "a.bin".to_string(),
@@ -712,22 +720,24 @@ mod tests {
             },
         );
 
-        assert!(
-            !state
-                .packages
-                .contains_key(&package_id(
-                    "https://mega.nz/folder/test",
-                    "https://mega.nz/folder/test"
-                ))
-        );
+        assert!(!state.packages.contains_key(&package_id(
+            "https://mega.nz/folder/test",
+            "https://mega.nz/folder/test"
+        )));
         assert_eq!(state.packages.len(), 1);
         let resolved_id = package_id("resolved-folder", "https://mega.nz/folder/test");
         assert_eq!(
             state.packages[&resolved_id].key.as_str(),
             "https://mega.nz/folder/test"
         );
-        assert_eq!(state.package_file_ids(&resolved_id), vec!["a.bin".to_string()]);
-        assert_eq!(state.url_order, vec!["https://mega.nz/folder/test".to_string()]);
+        assert_eq!(
+            state.package_file_ids(&resolved_id),
+            vec!["a.bin".to_string()]
+        );
+        assert_eq!(
+            state.url_order,
+            vec!["https://mega.nz/folder/test".to_string()]
+        );
     }
 
     #[test]
@@ -740,7 +750,9 @@ mod tests {
                 package: ResolvedPackage {
                     id: package_id("pkg", "https://mega.nz/folder/persist"),
                     source_url: "https://mega.nz/folder/persist".to_string(),
-                    key: crate::core::PackageKey::new("https://mega.nz/folder/persist".to_string().clone()),
+                    key: crate::core::PackageKey::new(
+                        "https://mega.nz/folder/persist".to_string().clone(),
+                    ),
                     display_name: "Persist".to_string(),
                     files: vec![ResolvedFile {
                         file_id: "episode-1.mkv".to_string(),
@@ -752,7 +764,10 @@ mod tests {
             },
         );
 
-        assert_eq!(state.url_order, vec!["https://mega.nz/folder/persist".to_string()]);
+        assert_eq!(
+            state.url_order,
+            vec!["https://mega.nz/folder/persist".to_string()]
+        );
     }
 
     #[test]
@@ -764,12 +779,17 @@ mod tests {
                 package: ResolvedPackage {
                     id: package_id("failed-pkg", "https://mega.nz/folder/failed"),
                     source_url: "https://mega.nz/folder/failed".to_string(),
-                    key: crate::core::PackageKey::new("https://mega.nz/folder/failed".to_string().clone()),
+                    key: crate::core::PackageKey::new(
+                        "https://mega.nz/folder/failed".to_string().clone(),
+                    ),
                     display_name: "Failed package".to_string(),
                     files: Vec::new(),
                     collision: Some(PackageCollision {
                         file_id: "duplicate.bin".to_string(),
-                        existing_package_id: package_id("existing", "https://mega.nz/folder/failed"),
+                        existing_package_id: package_id(
+                            "existing",
+                            "https://mega.nz/folder/failed",
+                        ),
                         incoming_package_id: package_id(
                             "failed-pkg",
                             "https://mega.nz/folder/failed",
@@ -796,7 +816,9 @@ mod tests {
             existing_id,
             PackageState {
                 id: existing_id,
-                key: crate::core::PackageKey::new("https://mega.nz/folder/test".to_string().clone()),
+                key: crate::core::PackageKey::new(
+                    "https://mega.nz/folder/test".to_string().clone(),
+                ),
                 display_name: "Folder".to_string(),
                 status: PackageStatus::Queued,
                 error: None,
@@ -825,12 +847,11 @@ mod tests {
             &mut state,
             CoreEvent::PackageResolved {
                 package: ResolvedPackage {
-                    id: package_id(
-                        "https://mega.nz/folder/test",
-                        "https://mega.nz/folder/test",
-                    ),
+                    id: package_id("https://mega.nz/folder/test", "https://mega.nz/folder/test"),
                     source_url: "https://mega.nz/folder/test".to_string(),
-                    key: crate::core::PackageKey::new("https://mega.nz/folder/test".to_string().clone()),
+                    key: crate::core::PackageKey::new(
+                        "https://mega.nz/folder/test".to_string().clone(),
+                    ),
                     display_name: "Folder".to_string(),
                     files: vec![ResolvedFile {
                         file_id: "b.bin".to_string(),
@@ -843,10 +864,7 @@ mod tests {
         );
 
         assert_eq!(state.packages.len(), 1);
-        let canonical_id = package_id(
-            "https://mega.nz/folder/test",
-            "https://mega.nz/folder/test",
-        );
+        let canonical_id = package_id("https://mega.nz/folder/test", "https://mega.nz/folder/test");
         let package = &state.packages[&canonical_id];
         assert_eq!(package.key.as_str(), "https://mega.nz/folder/test");
         assert_eq!(
@@ -866,7 +884,9 @@ mod tests {
             existing_id,
             PackageState {
                 id: existing_id,
-                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg-a".to_string().clone()),
+                key: crate::core::PackageKey::new(
+                    "https://mega.nz/folder/pkg-a".to_string().clone(),
+                ),
                 display_name: "Package A".to_string(),
                 status: PackageStatus::Queued,
                 error: None,
@@ -900,7 +920,9 @@ mod tests {
                         "https://mega.nz/folder/pkg-a",
                     ),
                     source_url: "https://mega.nz/folder/pkg-a".to_string(),
-                    key: crate::core::PackageKey::new("https://mega.nz/folder/pkg-a".to_string().clone()),
+                    key: crate::core::PackageKey::new(
+                        "https://mega.nz/folder/pkg-a".to_string().clone(),
+                    ),
                     display_name: "https://mega.nz/folder/pkg-a".to_string(),
                     files: vec![ResolvedFile {
                         file_id: "a.bin".to_string(),
@@ -920,21 +942,23 @@ mod tests {
         let package = &state.packages[&canonical_id];
         assert_eq!(package.key.as_str(), "https://mega.nz/folder/pkg-a");
         assert_eq!(package.display_name, "Package A");
-        assert_eq!(state.package_file_ids(&canonical_id), vec!["a.bin".to_string()]);
+        assert_eq!(
+            state.package_file_ids(&canonical_id),
+            vec!["a.bin".to_string()]
+        );
     }
 
     #[test]
     fn package_resolved_reassigns_existing_files_to_new_package_id_for_same_url() {
         let mut state = DownloadState::default();
-        let old_id = package_id(
-            "https://mega.nz/folder/test",
-            "https://mega.nz/folder/test",
-        );
+        let old_id = package_id("https://mega.nz/folder/test", "https://mega.nz/folder/test");
         state.packages.insert(
             old_id,
             PackageState {
                 id: old_id,
-                key: crate::core::PackageKey::new("https://mega.nz/folder/test".to_string().clone()),
+                key: crate::core::PackageKey::new(
+                    "https://mega.nz/folder/test".to_string().clone(),
+                ),
                 display_name: "https://mega.nz/folder/test".to_string(),
                 status: PackageStatus::Queued,
                 error: None,
@@ -965,7 +989,9 @@ mod tests {
                 package: ResolvedPackage {
                     id: package_id("batch-folder", "https://mega.nz/folder/test"),
                     source_url: "https://mega.nz/folder/test".to_string(),
-                    key: crate::core::PackageKey::new("https://mega.nz/folder/test".to_string().clone()),
+                    key: crate::core::PackageKey::new(
+                        "https://mega.nz/folder/test".to_string().clone(),
+                    ),
                     display_name: "Folder".to_string(),
                     files: vec![ResolvedFile {
                         file_id: "b.bin".to_string(),
