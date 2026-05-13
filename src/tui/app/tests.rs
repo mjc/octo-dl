@@ -1178,6 +1178,81 @@ fn sorted_file_indices_group_by_package_before_status() {
 }
 
 #[test]
+fn expanded_package_orders_files_error_downloading_queued_complete() {
+    let mut app = test_app();
+    let package_id = package_id("pkg", "https://mega.nz/folder/root");
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id,
+            source_url: "https://mega.nz/folder/root".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string().clone()),
+            display_name: "Package".to_string(),
+            files: vec![
+                ResolvedFile {
+                    file_id: "queued.bin".to_string(),
+                    path: "queued.bin".to_string(),
+                    size: 10,
+                },
+                ResolvedFile {
+                    file_id: "complete.bin".to_string(),
+                    path: "complete.bin".to_string(),
+                    size: 10,
+                },
+                ResolvedFile {
+                    file_id: "downloading.bin".to_string(),
+                    path: "downloading.bin".to_string(),
+                    size: 10,
+                },
+                ResolvedFile {
+                    file_id: "error.bin".to_string(),
+                    path: "error.bin".to_string(),
+                    size: 10,
+                },
+            ],
+            collision: None,
+        },
+    });
+    app.expanded_packages.insert(package_id);
+    app.apply_core_event(CoreEvent::FileQueued {
+        file_id: "queued.bin".to_string(),
+    });
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: "complete.bin".to_string(),
+    });
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: "downloading.bin".to_string(),
+        size: 10,
+    });
+    app.apply_core_event(CoreEvent::FileFailed {
+        file_id: "error.bin".to_string(),
+        message: "boom".to_string(),
+    });
+
+    assert_eq!(
+        app.visible_rows(),
+        vec![
+            TuiRow::Package(package_id),
+            TuiRow::File {
+                package_id: Some(package_id),
+                file_id: "error.bin".to_string(),
+            },
+            TuiRow::File {
+                package_id: Some(package_id),
+                file_id: "downloading.bin".to_string(),
+            },
+            TuiRow::File {
+                package_id: Some(package_id),
+                file_id: "queued.bin".to_string(),
+            },
+            TuiRow::File {
+                package_id: Some(package_id),
+                file_id: "complete.bin".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
 fn pause_downloads_queues_core_backed_active_files() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {

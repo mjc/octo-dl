@@ -285,11 +285,16 @@ impl DownloadState {
         }
     }
 
-    #[must_use]
-    pub fn package_file_ids(&self, package_id: &PackageId) -> Vec<FileId> {
+    pub fn package_files(&self, package_id: &PackageId) -> impl Iterator<Item = &FileState> + '_ {
+        let package_id = *package_id;
         self.files
             .values()
-            .filter(|file| &file.package_id == package_id)
+            .filter(move |file| file.package_id == package_id)
+    }
+
+    #[must_use]
+    pub fn package_file_ids(&self, package_id: &PackageId) -> Vec<FileId> {
+        self.package_files(package_id)
             .map(|file| file.id.clone())
             .collect()
     }

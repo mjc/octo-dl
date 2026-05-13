@@ -365,50 +365,56 @@ impl App {
                 .packages
                 .values()
                 .filter_map(|package| {
-                    let file_ids = self.core_state.package_file_ids(&package.id);
-                    if file_ids.is_empty() {
+                    let package_files = self
+                        .core_state
+                        .package_files(&package.id)
+                        .collect::<Vec<_>>();
+                    if package_files.is_empty() {
                         return None;
                     }
-                    let (present, complete, downloaded, size) = file_ids
+                    let file_ids = package_files
                         .iter()
-                        .filter_map(|id| self.core_state.files.get(id))
-                        .fold(
-                            (0_usize, 0_usize, 0_u64, 0_u64),
-                            |(present, complete, downloaded, size), file| {
-                                if matches!(
-                                    file.lifecycle,
-                                    FileLifecycle::Skipped | FileLifecycle::Deleted
-                                ) {
-                                    return (present, complete, downloaded, size);
-                                }
-                                let file_complete =
-                                    matches!(file.lifecycle, FileLifecycle::Complete);
-                                let visible = if file_complete {
-                                    file.size
-                                } else {
-                                    file.progress.visible_completed_bytes.min(file.size)
-                                };
-                                (
-                                    present + 1,
-                                    complete + usize::from(file_complete),
-                                    downloaded.saturating_add(visible),
-                                    size.saturating_add(file.size),
-                                )
-                            },
-                        );
+                        .map(|file| file.id.clone())
+                        .collect::<Vec<_>>();
+                    let mut present = 0_usize;
+                    let mut complete = 0_usize;
+                    let mut downloaded = 0_u64;
+                    let mut size = 0_u64;
+                    let mut source_url = None;
+                    let mut common_folder = None;
+                    let mut folder_conflict = false;
+
+                    for file in &package_files {
+                        source_url = source_url.or_else(|| file.source_url.clone());
+                        let folder = file.path.split('/').next().filter(|part| !part.is_empty());
+                        match (common_folder, folder) {
+                            (None, Some(folder)) => common_folder = Some(folder),
+                            (Some(existing), Some(folder)) if existing == folder => {}
+                            (Some(_), Some(_)) => folder_conflict = true,
+                            _ => {}
+                        }
+
+                        if matches!(
+                            file.lifecycle,
+                            FileLifecycle::Skipped | FileLifecycle::Deleted
+                        ) {
+                            continue;
+                        }
+                        let file_complete = matches!(file.lifecycle, FileLifecycle::Complete);
+                        let visible = if file_complete {
+                            file.size
+                        } else {
+                            file.progress.visible_completed_bytes.min(file.size)
+                        };
+                        present += 1;
+                        complete += usize::from(file_complete);
+                        downloaded = downloaded.saturating_add(visible);
+                        size = size.saturating_add(file.size);
+                    }
+
                     Some(DashboardPackageRow {
                         id: package.id.to_string(),
-                        source_url: self
-                            .core_state
-                            .package_file_ids(&package.id)
-                            .into_iter()
-                            .find_map(|file_id| {
-                                self.core_state
-                                    .files
-                                    .get(&file_id)
-                                    .and_then(|file| file.source_url.clone())
-                            })
-                            .unwrap_or_default(),
+                        source_url: source_url.unwrap_or_default(),
                         display_name: package.display_name.clone(),
                         status: package.status,
                         file_ids,
@@ -419,7 +425,9 @@ impl App {
                         percent: percent(downloaded, size),
                         expanded: self.expanded_packages.contains(&package.id)
                             || matches!(package.status, PackageStatus::Failed),
-                        folder_label: self.folder_label_from_package_files(&package.id),
+                        folder_label: (!folder_conflict)
+                            .then(|| common_folder.map(str::to_string))
+                            .flatten(),
                         error: package.error.clone(),
                     })
                 })
@@ -467,27 +475,6 @@ impl App {
                 }
             })
             .collect()
-    }
-
-    fn folder_label_from_package_files(
-        &self,
-        package_id: &crate::core::PackageId,
-    ) -> Option<String> {
-        let mut common: Option<&str> = None;
-        for file_id in &self.core_state.package_file_ids(package_id) {
-            let file = self.core_state.files.get(file_id)?;
-            let folder = file
-                .path
-                .split('/')
-                .next()
-                .filter(|part| !part.is_empty())?;
-            match common {
-                None => common = Some(folder),
-                Some(existing) if existing == folder => {}
-                Some(_) => return None,
-            }
-        }
-        common.map(str::to_string)
     }
 }
 
@@ -636,7 +623,9 @@ mod tests {
             package_id,
             crate::core::PackageState {
                 id: package_id,
-                key: crate::core::PackageKey::new("https://mega.nz/folder/failed".to_string().clone()),
+                key: crate::core::PackageKey::new(
+                    "https://mega.nz/folder/failed".to_string().clone(),
+                ),
                 display_name: "Failed".to_string(),
                 status: PackageStatus::Failed,
                 error: Some("boom".to_string()),
