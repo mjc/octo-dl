@@ -2,8 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::core::{
     CoreCommand, CoreEffect, CoreEvent, PackageId, ResolvedFile, ResolvedPackage, RestartSnapshot,
-    SavedCredentials, SessionSnapshotV3, build_restart_snapshot, reduce,
-    snapshot_from_state,
+    SavedCredentials, SessionSnapshotV3, build_restart_snapshot, reduce, snapshot_from_state,
 };
 
 use super::{
@@ -375,10 +374,7 @@ impl App {
             } else {
                 "Queued"
             };
-            self.status = format!(
-                "{activity} ({}/{})",
-                self.files_completed, self.files_total
-            );
+            self.status = format!("{activity} ({}/{})", self.files_completed, self.files_total);
         }
     }
 

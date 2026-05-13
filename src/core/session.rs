@@ -165,12 +165,10 @@ impl SessionSnapshotV3 {
 
     pub fn save(&self) -> std::io::Result<()> {
         let mut normalized = self.clone();
-        normalize_snapshot(&mut normalized).map_err(|error| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, error)
-        })?;
-        validate_snapshot(&normalized).map_err(|error| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, error)
-        })?;
+        normalize_snapshot(&mut normalized)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        validate_snapshot(&normalized)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let dir = Self::state_dir();
         std::fs::create_dir_all(&dir)?;
         let path = self.state_path();
@@ -245,7 +243,10 @@ impl SessionSnapshotV3 {
             }
         }
 
-        canonical_sessions.into_iter().next().map(|(_, session)| session)
+        canonical_sessions
+            .into_iter()
+            .next()
+            .map(|(_, session)| session)
     }
 
     pub fn mark_file_complete(&mut self, file_id: &str) {
@@ -362,10 +363,10 @@ pub fn normalize_snapshot(snapshot: &mut SessionSnapshotV3) -> Result<(), String
         let paths = grouped_paths.get(&package_id).cloned().unwrap_or_default();
         let display_name = canonical_package_display_name(
             existing_packages
-            .get(&package_id)
-            .map(|package| package.display_name.clone())
-            .as_deref()
-            .unwrap_or(""),
+                .get(&package_id)
+                .map(|package| package.display_name.clone())
+                .as_deref()
+                .unwrap_or(""),
             &paths,
         );
         let error = existing_packages
@@ -402,10 +403,7 @@ pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
 
     let mut package_keys = std::collections::HashSet::new();
     for package in &snapshot.packages {
-        if packages_by_id
-            .insert(package.id.clone(), package)
-            .is_some()
-        {
+        if packages_by_id.insert(package.id.clone(), package).is_some() {
             return Err(format!("duplicate package id {}", package.id));
         }
         if !package_keys.insert(package.key.clone()) {
@@ -755,8 +753,10 @@ mod tests {
 
         assert!(SessionSnapshotV3::latest().is_none());
         assert!(!path.exists());
-        assert!(SessionSnapshotV3::state_dir()
-            .join("session-v4-empty.invalid.bak")
-            .exists());
+        assert!(
+            SessionSnapshotV3::state_dir()
+                .join("session-v4-empty.invalid.bak")
+                .exists()
+        );
     }
 }
