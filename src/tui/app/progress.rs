@@ -182,30 +182,33 @@ impl App {
     }
 
     pub fn recompute_totals(&mut self) {
-        self.total_size = self.core_state.totals.run_total_bytes;
-        self.total_downloaded = self.core_state.totals.run_completed_bytes;
-        self.files_completed = self.core_state.totals.run_file_completed;
-        self.files_total = self.core_state.totals.run_file_total;
-        self.total_network_downloaded = self.core_state.totals.displayed_network_bytes;
+        let mut total_size = self.core_state.totals.run_total_bytes;
+        let mut total_downloaded = self.core_state.totals.run_completed_bytes;
+        let mut files_completed = self.core_state.totals.run_file_completed;
+        let mut files_total = self.core_state.totals.run_file_total;
+        let mut total_network_downloaded = self.core_state.totals.displayed_network_bytes;
 
-        for file in &self.files {
-            if self.core_state.files.contains_key(&file.id)
-                || !self.overlay_counts_toward_progress(&file.id)
-            {
+        for (id, overlay) in &self.overlay_files {
+            if self.core_state.files.contains_key(id) || !overlay.counts_toward_progress {
                 continue;
             }
-            self.total_size = self.total_size.saturating_add(file.size);
-            self.total_downloaded = self.total_downloaded.saturating_add(file.downloaded);
-            self.total_network_downloaded = self
-                .total_network_downloaded
-                .saturating_add(file.downloaded);
+            let file = &overlay.file;
+            total_size = total_size.saturating_add(file.size);
+            total_downloaded = total_downloaded.saturating_add(file.downloaded);
+            total_network_downloaded = total_network_downloaded.saturating_add(file.downloaded);
             if matches!(file.status, FileStatus::Complete) {
-                self.files_completed = self.files_completed.saturating_add(1);
+                files_completed = files_completed.saturating_add(1);
             }
             if !matches!(file.status, FileStatus::Error(_)) {
-                self.files_total = self.files_total.saturating_add(1);
+                files_total = files_total.saturating_add(1);
             }
         }
+
+        self.total_size = total_size;
+        self.total_downloaded = total_downloaded;
+        self.files_completed = files_completed;
+        self.files_total = files_total;
+        self.total_network_downloaded = total_network_downloaded;
 
         if self.total_downloaded > self.total_size || self.files_completed > self.files_total {
             self.log_state_diagnostics("recompute_totals_impossible");

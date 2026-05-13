@@ -209,13 +209,17 @@ fn file_queued_from_deleted_url_is_ignored() {
 #[test]
 fn handle_file_complete_is_idempotent_for_visible_complete_rows() {
     let mut app = test_app();
-    app.files.push(FileEntry {
-        id: "file-id".to_string(),
-        name: "file.mkv".to_string(),
-        size: 128,
-        downloaded: 128,
-        status: FileStatus::Complete,
-    });
+    app.upsert_overlay_file(
+        FileEntry {
+            id: "file-id".to_string(),
+            name: "file.mkv".to_string(),
+            size: 128,
+            downloaded: 128,
+            status: FileStatus::Complete,
+        },
+        None,
+        true,
+    );
     app.recompute_totals();
     assert_eq!(app.files_completed, 1);
 

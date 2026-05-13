@@ -1,6 +1,15 @@
 use super::{App, FileEntry, FileStatus, OverlayFile, VisibleFileContext};
 
 impl App {
+    pub(crate) fn counted_overlay_files(
+        &self,
+    ) -> impl Iterator<Item = (&str, &OverlayFile)> + '_ {
+        self.overlay_files.iter().filter_map(|(id, overlay)| {
+            (!self.core_state.files.contains_key(id) && overlay.counts_toward_progress)
+                .then_some((id.as_str(), overlay))
+        })
+    }
+
     fn seed_overlay_from_visible(&mut self) {
         super::super::visible::seed_overlay_from_visible(
             &self.files,
@@ -162,13 +171,6 @@ impl App {
 
     pub(crate) fn show_ui_error_only(&mut self, name: &str, error: &str) {
         self.show_overlay_error(name, name, error, false);
-    }
-
-    pub(crate) fn overlay_counts_toward_progress(&self, id: &str) -> bool {
-        self.overlay_files
-            .get(id)
-            .map(|overlay| overlay.counts_toward_progress)
-            .unwrap_or(true)
     }
 }
 
