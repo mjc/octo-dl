@@ -8,7 +8,10 @@ use base64::Engine;
 use regex::Regex;
 
 static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"https?://mega\.nz/(?:file|folder)/[^\s"'<>\[\](){}]+"#).expect("valid regex")
+    Regex::new(
+        r#"https?://mega\.nz/(?:(?:file|folder)/[^\s"'<>\[\](){}]+|#(?:!|F!)[^\s"'<>\[\](){}]+)"#,
+    )
+    .expect("valid regex")
 });
 
 /// Extracts MEGA URLs and DLC file paths from raw input text.
@@ -27,9 +30,9 @@ pub fn extract_urls(input: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut result: Vec<String> = Vec::new();
 
-    // Pull modern-format URLs out of the entire input.
+    // Pull MEGA URLs out of the entire input.
     for m in URL_RE.find_iter(input) {
-        let url = m.as_str().to_string();
+        let url = normalize_mega_url(m.as_str()).unwrap_or_else(|| m.as_str().to_string());
         if seen.insert(url.clone()) {
             result.push(url);
         }
@@ -76,9 +79,9 @@ fn try_decode_base64(
         };
         decoded = s;
 
-        // Check for modern URLs in decoded result
+        // Check for MEGA URLs in decoded result.
         for m in URL_RE.find_iter(&decoded) {
-            let url = m.as_str().to_string();
+            let url = normalize_mega_url(m.as_str()).unwrap_or_else(|| m.as_str().to_string());
             if seen.insert(url.clone()) {
                 result.push(url);
             }
@@ -87,6 +90,39 @@ fn try_decode_base64(
             result.push(decoded.clone());
         }
     }
+}
+
+#[must_use]
+pub(crate) fn normalize_mega_url(url: &str) -> Option<String> {
+    let (scheme, payload) = url
+        .strip_prefix("https://mega.nz/")
+        .map(|payload| ("https", payload))
+        .or_else(|| {
+            url.strip_prefix("http://mega.nz/")
+                .map(|payload| ("http", payload))
+        })?;
+
+    if payload.starts_with("file/") || payload.starts_with("folder/") {
+        return Some(url.to_string());
+    }
+
+    if let Some(rest) = payload.strip_prefix("#!") {
+        let (node_id, node_key) = rest.split_once('!')?;
+        if node_id.is_empty() || node_key.is_empty() {
+            return None;
+        }
+        return Some(format!("{scheme}://mega.nz/file/{node_id}#{node_key}"));
+    }
+
+    if let Some(rest) = payload.strip_prefix("#F!") {
+        let (node_id, node_key) = rest.split_once('!')?;
+        if node_id.is_empty() || node_key.is_empty() {
+            return None;
+        }
+        return Some(format!("{scheme}://mega.nz/folder/{node_id}#{node_key}"));
+    }
+
+    None
 }
 
 /// Returns `true` if `s` looks like a path to a `.dlc` file.
@@ -311,24 +347,34 @@ mod tests {
         assert!(!is_dlc_path("noextension"));
     }
 
-    // --- extract_urls: legacy URLs ignored ---
+    // --- extract_urls: legacy URLs ---
 
     #[test]
-    fn extract_ignores_legacy_folder_url() {
+    fn extract_normalizes_legacy_folder_url() {
         let urls = extract_urls("https://mega.nz/#F!abc!key123");
-        assert!(urls.is_empty());
+        assert_eq!(urls, vec!["https://mega.nz/folder/abc#key123"]);
     }
 
     #[test]
-    fn extract_ignores_legacy_file_url() {
+    fn extract_normalizes_legacy_file_url() {
+        let urls =
+            extract_urls("https://mega.nz/#!x3JwHYgK!7l9e_rV1yVFCxd63F4zipoQyCjwyRT0pckkpvAdxm2M");
+        assert_eq!(
+            urls,
+            vec!["https://mega.nz/file/x3JwHYgK#7l9e_rV1yVFCxd63F4zipoQyCjwyRT0pckkpvAdxm2M"]
+        );
+    }
+
+    #[test]
+    fn extract_normalizes_short_legacy_file_url() {
         let urls = extract_urls("https://mega.nz/#!abc!key123");
-        assert!(urls.is_empty());
+        assert_eq!(urls, vec!["https://mega.nz/file/abc#key123"]);
     }
 
     #[test]
-    fn extract_ignores_base64_encoded_legacy_url() {
+    fn extract_normalizes_base64_encoded_legacy_url() {
         let encoded = STANDARD.encode("https://mega.nz/#!abc!key123");
         let urls = extract_urls(&encoded);
-        assert!(urls.is_empty());
+        assert_eq!(urls, vec!["https://mega.nz/file/abc#key123"]);
     }
 }
