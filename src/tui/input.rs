@@ -6,7 +6,9 @@ mod selection;
 #[cfg(test)]
 mod tests;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use tui_input::backend::crossterm::to_input_request;
+use tui_input::{Input, InputRequest};
 
 use crate::extract_urls;
 
@@ -47,6 +49,7 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Char('a' | 'i') => {
             app.url_input_active = true;
+            app.url_input_cursor = app.url_input.chars().count();
         }
         KeyCode::Char('p') => {
             app.handle_ui_action(UiAction::TogglePause);
@@ -89,6 +92,7 @@ fn handle_url_input(app: &mut App, key: KeyEvent) {
             if !extracted.is_empty() {
                 app.handle_ui_action(UiAction::AddUrls(extracted));
                 app.url_input.clear();
+                app.url_input_cursor = 0;
                 app.url_input_active = false;
             } else if trimmed.is_empty() {
                 app.status = "Enter a URL or press Esc to cancel".to_string();
@@ -98,15 +102,10 @@ fn handle_url_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Esc => {
             app.url_input.clear();
+            app.url_input_cursor = 0;
             app.url_input_active = false;
         }
-        KeyCode::Char(c) => {
-            app.url_input.push(c);
-        }
-        KeyCode::Backspace => {
-            app.url_input.pop();
-        }
-        _ => {}
+        _ => handle_url_edit_key(app, key),
     }
 }
 
@@ -120,8 +119,42 @@ pub fn handle_paste(app: &mut App, text: &str) {
         Popup::Config | Popup::Confirm | Popup::Sort => {}
         Popup::None => {
             // Append pasted text to URL input, replacing newlines with spaces
+            if !app.url_input_active {
+                app.url_input_cursor = app.url_input.chars().count();
+            }
             app.url_input_active = true;
-            app.url_input.push_str(&text.replace(['\n', '\r'], " "));
+            let mut input = url_input_state(app);
+            let text = text.replace(['\n', '\r'], " ");
+            for c in text.chars() {
+                input.handle(InputRequest::InsertChar(c));
+            }
+            sync_url_input(app, input);
         }
     }
+}
+
+fn handle_url_edit_key(app: &mut App, key: KeyEvent) {
+    let mut input = url_input_state(app);
+    let request = match (key.code, key.modifiers) {
+        (KeyCode::Left, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+            Some(InputRequest::GoToPrevWord)
+        }
+        (KeyCode::Right, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+            Some(InputRequest::GoToNextWord)
+        }
+        _ => to_input_request(&Event::Key(key)),
+    };
+    if let Some(request) = request {
+        input.handle(request);
+        sync_url_input(app, input);
+    }
+}
+
+fn url_input_state(app: &App) -> Input {
+    Input::new(app.url_input.clone()).with_cursor(app.url_input_cursor)
+}
+
+fn sync_url_input(app: &mut App, input: Input) {
+    app.url_input = input.value().to_string();
+    app.url_input_cursor = input.cursor();
 }

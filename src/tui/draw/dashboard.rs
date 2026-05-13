@@ -391,7 +391,11 @@ pub(super) fn dashboard_aggregate_progress_label(
     )
 }
 
-pub(super) fn focused_url_input_view(value: &str, width: u16) -> (String, Option<u16>) {
+pub(super) fn focused_url_input_view(
+    value: &str,
+    cursor: usize,
+    width: u16,
+) -> (String, Option<u16>) {
     if width == 0 {
         return (String::new(), None);
     }
@@ -402,13 +406,15 @@ pub(super) fn focused_url_input_view(value: &str, width: u16) -> (String, Option
     }
 
     let char_count = value.chars().count();
+    let cursor = cursor.min(char_count);
     if char_count <= visible_width {
-        return (value.to_string(), Some(char_count as u16));
+        return (value.to_string(), Some(cursor as u16));
     }
 
+    let start = cursor.saturating_sub(visible_width);
     (
-        take_last_chars(value, visible_width),
-        Some(width.saturating_sub(1)),
+        value.chars().skip(start).take(visible_width).collect(),
+        Some((cursor - start) as u16),
     )
 }
 
@@ -455,25 +461,6 @@ fn compact_label(value: &str) -> String {
         .find(|part| !part.is_empty())
         .unwrap_or(value)
         .to_string()
-}
-
-fn take_last_chars(value: &str, max_chars: usize) -> String {
-    if value.is_ascii() {
-        let start = value.len().saturating_sub(max_chars);
-        return value[start..].to_string();
-    }
-    if text_width(value) <= max_chars {
-        return value.to_string();
-    }
-
-    value
-        .chars()
-        .rev()
-        .take(max_chars)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
 }
 
 pub(super) fn truncate_end(value: &str, max_chars: usize) -> String {

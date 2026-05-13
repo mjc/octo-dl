@@ -36,6 +36,20 @@ fn ctrl_key(code: KeyCode) -> KeyEvent {
     }
 }
 
+fn alt_key(code: KeyCode) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers: KeyModifiers::ALT,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
+}
+
+fn activate_url_input(app: &mut App) {
+    app.url_input_active = true;
+    app.url_input_cursor = app.url_input.chars().count();
+}
+
 fn confirm(app: &mut App) {
     assert_eq!(app.popup, Popup::Confirm);
     handle_input(app, key(KeyCode::Char('y')));
@@ -83,7 +97,7 @@ fn handle_main_input_esc_quit_when_empty() {
 fn handle_main_input_esc_clears_url_when_nonempty() {
     let mut app = test_app();
     app.url_input = "some text".to_string();
-    app.url_input_active = true;
+    activate_url_input(&mut app);
     handle_input(&mut app, key(KeyCode::Esc));
     assert!(!app.should_quit);
     assert!(app.url_input.is_empty());
@@ -111,7 +125,7 @@ fn handle_main_input_ignores_unmapped_keys_in_command_mode() {
 fn handle_main_input_typing_q_does_not_quit_in_url_mode() {
     let mut app = test_app();
     app.url_input = "https://example".to_string();
-    app.url_input_active = true;
+    activate_url_input(&mut app);
     handle_input(&mut app, key(KeyCode::Char('q')));
     assert!(!app.should_quit);
     assert_eq!(app.url_input, "https://exampleq");
@@ -121,9 +135,63 @@ fn handle_main_input_typing_q_does_not_quit_in_url_mode() {
 fn handle_main_input_backspace() {
     let mut app = test_app();
     app.url_input = "abc".to_string();
-    app.url_input_active = true;
+    activate_url_input(&mut app);
     handle_input(&mut app, key(KeyCode::Backspace));
     assert_eq!(app.url_input, "ab");
+}
+
+#[test]
+fn handle_url_input_ctrl_w_deletes_previous_word() {
+    let mut app = test_app();
+    app.url_input = "alpha beta".to_string();
+    activate_url_input(&mut app);
+
+    handle_input(&mut app, ctrl_key(KeyCode::Char('w')));
+
+    assert_eq!(app.url_input, "alpha ");
+    assert_eq!(app.url_input_cursor, "alpha ".chars().count());
+}
+
+#[test]
+fn handle_url_input_alt_arrows_move_by_word() {
+    let mut app = test_app();
+    app.url_input = "alpha beta gamma".to_string();
+    activate_url_input(&mut app);
+
+    handle_input(&mut app, alt_key(KeyCode::Left));
+    handle_input(&mut app, key(KeyCode::Char('X')));
+    handle_input(&mut app, alt_key(KeyCode::Right));
+    handle_input(&mut app, key(KeyCode::Char('!')));
+
+    assert_eq!(app.url_input, "alpha beta Xgamma!");
+}
+
+#[test]
+fn handle_url_input_ctrl_a_and_ctrl_e_move_to_edges() {
+    let mut app = test_app();
+    app.url_input = "middle".to_string();
+    activate_url_input(&mut app);
+
+    handle_input(&mut app, ctrl_key(KeyCode::Char('a')));
+    handle_input(&mut app, key(KeyCode::Char('^')));
+    handle_input(&mut app, ctrl_key(KeyCode::Char('e')));
+    handle_input(&mut app, key(KeyCode::Char('$')));
+
+    assert_eq!(app.url_input, "^middle$");
+}
+
+#[test]
+fn handle_url_input_delete_edits_at_cursor() {
+    let mut app = test_app();
+    app.url_input = "abc".to_string();
+    activate_url_input(&mut app);
+
+    handle_input(&mut app, key(KeyCode::Home));
+    handle_input(&mut app, key(KeyCode::Right));
+    handle_input(&mut app, key(KeyCode::Delete));
+    handle_input(&mut app, key(KeyCode::Char('X')));
+
+    assert_eq!(app.url_input, "aXc");
 }
 
 #[test]
@@ -842,7 +910,7 @@ fn handle_main_input_url_submit() {
     let (url_tx, mut url_rx) = mpsc::unbounded_channel();
     app.url_tx = url_tx;
     app.url_input = "https://mega.nz/file/test123".to_string();
-    app.url_input_active = true;
+    activate_url_input(&mut app);
 
     handle_input(&mut app, key(KeyCode::Enter));
 
@@ -861,7 +929,7 @@ fn handle_main_input_url_submit() {
 fn handle_main_input_empty_url_submit_sets_guidance_status() {
     let mut app = test_app();
     app.url_input = "   ".to_string();
-    app.url_input_active = true;
+    activate_url_input(&mut app);
 
     handle_input(&mut app, key(KeyCode::Enter));
 
@@ -874,7 +942,7 @@ fn handle_main_input_empty_url_submit_sets_guidance_status() {
 fn handle_main_input_invalid_url_submit_sets_error_status() {
     let mut app = test_app();
     app.url_input = "not a mega url".to_string();
-    app.url_input_active = true;
+    activate_url_input(&mut app);
 
     handle_input(&mut app, key(KeyCode::Enter));
 

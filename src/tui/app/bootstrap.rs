@@ -66,6 +66,7 @@ impl App {
             login: super::LoginState::new(),
             authenticated: false,
             url_input: String::new(),
+            url_input_cursor: 0,
             url_input_active: false,
             urls: Vec::new(),
             files: Vec::new(),

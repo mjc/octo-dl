@@ -179,14 +179,16 @@ impl DownloadDashboardState {
 
 pub struct DashboardChrome<'a> {
     pub url_input: &'a str,
+    pub url_input_cursor: usize,
     pub url_input_active: bool,
 }
 
 impl<'a> DashboardChrome<'a> {
     #[must_use]
-    pub const fn new(url_input: &'a str, url_input_active: bool) -> Self {
+    pub const fn new(url_input: &'a str, url_input_cursor: usize, url_input_active: bool) -> Self {
         Self {
             url_input,
+            url_input_cursor,
             url_input_active,
         }
     }
@@ -195,6 +197,7 @@ impl<'a> DashboardChrome<'a> {
     pub const fn read_only() -> Self {
         Self {
             url_input: "",
+            url_input_cursor: 0,
             url_input_active: false,
         }
     }
