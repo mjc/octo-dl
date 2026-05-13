@@ -66,6 +66,7 @@ pub(super) fn seed_overlay_from_visible(
 
 pub(super) fn sync_visible_files(
     files: &mut Vec<FileEntry>,
+    visible_file_positions: &mut HashMap<String, usize>,
     overlay_files: &mut IndexMap<String, OverlayFile>,
     file_ui: &mut HashMap<String, FileUiState>,
     file_list_state: &mut ListState,
@@ -110,6 +111,11 @@ pub(super) fn sync_visible_files(
     }
 
     *files = next_files;
+    *visible_file_positions = files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| (file.id.clone(), index))
+        .collect();
     let visible_ids: HashSet<_> = files.iter().map(|file| file.id.clone()).collect();
     file_ui.retain(|file_id, _| visible_ids.contains(file_id));
     let visible_rows = visible_rows_for(files, core_state, overlay_files, expanded_packages, sort);

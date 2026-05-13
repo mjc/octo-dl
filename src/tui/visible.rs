@@ -49,6 +49,7 @@ pub(super) fn seed_overlay_from_visible(
 
 pub(super) fn sync_visible_files(
     files: &mut Vec<FileEntry>,
+    visible_file_positions: &mut HashMap<String, usize>,
     overlay_files: &mut IndexMap<String, OverlayFile>,
     file_ui: &mut HashMap<String, FileUiState>,
     file_list_state: &mut ListState,
@@ -60,6 +61,7 @@ pub(super) fn sync_visible_files(
 ) {
     sync::sync_visible_files(
         files,
+        visible_file_positions,
         overlay_files,
         file_ui,
         file_list_state,
