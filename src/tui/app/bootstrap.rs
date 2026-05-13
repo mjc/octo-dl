@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     DownloadConfig, ServiceConfig,
-    core::{DownloadState, SessionMeta, SessionSnapshotV3},
+    core::{DownloadState, SessionMeta, SessionSnapshot},
 };
 
 use crate::tui::dashboard::DashboardUiMode;
@@ -32,7 +32,7 @@ fn path_io_error(action: &str, path: &Path, error: io::Error) -> io::Error {
 }
 
 fn state_dir_service_config_path() -> PathBuf {
-    let mut path = SessionSnapshotV3::state_dir();
+    let mut path = SessionSnapshot::state_dir();
     path.pop();
     path.push("config.toml");
     path

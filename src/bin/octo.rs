@@ -287,7 +287,7 @@ fn native_tui_log_writer() -> Box<dyn Write + Send> {
 }
 
 fn native_tui_log_path() -> PathBuf {
-    let mut path = octo_dl::SessionSnapshotV3::state_dir();
+    let mut path = octo_dl::SessionSnapshot::state_dir();
     path.pop();
     path.push("native-tui.log");
     path

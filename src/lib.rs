@@ -50,7 +50,7 @@ pub mod url;
 
 // Re-export main types for convenience
 pub use config::{ApiConfig, DownloadConfig, ServiceConfig, ServiceCredentials};
-pub use core::{FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3};
+pub use core::{FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshot};
 pub use dlc::{DlcKeyCache, parse_dlc_data, parse_dlc_file};
 pub use download::{
     CollectedFiles, DownloadItem, DownloadProgress, Downloader, FileStatus, NoProgress,

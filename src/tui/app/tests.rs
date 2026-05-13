@@ -763,7 +763,7 @@ fn core_persisted_session_snapshot_is_saved_to_disk() {
         },
     });
 
-    let session = crate::core::SessionSnapshotV3::latest().expect("session should be saved");
+    let session = crate::core::SessionSnapshot::latest().expect("session should be saved");
     assert_eq!(session.packages.len(), 1);
     assert_eq!(session.packages[0].key.as_str(), "Root");
     assert_eq!(session.files.len(), 1);

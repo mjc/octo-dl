@@ -5,7 +5,7 @@ use crate::core::model::{
     DesiredState, DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
     PackageState, PackageStatus, SessionMeta, UrlId,
 };
-use crate::core::session::SessionSnapshotV3;
+use crate::core::session::SessionSnapshot;
 use chrono::Utc;
 use indexmap::IndexMap;
 
@@ -107,7 +107,7 @@ where
 }
 
 #[must_use]
-pub fn build_restart_snapshot(session: &SessionSnapshotV3) -> RestartSnapshot {
+pub fn build_restart_snapshot(session: &SessionSnapshot) -> RestartSnapshot {
     reconcile_restart(
         Some(canonical_restart_session(session.clone())),
         scan_filesystem(session.files.iter().map(|file| file.path.clone())),
@@ -116,7 +116,7 @@ pub fn build_restart_snapshot(session: &SessionSnapshotV3) -> RestartSnapshot {
 }
 
 pub fn reconcile_restart(
-    session: Option<SessionSnapshotV3>,
+    session: Option<SessionSnapshot>,
     fs: FilesystemSnapshot,
     urls: Vec<UrlId>,
 ) -> RestartSnapshot {
@@ -279,7 +279,7 @@ pub fn reconcile_restart(
     }
 }
 
-fn canonical_restart_session(mut snapshot: SessionSnapshotV3) -> SessionSnapshotV3 {
+fn canonical_restart_session(mut snapshot: SessionSnapshot) -> SessionSnapshot {
     crate::core::normalize_snapshot(&mut snapshot)
         .expect("restart snapshots should be canonicalizable");
     snapshot
@@ -291,15 +291,15 @@ mod tests {
     use crate::core::RuntimeState;
     use crate::core::model::SessionRunStatus;
     use crate::core::session::{
-        FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
+        FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
     };
 
     fn package_id(raw: &str, source_url: &str) -> PackageId {
         PackageId::parse_or_key(raw, &crate::core::PackageKey::new(source_url))
     }
 
-    fn sample_snapshot() -> SessionSnapshotV3 {
-        SessionSnapshotV3 {
+    fn sample_snapshot() -> SessionSnapshot {
+        SessionSnapshot {
             version: 4,
             id: "session".to_string().into(),
             created: Utc::now(),
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn restart_does_not_synthesize_complete_files_missing_from_session() {
-        let mut snapshot = SessionSnapshotV3::new(
+        let mut snapshot = SessionSnapshot::new(
             crate::config::DownloadConfig::default(),
             SavedCredentials::encrypt("u", "p", None),
         );
@@ -592,7 +592,7 @@ mod tests {
 
     #[test]
     fn restart_does_not_synthesize_partial_files_missing_from_session() {
-        let mut snapshot = SessionSnapshotV3::new(
+        let mut snapshot = SessionSnapshot::new(
             crate::config::DownloadConfig::default(),
             SavedCredentials::encrypt("u", "p", None),
         );

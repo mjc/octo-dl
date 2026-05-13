@@ -21,6 +21,6 @@ pub use restart::{
     build_restart_snapshot, reconcile_restart, scan_filesystem,
 };
 pub use session::{
-    FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
+    FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
     decrypt_credential, encrypt_credential, normalize_snapshot, queued_file_snapshot,
 };

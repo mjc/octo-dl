@@ -15,7 +15,7 @@ use crate::{
     SessionStats, SessionStatsBuilder,
     core::{
         PackageId, PackageKey, PackageSnapshot, ProgressDelta, SavedCredentials, SessionRunStatus,
-        SessionSnapshotV3, SessionUrlSnapshot, build_restart_snapshot, normalize_snapshot,
+        SessionSnapshot, SessionUrlSnapshot, build_restart_snapshot, normalize_snapshot,
     },
     download::{infer_package_display_name, infer_package_id},
     format_bytes, format_duration, is_dlc_path,
@@ -283,7 +283,7 @@ fn print_summary(stats: &SessionStats) {
 }
 
 fn ensure_session_url<'a>(
-    session: &'a mut SessionSnapshotV3,
+    session: &'a mut SessionSnapshot,
     url: &str,
 ) -> &'a mut SessionUrlSnapshot {
     if let Some(index) = session.urls.iter().position(|entry| entry.url == url) {
@@ -296,27 +296,27 @@ fn ensure_session_url<'a>(
     session.urls.last_mut().expect("url was just pushed")
 }
 
-fn mark_session_file_complete(session: &mut SessionSnapshotV3, file_id: &str) {
+fn mark_session_file_complete(session: &mut SessionSnapshot, file_id: &str) {
     session.mark_file_complete(file_id);
 }
 
-fn mark_session_file_error(session: &mut SessionSnapshotV3, file_id: &str, error: &str) {
+fn mark_session_file_error(session: &mut SessionSnapshot, file_id: &str, error: &str) {
     session.mark_file_error(file_id, error);
 }
 
 #[must_use]
-fn session_completed_count(session: &SessionSnapshotV3) -> usize {
+fn session_completed_count(session: &SessionSnapshot) -> usize {
     session.completed_count()
 }
 
 #[must_use]
-fn session_remaining_count(session: &SessionSnapshotV3) -> usize {
+fn session_remaining_count(session: &SessionSnapshot) -> usize {
     session.remaining_count()
 }
 
-fn persist_session(session: &mut SessionSnapshotV3) -> crate::Result<()> {
+fn persist_session(session: &mut SessionSnapshot) -> crate::Result<()> {
     session.save()?;
-    *session = SessionSnapshotV3::load(&session.state_path())?;
+    *session = SessionSnapshot::load(&session.state_path())?;
     Ok(())
 }
 
@@ -351,7 +351,7 @@ async fn collect_cli_package_files<'a>(
 }
 
 fn register_cli_package_in_session(
-    session: &mut SessionSnapshotV3,
+    session: &mut SessionSnapshot,
     source_url: &str,
     package: &CliPackageFiles<'_>,
 ) {
@@ -379,7 +379,7 @@ fn register_cli_package_in_session(
 }
 
 #[cfg(test)]
-fn resumable_urls(session: &SessionSnapshotV3) -> Vec<(usize, String)> {
+fn resumable_urls(session: &SessionSnapshot) -> Vec<(usize, String)> {
     let restart = build_restart_snapshot(session);
     restart
         .resumable_urls()
@@ -400,7 +400,7 @@ async fn download_all(
     files: &[DownloadItem<'_>],
     progress: &Arc<CliDownloadProgress>,
     builder: &mut SessionStatsBuilder,
-    mut session_state: Option<&mut SessionSnapshotV3>,
+    mut session_state: Option<&mut SessionSnapshot>,
 ) -> crate::Result<()> {
     if files.is_empty() {
         return Ok(());
@@ -569,7 +569,7 @@ pub async fn run() -> crate::Result<()> {
 
     // Check for resumable session
     if config.resume {
-        if let Some(session) = SessionSnapshotV3::latest() {
+        if let Some(session) = SessionSnapshot::latest() {
             println!(
                 "Resuming session {} ({} files, {} completed)",
                 session.id,
@@ -581,7 +581,7 @@ pub async fn run() -> crate::Result<()> {
         println!("No resumable session found, starting fresh.");
     } else if config.urls.is_empty() && config.dlc_files.is_empty() {
         // Check if there's a session to resume
-        if let Some(session) = SessionSnapshotV3::latest() {
+        if let Some(session) = SessionSnapshot::latest() {
             println!(
                 "Found incomplete session: {} ({} remaining files)",
                 session.id,
@@ -641,7 +641,7 @@ pub async fn run() -> crate::Result<()> {
     let downloader = crate::Downloader::new(client, config.download_config.clone());
     let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
-    let mut session_state = SessionSnapshotV3::new(
+    let mut session_state = SessionSnapshot::new(
         config.download_config.clone(),
         SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
     );
@@ -738,7 +738,7 @@ pub async fn run() -> crate::Result<()> {
 }
 
 /// Resume a previous incomplete session.
-async fn resume_session(mut session: SessionSnapshotV3, config: &CliConfig) -> crate::Result<()> {
+async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> crate::Result<()> {
     let restart = build_restart_snapshot(&session);
     // Decrypt credentials
     let (email, password, mfa) = session

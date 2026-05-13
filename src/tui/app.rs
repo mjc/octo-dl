@@ -27,7 +27,7 @@ use ratatui::widgets::ListState;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::{DownloadState, FileId, PackageId, ProgressDelta, SessionSnapshotV3};
+use crate::core::{DownloadState, FileId, PackageId, ProgressDelta, SessionSnapshot};
 use crate::tui::dashboard::DashboardUiMode;
 
 pub(crate) use self::progress::FileUiState;
@@ -109,7 +109,7 @@ pub struct App {
     // Files reset from the UI — used to suppress stale terminal events from the old attempt
     pub reset_pending_files: HashSet<FileId>,
     // Session
-    pub session: Option<SessionSnapshotV3>,
+    pub session: Option<SessionSnapshot>,
     pub core_state: DownloadState,
     // API port for display
     pub api_port: u16,
