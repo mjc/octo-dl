@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     DownloadConfig,
-    core::{FileId, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot},
+    core::{FileId, SavedCredentials, SessionSnapshot, SessionUrlSnapshot},
     format_bytes,
     tui::dashboard::DashboardUiMode,
 };
@@ -166,7 +166,7 @@ impl App {
             return;
         }
 
-        let mut session = SessionSnapshotV3::new(config.clone(), credentials);
+        let mut session = SessionSnapshot::new(config.clone(), credentials);
         session.urls = self
             .urls
             .iter()
@@ -493,7 +493,7 @@ mod tests {
         let _guard = StateDirectoryGuard::set(dir.path());
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let mut app = App::new(9723, event_tx, true);
-        let mut session = SessionSnapshotV3::new(
+        let mut session = SessionSnapshot::new(
             DownloadConfig::default(),
             SavedCredentials::encrypt("stale@example.com", "stale-pass", Some("654321")),
         );
@@ -537,7 +537,7 @@ mod tests {
         app.ensure_download_session(&DownloadConfig::default());
 
         assert!(app.session.is_none());
-        assert!(SessionSnapshotV3::latest().is_none());
+        assert!(SessionSnapshot::latest().is_none());
     }
 
     #[test]

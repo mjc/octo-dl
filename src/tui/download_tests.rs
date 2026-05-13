@@ -13,7 +13,7 @@ fn test_app() -> App {
     App::new(9723, tx, true)
 }
 
-fn session_with_file(path: &str, size: u64) -> crate::SessionSnapshotV3 {
+fn session_with_file(path: &str, size: u64) -> crate::SessionSnapshot {
     let mut session = session_snapshot(vec![(
         "https://mega.nz/folder/root",
         UrlFixtureStatus::Fetched,

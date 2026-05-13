@@ -1,7 +1,7 @@
 use crate::config::DownloadConfig;
 use crate::core::{
     DesiredState, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
-    PackageSnapshot, RuntimeState, SavedCredentials, SessionSnapshotV3, SessionUrlSnapshot,
+    PackageSnapshot, RuntimeState, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
     normalize_snapshot,
 };
 use std::path::{Path, PathBuf};
@@ -69,8 +69,8 @@ pub fn package_id(raw: &str, source_url: &str) -> PackageId {
     PackageId::parse_or_key(raw, &PackageKey::new(source_url))
 }
 
-pub fn session_snapshot(urls: Vec<(&str, UrlFixtureStatus)>) -> SessionSnapshotV3 {
-    let mut session = SessionSnapshotV3::new(DownloadConfig::default(), test_credentials());
+pub fn session_snapshot(urls: Vec<(&str, UrlFixtureStatus)>) -> SessionSnapshot {
+    let mut session = SessionSnapshot::new(DownloadConfig::default(), test_credentials());
     session.urls = urls
         .into_iter()
         .map(|(url, status)| SessionUrlSnapshot {
@@ -85,7 +85,7 @@ pub fn session_snapshot(urls: Vec<(&str, UrlFixtureStatus)>) -> SessionSnapshotV
 }
 
 pub fn push_file(
-    session: &mut SessionSnapshotV3,
+    session: &mut SessionSnapshot,
     package_index: usize,
     path: &str,
     size: u64,

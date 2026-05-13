@@ -4,7 +4,7 @@ use indexmap::IndexMap;
 
 use crate::core::{
     CoreCommand, CoreEffect, CoreEvent, FileId, PackageId, ResolvedFile, ResolvedPackage,
-    RestartSnapshot, SavedCredentials, SessionSnapshotV3, build_restart_snapshot, reduce,
+    RestartSnapshot, SavedCredentials, SessionSnapshot, build_restart_snapshot, reduce,
     snapshot_from_state,
 };
 
@@ -202,7 +202,7 @@ impl App {
         }
     }
 
-    fn persist_core_session_snapshot(&mut self, snapshot: SessionSnapshotV3) {
+    fn persist_core_session_snapshot(&mut self, snapshot: SessionSnapshot) {
         self.persist_session(snapshot);
     }
 
@@ -213,7 +213,7 @@ impl App {
 
         let credentials =
             SavedCredentials::encrypt(self.login.email(), self.login.password(), None);
-        let session = SessionSnapshotV3::new(self.config.config.clone(), credentials);
+        let session = SessionSnapshot::new(self.config.config.clone(), credentials);
         self.save_and_install_session(session);
     }
 
@@ -330,7 +330,7 @@ impl App {
 
     pub(crate) fn mutate_session_and_save<R>(
         &mut self,
-        f: impl FnOnce(&mut SessionSnapshotV3) -> R,
+        f: impl FnOnce(&mut SessionSnapshot) -> R,
     ) -> Option<R> {
         self.session.clone().map(|mut session| {
             let result = f(&mut session);
@@ -339,7 +339,7 @@ impl App {
         })
     }
 
-    pub(crate) fn read_session<R>(&self, f: impl FnOnce(&SessionSnapshotV3) -> R) -> Option<R> {
+    pub(crate) fn read_session<R>(&self, f: impl FnOnce(&SessionSnapshot) -> R) -> Option<R> {
         self.session.as_ref().map(f)
     }
 
@@ -348,12 +348,12 @@ impl App {
             .mutate_session_and_save(|session| SessionAdapter::apply_run_update(session, update));
     }
 
-    pub(crate) fn install_session(&mut self, session: SessionSnapshotV3) {
+    pub(crate) fn install_session(&mut self, session: SessionSnapshot) {
         self.session = Some(session);
         self.seed_core_session_from_session();
     }
 
-    pub(crate) fn save_and_install_session(&mut self, session: SessionSnapshotV3) {
+    pub(crate) fn save_and_install_session(&mut self, session: SessionSnapshot) {
         let _ = self.persist_session(session);
     }
 
@@ -364,7 +364,7 @@ impl App {
     }
 
     pub(crate) fn resume_latest_session(&mut self) {
-        let Some(session) = SessionSnapshotV3::latest() else {
+        let Some(session) = SessionSnapshot::latest() else {
             return;
         };
         log::info!("Resuming session {}", session.id);
@@ -381,7 +381,7 @@ impl App {
 
     pub(crate) fn resume_from_restart(
         &mut self,
-        mut session: SessionSnapshotV3,
+        mut session: SessionSnapshot,
         restart: &RestartSnapshot,
     ) {
         self.restore_restart_snapshot(restart);
@@ -440,14 +440,14 @@ impl App {
         }
     }
 
-    fn persist_session(&mut self, session: SessionSnapshotV3) -> bool {
+    fn persist_session(&mut self, session: SessionSnapshot) -> bool {
         if let Err(error) = session.save() {
             log::error!("Failed to save session {}: {error}", session.id);
             self.status = format!("Failed to save session: {error}");
             return false;
         }
 
-        match SessionSnapshotV3::load(&session.state_path()) {
+        match SessionSnapshot::load(&session.state_path()) {
             Ok(saved) => {
                 self.install_session(saved);
                 true

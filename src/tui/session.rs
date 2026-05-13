@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::core::{
     DesiredState, FileLifecycle, FileSnapshot, PackageId, PackageKey, SessionMeta,
-    SessionRunStatus, SessionSnapshotV3, SessionUrlSnapshot, normalize_snapshot,
+    SessionRunStatus, SessionSnapshot, SessionUrlSnapshot, normalize_snapshot,
 };
 
 pub(super) enum SessionFileUpdate<'a> {
@@ -26,17 +26,17 @@ pub(super) enum SessionRunUpdate {
 pub(super) struct SessionAdapter;
 
 impl SessionAdapter {
-    pub(super) fn contains_url(session: &SessionSnapshotV3, url: &str) -> bool {
+    pub(super) fn contains_url(session: &SessionSnapshot, url: &str) -> bool {
         session.urls.iter().any(|entry| entry.url == url)
     }
 
     #[cfg(test)]
-    pub(super) fn replace_state(session: &mut SessionSnapshotV3, next: SessionSnapshotV3) {
+    pub(super) fn replace_state(session: &mut SessionSnapshot, next: SessionSnapshot) {
         *session = next;
     }
 
     pub(super) fn update_url(
-        session: &mut SessionSnapshotV3,
+        session: &mut SessionSnapshot,
         url: &str,
         update: SessionUrlUpdate<'_>,
     ) {
@@ -59,7 +59,7 @@ impl SessionAdapter {
         }
     }
 
-    pub(super) fn remove_url(session: &mut SessionSnapshotV3, url: &str) {
+    pub(super) fn remove_url(session: &mut SessionSnapshot, url: &str) {
         session.urls.retain(|entry| entry.url != url);
         session
             .files
@@ -68,7 +68,7 @@ impl SessionAdapter {
     }
 
     pub(super) fn update_file(
-        session: &mut SessionSnapshotV3,
+        session: &mut SessionSnapshot,
         file_id: &str,
         update: SessionFileUpdate<'_>,
     ) {
@@ -99,7 +99,7 @@ impl SessionAdapter {
         }
     }
 
-    pub(super) fn meta(session: &SessionSnapshotV3) -> SessionMeta {
+    pub(super) fn meta(session: &SessionSnapshot) -> SessionMeta {
         SessionMeta {
             session_id: session.id.clone(),
             created: session.created,
@@ -110,7 +110,7 @@ impl SessionAdapter {
     }
 
     pub(super) fn skipped_paths_by_url(
-        session: &SessionSnapshotV3,
+        session: &SessionSnapshot,
     ) -> HashMap<String, HashSet<String>> {
         let mut skipped = HashMap::<String, HashSet<String>>::new();
         for file in &session.files {
@@ -128,7 +128,7 @@ impl SessionAdapter {
         skipped
     }
 
-    pub(super) fn apply_run_update(session: &mut SessionSnapshotV3, update: SessionRunUpdate) {
+    pub(super) fn apply_run_update(session: &mut SessionSnapshot, update: SessionRunUpdate) {
         match update {
             SessionRunUpdate::Completed => {
                 session.status = SessionRunStatus::Completed;
@@ -140,7 +140,7 @@ impl SessionAdapter {
     }
 
     pub(super) fn apply_restart(
-        session: &mut SessionSnapshotV3,
+        session: &mut SessionSnapshot,
         restart: &crate::core::RestartSnapshot,
     ) -> Vec<String> {
         let resumed_urls = restart.resumable_urls();
@@ -182,7 +182,7 @@ impl SessionAdapter {
         resumed_urls
     }
 
-    pub(super) fn sync_for_shutdown(session: &mut SessionSnapshotV3, visible: &HashSet<String>) {
+    pub(super) fn sync_for_shutdown(session: &mut SessionSnapshot, visible: &HashSet<String>) {
         if session.status == SessionRunStatus::Completed {
             return;
         }
@@ -220,7 +220,7 @@ impl SessionAdapter {
     }
 
     pub(super) fn register_queued_file(
-        session: &mut SessionSnapshotV3,
+        session: &mut SessionSnapshot,
         package_id: &str,
         package_display_name: &str,
         submitted_url: &str,
@@ -262,7 +262,7 @@ impl SessionAdapter {
         true
     }
 
-    fn ensure_url<'a>(session: &'a mut SessionSnapshotV3, url: &str) -> &'a mut SessionUrlSnapshot {
+    fn ensure_url<'a>(session: &'a mut SessionSnapshot, url: &str) -> &'a mut SessionUrlSnapshot {
         if let Some(index) = session.urls.iter().position(|entry| entry.url == url) {
             return &mut session.urls[index];
         }
@@ -291,7 +291,7 @@ impl SessionAdapter {
 }
 
 fn ensure_package_identity(
-    session: &mut SessionSnapshotV3,
+    session: &mut SessionSnapshot,
     package_id: &str,
     display_name: &str,
 ) -> PackageId {
@@ -325,7 +325,7 @@ fn ensure_package_identity(
 }
 
 fn upsert_package_metadata(
-    session: &mut SessionSnapshotV3,
+    session: &mut SessionSnapshot,
     package_id: PackageId,
     package_key: PackageKey,
     display_name: String,
@@ -353,6 +353,6 @@ fn upsert_package_metadata(
     });
 }
 
-fn rebuild_packages(session: &mut SessionSnapshotV3) {
+fn rebuild_packages(session: &mut SessionSnapshot) {
     normalize_snapshot(session).expect("live session snapshots should stay canonical");
 }

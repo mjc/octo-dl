@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     core::{
         CoreEvent, FileLifecycle, PackageSnapshot, PackageState, PackageStatus, ResolvedFile,
-        ResolvedPackage, SessionRunStatus, SessionSnapshotV3,
+        ResolvedPackage, SessionRunStatus, SessionSnapshot,
     },
     test_support::{
         FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id, push_file,
@@ -139,7 +139,7 @@ fn save_rejects_empty_synthetic_package_placeholders() {
     });
     session.save().unwrap();
 
-    let reloaded = SessionSnapshotV3::latest().expect("canonical session should persist");
+    let reloaded = SessionSnapshot::latest().expect("canonical session should persist");
     assert!(reloaded.packages.is_empty());
 }
 
@@ -583,7 +583,7 @@ fn submitted_url_bootstraps_session_for_shutdown_persistence() {
     app.submit_url("https://mega.nz/file/pending".to_string());
     app.sync_session_for_shutdown();
 
-    let session = crate::core::SessionSnapshotV3::latest().expect("session should be saved");
+    let session = crate::core::SessionSnapshot::latest().expect("session should be saved");
     assert_eq!(session.status, SessionRunStatus::Paused);
     assert!(
         session

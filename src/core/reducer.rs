@@ -5,7 +5,7 @@ use crate::core::model::{
     PackageKey, PackageState, PackageStatus, RuntimeState, SessionRunStatus, UrlId,
 };
 use crate::core::restart::RestartSnapshot;
-use crate::core::session::{FileSnapshot, PackageSnapshot, SessionSnapshotV3};
+use crate::core::session::{FileSnapshot, PackageSnapshot, SessionSnapshot};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedFile {
@@ -93,7 +93,7 @@ pub enum CoreEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreEffect {
-    PersistSession(SessionSnapshotV3),
+    PersistSession(SessionSnapshot),
     EnqueueUrlResolution { url: UrlId },
     EnqueueFileDownload { file_id: FileId },
     DeleteOutputArtifacts { file_id: FileId, path: String },
@@ -733,7 +733,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
     effects
 }
 
-pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
+pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
     let mut url_errors = std::collections::HashMap::<UrlId, String>::new();
     for file in state.files.values() {
         let Some(source_url) = file.source_url.as_ref() else {
@@ -784,7 +784,7 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshotV3 {
             })
         })
         .collect();
-    SessionSnapshotV3 {
+    SessionSnapshot {
         version: 5,
         id: state.session_meta.session_id.clone(),
         created: state.session_meta.created,

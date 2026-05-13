@@ -110,7 +110,7 @@ pub struct FileSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSnapshotV3 {
+pub struct SessionSnapshot {
     pub version: u32,
     pub id: String,
     pub created: DateTime<Utc>,
@@ -152,7 +152,7 @@ struct LegacySessionSnapshotV4 {
     pub credentials: SavedCredentials,
 }
 
-impl SessionSnapshotV3 {
+impl SessionSnapshot {
     #[must_use]
     pub fn new(config: DownloadConfig, credentials: SavedCredentials) -> Self {
         Self {
@@ -378,7 +378,7 @@ fn rejected_session_backup_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{stem}.invalid.bak"))
 }
 
-fn session_resume_priority(snapshot: &SessionSnapshotV3) -> u8 {
+fn session_resume_priority(snapshot: &SessionSnapshot) -> u8 {
     match snapshot.status {
         SessionRunStatus::Paused => 2,
         SessionRunStatus::InProgress => 1,
@@ -386,7 +386,7 @@ fn session_resume_priority(snapshot: &SessionSnapshotV3) -> u8 {
     }
 }
 
-fn from_legacy_snapshot(legacy: LegacySessionSnapshotV4) -> SessionSnapshotV3 {
+fn from_legacy_snapshot(legacy: LegacySessionSnapshotV4) -> SessionSnapshot {
     let files_by_id: IndexMap<_, _> = legacy
         .files
         .into_iter()
@@ -408,7 +408,7 @@ fn from_legacy_snapshot(legacy: LegacySessionSnapshotV4) -> SessionSnapshotV3 {
             error: package.error,
         })
         .collect::<Vec<_>>();
-    let mut snapshot = SessionSnapshotV3 {
+    let mut snapshot = SessionSnapshot {
         version: 5,
         id: legacy.id,
         created: legacy.created,
@@ -423,7 +423,7 @@ fn from_legacy_snapshot(legacy: LegacySessionSnapshotV4) -> SessionSnapshotV3 {
     snapshot
 }
 
-pub fn normalize_snapshot(snapshot: &mut SessionSnapshotV3) -> Result<(), String> {
+pub fn normalize_snapshot(snapshot: &mut SessionSnapshot) -> Result<(), String> {
     if snapshot.version != 4 && snapshot.version != 5 {
         return Err(format!("unsupported session version {}", snapshot.version));
     }
@@ -502,7 +502,7 @@ pub fn normalize_snapshot(snapshot: &mut SessionSnapshotV3) -> Result<(), String
     Ok(())
 }
 
-pub fn validate_snapshot(snapshot: &SessionSnapshotV3) -> Result<(), String> {
+pub fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), String> {
     if snapshot.version != 5 {
         return Err(format!("unsupported session version {}", snapshot.version));
     }
@@ -687,12 +687,12 @@ mod tests {
     fn latest_deletes_non_canonical_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
-        let old_path = SessionSnapshotV3::state_dir().join("legacy.toml");
-        let backup = SessionSnapshotV3::state_dir().join("legacy.invalid.bak");
-        std::fs::create_dir_all(SessionSnapshotV3::state_dir()).unwrap();
+        let old_path = SessionSnapshot::state_dir().join("legacy.toml");
+        let backup = SessionSnapshot::state_dir().join("legacy.invalid.bak");
+        std::fs::create_dir_all(SessionSnapshot::state_dir()).unwrap();
         std::fs::write(&old_path, "id = 'legacy'\n").unwrap();
 
-        assert!(SessionSnapshotV3::latest().is_none());
+        assert!(SessionSnapshot::latest().is_none());
         assert!(!old_path.exists());
         assert!(backup.exists());
     }
@@ -701,7 +701,7 @@ mod tests {
     fn latest_prefers_newest_canonical_session() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
-        let mut first = SessionSnapshotV3::new(
+        let mut first = SessionSnapshot::new(
             DownloadConfig::default(),
             SavedCredentials::encrypt("a", "b", None),
         );
@@ -712,7 +712,7 @@ mod tests {
         });
         first.save().unwrap();
 
-        let mut second = SessionSnapshotV3::new(
+        let mut second = SessionSnapshot::new(
             DownloadConfig::default(),
             SavedCredentials::encrypt("a", "b", None),
         );
@@ -723,7 +723,7 @@ mod tests {
         let second_id = second.id.clone();
         second.save().unwrap();
 
-        let latest = SessionSnapshotV3::latest().unwrap();
+        let latest = SessionSnapshot::latest().unwrap();
         assert_eq!(latest.id, second_id);
     }
 
@@ -732,7 +732,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
 
-        let mut paused = SessionSnapshotV3::new(
+        let mut paused = SessionSnapshot::new(
             DownloadConfig::default(),
             SavedCredentials::encrypt("a", "b", None),
         );
@@ -764,7 +764,7 @@ mod tests {
         });
         paused.save().unwrap();
 
-        let mut completed = SessionSnapshotV3::new(
+        let mut completed = SessionSnapshot::new(
             DownloadConfig::default(),
             SavedCredentials::encrypt("a", "b", None),
         );
@@ -775,7 +775,7 @@ mod tests {
         });
         completed.save().unwrap();
 
-        let latest = SessionSnapshotV3::latest().unwrap();
+        let latest = SessionSnapshot::latest().unwrap();
         assert_eq!(latest.status, SessionRunStatus::Paused);
         assert_eq!(latest.files.len(), 1);
         assert!(!completed.state_path().exists());
@@ -789,7 +789,7 @@ mod tests {
 
         let package_key = PackageKey::new("Folder");
         let package_id = PackageId::for_package_key(&package_key);
-        let mut session = SessionSnapshotV3::new(
+        let mut session = SessionSnapshot::new(
             DownloadConfig::default(),
             SavedCredentials::encrypt("a", "b", None),
         );
@@ -839,7 +839,7 @@ mod tests {
         ];
         session.save().unwrap();
 
-        let latest = SessionSnapshotV3::latest().unwrap();
+        let latest = SessionSnapshot::latest().unwrap();
         assert_eq!(latest.packages.len(), 1);
         assert_eq!(latest.files.len(), 2);
         assert_eq!(latest.packages[0].display_name, "Folder");
@@ -850,11 +850,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
 
-        let path = SessionSnapshotV3::state_dir().join("session-v4-empty.toml");
-        std::fs::create_dir_all(SessionSnapshotV3::state_dir()).unwrap();
+        let path = SessionSnapshot::state_dir().join("session-v4-empty.toml");
+        std::fs::create_dir_all(SessionSnapshot::state_dir()).unwrap();
         std::fs::write(
             &path,
-            toml::to_string(&SessionSnapshotV3 {
+            toml::to_string(&SessionSnapshot {
                 version: 4,
                 id: "empty".to_string().into(),
                 created: Utc::now(),
@@ -869,10 +869,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(SessionSnapshotV3::latest().is_none());
+        assert!(SessionSnapshot::latest().is_none());
         assert!(!path.exists());
         assert!(
-            SessionSnapshotV3::state_dir()
+            SessionSnapshot::state_dir()
                 .join("session-v4-empty.invalid.bak")
                 .exists()
         );
