@@ -293,6 +293,11 @@ impl DownloadState {
     }
 
     #[must_use]
+    pub fn package_has_files(&self, package_id: &PackageId) -> bool {
+        self.package_files(package_id).next().is_some()
+    }
+
+    #[must_use]
     pub fn package_file_ids(&self, package_id: &PackageId) -> Vec<FileId> {
         self.package_files(package_id)
             .map(|file| file.id.clone())
