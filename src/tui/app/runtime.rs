@@ -79,7 +79,6 @@ impl App {
             url_rx,
             token_tx,
             pause_rx,
-            skipped_session_paths: self.skipped_session_paths(),
         };
 
         tokio::spawn(async move {
@@ -140,12 +139,12 @@ impl App {
             self.upsert_overlay_file(
                 FileEntry {
                     id: url.clone().into(),
-                    name: url,
+                    name: url.clone(),
                     size: 0,
                     downloaded: 0,
                     status: FileStatus::Queued,
                 },
-                None,
+                Some(url),
                 false,
             );
         }

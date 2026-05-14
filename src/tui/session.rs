@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::core::{
     DesiredState, FileLifecycle, FileSnapshot, PackageId, PackageKey, SessionMeta,
@@ -8,7 +8,6 @@ use crate::core::{
 pub(super) enum SessionFileUpdate<'a> {
     Complete,
     Error(&'a str),
-    Skipped,
 }
 
 pub(super) enum SessionUrlUpdate<'a> {
@@ -69,6 +68,21 @@ impl SessionAdapter {
         rebuild_packages(session);
     }
 
+    pub(super) fn remove_file(session: &mut SessionSnapshot, file_id: &str) {
+        let mut removed_source_urls = HashSet::new();
+        for package in &mut session.packages {
+            package.files.retain(|file| {
+                let remove = file.id == file_id || file.path == file_id;
+                if remove && let Some(source_url) = &file.source_url {
+                    removed_source_urls.insert(source_url.clone());
+                }
+                !remove
+            });
+        }
+        rebuild_packages(session);
+        remove_orphaned_urls(session, &removed_source_urls);
+    }
+
     pub(super) fn update_file(
         session: &mut SessionSnapshot,
         file_id: &str,
@@ -90,14 +104,6 @@ impl SessionAdapter {
                     file.runtime.active = false;
                 }
             }
-            SessionFileUpdate::Skipped => {
-                if let Some(file) = find_file_mut(session, file_id) {
-                    file.lifecycle = FileLifecycle::Skipped;
-                    file.desired = DesiredState::Suppressed;
-                    file.runtime.active = false;
-                    file.runtime.counts_in_run_totals = false;
-                }
-            }
         }
         rebuild_packages(session);
     }
@@ -110,28 +116,6 @@ impl SessionAdapter {
             config: session.config.clone(),
             credentials: session.credentials.clone(),
         }
-    }
-
-    pub(super) fn skipped_paths_by_url(
-        session: &SessionSnapshot,
-    ) -> HashMap<String, HashSet<String>> {
-        let mut skipped = HashMap::<String, HashSet<String>>::new();
-        for file in session.iter_files() {
-            if !matches!(
-                file.lifecycle,
-                FileLifecycle::Skipped | FileLifecycle::Deleted
-            ) {
-                continue;
-            }
-            let Some(url) = file.source_url.as_ref() else {
-                continue;
-            };
-            skipped
-                .entry(url.clone())
-                .or_default()
-                .insert(file.path.clone());
-        }
-        skipped
     }
 
     pub(super) fn apply_run_update(session: &mut SessionSnapshot, update: SessionRunUpdate) {
@@ -206,28 +190,20 @@ impl SessionAdapter {
 
         for package in &mut session.packages {
             package.files.retain(|file| {
-                matches!(file.lifecycle, FileLifecycle::Skipped)
-                    || visible.contains(file.path.as_str())
-                    || visible.contains(file.id.as_str())
+                visible.contains(file.path.as_str()) || visible.contains(file.id.as_str())
             });
         }
 
         rebuild_packages(session);
 
         let has_pending_urls = session.urls.iter().any(|tracked_url| {
-            !session.iter_files().any(|file| {
-                file.source_url.as_deref() == Some(tracked_url.url.as_str())
-                    && matches!(
-                        file.lifecycle,
-                        FileLifecycle::Complete | FileLifecycle::Skipped | FileLifecycle::Deleted
-                    )
-            }) || session.iter_files().any(|file| {
-                file.source_url.as_deref() == Some(tracked_url.url.as_str())
-                    && !matches!(
-                        file.lifecycle,
-                        FileLifecycle::Complete | FileLifecycle::Skipped | FileLifecycle::Deleted
-                    )
-            })
+            !session
+                .iter_files()
+                .any(|file| file.source_url.as_deref() == Some(tracked_url.url.as_str()))
+                || session.iter_files().any(|file| {
+                    file.source_url.as_deref() == Some(tracked_url.url.as_str())
+                        && !matches!(file.lifecycle, FileLifecycle::Complete)
+                })
         });
 
         if session.iter_files().next().is_none() && !has_pending_urls {
@@ -254,20 +230,49 @@ impl SessionAdapter {
             Self::ensure_url(session, submitted_url);
         }
         let package_id = ensure_package_identity(session, package_id, package_display_name);
-        if let Some(file) = session.packages.iter_mut().find_map(|package| {
-            package.files.iter_mut().find(|file| {
-                file.path == path
-                    && (file.package_id == package_id
-                        || file.source_url.as_deref() == Some(source_url))
-            })
-        }) {
-            if matches!(file.lifecycle, FileLifecycle::Skipped) {
-                return false;
+        let existing = session
+            .packages
+            .iter()
+            .enumerate()
+            .find_map(|(package_index, package)| {
+                package
+                    .files
+                    .iter()
+                    .position(|file| {
+                        file.path == path
+                            && (file.package_id == package_id
+                                || file.source_url.as_deref() == Some(source_url))
+                    })
+                    .map(|file_index| (package_index, file_index))
+            });
+        if let Some((package_index, file_index)) = existing {
+            if session.packages[package_index].id == package_id {
+                let file = &mut session.packages[package_index].files[file_index];
+                file.package_id = package_id.clone();
+                file.source_url = Some(source_url.to_string());
+                file.size = size;
+                file.path = path.to_string();
+                file.lifecycle = FileLifecycle::Queued;
+                file.desired = DesiredState::Present;
+                file.runtime.active = false;
+                file.runtime.counts_in_run_totals = true;
+            } else {
+                let mut file = session.packages[package_index].files.remove(file_index);
+                file.package_id = package_id.clone();
+                file.source_url = Some(source_url.to_string());
+                file.size = size;
+                file.path = path.to_string();
+                file.lifecycle = FileLifecycle::Queued;
+                file.desired = DesiredState::Present;
+                file.runtime.active = false;
+                file.runtime.counts_in_run_totals = true;
+                let package = session
+                    .packages
+                    .iter_mut()
+                    .find(|package| package.id == package_id)
+                    .expect("package identity should exist before queuing a file");
+                package.files.push(file);
             }
-            file.package_id = package_id.clone();
-            file.source_url = Some(source_url.to_string());
-            file.size = size;
-            file.path = path.to_string();
             rebuild_packages(session);
             return true;
         }
@@ -387,6 +392,21 @@ fn rebuild_packages(session: &mut SessionSnapshot) {
         return;
     }
     validate_snapshot(session).expect("live session snapshots should stay canonical");
+}
+
+fn remove_orphaned_urls(session: &mut SessionSnapshot, candidate_urls: &HashSet<String>) {
+    if candidate_urls.is_empty() {
+        return;
+    }
+
+    let referenced_urls = session
+        .iter_files()
+        .filter_map(|file| file.source_url.clone())
+        .collect::<HashSet<_>>();
+    session.urls.retain(|entry| {
+        !candidate_urls.contains(&entry.url) || referenced_urls.contains(&entry.url)
+    });
+    rebuild_packages(session);
 }
 
 fn find_file_mut<'a>(

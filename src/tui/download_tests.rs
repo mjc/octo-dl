@@ -134,45 +134,6 @@ fn file_queued_bootstraps_and_saves_session() {
 }
 
 #[test]
-fn file_queued_does_not_restore_session_skipped_file() {
-    let dir = tempdir().unwrap();
-    let _guard = StateDirectoryGuard::set(dir.path());
-    let mut app = test_app();
-    let mut session = session_snapshot(vec![(
-        "https://mega.nz/file/root",
-        UrlFixtureStatus::Fetched,
-    )]);
-    push_file(
-        &mut session,
-        0,
-        "episode.mkv",
-        128,
-        FileFixtureStatus::Skipped,
-    );
-    app.session = Some(session);
-
-    app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
-        id: "episode.mkv".to_string().into(),
-        size: 128,
-        count_toward_progress: true,
-        origin: FileOrigin {
-            package_id: None,
-            package_display_name: None,
-            source_url: "https://mega.nz/file/root".to_string(),
-            submitted_url: "https://mega.nz/file/root".to_string(),
-        },
-    }));
-
-    assert!(app.files.is_empty());
-    let session = app.session.as_ref().expect("session should remain");
-    assert_eq!(session.file_count(), 1);
-    assert_eq!(
-        session.find_file("episode.mkv").unwrap().lifecycle,
-        FileLifecycle::Skipped
-    );
-}
-
-#[test]
 fn file_queued_does_not_clear_deleted_file_guard() {
     let mut app = test_app();
     let file_id = crate::core::FileId::from("episode.mkv");

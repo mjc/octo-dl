@@ -261,8 +261,6 @@ pub enum PackageStatus {
     Partial,
     Complete,
     Failed,
-    Skipped,
-    Deleted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -272,7 +270,6 @@ pub enum DesiredState {
     Present,
     RetryRequested,
     ResetRequested,
-    Suppressed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -291,15 +288,13 @@ pub enum FileLifecycle {
     Queued,
     Downloading,
     Complete,
-    Skipped,
-    Deleted,
     Failed,
 }
 
 impl FileLifecycle {
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Complete | Self::Skipped | Self::Deleted)
+        matches!(self, Self::Complete)
     }
 }
 
@@ -437,10 +432,7 @@ impl DownloadState {
                 !file.runtime.active
                     && !matches!(
                         file.lifecycle,
-                        FileLifecycle::Complete
-                            | FileLifecycle::Skipped
-                            | FileLifecycle::Deleted
-                            | FileLifecycle::Failed
+                        FileLifecycle::Complete | FileLifecycle::Failed
                     )
             })
             .map(|file| file.id.clone())

@@ -56,7 +56,6 @@ pub enum UrlFixtureStatus {
 pub enum FileFixtureStatus {
     Pending,
     Completed,
-    Skipped,
     Error(String),
 }
 
@@ -134,14 +133,6 @@ pub fn push_file(
                 false,
                 false,
                 size,
-                None,
-            ),
-            FileFixtureStatus::Skipped => (
-                FileLifecycle::Skipped,
-                DesiredState::Suppressed,
-                false,
-                false,
-                0,
                 None,
             ),
             FileFixtureStatus::Error(message) => (

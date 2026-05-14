@@ -936,10 +936,16 @@ mod tests {
     #[test]
     fn resume_url_selection_excludes_fetched_urls_with_only_terminal_files() {
         let mut session = session_snapshot(vec![(
-            "https://mega.nz/file/skipped",
+            "https://mega.nz/file/complete",
             UrlFixtureStatus::Fetched,
         )]);
-        push_file(&mut session, 0, "skip.bin", 123, FileFixtureStatus::Skipped);
+        push_file(
+            &mut session,
+            0,
+            "complete.bin",
+            123,
+            FileFixtureStatus::Completed,
+        );
 
         let urls = resumable_urls(&session);
         assert!(urls.is_empty());
