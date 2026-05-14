@@ -101,7 +101,7 @@ fn new_without_explicit_config_loads_default_saved_credentials() {
 
     assert_eq!(app.login.email(), "saved@example.com");
     assert_eq!(app.login.password(), "saved-secret");
-    assert!(app.login.mfa().is_empty());
+    assert_eq!(app.login.mfa(), "654321");
     assert_eq!(
         app.persist_config_path.as_deref(),
         Some(config_path.as_path())
@@ -150,6 +150,7 @@ fn implicit_cwd_template_falls_back_to_state_config_credentials() {
 
     assert_eq!(app.login.email(), "saved@example.com");
     assert_eq!(app.login.password(), "saved-secret");
+    assert_eq!(app.login.mfa(), "654321");
     assert!(app.api_key.is_some());
     assert_eq!(
         app.persist_config_path.as_deref(),
