@@ -380,14 +380,16 @@ async fn main() -> octo_dl::Result<()> {
                 std::process::exit(1);
             })
         });
+        let host_param = options.host_explicit.then_some(Some(options.host.clone()));
         #[cfg(feature = "tui")]
         {
-            octo_dl::tui::run_api_only(options.config_path.as_deref(), listen)
+            octo_dl::tui::run_api_only(host_param, options.config_path.as_deref(), listen)
                 .await
                 .map_err(octo_dl::Error::Io)
         }
         #[cfg(not(feature = "tui"))]
         {
+            let _ = host_param;
             eprintln!("API support requires the 'tui' feature");
             std::process::exit(1);
         }
@@ -534,6 +536,16 @@ mod tests {
                 .expect("attach should parse");
         assert_eq!(options.ui, Some(UiMode::Tui));
         assert_eq!(options.tui_attach.as_deref(), Some("127.0.0.1:9724"));
+
+        let options = parse_runtime_options(&[
+            "--headless".to_string(),
+            "--host".to_string(),
+            "0.0.0.0".to_string(),
+        ])
+        .expect("headless host override should parse");
+        assert_eq!(options.ui, Some(UiMode::Headless));
+        assert!(options.host_explicit);
+        assert_eq!(options.host, "0.0.0.0");
     }
 
     #[test]

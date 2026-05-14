@@ -1353,7 +1353,7 @@ fn sorted_file_indices_group_by_package_before_status() {
 }
 
 #[test]
-fn expanded_package_orders_files_error_downloading_queued_complete() {
+fn expanded_package_orders_files_failed_downloading_queued_complete() {
     let mut app = test_app();
     let package_id = package_id("pkg", "https://mega.nz/folder/root");
     app.apply_core_event(CoreEvent::PackageResolved {
@@ -1409,11 +1409,7 @@ fn expanded_package_orders_files_error_downloading_queued_complete() {
             TuiRow::Package(package_id),
             TuiRow::File {
                 package_id: Some(package_id),
-                file_id: "queued.bin".to_string().into(),
-            },
-            TuiRow::File {
-                package_id: Some(package_id),
-                file_id: "complete.bin".to_string().into(),
+                file_id: "error.bin".to_string().into(),
             },
             TuiRow::File {
                 package_id: Some(package_id),
@@ -1421,7 +1417,11 @@ fn expanded_package_orders_files_error_downloading_queued_complete() {
             },
             TuiRow::File {
                 package_id: Some(package_id),
-                file_id: "error.bin".to_string().into(),
+                file_id: "queued.bin".to_string().into(),
+            },
+            TuiRow::File {
+                package_id: Some(package_id),
+                file_id: "complete.bin".to_string().into(),
             },
         ]
     );

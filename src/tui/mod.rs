@@ -95,6 +95,7 @@ pub async fn run(
 /// Returns an error if configuration loading fails, server startup fails, or I/O operations fail.
 ///
 pub async fn run_api_only(
+    explicit_api_host: Option<Option<String>>,
     config_path: Option<&Path>,
     tui_listen: Option<SocketAddr>,
 ) -> io::Result<()> {
@@ -124,11 +125,12 @@ pub async fn run_api_only(
             true,
         );
     } else {
-        log::info!("Starting API server on {api_host}:{api_port}");
+        let host = explicit_api_host.flatten().unwrap_or(api_host);
+        log::info!("Starting API server on {host}:{api_port}");
         app.spawn_api_server(
-            api_host.clone(),
+            host.clone(),
             api_port,
-            Some(api_host),
+            Some(host),
             shared_state,
             false,
         );

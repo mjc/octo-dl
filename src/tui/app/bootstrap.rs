@@ -334,9 +334,9 @@ impl App {
             return Ok(());
         }
 
-        if let Some((email, password, _mfa)) = service_config.credentials.decrypt_if_needed() {
+        if let Some((email, password, mfa)) = service_config.credentials.decrypt_if_needed() {
             log::info!("Loaded fallback credentials from {}", config_path.display());
-            self.login.set_credentials_if_missing(&email, &password, "");
+            self.login.set_credentials_if_missing(&email, &password, &mfa);
             if self.api_key.is_none() {
                 self.api_key.clone_from(&service_config.api.api_key);
             }
@@ -372,10 +372,9 @@ impl App {
 
         let mut credentials_from_config = false;
         if service_config.credentials.has_credentials() {
-            if let Some((email, password, _mfa)) = service_config.credentials.decrypt_if_needed() {
+            if let Some((email, password, mfa)) = service_config.credentials.decrypt_if_needed() {
                 log::info!("Loaded credentials from config file");
-                credentials_from_config =
-                    self.login.set_credentials(email, password, String::new());
+                credentials_from_config = self.login.set_credentials(email, password, mfa);
 
                 if !service_config.credentials.encrypted {
                     log::info!("Encrypting plaintext credentials in config file");
