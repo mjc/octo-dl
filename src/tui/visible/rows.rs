@@ -147,7 +147,6 @@ fn package_status_rank(status: PackageStatus) -> u8 {
         PackageStatus::Queued | PackageStatus::Pending => 2,
         PackageStatus::Partial => 3,
         PackageStatus::Complete => 4,
-        PackageStatus::Skipped | PackageStatus::Deleted => 5,
     }
 }
 
@@ -164,12 +163,7 @@ fn package_is_auto_expanded_for(
 }
 
 fn file_is_visible_in_package(core_state: &DownloadState, file_id: &FileId) -> bool {
-    core_state.files.get(file_id).is_some_and(|file| {
-        !matches!(
-            file.lifecycle,
-            FileLifecycle::Skipped | FileLifecycle::Deleted
-        )
-    })
+    core_state.files.contains_key(file_id)
 }
 
 fn overlay_row_is_hidden_placeholder(file: &FileEntry, overlay: Option<&OverlayFile>) -> bool {
@@ -338,7 +332,6 @@ fn file_status_from_core(file: &crate::core::FileState) -> FileStatus {
         FileLifecycle::Failed => {
             FileStatus::Error(file.message.clone().unwrap_or_else(|| "failed".to_string()))
         }
-        FileLifecycle::Skipped | FileLifecycle::Deleted => FileStatus::Complete,
     }
 }
 

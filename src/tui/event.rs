@@ -1,6 +1,6 @@
 //! Download event types and TUI progress adapter.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::{
@@ -39,7 +39,6 @@ pub struct DownloadChannels {
     pub url_rx: mpsc::UnboundedReceiver<DownloadRequest>,
     pub token_tx: mpsc::UnboundedSender<TokenMessage>,
     pub pause_rx: tokio::sync::watch::Receiver<bool>,
-    pub skipped_session_paths: HashMap<String, HashSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -21,7 +21,6 @@ fn project_core_file(
         FileLifecycle::Failed => {
             FileStatus::Error(file.message.clone().unwrap_or_else(|| "failed".to_string()))
         }
-        FileLifecycle::Skipped | FileLifecycle::Deleted => return None,
     };
 
     let downloaded = match file.lifecycle {

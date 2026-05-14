@@ -530,17 +530,51 @@ fn handle_main_input_delete_removes_session_entry_and_keeps_selection() {
         .collect();
     assert_eq!(
         statuses,
-        vec![
-            ("first.bin", &crate::core::FileLifecycle::Skipped),
-            ("second.bin", &crate::core::FileLifecycle::Queued),
-        ]
+        vec![("second.bin", &crate::core::FileLifecycle::Queued)]
     );
     let saved = crate::core::SessionSnapshot::load(&session_path).unwrap();
-    assert_eq!(
-        saved.find_file("first.bin").unwrap().lifecycle,
-        crate::core::FileLifecycle::Skipped
-    );
+    assert!(saved.find_file("first.bin").is_none());
     assert!(saved.find_file("second.bin").is_some());
+}
+
+#[test]
+fn handle_main_input_delete_last_file_removes_empty_session_file() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    app.files = vec![FileEntry {
+        id: "only.bin".to_string().into(),
+        name: "only.bin".to_string(),
+        size: 10,
+        downloaded: 0,
+        status: FileStatus::Queued,
+    }];
+    app.recompute_totals();
+    app.file_list_state.select(Some(0));
+
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/folder/root",
+        UrlFixtureStatus::Fetched,
+    )]);
+    push_file(&mut session, 0, "only.bin", 10, FileFixtureStatus::Pending);
+    let session_path = session.state_path();
+    session.save().unwrap();
+    assert!(session_path.exists());
+    app.session = Some(session);
+
+    handle_input(&mut app, key(KeyCode::Delete));
+    confirm(&mut app);
+
+    assert!(app.files.is_empty());
+    assert!(app.deleted_files.contains("only.bin"));
+    assert!(!session_path.exists());
+    let session = app
+        .session
+        .as_ref()
+        .expect("empty session should remain live");
+    assert!(session.urls.is_empty());
+    assert!(session.packages.is_empty());
+    assert!(session.files.is_empty());
 }
 
 #[test]

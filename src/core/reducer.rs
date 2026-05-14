@@ -112,12 +112,7 @@ fn should_persist_session(event: &CoreEvent) -> bool {
 }
 
 fn counts_in_run_totals(file: &FileState) -> bool {
-    file.runtime.counts_in_run_totals
-        && !file.runtime.preexisting_complete
-        && !matches!(
-            file.lifecycle,
-            FileLifecycle::Skipped | FileLifecycle::Deleted
-        )
+    file.runtime.counts_in_run_totals && !file.runtime.preexisting_complete
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -216,8 +211,6 @@ fn package_status_from_files(state: &DownloadState, package_id: PackageId) -> Pa
     let mut has_failed = false;
     let mut has_queued = false;
     let mut has_complete = false;
-    let mut all_skipped = true;
-    let mut all_deleted = true;
 
     for file_id in file_ids {
         let Some(file) = state.files.get(file_id) else {
@@ -228,14 +221,6 @@ fn package_status_from_files(state: &DownloadState, package_id: PackageId) -> Pa
             FileLifecycle::Failed => has_failed = true,
             FileLifecycle::Queued | FileLifecycle::Planned => has_queued = true,
             FileLifecycle::Complete => has_complete = true,
-            FileLifecycle::Skipped => all_deleted = false,
-            FileLifecycle::Deleted => all_skipped = false,
-        }
-        if !matches!(file.lifecycle, FileLifecycle::Skipped) {
-            all_skipped = false;
-        }
-        if !matches!(file.lifecycle, FileLifecycle::Deleted) {
-            all_deleted = false;
         }
     }
 
@@ -243,10 +228,6 @@ fn package_status_from_files(state: &DownloadState, package_id: PackageId) -> Pa
         PackageStatus::Failed
     } else if has_downloading {
         PackageStatus::Downloading
-    } else if all_deleted && !file_ids.is_empty() {
-        PackageStatus::Deleted
-    } else if all_skipped && !file_ids.is_empty() {
-        PackageStatus::Skipped
     } else if has_complete && (has_queued || has_downloading) {
         PackageStatus::Partial
     } else if has_complete && !file_ids.is_empty() {
@@ -267,12 +248,11 @@ fn recompute_package_status(state: &mut DownloadState, package_id: PackageId) {
 
 fn recompute_session_status(state: &mut DownloadState) {
     state.session_meta.status = if !state.files.is_empty()
-        && state.packages.values().all(|package| {
-            matches!(
-                package.status,
-                PackageStatus::Complete | PackageStatus::Skipped | PackageStatus::Deleted
-            )
-        }) {
+        && state
+            .packages
+            .values()
+            .all(|package| matches!(package.status, PackageStatus::Complete))
+    {
         SessionRunStatus::Completed
     } else {
         SessionRunStatus::InProgress
@@ -481,14 +461,9 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id) {
                 let before = FileDerivedState::from(&*file);
-                if !matches!(
-                    file.lifecycle,
-                    FileLifecycle::Skipped | FileLifecycle::Deleted
-                ) {
-                    file.lifecycle = FileLifecycle::Queued;
-                    file.runtime.active = false;
-                    file.message = None;
-                }
+                file.lifecycle = FileLifecycle::Queued;
+                file.runtime.active = false;
+                file.message = None;
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
             }
@@ -500,18 +475,13 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id) {
                 let before = FileDerivedState::from(&*file);
-                if !matches!(
-                    file.lifecycle,
-                    FileLifecycle::Skipped | FileLifecycle::Deleted
-                ) {
-                    file.size = size;
-                    file.lifecycle = FileLifecycle::Downloading;
-                    file.progress = FileProgressState::default();
-                    file.runtime.active = true;
-                    file.runtime.counts_in_run_totals = true;
-                    file.runtime.preexisting_complete = false;
-                    file.runtime.reused_chunks = 0;
-                }
+                file.size = size;
+                file.lifecycle = FileLifecycle::Downloading;
+                file.progress = FileProgressState::default();
+                file.runtime.active = true;
+                file.runtime.counts_in_run_totals = true;
+                file.runtime.preexisting_complete = false;
+                file.runtime.reused_chunks = 0;
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
             }
@@ -627,13 +597,8 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             }
         }
         CoreEvent::FileDeleted { file_id } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id) {
-                let before = FileDerivedState::from(&*file);
-                file.lifecycle = FileLifecycle::Deleted;
-                file.desired = DesiredState::Suppressed;
-                file.runtime.active = false;
-                file.runtime.counts_in_run_totals = false;
+            if let Some(file) = state.files.shift_remove(&file_id) {
+                let before = FileDerivedState::from(&file);
                 effects.push(CoreEffect::DeleteOutputArtifacts {
                     file_id: file.id.clone(),
                     path: file.path.clone(),
@@ -642,11 +607,17 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                     file_id: file.id.clone(),
                     path: file.path.clone(),
                 });
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
-            }
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
+                remove_totals_contribution(state, before);
+                remove_file_from_package_index(state, &file_id, before.package_id);
+                recompute_package_status(state, before.package_id);
+                if state
+                    .packages
+                    .get(&before.package_id)
+                    .is_some_and(|package| package.file_ids.is_empty())
+                {
+                    state.packages.shift_remove(&before.package_id);
+                }
+                recompute_session_status(state);
             }
         }
         CoreEvent::FileRetryRequested { file_id } => {
@@ -820,13 +791,7 @@ fn recompute_derived(state: &mut DownloadState) {
 
     let mut totals = crate::core::model::TotalsState::default();
     for file in state.files.values() {
-        if !file.runtime.counts_in_run_totals
-            || file.runtime.preexisting_complete
-            || matches!(
-                file.lifecycle,
-                FileLifecycle::Skipped | FileLifecycle::Deleted
-            )
-        {
+        if !file.runtime.counts_in_run_totals || file.runtime.preexisting_complete {
             continue;
         }
         totals.run_total_bytes = totals.run_total_bytes.saturating_add(file.size);
@@ -1306,7 +1271,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_state_does_not_revive_without_reset() {
+    fn deleted_file_is_removed_from_core_state() {
         let mut state = sample_state();
         reduce(
             &mut state,
@@ -1314,14 +1279,8 @@ mod tests {
                 file_id: "file.bin".to_string().into(),
             },
         );
-        reduce(
-            &mut state,
-            CoreEvent::FileStarted {
-                file_id: "file.bin".to_string().into(),
-                size: 100,
-            },
-        );
-        assert_eq!(state.files["file.bin"].lifecycle, FileLifecycle::Deleted);
+        assert!(!state.files.contains_key("file.bin"));
+        assert!(state.packages.is_empty());
     }
 
     #[test]

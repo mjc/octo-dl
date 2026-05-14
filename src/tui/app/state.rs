@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use indexmap::IndexMap;
 
@@ -76,11 +76,6 @@ impl App {
         }
     }
 
-    pub(crate) fn skipped_session_paths(&self) -> HashMap<String, HashSet<String>> {
-        self.read_session(SessionAdapter::skipped_paths_by_url)
-            .unwrap_or_default()
-    }
-
     pub(crate) fn apply_core_event(&mut self, event: CoreEvent) {
         let policy = CoreApplyPolicy::for_event(&event);
         self.apply_core_event_with_policy(event, policy);
@@ -120,9 +115,6 @@ impl App {
                     .clone()
                     .unwrap_or_else(|| "failed".to_string()),
             ),
-            crate::core::FileLifecycle::Skipped | crate::core::FileLifecycle::Deleted => {
-                visible_file.status.clone()
-            }
         };
         Some((previous_downloaded, visible_file.downloaded))
     }
@@ -166,6 +158,9 @@ impl App {
 
     fn apply_core_event_with_policy(&mut self, event: CoreEvent, policy: CoreApplyPolicy) {
         let selected_row_identity = policy.sync_visible.then(|| self.selected_row()).flatten();
+        if let CoreEvent::FileDeleted { file_id } = &event {
+            self.deleted_files.insert(file_id.clone());
+        }
         self.seed_core_session_from_session();
         let effects = reduce(&mut self.core_state, event);
         self.apply_core_effects(effects, policy.sync_pending);
@@ -350,6 +345,12 @@ impl App {
         });
     }
 
+    pub(crate) fn remove_session_file(&mut self, file_id: &FileId) {
+        let _ = self.mutate_session_and_save(|session| {
+            SessionAdapter::remove_file(session, file_id.as_str())
+        });
+    }
+
     pub(crate) fn register_session_queued_file(
         &mut self,
         package_id: &str,
@@ -482,6 +483,19 @@ impl App {
     }
 
     fn persist_session(&mut self, session: SessionSnapshot) -> bool {
+        if session.urls.is_empty() && session.packages.is_empty() && session.files.is_empty() {
+            let path = session.state_path();
+            if let Err(error) = std::fs::remove_file(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                log::error!("Failed to remove empty session {}: {error}", path.display());
+                self.status = format!("Failed to remove empty session: {error}");
+                return false;
+            }
+            self.install_session(session);
+            return true;
+        }
+
         if let Err(error) = session.save() {
             log::error!("Failed to save session {}: {error}", session.id);
             self.status = format!("Failed to save session: {error}");

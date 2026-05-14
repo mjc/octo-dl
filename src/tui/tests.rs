@@ -441,43 +441,6 @@ fn resume_session_restores_retryable_errors_as_queued() {
 }
 
 #[test]
-fn resume_session_does_not_restore_or_requeue_skipped_files() {
-    let dir = tempdir().unwrap();
-    let _guard = StateDirectoryGuard::set(dir.path());
-
-    let mut session = session_snapshot(vec![(
-        "https://mega.nz/file/skipped",
-        UrlFixtureStatus::Fetched,
-    )]);
-    push_file(
-        &mut session,
-        0,
-        "skipped.mkv",
-        256,
-        FileFixtureStatus::Skipped,
-    );
-    session.save().unwrap();
-
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut app = App::new(0, event_tx, true);
-
-    app.resume_latest_session();
-
-    assert!(app.files.is_empty());
-    assert!(app.urls.is_empty());
-
-    let mut url_rx = app.url_rx.take().expect("url_rx should exist");
-    assert!(url_rx.try_recv().is_err());
-
-    let session_state = app.session.as_ref().expect("session should be present");
-    assert!(session_state.packages[0].error.is_none());
-    assert_eq!(
-        session_state.find_file("skipped.mkv").unwrap().lifecycle,
-        FileLifecycle::Skipped
-    );
-}
-
-#[test]
 fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());

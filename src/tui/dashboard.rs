@@ -407,12 +407,6 @@ impl App {
                             _ => {}
                         }
 
-                        if matches!(
-                            file.lifecycle,
-                            FileLifecycle::Skipped | FileLifecycle::Deleted
-                        ) {
-                            continue;
-                        }
                         let file_complete = matches!(file.lifecycle, FileLifecycle::Complete);
                         let visible = if file_complete {
                             file.size

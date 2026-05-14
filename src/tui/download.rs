@@ -351,7 +351,6 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
         mut url_rx,
         token_tx,
         pause_rx,
-        skipped_session_paths,
     } = channels;
 
     let progress: Arc<dyn DownloadProgress> = Arc::new(TuiProgress::new(tx.clone()));
@@ -396,7 +395,6 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
                     &mut scheduler,
                     &tx,
                     &token_tx,
-                    &skipped_session_paths,
                 ).await {
                     break;
                 }
@@ -449,7 +447,6 @@ async fn handle_download_request(
     scheduler: &mut SchedulerState,
     tx: &mpsc::UnboundedSender<DownloadEvent>,
     token_tx: &mpsc::UnboundedSender<TokenMessage>,
-    skipped_session_paths: &HashMap<String, HashSet<String>>,
 ) -> bool {
     match request {
         DownloadRequest::SubmitUrl { .. } | DownloadRequest::ResumeFileIds { .. } => {
@@ -457,13 +454,7 @@ async fn handle_download_request(
             let batch = vec![request];
             let resolved =
                 resolve_download_requests(&batch, &runtime.http, &runtime.dlc_cache, tx).await;
-            let collected = collect_batch(
-                &resolved,
-                &runtime.downloader,
-                &runtime.progress,
-                skipped_session_paths,
-            )
-            .await;
+            let collected = collect_batch(&resolved, &runtime.downloader, &runtime.progress).await;
             let collected = scheduler.register_resolved_batch(collected);
             collected.emit_events(tx);
             let _ = token_tx;
@@ -771,7 +762,6 @@ async fn collect_batch(
     node_sets: &[FetchedNodeSet],
     downloader: &Arc<crate::Downloader>,
     progress: &Arc<dyn DownloadProgress>,
-    skipped_paths: &HashMap<String, HashSet<String>>,
 ) -> CollectedBatch {
     let mut queued_items = Vec::new();
     let mut completed_items = Vec::new();
@@ -781,7 +771,7 @@ async fn collect_batch(
     let successful_submitted_urls = successful_submitted_urls(node_sets.iter());
 
     for node_set in node_sets {
-        let collected = collect_node_set(node_set, downloader, progress, skipped_paths).await;
+        let collected = collect_node_set(node_set, downloader, progress).await;
         skipped_count += collected.skipped_count;
         partial_count += collected.partial_count;
         duplicate_resolver.extend_queued(
@@ -808,7 +798,6 @@ async fn collect_node_set(
     node_set: &FetchedNodeSet,
     downloader: &Arc<crate::Downloader>,
     progress: &Arc<dyn DownloadProgress>,
-    skipped_paths: &HashMap<String, HashSet<String>>,
 ) -> CollectedNodeSet {
     let Some(nodes) = node_set.nodes.as_ref() else {
         return CollectedNodeSet {
@@ -819,13 +808,12 @@ async fn collect_node_set(
         };
     };
 
-    let skipped_for_url = skipped_paths.get(&node_set.resolved.submitted_url);
     let collected = downloader.collect_files(nodes, progress).await;
     let mut resolved = node_set.resolved.clone();
     let (package_id, package_display_name) = package_identity_for_nodes(nodes, &collected);
     resolved.package_id = Some(package_id);
     resolved.package_display_name = Some(package_display_name);
-    let mut skipped_count = 0;
+    let skipped_count = 0;
     let keep_file = |path: &str| -> bool {
         match &node_set.requested_files {
             RequestedFiles::All => true,
@@ -875,16 +863,12 @@ async fn collect_node_set(
     let queued_items = visible_downloads(
         to_download,
         &resolved,
-        skipped_for_url,
-        &mut skipped_count,
         &node_set.requested_files,
         &node_set.requested_attempt_ids,
     );
     let completed_items = visible_downloads(
         completed,
         &resolved,
-        skipped_for_url,
-        &mut skipped_count,
         &node_set.requested_files,
         &node_set.requested_attempt_ids,
     );
@@ -1154,30 +1138,22 @@ fn successful_submitted_urls<'a>(
 fn visible_downloads(
     items: Vec<crate::OwnedDownloadItem>,
     resolved: &ResolvedUrl,
-    skipped_paths: Option<&HashSet<String>>,
-    skipped_count: &mut usize,
     requested_files: &RequestedFiles,
     requested_attempt_ids: &HashMap<FileId, u64>,
 ) -> Vec<QueuedDownload> {
     items
         .into_iter()
-        .filter_map(|item| {
-            if skipped_paths.is_some_and(|paths| paths.contains(&item.path)) {
-                *skipped_count += 1;
-                return None;
-            }
-            Some(QueuedDownload {
-                resolved: resolved.clone(),
-                attempt_id: requested_attempt_ids
-                    .get(item.path.as_str())
-                    .copied()
-                    .unwrap_or(0),
-                trust_resume_state: matches!(
-                    requested_files,
-                    RequestedFiles::Only(file_ids) if file_ids.contains(item.path.as_str())
-                ),
-                item,
-            })
+        .map(|item| QueuedDownload {
+            resolved: resolved.clone(),
+            attempt_id: requested_attempt_ids
+                .get(item.path.as_str())
+                .copied()
+                .unwrap_or(0),
+            trust_resume_state: matches!(
+                requested_files,
+                RequestedFiles::Only(file_ids) if file_ids.contains(item.path.as_str())
+            ),
+            item,
         })
         .collect()
 }

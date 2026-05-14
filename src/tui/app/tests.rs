@@ -387,66 +387,6 @@ fn visible_file_context_prefers_core_state_over_stale_visible_row() {
 }
 
 #[test]
-fn skipped_session_paths_groups_only_skipped_files_by_url() {
-    let mut app = test_app();
-    let mut session = session_snapshot(vec![
-        ("https://mega.nz/file/a", UrlFixtureStatus::Fetched),
-        ("https://mega.nz/file/b", UrlFixtureStatus::Fetched),
-    ]);
-    push_file(&mut session, 0, "skip-a.bin", 1, FileFixtureStatus::Skipped);
-    push_file(&mut session, 1, "skip-b.bin", 1, FileFixtureStatus::Skipped);
-    push_file(
-        &mut session,
-        0,
-        "pending.bin",
-        1,
-        FileFixtureStatus::Pending,
-    );
-    app.session = Some(session);
-
-    let skipped = app.skipped_session_paths();
-
-    assert_eq!(skipped.len(), 2);
-    assert!(
-        skipped["https://mega.nz/file/a"].contains("skip-a.bin"),
-        "skipped paths should include skipped file under original URL"
-    );
-    assert!(
-        !skipped["https://mega.nz/file/a"].contains("pending.bin"),
-        "non-skipped files must not appear in the snapshot"
-    );
-    assert!(skipped["https://mega.nz/file/b"].contains("skip-b.bin"));
-}
-
-#[test]
-fn register_session_queued_file_does_not_revive_skipped_entry() {
-    let dir = tempdir().unwrap();
-    let _guard = StateDirectoryGuard::set(dir.path());
-    let mut app = test_app();
-    let mut session = session_snapshot(vec![("https://mega.nz/file/a", UrlFixtureStatus::Fetched)]);
-    push_file(&mut session, 0, "skip-a.bin", 1, FileFixtureStatus::Skipped);
-    app.session = Some(session);
-
-    let should_queue = app.register_session_queued_file(
-        "https://mega.nz/file/a",
-        "https://mega.nz/file/a",
-        "https://mega.nz/file/a",
-        "https://mega.nz/file/a",
-        &"skip-a.bin".into(),
-        1,
-    );
-
-    assert!(!should_queue);
-    let session = app.session.as_ref().unwrap();
-    assert_eq!(session.file_count(), 1);
-    assert!(matches!(
-        session.find_file("skip-a.bin").unwrap().lifecycle,
-        crate::core::FileLifecycle::Skipped
-    ));
-    assert_eq!(session.find_file("skip-a.bin").unwrap().id, "skip-a.bin");
-}
-
-#[test]
 fn register_session_queued_file_preserves_explicit_package_identity() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
@@ -751,6 +691,39 @@ fn pending_empty_package_placeholder_is_visible() {
             file_id: "https://mega.nz/folder/root".to_string().into(),
         })
     );
+}
+
+#[test]
+fn bookmarklet_added_url_placeholder_is_visible_with_existing_packages() {
+    let mut app = test_app();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id("pkg", "https://mega.nz/file/root"),
+            source_url: "https://mega.nz/file/root".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+            display_name: "Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: "file.bin".to_string().into(),
+                path: "file.bin".to_string(),
+                size: 100,
+            }],
+            collision: None,
+        },
+    });
+
+    app.handle_ui_action(UiAction::AddUrls(vec![
+        "https://mega.nz/folder/bookmarklet".to_string(),
+    ]));
+
+    assert!(app.visible_rows().contains(&TuiRow::File {
+        package_id: None,
+        file_id: "https://mega.nz/folder/bookmarklet".to_string().into(),
+    }));
+    let placeholder = app
+        .visible_file(&"https://mega.nz/folder/bookmarklet".into())
+        .expect("bookmarklet placeholder should be visible");
+    assert_eq!(placeholder.name, "https://mega.nz/folder/bookmarklet");
+    assert!(matches!(placeholder.status, FileStatus::Queued));
 }
 
 #[test]

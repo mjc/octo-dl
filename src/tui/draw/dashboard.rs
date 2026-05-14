@@ -429,7 +429,6 @@ fn package_status_style(status: PackageStatus, percent: u64) -> (&'static str, C
         PackageStatus::Complete => ("\u{2713}", Color::Green),
         PackageStatus::Partial => (package_progress_icon(percent), Color::Yellow),
         PackageStatus::Queued | PackageStatus::Pending => ("\u{25cb}", Color::DarkGray),
-        PackageStatus::Skipped | PackageStatus::Deleted => ("\u{2715}", Color::DarkGray),
     }
 }
 

@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::core::model::{
-    DesiredState, DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
-    PackageState, PackageStatus, SessionMeta, UrlId,
+    DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId, PackageState,
+    PackageStatus, SessionMeta, UrlId,
 };
 use crate::core::session::SessionSnapshot;
 use chrono::Utc;
@@ -34,7 +34,6 @@ pub struct RestartSnapshot {
     pub state: DownloadState,
     pub resume_file_ids: Vec<FileId>,
     pub preexisting_complete_file_ids: Vec<FileId>,
-    pub suppressed_file_ids: Vec<FileId>,
 }
 
 impl RestartSnapshot {
@@ -51,10 +50,7 @@ impl RestartSnapshot {
                         continue;
                     }
                     saw_file_for_url = true;
-                    if !matches!(
-                        file.lifecycle,
-                        FileLifecycle::Complete | FileLifecycle::Skipped | FileLifecycle::Deleted
-                    ) {
+                    if !matches!(file.lifecycle, FileLifecycle::Complete) {
                         has_remaining = true;
                         break;
                     }
@@ -145,7 +141,6 @@ pub fn reconcile_restart(
     let mut files = IndexMap::<FileId, FileState>::new();
     let mut resume_file_ids = Vec::new();
     let mut preexisting_complete_file_ids = Vec::new();
-    let mut suppressed_file_ids = Vec::new();
 
     let complete_map: HashMap<_, _> = fs
         .complete_files
@@ -191,7 +186,6 @@ pub fn reconcile_restart(
             .into_iter()
             .flat_map(|package| package.files.into_iter())
         {
-            let file_id = file.id.clone();
             let mut file = FileState {
                 id: file.id.clone(),
                 package_id: file.package_id.clone(),
@@ -204,16 +198,6 @@ pub fn reconcile_restart(
                 runtime: file.runtime.clone(),
                 message: file.message.clone(),
             };
-            if matches!(
-                file.lifecycle,
-                FileLifecycle::Skipped | FileLifecycle::Deleted
-            ) || matches!(file.desired, DesiredState::Suppressed)
-            {
-                file.runtime.counts_in_run_totals = false;
-                suppressed_file_ids.push(file_id.clone());
-                files.insert(file_id, file);
-                continue;
-            }
             let observed = crate::download::ObservedLocalFile {
                 final_size: complete_map.get(&file.id).copied(),
                 part_size: partial_map.get(&file.id).map(|partial| partial.bytes),
@@ -283,7 +267,6 @@ pub fn reconcile_restart(
         state,
         resume_file_ids,
         preexisting_complete_file_ids,
-        suppressed_file_ids,
     }
 }
 
@@ -297,11 +280,11 @@ fn canonical_restart_session(mut snapshot: SessionSnapshot) -> SessionSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::RuntimeState;
     use crate::core::model::SessionRunStatus;
     use crate::core::session::{
         FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
     };
+    use crate::core::{DesiredState, RuntimeState};
 
     fn package_id(raw: &str, source_url: &str) -> PackageId {
         PackageId::parse_or_key(raw, &crate::core::PackageKey::new(source_url))
@@ -623,30 +606,6 @@ mod tests {
         assert_eq!(
             restart.resumable_urls(),
             vec!["https://mega.nz/file/test".to_string()]
-        );
-    }
-
-    #[test]
-    fn restart_suppresses_deleted_and_skipped_files() {
-        let mut snapshot = sample_snapshot();
-        snapshot.packages[0].files = vec![FileSnapshot {
-            id: "a.bin".to_string().into(),
-            package_id: package_id("pkg", "https://mega.nz/file/test"),
-            source_url: Some("https://mega.nz/file/test".to_string()),
-            path: "a.bin".to_string(),
-            size: 100,
-            lifecycle: FileLifecycle::Deleted,
-            progress: FileProgressState::default(),
-            desired: DesiredState::Suppressed,
-            runtime: RuntimeState::default(),
-            message: None,
-        }];
-        snapshot.sync_flat_files_from_packages();
-        let restart = reconcile_restart(Some(snapshot), FilesystemSnapshot::default(), vec![]);
-        assert_eq!(restart.suppressed_file_ids, vec!["a.bin".to_string()]);
-        assert_eq!(
-            restart.state.files["a.bin"].lifecycle,
-            FileLifecycle::Skipped
         );
     }
 }

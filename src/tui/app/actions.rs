@@ -123,10 +123,6 @@ impl App {
         self.update_session_file(id, SessionFileUpdate::Error(error));
     }
 
-    fn mark_file_skipped(&mut self, id: &FileId) {
-        self.update_session_file(id, SessionFileUpdate::Skipped);
-    }
-
     fn handle_deleted_download_artifact(&mut self, id: &FileId, artifact_path: &str) -> bool {
         if !self.deleted_files.contains(id) {
             return false;
@@ -136,7 +132,7 @@ impl App {
         self.reset_pending_files.remove(id);
         self.cancellation_tokens.remove(id);
         super::super::download::schedule_download_artifact_delete(artifact_path.to_string());
-        self.mark_file_skipped(id);
+        self.remove_session_file(id);
         true
     }
 
@@ -428,7 +424,7 @@ impl App {
             let _ = self.remove_overlay_file(id);
             super::super::download::schedule_download_artifact_delete(artifact_path);
         }
-        self.mark_file_skipped(id);
+        self.remove_session_file(id);
         if !is_core_backed {
             self.recompute_totals();
         }
