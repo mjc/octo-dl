@@ -180,10 +180,10 @@ impl App {
                 CoreEffect::EnqueueUrlResolution { url } => {
                     let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
                 }
-                CoreEffect::DeleteOutputArtifacts { path, .. } => {
+                CoreEffect::DeleteOutputArtifacts { path } => {
                     super::super::download::schedule_output_artifact_delete(path);
                 }
-                CoreEffect::DeleteResumeArtifacts { path, .. } => {
+                CoreEffect::DeleteResumeArtifacts { path } => {
                     super::super::download::schedule_resume_artifact_delete(path);
                 }
                 CoreEffect::PublishStatusMessage(message) => {
