@@ -11,12 +11,6 @@ pub(super) enum SessionUrlUpdate<'a> {
     Error(&'a str),
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum SessionRunUpdate {
-    Completed,
-    Paused,
-}
-
 pub(super) struct SessionAdapter;
 
 impl SessionAdapter {
@@ -85,17 +79,6 @@ impl SessionAdapter {
             status: session.status,
             config: session.config.clone(),
             credentials: session.credentials.clone(),
-        }
-    }
-
-    pub(super) fn apply_run_update(session: &mut SessionSnapshot, update: SessionRunUpdate) {
-        match update {
-            SessionRunUpdate::Completed => {
-                session.status = SessionRunStatus::Completed;
-            }
-            SessionRunUpdate::Paused => {
-                session.status = SessionRunStatus::Paused;
-            }
         }
     }
 
@@ -177,10 +160,10 @@ impl SessionAdapter {
         });
 
         if session.iter_files().next().is_none() && !has_pending_urls {
-            Self::apply_run_update(session, SessionRunUpdate::Completed);
+            session.status = SessionRunStatus::Completed;
         } else {
             log::info!("Marking session as paused for later resume");
-            Self::apply_run_update(session, SessionRunUpdate::Paused);
+            session.status = SessionRunStatus::Paused;
         }
     }
 
