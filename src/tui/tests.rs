@@ -607,10 +607,9 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
         source_url.as_str(),
         UrlFixtureStatus::Pending,
     )]));
-    app.update_session_url(
-        &source_url,
-        crate::tui::session::SessionUrlUpdate::Error("boom"),
-    );
+    let _ = app.mutate_session_and_save(|session| {
+        crate::tui::session::SessionAdapter::mark_url_error(session, &source_url, "boom")
+    });
     app.session
         .as_mut()
         .expect("session should be installed")
