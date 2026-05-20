@@ -171,7 +171,8 @@ impl App {
     }
 
     fn apply_core_effects(&mut self, effects: CoreEffects, should_sync_pending: bool) {
-        let mut queued_file_map: IndexMap<String, Vec<FileId>> = IndexMap::new();
+        let mut queued_file_map = std::mem::take(&mut self.queued_file_effects);
+        queued_file_map.clear();
         for effect in effects {
             match effect {
                 CoreEffect::PersistSession(snapshot) => {
@@ -207,12 +208,16 @@ impl App {
             }
         }
 
-        self.enqueue_batched_file_downloads(queued_file_map);
+        self.enqueue_batched_file_downloads(&mut queued_file_map);
+        self.queued_file_effects = queued_file_map;
         self.sync_scheduler_pending_order(should_sync_pending);
     }
 
-    fn enqueue_batched_file_downloads(&mut self, queued_file_map: IndexMap<String, Vec<FileId>>) {
-        for (source_url, file_ids) in queued_file_map {
+    fn enqueue_batched_file_downloads(
+        &mut self,
+        queued_file_map: &mut IndexMap<String, Vec<FileId>>,
+    ) {
+        for (source_url, file_ids) in queued_file_map.iter_mut() {
             if file_ids.is_empty() {
                 continue;
             }
@@ -227,8 +232,8 @@ impl App {
                 })
                 .collect();
             let _ = self.url_tx.send(DownloadRequest::ResumeFileIds {
-                source_url,
-                file_ids,
+                source_url: source_url.clone(),
+                file_ids: std::mem::take(file_ids),
                 attempt_ids,
             });
         }

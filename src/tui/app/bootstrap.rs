@@ -73,6 +73,7 @@ impl App {
             visible_file_positions: HashMap::new(),
             overlay_files: IndexMap::new(),
             file_ui: HashMap::new(),
+            queued_file_effects: IndexMap::new(),
             file_list_state: ListState::default(),
             expanded_packages: HashSet::new(),
             sort: super::SortState::new(),

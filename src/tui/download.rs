@@ -278,15 +278,13 @@ impl SchedulerState {
     }
 
     fn rebuild_pending_queue(&mut self) {
-        self.pending_queue = self
-            .desired_pending_order
-            .iter()
-            .filter(|file_id| {
-                self.available_downloads.contains_key(*file_id)
-                    && !self.active_downloads.contains(*file_id)
-            })
-            .cloned()
-            .collect();
+        self.pending_queue.clear();
+        self.pending_queue
+            .extend(self.desired_pending_order.iter().filter_map(|file_id| {
+                (self.available_downloads.contains_key(file_id)
+                    && !self.active_downloads.contains(file_id))
+                .then(|| file_id.clone())
+            }));
     }
 }
 
