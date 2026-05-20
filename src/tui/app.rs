@@ -63,6 +63,7 @@ pub struct App {
     pub(crate) visible_file_positions: HashMap<FileId, usize>,
     pub(crate) overlay_files: IndexMap<FileId, OverlayFile>,
     pub(crate) file_ui: HashMap<FileId, FileUiState>,
+    pub(crate) queued_file_effects: IndexMap<String, Vec<FileId>>,
     pub file_list_state: ListState,
     pub expanded_packages: HashSet<PackageId>,
     pub sort: SortState,
