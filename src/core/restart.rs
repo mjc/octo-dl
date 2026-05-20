@@ -194,7 +194,6 @@ pub fn reconcile_restart(
                 size: file.size,
                 lifecycle: file.lifecycle.clone(),
                 progress: file.progress.clone(),
-                desired: file.desired,
                 runtime: file.runtime.clone(),
             };
             let observed = crate::download::ObservedLocalFile {
@@ -275,11 +274,11 @@ fn canonical_restart_session(snapshot: SessionSnapshot) -> SessionSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::RuntimeState;
     use crate::core::model::SessionRunStatus;
     use crate::core::session::{
         FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
     };
-    use crate::core::{DesiredState, RuntimeState};
 
     fn package_id(raw: &str, source_url: &str) -> PackageId {
         PackageId::parse_or_key(raw, &crate::core::PackageKey::new(source_url))
@@ -307,7 +306,6 @@ mod tests {
                     size: 100,
                     lifecycle: FileLifecycle::Queued,
                     progress: FileProgressState::default(),
-                    desired: DesiredState::Present,
                     runtime: RuntimeState {
                         counts_in_run_totals: true,
                         ..RuntimeState::default()
@@ -473,7 +471,6 @@ mod tests {
                     size: 10,
                     lifecycle: FileLifecycle::Queued,
                     progress: FileProgressState::default(),
-                    desired: DesiredState::Present,
                     runtime: RuntimeState::default(),
                 }],
                 error: None,
@@ -490,7 +487,6 @@ mod tests {
                     size: 20,
                     lifecycle: FileLifecycle::Queued,
                     progress: FileProgressState::default(),
-                    desired: DesiredState::Present,
                     runtime: RuntimeState::default(),
                 }],
                 error: None,

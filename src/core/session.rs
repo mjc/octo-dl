@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::DownloadConfig;
 use crate::core::model::{
-    DesiredState, FileId, FileLifecycle, FileProgressState, PackageId, PackageKey, RuntimeState,
+    FileId, FileLifecycle, FileProgressState, PackageId, PackageKey, RuntimeState,
     SessionRunStatus, UrlId,
 };
 
@@ -99,7 +99,6 @@ pub struct FileSnapshot {
     pub size: u64,
     pub lifecycle: FileLifecycle,
     pub progress: FileProgressState,
-    pub desired: DesiredState,
     pub runtime: RuntimeState,
 }
 
@@ -305,7 +304,6 @@ pub fn queued_file_snapshot(
         size,
         lifecycle: FileLifecycle::Queued,
         progress: FileProgressState::default(),
-        desired: DesiredState::Present,
         runtime: RuntimeState {
             counts_in_run_totals: true,
             active: false,
@@ -541,7 +539,6 @@ mod tests {
             size: 10,
             lifecycle: FileLifecycle::Queued,
             progress: FileProgressState::default(),
-            desired: DesiredState::Present,
             runtime: RuntimeState::default(),
         });
         paused.save().unwrap();
@@ -601,7 +598,6 @@ mod tests {
                 size: 10,
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
-                desired: DesiredState::Present,
                 runtime: RuntimeState::default(),
             },
             FileSnapshot {
@@ -612,7 +608,6 @@ mod tests {
                 size: 20,
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
-                desired: DesiredState::Present,
                 runtime: RuntimeState::default(),
             },
         ];

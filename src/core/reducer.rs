@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use crate::core::model::{
-    DesiredState, DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
-    PackageKey, PackageState, PackageStatus, RuntimeState, SessionRunStatus, UrlId,
+    DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId, PackageKey,
+    PackageState, PackageStatus, RuntimeState, SessionRunStatus, UrlId,
 };
 use crate::core::restart::RestartSnapshot;
 use crate::core::session::{FileSnapshot, PackageSnapshot, SessionSnapshot};
@@ -456,7 +456,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                             size: resolved.size,
                             lifecycle: FileLifecycle::Planned,
                             progress: FileProgressState::default(),
-                            desired: DesiredState::Present,
                             runtime: RuntimeState {
                                 counts_in_run_totals: true,
                                 ..RuntimeState::default()
@@ -649,7 +648,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
             {
                 let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Queued;
-                file.desired = DesiredState::RetryRequested;
                 file.runtime.active = false;
                 file.runtime.counts_in_run_totals = true;
                 file.progress.visible_completed_bytes = 0;
@@ -673,7 +671,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
             if let Some(file) = state.files.get_mut(&file_id) {
                 let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Queued;
-                file.desired = DesiredState::ResetRequested;
                 file.runtime.active = false;
                 file.runtime.counts_in_run_totals = true;
                 file.runtime.preexisting_complete = false;
@@ -754,7 +751,6 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
                     size: file.size,
                     lifecycle: file.lifecycle.clone(),
                     progress: file.progress.clone(),
-                    desired: file.desired,
                     runtime: file.runtime.clone(),
                 })
                 .collect::<Vec<_>>();
@@ -908,7 +904,6 @@ mod tests {
                 size: 100,
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
-                desired: DesiredState::Present,
                 runtime: RuntimeState {
                     counts_in_run_totals: true,
                     ..RuntimeState::default()
@@ -1097,7 +1092,6 @@ mod tests {
                 size: 10,
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
-                desired: DesiredState::Present,
                 runtime: RuntimeState {
                     counts_in_run_totals: true,
                     ..RuntimeState::default()
@@ -1167,7 +1161,6 @@ mod tests {
                     message: "boom".to_string(),
                 },
                 progress: FileProgressState::default(),
-                desired: DesiredState::Present,
                 runtime: RuntimeState {
                     counts_in_run_totals: true,
                     ..RuntimeState::default()
@@ -1239,7 +1232,6 @@ mod tests {
                 size: 10,
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
-                desired: DesiredState::Present,
                 runtime: RuntimeState {
                     counts_in_run_totals: true,
                     ..RuntimeState::default()

@@ -263,15 +263,6 @@ pub enum PackageStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum DesiredState {
-    #[default]
-    Present,
-    RetryRequested,
-    ResetRequested,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RuntimeState {
     pub counts_in_run_totals: bool,
@@ -341,7 +332,6 @@ pub struct FileState {
     pub size: u64,
     pub lifecycle: FileLifecycle,
     pub progress: FileProgressState,
-    pub desired: DesiredState,
     pub runtime: RuntimeState,
 }
 
