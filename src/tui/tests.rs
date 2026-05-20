@@ -335,7 +335,6 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
             size: 128,
             lifecycle: FileLifecycle::Queued,
             progress: crate::core::FileProgressState::default(),
-            desired: crate::core::DesiredState::Present,
             runtime: crate::core::RuntimeState {
                 counts_in_run_totals: true,
                 ..crate::core::RuntimeState::default()
@@ -349,7 +348,6 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
             size: 256,
             lifecycle: FileLifecycle::Queued,
             progress: crate::core::FileProgressState::default(),
-            desired: crate::core::DesiredState::Present,
             runtime: crate::core::RuntimeState {
                 counts_in_run_totals: true,
                 ..crate::core::RuntimeState::default()

@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use crate::core::{
-    DesiredState, FileLifecycle, FileSnapshot, PackageId, PackageKey, SessionMeta,
-    SessionRunStatus, SessionSnapshot, SessionUrlSnapshot, validate_snapshot,
+    FileLifecycle, FileSnapshot, PackageId, PackageKey, SessionMeta, SessionRunStatus,
+    SessionSnapshot, SessionUrlSnapshot, validate_snapshot,
 };
 
 pub(super) struct SessionAdapter;
@@ -189,7 +189,6 @@ impl SessionAdapter {
                 file.size = size;
                 file.path = path.to_string();
                 file.lifecycle = FileLifecycle::Queued;
-                file.desired = DesiredState::Present;
                 file.runtime.active = false;
                 file.runtime.counts_in_run_totals = true;
             } else {
@@ -199,7 +198,6 @@ impl SessionAdapter {
                 file.size = size;
                 file.path = path.to_string();
                 file.lifecycle = FileLifecycle::Queued;
-                file.desired = DesiredState::Present;
                 file.runtime.active = false;
                 file.runtime.counts_in_run_totals = true;
                 let package = session
@@ -251,7 +249,6 @@ impl SessionAdapter {
             size: file.size,
             lifecycle: file.lifecycle.clone(),
             progress: file.progress.clone(),
-            desired: file.desired,
             runtime: file.runtime.clone(),
         }
     }
