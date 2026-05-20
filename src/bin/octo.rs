@@ -90,8 +90,44 @@ fn print_usage() {
     eprintln!("Run 'octo --tui --help' or 'octo --help' for mode-specific options.");
 }
 
+fn print_tui_usage() {
+    eprintln!("Usage: octo --tui [OPTIONS]");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --tui               Launch interactive terminal TUI");
+    eprintln!("  --host <HOST>       Bind address for the API server when enabled");
+    eprintln!("  --tui-listen ADDR   Publish remote TUI attach stream on loopback ADDR");
+    eprintln!("  --config <PATH>     Config file override");
+    eprintln!("  -h, --help          Show this help");
+}
+
+fn print_headless_usage() {
+    eprintln!("Usage: octo --headless [OPTIONS]");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --headless          Start headless API service");
+    eprintln!("  --host <HOST>       Bind address for the API server");
+    eprintln!("  --tui-listen ADDR   Publish remote TUI attach stream on loopback ADDR");
+    eprintln!("  --config <PATH>     Config file override");
+    eprintln!("  -h, --help          Show this help");
+}
+
 fn help_requested(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "-h" || arg == "--help")
+}
+
+#[cfg(feature = "tui")]
+fn parse_tui_listen(value: &str) -> std::net::SocketAddr {
+    octo_dl::tui::parse_loopback_addr(value).unwrap_or_else(|error| {
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    })
+}
+
+#[cfg(not(feature = "tui"))]
+fn parse_tui_listen(_value: &str) -> std::net::SocketAddr {
+    eprintln!("TUI support not compiled in");
+    std::process::exit(1);
 }
 
 fn init_logger(args: &[String]) {
@@ -322,15 +358,29 @@ async fn main() -> octo_dl::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     init_logger(&args);
 
-    if help_requested(&args) {
-        print_usage();
-        std::process::exit(0);
-    }
-
     let options = parse_runtime_options(&args).unwrap_or_else(|error| {
         eprintln!("Error: {error}");
         std::process::exit(1);
     });
+
+    if help_requested(&args) {
+        match options.ui {
+            Some(UiMode::Tui) => {
+                print_tui_usage();
+                std::process::exit(0);
+            }
+            Some(UiMode::Headless) => {
+                print_headless_usage();
+                std::process::exit(0);
+            }
+            None => {
+                if args.iter().all(|arg| arg == "-h" || arg == "--help") {
+                    print_usage();
+                    std::process::exit(0);
+                }
+            }
+        }
+    }
 
     if options.ui == Some(UiMode::Tui)
         && let Some(addr) = options.tui_attach.as_deref()
@@ -354,12 +404,7 @@ async fn main() -> octo_dl::Result<()> {
     }
 
     if options.ui == Some(UiMode::Tui) {
-        let listen = options.tui_listen.as_deref().map(|value| {
-            octo_dl::tui::parse_loopback_addr(value).unwrap_or_else(|error| {
-                eprintln!("Error: {error}");
-                std::process::exit(1);
-            })
-        });
+        let listen = options.tui_listen.as_deref().map(parse_tui_listen);
         let host_param = options.host_explicit.then_some(Some(options.host.clone()));
         #[cfg(feature = "tui")]
         {
@@ -370,16 +415,12 @@ async fn main() -> octo_dl::Result<()> {
         #[cfg(not(feature = "tui"))]
         {
             let _ = host_param;
+            let _ = listen;
             eprintln!("TUI support not compiled in");
             std::process::exit(1);
         }
     } else if options.ui == Some(UiMode::Headless) {
-        let listen = options.tui_listen.as_deref().map(|value| {
-            octo_dl::tui::parse_loopback_addr(value).unwrap_or_else(|error| {
-                eprintln!("Error: {error}");
-                std::process::exit(1);
-            })
-        });
+        let listen = options.tui_listen.as_deref().map(parse_tui_listen);
         let host_param = options.host_explicit.then_some(Some(options.host.clone()));
         #[cfg(feature = "tui")]
         {
@@ -390,6 +431,7 @@ async fn main() -> octo_dl::Result<()> {
         #[cfg(not(feature = "tui"))]
         {
             let _ = host_param;
+            let _ = listen;
             eprintln!("API support requires the 'tui' feature");
             std::process::exit(1);
         }
