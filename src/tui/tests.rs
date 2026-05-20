@@ -692,12 +692,12 @@ fn ui_delete_file_keeps_completed_artifact_on_disk() {
 
     assert!(app.files.is_empty());
     assert!(file_path.exists());
-    assert!(!part_path.exists());
-    assert!(!sidecar_path.exists());
+    assert!(part_path.exists());
+    assert!(sidecar_path.exists());
 }
 
 #[test]
-fn ui_delete_core_backed_completed_file_keeps_output_and_removes_resume_artifacts() {
+fn ui_delete_core_backed_completed_file_leaves_filesystem_artifacts() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("core-backed.bin");
     let part_path = dir.path().join("core-backed.bin.part");
@@ -735,8 +735,8 @@ fn ui_delete_core_backed_completed_file_keeps_output_and_removes_resume_artifact
     app.handle_ui_action(UiAction::DeleteFile(file_id.into()));
 
     assert!(file_path.exists());
-    assert!(!part_path.exists());
-    assert!(!sidecar_path.exists());
+    assert!(part_path.exists());
+    assert!(sidecar_path.exists());
 }
 
 #[test]
@@ -787,7 +787,7 @@ fn ui_delete_completed_package_leaves_filesystem_artifacts() {
 }
 
 #[test]
-fn deleted_file_completion_event_redeletes_output_artifacts() {
+fn deleted_file_completion_event_is_ignored_and_leaves_artifacts() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("late-complete.bin");
     let part_path = dir.path().join("late-complete.bin.part");
@@ -833,9 +833,11 @@ fn deleted_file_completion_event_redeletes_output_artifacts() {
         attempt_id: 0,
     });
 
-    assert!(!file_path.exists());
-    assert!(!part_path.exists());
-    assert!(!sidecar_path.exists());
+    assert!(app.files.is_empty());
+    assert!(app.core_state.files.is_empty());
+    assert!(file_path.exists());
+    assert!(part_path.exists());
+    assert!(sidecar_path.exists());
 }
 
 #[test]
@@ -892,14 +894,14 @@ fn deleted_file_stays_deleted_after_cancel_then_completion_events() {
     });
 
     assert!(app.files.is_empty());
-    assert!(app.deleted_files.contains(file_id.as_str()));
-    assert!(!file_path.exists());
-    assert!(!part_path.exists());
-    assert!(!sidecar_path.exists());
+    assert!(app.core_state.files.is_empty());
+    assert!(file_path.exists());
+    assert!(part_path.exists());
+    assert!(sidecar_path.exists());
 }
 
 #[test]
-fn deleted_file_error_event_redeletes_output_artifacts() {
+fn deleted_file_error_event_is_ignored_and_leaves_artifacts() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("late-error.bin");
     let part_path = dir.path().join("late-error.bin.part");
@@ -947,9 +949,10 @@ fn deleted_file_error_event_redeletes_output_artifacts() {
     });
 
     assert!(app.files.is_empty());
-    assert!(!file_path.exists());
-    assert!(!part_path.exists());
-    assert!(!sidecar_path.exists());
+    assert!(app.core_state.files.is_empty());
+    assert!(file_path.exists());
+    assert!(part_path.exists());
+    assert!(sidecar_path.exists());
 }
 
 #[test]

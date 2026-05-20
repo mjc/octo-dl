@@ -41,7 +41,7 @@ pub(crate) use self::types::{OverlayFile, SharedStateChannels, VisibleFileContex
 
 use super::event::DownloadRequest;
 use super::event::{DownloadEvent, QueuedFile, TokenMessage};
-use super::session::{SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate};
+use super::session::{SessionAdapter, SessionUrlUpdate};
 use super::visible;
 
 pub struct App {
@@ -105,8 +105,6 @@ pub struct App {
     pub cancellation_tokens: HashMap<FileId, CancellationToken>,
     // Per-file download attempt IDs for retry/reset flows
     pub file_attempt_ids: HashMap<FileId, u64>,
-    // Files deleted from the UI — used to suppress stale download events
-    pub deleted_files: HashSet<FileId>,
     // Files reset from the UI — used to suppress stale terminal events from the old attempt
     pub reset_pending_files: HashSet<FileId>,
     // Session
@@ -152,7 +150,6 @@ impl App {
             &self.core_state,
             &self.expanded_packages,
             &self.sort,
-            &self.deleted_files,
             selected_row_identity,
         );
     }

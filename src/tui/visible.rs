@@ -38,15 +38,6 @@ pub(super) fn sorted_file_indices(
     rows::sorted_file_indices(files, core_state, overlay_files)
 }
 
-pub(super) fn seed_overlay_from_visible(
-    files: &[FileEntry],
-    core_state: &DownloadState,
-    deleted_files: &HashSet<FileId>,
-    overlay_files: &mut IndexMap<FileId, OverlayFile>,
-) {
-    sync::seed_overlay_from_visible(files, core_state, deleted_files, overlay_files);
-}
-
 pub(super) fn sync_visible_files(
     files: &mut Vec<FileEntry>,
     visible_file_positions: &mut HashMap<FileId, usize>,
@@ -56,7 +47,6 @@ pub(super) fn sync_visible_files(
     core_state: &DownloadState,
     expanded_packages: &HashSet<PackageId>,
     sort: &SortState,
-    deleted_files: &HashSet<FileId>,
     selected_row_identity: Option<TuiRow>,
 ) {
     sync::sync_visible_files(
@@ -68,7 +58,6 @@ pub(super) fn sync_visible_files(
         core_state,
         expanded_packages,
         sort,
-        deleted_files,
         selected_row_identity,
     );
 }

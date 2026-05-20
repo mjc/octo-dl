@@ -474,7 +474,7 @@ fn handle_main_input_delete_removes_session_entry_and_keeps_selection() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
-    app.files = vec![
+    for file in [
         FileEntry {
             id: "first.bin".to_string().into(),
             name: "first.bin".to_string(),
@@ -489,7 +489,9 @@ fn handle_main_input_delete_removes_session_entry_and_keeps_selection() {
             downloaded: 0,
             status: FileStatus::Queued,
         },
-    ];
+    ] {
+        app.upsert_overlay_file(file, Some("https://mega.nz/folder/root".to_string()), true);
+    }
     app.recompute_totals();
     app.file_list_state.select(Some(0));
 
@@ -506,6 +508,7 @@ fn handle_main_input_delete_removes_session_entry_and_keeps_selection() {
         FileFixtureStatus::Pending,
     );
     let session_path = session.state_path();
+    session.save().unwrap();
     app.session = Some(session);
 
     handle_input(&mut app, key(KeyCode::Delete));
@@ -519,7 +522,6 @@ fn handle_main_input_delete_removes_session_entry_and_keeps_selection() {
     assert_eq!(app.files[0].id, "second.bin");
     assert_eq!(app.file_list_state.selected(), Some(0));
     assert_eq!(app.total_size, 20);
-    assert!(app.deleted_files.contains("first.bin"));
     assert!(session_path.exists());
 
     let session = app.session.as_ref().expect("session should remain");
@@ -566,7 +568,6 @@ fn handle_main_input_delete_last_file_removes_empty_session_file() {
     confirm(&mut app);
 
     assert!(app.files.is_empty());
-    assert!(app.deleted_files.contains("only.bin"));
     assert!(!session_path.exists());
     let session = app
         .session
@@ -580,7 +581,7 @@ fn handle_main_input_delete_last_file_removes_empty_session_file() {
 #[test]
 fn handle_main_input_delete_uses_visible_sorted_row() {
     let mut app = test_app();
-    app.files = vec![
+    for file in [
         FileEntry {
             id: "complete.bin".to_string().into(),
             name: "complete.bin".to_string(),
@@ -595,7 +596,9 @@ fn handle_main_input_delete_uses_visible_sorted_row() {
             downloaded: 5,
             status: FileStatus::Downloading,
         },
-    ];
+    ] {
+        app.upsert_overlay_file(file, None, true);
+    }
     app.file_list_state.select(Some(0));
 
     handle_input(&mut app, key(KeyCode::Delete));
@@ -630,7 +633,6 @@ fn handle_main_input_delete_removes_failed_file() {
     confirm(&mut app);
 
     assert!(app.files.is_empty());
-    assert!(app.deleted_files.contains("failed.bin"));
 }
 
 #[test]
@@ -676,7 +678,6 @@ fn handle_main_input_shift_d_deletes_without_confirmation() {
     assert_eq!(app.popup, Popup::None);
     assert_eq!(app.pending_confirmation, None);
     assert!(app.files.is_empty());
-    assert!(app.deleted_files.contains("remove.bin"));
 }
 
 #[test]
@@ -710,8 +711,8 @@ fn handle_main_input_shift_d_keeps_completed_file_artifact() {
     assert_eq!(app.pending_confirmation, None);
     assert!(app.files.is_empty());
     assert!(final_path.exists());
-    assert!(!part_path.exists());
-    assert!(!sidecar_path.exists());
+    assert!(part_path.exists());
+    assert!(sidecar_path.exists());
 }
 
 #[test]
@@ -829,8 +830,8 @@ fn handle_main_input_delete_keeps_completed_file_artifact() {
 
     assert!(app.files.is_empty());
     assert!(final_path.exists());
-    assert!(!part_path.exists());
-    assert!(!sidecar_path.exists());
+    assert!(part_path.exists());
+    assert!(sidecar_path.exists());
 }
 
 #[test]

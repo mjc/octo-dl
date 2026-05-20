@@ -847,6 +847,7 @@ fn overlay_error_remains_visible_alongside_core_package_rows() {
             collision: None,
         },
     });
+    app.submit_url("https://mega.nz/folder/bad".to_string());
 
     app.handle_download_event(crate::tui::event::DownloadEvent::ScopeError {
         scope: "https://mega.nz/folder/bad".to_string(),
@@ -930,20 +931,6 @@ fn deleting_url_level_error_removes_session_url_and_ignores_late_events() {
             .iter()
             .all(|package| package.display_name != url)
     );
-}
-
-#[test]
-fn submitting_url_does_not_consult_deleted_file_ids() {
-    let dir = tempdir().unwrap();
-    let _guard = StateDirectoryGuard::set(dir.path());
-    let mut app = test_app();
-    let url = "https://mega.nz/folder/bad".to_string();
-    app.deleted_files.insert(url.clone().into());
-
-    app.submit_url(url.clone());
-
-    assert!(app.urls.contains(&url));
-    assert!(app.deleted_files.contains(url.as_str()));
 }
 
 #[test]
@@ -1089,31 +1076,6 @@ fn resume_reuse_then_progress_keeps_file_bandwidth_on_fresh_bytes_only() {
     assert_eq!(core_file.progress.downloaded_network_bytes, 25);
     assert_eq!(app.total_downloaded, 85);
     assert_eq!(app.total_network_downloaded, 25);
-}
-
-#[test]
-fn mark_visible_file_error_updates_session_file_status() {
-    let dir = tempdir().unwrap();
-    let _guard = StateDirectoryGuard::set(dir.path());
-    let mut app = test_app();
-    let mut session = session_snapshot(vec![(
-        "https://mega.nz/file/root",
-        UrlFixtureStatus::Fetched,
-    )]);
-    push_file(&mut session, 0, "file-id", 128, FileFixtureStatus::Pending);
-    app.session = Some(session);
-
-    app.mark_visible_file_error(&"file-id".into(), "file-id", "network failure");
-
-    let session = app.session.as_ref().expect("session should remain");
-    assert!(matches!(
-        session.find_file("file-id").unwrap().lifecycle,
-        crate::core::FileLifecycle::Failed
-    ));
-    assert_eq!(
-        session.find_file("file-id").unwrap().message.as_deref(),
-        Some("network failure")
-    );
 }
 
 #[test]
