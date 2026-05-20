@@ -124,7 +124,7 @@ fn counts_in_run_totals(file: &FileState) -> bool {
 #[derive(Debug, Clone, Copy)]
 struct FileDerivedState {
     package_id: PackageId,
-    lifecycle: FileLifecycle,
+    is_complete: bool,
     size: u64,
     visible_completed_bytes: u64,
     downloaded_network_bytes: u64,
@@ -135,7 +135,7 @@ impl From<&FileState> for FileDerivedState {
     fn from(file: &FileState) -> Self {
         Self {
             package_id: file.package_id,
-            lifecycle: file.lifecycle,
+            is_complete: matches!(file.lifecycle, FileLifecycle::Complete),
             size: file.size,
             visible_completed_bytes: file.progress.visible_completed_bytes.min(file.size),
             downloaded_network_bytes: file.progress.downloaded_network_bytes.min(file.size),
@@ -158,7 +158,7 @@ fn add_totals_contribution(state: &mut DownloadState, file: FileDerivedState) {
         .displayed_network_bytes
         .saturating_add(file.downloaded_network_bytes);
     state.totals.run_file_total = state.totals.run_file_total.saturating_add(1);
-    if matches!(file.lifecycle, FileLifecycle::Complete) {
+    if file.is_complete {
         state.totals.run_file_completed = state.totals.run_file_completed.saturating_add(1);
     }
 }
@@ -177,7 +177,7 @@ fn remove_totals_contribution(state: &mut DownloadState, file: FileDerivedState)
         .displayed_network_bytes
         .saturating_sub(file.downloaded_network_bytes);
     state.totals.run_file_total = state.totals.run_file_total.saturating_sub(1);
-    if matches!(file.lifecycle, FileLifecycle::Complete) {
+    if file.is_complete {
         state.totals.run_file_completed = state.totals.run_file_completed.saturating_sub(1);
     }
 }
@@ -234,7 +234,7 @@ fn package_status_from_files(state: &DownloadState, package_id: PackageId) -> Pa
         };
         match file.lifecycle {
             FileLifecycle::Downloading => has_downloading = true,
-            FileLifecycle::Failed => has_failed = true,
+            FileLifecycle::Failed { .. } => has_failed = true,
             FileLifecycle::Queued | FileLifecycle::Planned => has_queued = true,
             FileLifecycle::Complete => has_complete = true,
         }
@@ -461,7 +461,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                                 counts_in_run_totals: true,
                                 ..RuntimeState::default()
                             },
-                            message: None,
                         };
                         insert_file_state(state, file);
                     }
@@ -479,7 +478,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Queued;
                 file.runtime.active = false;
-                file.message = None;
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
             }
@@ -573,7 +571,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 file.lifecycle = FileLifecycle::Complete;
                 file.runtime.active = false;
                 file.progress.visible_completed_bytes = file.size;
-                file.message = None;
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
             }
@@ -586,9 +583,8 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
             if let Some(file) = state.files.get_mut(&file_id) {
                 let before = FileDerivedState::from(&*file);
                 if !file.lifecycle.is_terminal() {
-                    file.lifecycle = FileLifecycle::Failed;
+                    file.lifecycle = FileLifecycle::Failed { message };
                     file.runtime.active = false;
-                    file.message = Some(message);
                 }
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
@@ -649,7 +645,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
         CoreEvent::FileRetryRequested { file_id } => {
             let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id)
-                && matches!(file.lifecycle, FileLifecycle::Failed)
+                && matches!(file.lifecycle, FileLifecycle::Failed { .. })
             {
                 let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Queued;
@@ -659,7 +655,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 file.progress.visible_completed_bytes = 0;
                 file.progress.downloaded_network_bytes = 0;
                 file.progress.verified_existing_bytes = 0;
-                file.message = None;
                 effects.push(CoreEffect::DeleteResumeArtifacts {
                     path: file.path.clone(),
                 });
@@ -683,7 +678,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 file.runtime.counts_in_run_totals = true;
                 file.runtime.preexisting_complete = false;
                 file.progress = FileProgressState::default();
-                file.message = None;
                 effects.push(CoreEffect::DeleteOutputArtifacts {
                     path: file.path.clone(),
                 });
@@ -758,11 +752,10 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
                     source_url: file.source_url.clone(),
                     path: file.path.clone(),
                     size: file.size,
-                    lifecycle: file.lifecycle,
+                    lifecycle: file.lifecycle.clone(),
                     progress: file.progress.clone(),
                     desired: file.desired,
                     runtime: file.runtime.clone(),
-                    message: file.message.clone(),
                 })
                 .collect::<Vec<_>>();
             if files.is_empty() {
@@ -920,7 +913,6 @@ mod tests {
                     counts_in_run_totals: true,
                     ..RuntimeState::default()
                 },
-                message: None,
             },
         );
         state
@@ -1110,7 +1102,6 @@ mod tests {
                     counts_in_run_totals: true,
                     ..RuntimeState::default()
                 },
-                message: None,
             },
         );
 
@@ -1172,14 +1163,15 @@ mod tests {
                 source_url: "https://mega.nz/folder/pkg-a".to_string(),
                 path: "a.bin".to_string(),
                 size: 10,
-                lifecycle: FileLifecycle::Failed,
+                lifecycle: FileLifecycle::Failed {
+                    message: "boom".to_string(),
+                },
                 progress: FileProgressState::default(),
                 desired: DesiredState::Present,
                 runtime: RuntimeState {
                     counts_in_run_totals: true,
                     ..RuntimeState::default()
                 },
-                message: Some("boom".to_string()),
             },
         );
 
@@ -1252,7 +1244,6 @@ mod tests {
                     counts_in_run_totals: true,
                     ..RuntimeState::default()
                 },
-                message: None,
             },
         );
 

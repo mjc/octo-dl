@@ -192,11 +192,10 @@ pub fn reconcile_restart(
                 source_url: file.source_url.clone(),
                 path: file.path.clone(),
                 size: file.size,
-                lifecycle: file.lifecycle,
+                lifecycle: file.lifecycle.clone(),
                 progress: file.progress.clone(),
                 desired: file.desired,
                 runtime: file.runtime.clone(),
-                message: file.message.clone(),
             };
             let observed = crate::download::ObservedLocalFile {
                 final_size: complete_map.get(&file.id).copied(),
@@ -227,7 +226,6 @@ pub fn reconcile_restart(
                 };
                 file.runtime.counts_in_run_totals = true;
                 file.runtime.preexisting_complete = false;
-                file.message = None;
                 resume_file_ids.push(file.id.clone());
             } else if matches!(file.lifecycle, FileLifecycle::Complete) {
                 file.runtime.preexisting_complete = true;
@@ -238,7 +236,6 @@ pub fn reconcile_restart(
                 file.runtime.counts_in_run_totals = true;
                 file.runtime.preexisting_complete = false;
                 file.progress = FileProgressState::default();
-                file.message = None;
                 resume_file_ids.push(file.id.clone());
             }
             files.insert(file.id.clone(), file);
@@ -315,7 +312,6 @@ mod tests {
                         counts_in_run_totals: true,
                         ..RuntimeState::default()
                     },
-                    message: None,
                 }],
                 error: None,
             }],
@@ -398,8 +394,9 @@ mod tests {
             downloaded_network_bytes: 0,
             visible_completed_bytes: 95,
         };
-        file.lifecycle = FileLifecycle::Failed;
-        file.message = Some("corrupt".to_string());
+        file.lifecycle = FileLifecycle::Failed {
+            message: "corrupt".to_string(),
+        };
         snapshot.prune_empty_packages();
 
         let restart = reconcile_restart(
@@ -411,7 +408,7 @@ mod tests {
         let file = &restart.state.files["a.bin"];
         assert_eq!(file.lifecycle, FileLifecycle::Queued);
         assert_eq!(file.progress, FileProgressState::default());
-        assert!(file.message.is_none());
+        assert!(matches!(file.lifecycle, FileLifecycle::Queued));
         assert_eq!(restart.resume_file_ids, vec!["a.bin".to_string()]);
     }
 
@@ -478,7 +475,6 @@ mod tests {
                     progress: FileProgressState::default(),
                     desired: DesiredState::Present,
                     runtime: RuntimeState::default(),
-                    message: None,
                 }],
                 error: None,
             },
@@ -496,7 +492,6 @@ mod tests {
                     progress: FileProgressState::default(),
                     desired: DesiredState::Present,
                     runtime: RuntimeState::default(),
-                    message: None,
                 }],
                 error: None,
             },

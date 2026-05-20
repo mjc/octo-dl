@@ -14,16 +14,14 @@ fn project_core_file(
     _package: Option<&PackageState>,
     existing: Option<FileEntry>,
 ) -> Option<FileEntry> {
-    let status = match file.lifecycle {
+    let status = match &file.lifecycle {
         FileLifecycle::Planned | FileLifecycle::Queued => FileStatus::Queued,
         FileLifecycle::Downloading => FileStatus::Downloading,
         FileLifecycle::Complete => FileStatus::Complete,
-        FileLifecycle::Failed => {
-            FileStatus::Error(file.message.clone().unwrap_or_else(|| "failed".to_string()))
-        }
+        FileLifecycle::Failed { message } => FileStatus::Error(message.clone()),
     };
 
-    let downloaded = match file.lifecycle {
+    let downloaded = match &file.lifecycle {
         FileLifecycle::Complete => file.size,
         _ => crate::core::visible_completed_bytes_for_display(file),
     };

@@ -98,22 +98,17 @@ impl App {
         let previous_downloaded = visible_file.downloaded;
         visible_file.name = core_file.path.clone();
         visible_file.size = core_file.size;
-        visible_file.downloaded = match core_file.lifecycle {
+        visible_file.downloaded = match &core_file.lifecycle {
             crate::core::FileLifecycle::Complete => core_file.size,
             _ => crate::core::visible_completed_bytes_for_display(core_file),
         };
-        visible_file.status = match core_file.lifecycle {
+        visible_file.status = match &core_file.lifecycle {
             crate::core::FileLifecycle::Planned | crate::core::FileLifecycle::Queued => {
                 FileStatus::Queued
             }
             crate::core::FileLifecycle::Downloading => FileStatus::Downloading,
             crate::core::FileLifecycle::Complete => FileStatus::Complete,
-            crate::core::FileLifecycle::Failed => FileStatus::Error(
-                core_file
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| "failed".to_string()),
-            ),
+            crate::core::FileLifecycle::Failed { message } => FileStatus::Error(message.clone()),
         };
         Some((previous_downloaded, visible_file.downloaded))
     }
@@ -124,24 +119,24 @@ impl App {
         now: std::time::Instant,
     ) -> Option<u64> {
         let core_file = self.core_state.files.get(file_id)?;
-        let downloaded = match core_file.lifecycle {
+        let downloaded = match &core_file.lifecycle {
             crate::core::FileLifecycle::Complete => core_file.size,
             _ => crate::core::visible_completed_bytes_for_display(core_file),
         };
         let network_downloaded = crate::tui::app::App::core_file_network_downloaded(core_file);
-        let lifecycle = core_file.lifecycle;
-        let failure_message = core_file.message.clone();
+        let complete = matches!(core_file.lifecycle, crate::core::FileLifecycle::Complete);
+        let failure_message = core_file.lifecycle.failure_message().map(str::to_owned);
 
         let &visible_index = self.visible_file_positions.get(file_id)?;
         let visible_file = self.files.get_mut(visible_index)?;
         let previous_downloaded = visible_file.downloaded;
         visible_file.downloaded = downloaded;
-        visible_file.status = match lifecycle {
-            crate::core::FileLifecycle::Complete => FileStatus::Complete,
-            crate::core::FileLifecycle::Failed => {
-                FileStatus::Error(failure_message.unwrap_or_else(|| "failed".to_string()))
-            }
-            _ => FileStatus::Downloading,
+        visible_file.status = if complete {
+            FileStatus::Complete
+        } else if let Some(message) = failure_message {
+            FileStatus::Error(message)
+        } else {
+            FileStatus::Downloading
         };
 
         let accepted = downloaded.saturating_sub(previous_downloaded);

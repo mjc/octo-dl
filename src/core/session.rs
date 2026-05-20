@@ -101,8 +101,6 @@ pub struct FileSnapshot {
     pub progress: FileProgressState,
     pub desired: DesiredState,
     pub runtime: RuntimeState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,8 +240,9 @@ impl SessionSnapshot {
 
     pub fn mark_file_error(&mut self, file_id: &str, error: &str) {
         if let Some(file) = self.find_file_mut(file_id) {
-            file.lifecycle = FileLifecycle::Failed;
-            file.message = Some(error.to_string());
+            file.lifecycle = FileLifecycle::Failed {
+                message: error.to_string(),
+            };
             file.runtime.active = false;
         }
     }
@@ -313,7 +312,6 @@ pub fn queued_file_snapshot(
             preexisting_complete: false,
             reused_chunks: 0,
         },
-        message: None,
     }
 }
 
@@ -545,7 +543,6 @@ mod tests {
             progress: FileProgressState::default(),
             desired: DesiredState::Present,
             runtime: RuntimeState::default(),
-            message: None,
         });
         paused.save().unwrap();
 
@@ -606,7 +603,6 @@ mod tests {
                 progress: FileProgressState::default(),
                 desired: DesiredState::Present,
                 runtime: RuntimeState::default(),
-                message: None,
             },
             FileSnapshot {
                 id: "folder/b.bin".to_string().into(),
@@ -618,7 +614,6 @@ mod tests {
                 progress: FileProgressState::default(),
                 desired: DesiredState::Present,
                 runtime: RuntimeState::default(),
-                message: None,
             },
         ];
         session.save().unwrap();

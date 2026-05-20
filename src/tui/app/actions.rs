@@ -488,7 +488,7 @@ impl App {
                 (
                     file.id.clone(),
                     file.source_url.clone(),
-                    matches!(file.lifecycle, crate::core::FileLifecycle::Failed),
+                    matches!(file.lifecycle, crate::core::FileLifecycle::Failed { .. }),
                 )
             })
             .collect();

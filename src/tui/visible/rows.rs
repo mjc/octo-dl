@@ -321,13 +321,11 @@ pub(super) fn visible_rows_for(
 }
 
 fn file_status_from_core(file: &crate::core::FileState) -> FileStatus {
-    match file.lifecycle {
+    match &file.lifecycle {
         FileLifecycle::Planned | FileLifecycle::Queued => FileStatus::Queued,
         FileLifecycle::Downloading => FileStatus::Downloading,
         FileLifecycle::Complete => FileStatus::Complete,
-        FileLifecycle::Failed => {
-            FileStatus::Error(file.message.clone().unwrap_or_else(|| "failed".to_string()))
-        }
+        FileLifecycle::Failed { message } => FileStatus::Error(message.clone()),
     }
 }
 

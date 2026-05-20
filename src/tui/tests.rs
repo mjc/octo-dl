@@ -340,7 +340,6 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
                 counts_in_run_totals: true,
                 ..crate::core::RuntimeState::default()
             },
-            message: None,
         },
         crate::core::FileSnapshot {
             id: "Merged Folder/b.mkv".to_string().into(),
@@ -355,7 +354,6 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
                 counts_in_run_totals: true,
                 ..crate::core::RuntimeState::default()
             },
-            message: None,
         },
     ];
     session.save().unwrap();

@@ -249,11 +249,10 @@ impl SessionAdapter {
             source_url: file.source_url.clone(),
             path: file.path.clone(),
             size: file.size,
-            lifecycle: file.lifecycle,
+            lifecycle: file.lifecycle.clone(),
             progress: file.progress.clone(),
             desired: file.desired,
             runtime: file.runtime.clone(),
-            message: file.message.clone(),
         }
     }
 }
