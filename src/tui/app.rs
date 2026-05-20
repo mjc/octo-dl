@@ -41,7 +41,7 @@ pub(crate) use self::types::{OverlayFile, SharedStateChannels, VisibleFileContex
 
 use super::event::DownloadRequest;
 use super::event::{DownloadEvent, QueuedFile, TokenMessage};
-use super::session::{SessionAdapter, SessionUrlUpdate};
+use super::session::SessionAdapter;
 use super::visible;
 
 pub struct App {

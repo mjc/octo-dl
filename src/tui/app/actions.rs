@@ -5,9 +5,7 @@ use crate::{
     format_bytes,
 };
 
-use super::{
-    App, ProgressDelta, QueuedFile, SessionAdapter, SessionUrlUpdate, UiAction, VisibleFileContext,
-};
+use super::{App, ProgressDelta, QueuedFile, SessionAdapter, UiAction, VisibleFileContext};
 
 const MAX_UI_ACTIONS_PER_TICK: usize = 64;
 
@@ -32,7 +30,8 @@ impl App {
         self.ensure_session_for_pending_urls();
         self.queue_url_placeholder(url.clone());
         self.apply_core_command(CoreCommand::SubmitUrl { url: url.clone() });
-        self.update_session_url(&url, SessionUrlUpdate::Pending);
+        let _ =
+            self.mutate_session_and_save(|session| SessionAdapter::mark_url_pending(session, &url));
     }
 
     fn retry_source_url(&mut self, url: &str) {
@@ -44,7 +43,8 @@ impl App {
         self.apply_core_command(CoreCommand::SubmitUrl {
             url: url.to_string(),
         });
-        self.update_session_url(url, SessionUrlUpdate::Pending);
+        let _ =
+            self.mutate_session_and_save(|session| SessionAdapter::mark_url_pending(session, url));
     }
 
     pub(crate) fn drain_ui_actions(
@@ -155,7 +155,8 @@ impl App {
     }
 
     fn handle_session_url_error(&mut self, url: &str, error: &str) {
-        self.update_session_url(url, SessionUrlUpdate::Error(error));
+        let _ = self
+            .mutate_session_and_save(|session| SessionAdapter::mark_url_error(session, url, error));
         let _ = self
             .overlay_files
             .shift_remove(&FileId::from(url))
@@ -264,7 +265,8 @@ impl App {
         let url_id = FileId::from(url);
         self.forget_visible_file(&url_id);
         self.sync_visible_files();
-        self.update_session_url(url, SessionUrlUpdate::Fetched);
+        let _ =
+            self.mutate_session_and_save(|session| SessionAdapter::mark_url_fetched(session, url));
         self.recompute_totals();
     }
 

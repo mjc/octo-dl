@@ -5,12 +5,6 @@ use crate::core::{
     SessionRunStatus, SessionSnapshot, SessionUrlSnapshot, validate_snapshot,
 };
 
-pub(super) enum SessionUrlUpdate<'a> {
-    Pending,
-    Fetched,
-    Error(&'a str),
-}
-
 pub(super) struct SessionAdapter;
 
 impl SessionAdapter {
@@ -23,28 +17,18 @@ impl SessionAdapter {
         *session = next;
     }
 
-    pub(super) fn update_url(
-        session: &mut SessionSnapshot,
-        url: &str,
-        update: SessionUrlUpdate<'_>,
-    ) {
-        match update {
-            SessionUrlUpdate::Pending => {
-                let tracked_url = Self::ensure_url(session, url);
-                tracked_url.error = None;
-            }
-            SessionUrlUpdate::Fetched => {
-                let Some(tracked_url) = session.urls.iter_mut().find(|entry| entry.url == url)
-                else {
-                    return;
-                };
-                tracked_url.error = None;
-            }
-            SessionUrlUpdate::Error(error) => {
-                let tracked_url = Self::ensure_url(session, url);
-                tracked_url.error = Some(error.to_string());
-            }
+    pub(super) fn mark_url_pending(session: &mut SessionSnapshot, url: &str) {
+        Self::ensure_url(session, url).error = None;
+    }
+
+    pub(super) fn mark_url_fetched(session: &mut SessionSnapshot, url: &str) {
+        if let Some(tracked_url) = session.urls.iter_mut().find(|entry| entry.url == url) {
+            tracked_url.error = None;
         }
+    }
+
+    pub(super) fn mark_url_error(session: &mut SessionSnapshot, url: &str, error: &str) {
+        Self::ensure_url(session, url).error = Some(error.to_string());
     }
 
     pub(super) fn remove_url(session: &mut SessionSnapshot, url: &str) {

@@ -8,7 +8,7 @@ use crate::core::{
     snapshot_from_state,
 };
 
-use super::{App, FileStatus, SessionAdapter, SessionUrlUpdate};
+use super::{App, FileStatus, SessionAdapter};
 use crate::tui::event::DownloadRequest;
 
 fn core_event_requires_visible_sync(event: &CoreEvent) -> bool {
@@ -324,11 +324,6 @@ impl App {
                 file.runtime.preexisting_complete = true;
             }
         }
-    }
-
-    pub(crate) fn update_session_url(&mut self, url: &str, update: SessionUrlUpdate<'_>) {
-        let _ = self
-            .mutate_session_and_save(|session| SessionAdapter::update_url(session, url, update));
     }
 
     pub(crate) fn register_session_queued_file(
