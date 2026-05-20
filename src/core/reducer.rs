@@ -204,6 +204,16 @@ fn remove_file_from_package_index(
     }
 }
 
+fn remove_unreferenced_source_url(state: &mut DownloadState, source_url: &UrlId) {
+    if !state
+        .files
+        .values()
+        .any(|file| file.source_url.as_deref() == Some(source_url.as_str()))
+    {
+        state.url_order.retain(|url| url != source_url);
+    }
+}
+
 fn package_status_from_files(state: &DownloadState, package_id: PackageId) -> PackageStatus {
     let Some(package) = state.packages.get(&package_id) else {
         return PackageStatus::Pending;
@@ -623,13 +633,8 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 {
                     state.packages.shift_remove(&before.package_id);
                 }
-                if let Some(source_url) = source_url
-                    && !state
-                        .files
-                        .values()
-                        .any(|file| file.source_url.as_deref() == Some(source_url.as_str()))
-                {
-                    state.url_order.retain(|url| url != &source_url);
+                if let Some(source_url) = source_url {
+                    remove_unreferenced_source_url(state, &source_url);
                 }
                 recompute_session_status(state);
             }
@@ -647,13 +652,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                     }
                 }
                 for source_url in removed_source_urls {
-                    if !state
-                        .files
-                        .values()
-                        .any(|file| file.source_url.as_deref() == Some(source_url.as_str()))
-                    {
-                        state.url_order.retain(|url| url != &source_url);
-                    }
+                    remove_unreferenced_source_url(state, &source_url);
                 }
                 recompute_session_status(state);
             }
