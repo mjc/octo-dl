@@ -99,8 +99,8 @@ pub enum CoreEffect {
     PersistSession(SessionSnapshot),
     EnqueueUrlResolution { url: UrlId },
     EnqueueFileDownload { file_id: FileId },
-    DeleteOutputArtifacts { file_id: FileId, path: String },
-    DeleteResumeArtifacts { file_id: FileId, path: String },
+    DeleteOutputArtifacts { path: String },
+    DeleteResumeArtifacts { path: String },
     PublishStatusMessage(String),
     PublishViewSnapshot,
 }
@@ -662,7 +662,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 file.progress.verified_existing_bytes = 0;
                 file.message = None;
                 effects.push(CoreEffect::DeleteResumeArtifacts {
-                    file_id: file.id.clone(),
                     path: file.path.clone(),
                 });
                 effects.push(CoreEffect::EnqueueFileDownload {
@@ -687,11 +686,9 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                 file.progress = FileProgressState::default();
                 file.message = None;
                 effects.push(CoreEffect::DeleteOutputArtifacts {
-                    file_id: file.id.clone(),
                     path: file.path.clone(),
                 });
                 effects.push(CoreEffect::DeleteResumeArtifacts {
-                    file_id: file.id.clone(),
                     path: file.path.clone(),
                 });
                 effects.push(CoreEffect::EnqueueFileDownload {
@@ -1558,7 +1555,7 @@ mod tests {
         assert_eq!(state.files["file.bin"].lifecycle, FileLifecycle::Queued);
         assert!(effects.iter().any(|effect| matches!(
             effect,
-            CoreEffect::DeleteResumeArtifacts { file_id, .. } if file_id == "file.bin"
+            CoreEffect::DeleteResumeArtifacts { path } if path == "file.bin"
         )));
         assert!(effects.iter().any(|effect| matches!(
             effect,
