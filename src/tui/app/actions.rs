@@ -393,7 +393,9 @@ impl App {
         self.reset_pending_files.remove(id);
 
         if !is_core_backed && self.is_session_url(id.as_str()) {
-            self.remove_session_url(id.as_str());
+            let _ = self.mutate_session_and_save(|session| {
+                SessionAdapter::remove_url(session, id.as_str())
+            });
             self.urls.retain(|url| url != id.as_str());
         }
         if is_core_backed {
@@ -404,7 +406,8 @@ impl App {
             self.forget_visible_file(id);
             self.sync_visible_files();
         }
-        self.remove_session_file(id);
+        let _ = self
+            .mutate_session_and_save(|session| SessionAdapter::remove_file(session, id.as_str()));
         if !is_core_backed {
             self.recompute_totals();
         }
