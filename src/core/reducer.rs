@@ -613,16 +613,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
             if let Some(file) = state.files.shift_remove(&file_id) {
                 let before = FileDerivedState::from(&file);
                 let source_url = file.source_url.clone();
-                if !matches!(before.lifecycle, FileLifecycle::Complete) {
-                    effects.push(CoreEffect::DeleteOutputArtifacts {
-                        file_id: file.id.clone(),
-                        path: file.path.clone(),
-                    });
-                }
-                effects.push(CoreEffect::DeleteResumeArtifacts {
-                    file_id: file.id.clone(),
-                    path: file.path.clone(),
-                });
                 remove_totals_contribution(state, before);
                 remove_file_from_package_index(state, &file_id, before.package_id);
                 recompute_package_status(state, before.package_id);
@@ -1443,7 +1433,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_emits_cleanup_effects() {
+    fn delete_forgets_file_without_cleanup_effects() {
         let mut state = sample_state();
         let effects = reduce(
             &mut state,
@@ -1451,18 +1441,14 @@ mod tests {
                 file_id: "file.bin".to_string().into(),
             },
         );
-        assert!(effects.iter().any(|effect| matches!(
+        assert!(!effects.iter().any(|effect| matches!(
             effect,
-            CoreEffect::DeleteOutputArtifacts { file_id, .. } if file_id == "file.bin"
-        )));
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            CoreEffect::DeleteResumeArtifacts { file_id, .. } if file_id == "file.bin"
+            CoreEffect::DeleteOutputArtifacts { .. } | CoreEffect::DeleteResumeArtifacts { .. }
         )));
     }
 
     #[test]
-    fn deleting_completed_file_keeps_output_artifact() {
+    fn deleting_completed_file_keeps_artifacts() {
         let mut state = sample_state();
         reduce(
             &mut state,
@@ -1480,11 +1466,7 @@ mod tests {
 
         assert!(!effects.iter().any(|effect| matches!(
             effect,
-            CoreEffect::DeleteOutputArtifacts { file_id, .. } if file_id == "file.bin"
-        )));
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            CoreEffect::DeleteResumeArtifacts { file_id, .. } if file_id == "file.bin"
+            CoreEffect::DeleteOutputArtifacts { .. } | CoreEffect::DeleteResumeArtifacts { .. }
         )));
     }
 

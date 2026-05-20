@@ -66,11 +66,6 @@ pub(crate) fn schedule_output_artifact_delete(path: String) {
     }
 }
 
-pub(crate) fn schedule_download_artifact_delete(path: String) {
-    schedule_output_artifact_delete(path.clone());
-    schedule_resume_artifact_delete(path);
-}
-
 pub(super) fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .pool_idle_timeout(Duration::from_secs(60))

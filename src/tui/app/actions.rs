@@ -6,8 +6,7 @@ use crate::{
 };
 
 use super::{
-    App, ProgressDelta, QueuedFile, SessionAdapter, SessionFileUpdate, SessionUrlUpdate, UiAction,
-    VisibleFileContext,
+    App, ProgressDelta, QueuedFile, SessionAdapter, SessionUrlUpdate, UiAction, VisibleFileContext,
 };
 
 const MAX_UI_ACTIONS_PER_TICK: usize = 64;
@@ -125,23 +124,6 @@ impl App {
         }
     }
 
-    pub(crate) fn note_file_error(&mut self, id: &FileId, error: &str) {
-        self.update_session_file(id, SessionFileUpdate::Error(error));
-    }
-
-    fn handle_deleted_download_artifact(&mut self, id: &FileId, artifact_path: &str) -> bool {
-        if !self.deleted_files.contains(id) {
-            return false;
-        }
-
-        self.file_attempt_ids.remove(id);
-        self.reset_pending_files.remove(id);
-        self.cancellation_tokens.remove(id);
-        super::super::download::schedule_download_artifact_delete(artifact_path.to_string());
-        self.remove_session_file(id);
-        true
-    }
-
     fn reset_is_waiting_for_new_attempt(&self, id: &FileId) -> bool {
         self.reset_pending_files.contains(id)
     }
@@ -165,6 +147,13 @@ impl App {
             .unwrap_or(false)
     }
 
+    fn is_tracked_error_scope(&self, scope: &str) -> bool {
+        matches!(scope, "setup" | "download")
+            || self.urls.iter().any(|url| url == scope)
+            || self.core_state.url_order.iter().any(|url| url == scope)
+            || self.overlay_files.contains_key(scope)
+    }
+
     fn handle_session_url_error(&mut self, url: &str, error: &str) {
         self.update_session_url(url, SessionUrlUpdate::Error(error));
         let _ = self
@@ -177,9 +166,6 @@ impl App {
 
     pub(crate) fn handle_file_error_event(&mut self, id: FileId, error: String, attempt_id: u64) {
         log::error!("Download error: {id}: {error}");
-        if self.handle_deleted_download_artifact(&id, id.as_str()) {
-            return;
-        }
         if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale download error after retry/reset: {id}");
             return;
@@ -188,15 +174,15 @@ impl App {
             log::info!("Ignoring stale download error after reset: {id}");
             return;
         }
-
-        if self.core_state.files.contains_key(&id) {
-            self.apply_core_event(CoreEvent::FileFailed {
-                file_id: id.clone(),
-                message: error.clone(),
-            });
-        } else {
-            self.mark_visible_file_error(&id, id.as_str(), &error);
+        if !self.core_state.files.contains_key(&id) {
+            log::info!("Ignoring download error for untracked file: {id}");
+            return;
         }
+
+        self.apply_core_event(CoreEvent::FileFailed {
+            file_id: id.clone(),
+            message: error.clone(),
+        });
         self.update_download_status_message();
     }
 
@@ -204,8 +190,10 @@ impl App {
         log::error!("Download error: {scope}: {error}");
         if self.is_session_url(&scope) {
             self.handle_session_url_error(&scope, &error);
-        } else {
+        } else if self.is_tracked_error_scope(&scope) {
             self.show_ui_error_only(&scope, &error);
+        } else {
+            log::info!("Ignoring error for untracked scope: {scope}");
         }
         self.recompute_totals();
     }
@@ -258,9 +246,6 @@ impl App {
     }
 
     pub(crate) fn handle_file_queued_event(&mut self, file: QueuedFile) {
-        if self.deleted_files.contains(&file.id) {
-            return;
-        }
         if !self
             .core_state
             .url_order
@@ -289,19 +274,15 @@ impl App {
 
     pub(crate) fn handle_file_start_event(&mut self, id: FileId, size: u64, attempt_id: u64) {
         log::info!("Download started: {id} ({})", format_bytes(size));
-        if self.deleted_files.contains(&id) {
-            return;
-        }
         if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale download start after retry/reset: {id}");
             return;
         }
+        if !self.core_state.files.contains_key(&id) {
+            log::info!("Ignoring download start for untracked file: {id}");
+            return;
+        }
         self.reset_pending_files.remove(&id);
-        let source_url = self
-            .visible_file_context(&id)
-            .and_then(|context| context.source_url)
-            .unwrap_or_else(|| id.to_string());
-        self.ensure_core_file(&id, &source_url, id.as_str(), size, true);
         self.apply_core_event(CoreEvent::FileStarted {
             file_id: id.clone(),
             size,
@@ -316,11 +297,12 @@ impl App {
         delta: ProgressDelta,
         attempt_id: u64,
     ) {
-        if self.deleted_files.contains(&id) {
-            return;
-        }
         if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale download progress after retry/reset: {}", id);
+            return;
+        }
+        if !self.core_state.files.contains_key(&id) {
+            log::info!("Ignoring download progress for untracked file: {id}");
             return;
         }
         self.reset_pending_files.remove(&id);
@@ -339,11 +321,12 @@ impl App {
         bytes: u64,
         attempt_id: u64,
     ) {
-        if self.deleted_files.contains(&id) {
-            return;
-        }
         if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale resume reuse event after retry/reset: {id}");
+            return;
+        }
+        if !self.core_state.files.contains_key(&id) {
+            log::info!("Ignoring resume reuse for untracked file: {id}");
             return;
         }
         self.reset_pending_files.remove(&id);
@@ -362,9 +345,6 @@ impl App {
 
     pub(crate) fn handle_file_complete_event(&mut self, id: FileId, attempt_id: u64) {
         log::info!("Download complete: {id}");
-        if self.handle_deleted_download_artifact(&id, id.as_str()) {
-            return;
-        }
         if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale download completion after retry/reset: {id}");
             return;
@@ -373,28 +353,29 @@ impl App {
             log::info!("Ignoring stale download completion after reset: {id}");
             return;
         }
-        if self.core_state.files.contains_key(&id) {
-            self.apply_core_event(CoreEvent::FileCompleted {
-                file_id: id.clone(),
-            });
-            self.reset_file_ui_rate(&id);
-            self.update_download_status_message();
-        } else {
-            self.mark_visible_file_complete(&id, id.as_str());
+        if !self.core_state.files.contains_key(&id) {
+            log::info!("Ignoring download completion for untracked file: {id}");
+            return;
         }
+        self.apply_core_event(CoreEvent::FileCompleted {
+            file_id: id.clone(),
+        });
+        self.reset_file_ui_rate(&id);
+        self.update_download_status_message();
     }
 
     pub(crate) fn handle_file_cancelled_event(&mut self, id: FileId, attempt_id: u64) {
         log::info!("Download cancelled: {id}");
-        if self.handle_deleted_download_artifact(&id, id.as_str()) {
-            return;
-        }
         if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale download cancellation after retry/reset: {id}");
             return;
         }
         if self.reset_is_waiting_for_new_attempt(&id) {
             log::info!("Ignoring stale download cancellation after reset: {id}");
+            return;
+        }
+        if !self.core_state.files.contains_key(&id) {
+            log::info!("Ignoring download cancellation for untracked file: {id}");
             return;
         }
         self.cancellation_tokens.remove(&id);
@@ -407,17 +388,10 @@ impl App {
 
     pub(crate) fn perform_delete_file_action(&mut self, id: &FileId) {
         let context = self.visible_file_context(id);
-        let artifact_path = context
-            .as_ref()
-            .map_or_else(|| id.to_string(), |context| context.artifact_path.clone());
         let preserve_output_artifact = context
             .as_ref()
             .is_some_and(|context| matches!(context.status, super::FileStatus::Complete));
-        if let Some(context) = context.as_ref()
-            && !preserve_output_artifact
-        {
-            let _ = self.ensure_core_file_from_context(context);
-        }
+        self.overlay_files.shift_remove(id);
         let is_core_backed = self.core_state.files.contains_key(id);
         self.cancel_file_token(id);
         self.file_attempt_ids.remove(id);
@@ -425,16 +399,12 @@ impl App {
 
         if preserve_output_artifact && !is_core_backed {
             self.forget_visible_file(id);
-            super::super::download::schedule_resume_artifact_delete(artifact_path);
             self.remove_session_file(id);
             self.sync_visible_files();
             self.recompute_totals();
             return;
         }
 
-        if is_core_backed || !preserve_output_artifact {
-            self.deleted_files.insert(id.clone());
-        }
         if !is_core_backed && self.is_session_url(id.as_str()) {
             self.remove_session_url(id.as_str());
             self.urls.retain(|url| url != id.as_str());
@@ -443,16 +413,8 @@ impl App {
             self.apply_core_command(CoreCommand::DeleteFile {
                 file_id: id.clone(),
             });
-            if preserve_output_artifact {
-                super::super::download::schedule_resume_artifact_delete(artifact_path);
-            }
         } else {
             let _ = self.remove_overlay_file(id);
-            if preserve_output_artifact {
-                super::super::download::schedule_resume_artifact_delete(artifact_path);
-            } else {
-                super::super::download::schedule_download_artifact_delete(artifact_path);
-            }
         }
         self.remove_session_file(id);
         if !is_core_backed {
@@ -480,7 +442,6 @@ impl App {
             self.cancel_file_token(file_id);
             self.file_attempt_ids.remove(file_id);
             self.reset_pending_files.remove(file_id);
-            self.deleted_files.insert(file_id.clone());
             if let Some(source_url) = source_url {
                 self.urls.retain(|url| url != source_url);
             }

@@ -8,9 +8,7 @@ use crate::core::{
     snapshot_from_state,
 };
 
-use super::{
-    App, FileStatus, SessionAdapter, SessionFileUpdate, SessionRunUpdate, SessionUrlUpdate,
-};
+use super::{App, FileStatus, SessionAdapter, SessionUrlUpdate};
 use crate::tui::event::DownloadRequest;
 
 fn core_event_requires_visible_sync(event: &CoreEvent) -> bool {
@@ -159,9 +157,6 @@ impl App {
 
     fn apply_core_event_with_policy(&mut self, event: CoreEvent, policy: CoreApplyPolicy) {
         let selected_row_identity = policy.sync_visible.then(|| self.selected_row()).flatten();
-        if let CoreEvent::FileDeleted { file_id } = &event {
-            self.deleted_files.insert(file_id.clone());
-        }
         self.seed_core_session_from_session();
         let effects = reduce(&mut self.core_state, event);
         self.apply_core_effects(effects, policy.sync_pending);
@@ -340,12 +335,6 @@ impl App {
         let _ = self.mutate_session_and_save(|session| SessionAdapter::remove_url(session, url));
     }
 
-    pub(crate) fn update_session_file(&mut self, file_id: &FileId, update: SessionFileUpdate<'_>) {
-        let _ = self.mutate_session_and_save(|session| {
-            SessionAdapter::update_file(session, file_id.as_str(), update)
-        });
-    }
-
     pub(crate) fn remove_session_file(&mut self, file_id: &FileId) {
         let _ = self.mutate_session_and_save(|session| {
             SessionAdapter::remove_file(session, file_id.as_str())
@@ -389,11 +378,6 @@ impl App {
 
     pub(crate) fn read_session<R>(&self, f: impl FnOnce(&SessionSnapshot) -> R) -> Option<R> {
         self.session.as_ref().map(f)
-    }
-
-    pub(crate) fn update_session_run_status(&mut self, update: SessionRunUpdate) {
-        let _ = self
-            .mutate_session_and_save(|session| SessionAdapter::apply_run_update(session, update));
     }
 
     pub(crate) fn install_session(&mut self, session: SessionSnapshot) {
@@ -455,13 +439,6 @@ impl App {
         let _ = self.mutate_session_and_save(|session| {
             SessionAdapter::sync_for_shutdown(session, &visible)
         });
-    }
-
-    pub(crate) fn sync_session_after_file_complete(&mut self, id: &FileId) {
-        self.update_session_file(id, SessionFileUpdate::Complete);
-        if self.files_completed == self.files_total && self.files_total > 0 {
-            self.update_session_run_status(SessionRunUpdate::Completed);
-        }
     }
 
     pub(crate) fn update_download_status_message(&mut self) {

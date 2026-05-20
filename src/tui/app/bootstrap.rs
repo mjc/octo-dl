@@ -102,7 +102,6 @@ impl App {
             download_task_running: false,
             cancellation_tokens: HashMap::new(),
             file_attempt_ids: HashMap::new(),
-            deleted_files: HashSet::new(),
             reset_pending_files: HashSet::new(),
             session: None,
             core_state: DownloadState::new(SessionMeta {

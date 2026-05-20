@@ -2,15 +2,6 @@ use super::{App, FileEntry, FileStatus, OverlayFile, VisibleFileContext};
 use crate::core::FileId;
 
 impl App {
-    fn seed_overlay_from_visible(&mut self) {
-        super::super::visible::seed_overlay_from_visible(
-            &self.files,
-            &self.core_state,
-            &self.deleted_files,
-            &mut self.overlay_files,
-        );
-    }
-
     pub(crate) fn package_label_for_file(&self, file_id: &FileId) -> Option<String> {
         if let Some(core_file) = self.core_state.files.get(file_id) {
             let configured = self
@@ -52,16 +43,10 @@ impl App {
     }
 
     pub(crate) fn overlay_file_mut(&mut self, id: &FileId) -> Option<&mut FileEntry> {
-        if !self.overlay_files.contains_key(id) {
-            self.seed_overlay_from_visible();
-        }
         self.overlay_files.get_mut(id).map(|file| &mut file.file)
     }
 
     pub(crate) fn remove_overlay_file(&mut self, id: &FileId) -> Option<FileEntry> {
-        if !self.overlay_files.contains_key(id) {
-            self.seed_overlay_from_visible();
-        }
         let removed = self.overlay_files.shift_remove(id).map(|file| file.file);
         self.sync_visible_files();
         removed
@@ -114,23 +99,6 @@ impl App {
         })
     }
 
-    pub(crate) fn mark_visible_file_complete(&mut self, id: &FileId, name: &str) {
-        self.cancellation_tokens.remove(id);
-        if !self.core_state.files.contains_key(id)
-            && let Some(file) = self.overlay_file_mut(id)
-        {
-            file.name = name.to_string();
-            file.status = FileStatus::Complete;
-            file.downloaded = file.size;
-            self.sync_visible_files();
-        }
-        self.reset_file_ui_rate(id);
-
-        self.recompute_totals();
-        self.sync_session_after_file_complete(id);
-        self.update_download_status_message();
-    }
-
     pub(crate) fn show_overlay_error(
         &mut self,
         id: &FileId,
@@ -159,11 +127,6 @@ impl App {
             );
         }
         self.reset_file_ui_rate(id);
-    }
-
-    pub(crate) fn mark_visible_file_error(&mut self, id: &FileId, name: &str, error: &str) {
-        self.show_overlay_error(id, name, error, true);
-        self.note_file_error(id, error);
     }
 
     pub(crate) fn show_ui_error_only(&mut self, name: &str, error: &str) {

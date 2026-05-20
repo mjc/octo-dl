@@ -44,25 +44,6 @@ fn project_core_file(
     })
 }
 
-pub(super) fn seed_overlay_from_visible(
-    files: &[FileEntry],
-    core_state: &DownloadState,
-    deleted_files: &HashSet<FileId>,
-    overlay_files: &mut IndexMap<FileId, OverlayFile>,
-) {
-    for file in files {
-        if !core_state.files.contains_key(&file.id) && !deleted_files.contains(&file.id) {
-            overlay_files
-                .entry(file.id.clone())
-                .or_insert_with(|| OverlayFile {
-                    file: file.clone(),
-                    source_url: None,
-                    counts_toward_progress: true,
-                });
-        }
-    }
-}
-
 pub(super) fn sync_visible_files(
     files: &mut Vec<FileEntry>,
     visible_file_positions: &mut HashMap<FileId, usize>,
@@ -72,7 +53,6 @@ pub(super) fn sync_visible_files(
     core_state: &DownloadState,
     expanded_packages: &HashSet<PackageId>,
     sort: &SortState,
-    deleted_files: &HashSet<FileId>,
     selected_row_identity: Option<TuiRow>,
 ) {
     let selected_row = file_list_state.selected().unwrap_or(0);
@@ -83,17 +63,6 @@ pub(super) fn sync_visible_files(
         .collect();
 
     let mut existing = existing;
-    for (id, file) in &existing {
-        if !core_file_ids.contains(id) && !deleted_files.contains(id) {
-            overlay_files
-                .entry(id.clone())
-                .or_insert_with(|| OverlayFile {
-                    file: file.clone(),
-                    source_url: None,
-                    counts_toward_progress: true,
-                });
-        }
-    }
     let mut next_files = Vec::new();
     for file in core_state.files.values() {
         let package = core_state.packages.get(&file.package_id);
@@ -104,7 +73,7 @@ pub(super) fn sync_visible_files(
     }
 
     for (id, entry) in overlay_files.iter() {
-        if !core_file_ids.contains(id) && !deleted_files.contains(id) {
+        if !core_file_ids.contains(id) {
             next_files.push(entry.file.clone());
         }
     }

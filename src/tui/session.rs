@@ -5,11 +5,6 @@ use crate::core::{
     SessionRunStatus, SessionSnapshot, SessionUrlSnapshot, validate_snapshot,
 };
 
-pub(super) enum SessionFileUpdate<'a> {
-    Complete,
-    Error(&'a str),
-}
-
 pub(super) enum SessionUrlUpdate<'a> {
     Pending,
     Fetched,
@@ -81,31 +76,6 @@ impl SessionAdapter {
         }
         rebuild_packages(session);
         remove_orphaned_urls(session, &removed_source_urls);
-    }
-
-    pub(super) fn update_file(
-        session: &mut SessionSnapshot,
-        file_id: &str,
-        update: SessionFileUpdate<'_>,
-    ) {
-        match update {
-            SessionFileUpdate::Complete => {
-                if let Some(file) = find_file_mut(session, file_id) {
-                    file.lifecycle = FileLifecycle::Complete;
-                    file.progress.visible_completed_bytes = file.size;
-                    file.runtime.active = false;
-                    file.runtime.counts_in_run_totals = false;
-                }
-            }
-            SessionFileUpdate::Error(error) => {
-                if let Some(file) = find_file_mut(session, file_id) {
-                    file.lifecycle = FileLifecycle::Failed;
-                    file.message = Some(error.to_string());
-                    file.runtime.active = false;
-                }
-            }
-        }
-        rebuild_packages(session);
     }
 
     pub(super) fn meta(session: &SessionSnapshot) -> SessionMeta {
@@ -407,14 +377,4 @@ fn remove_orphaned_urls(session: &mut SessionSnapshot, candidate_urls: &HashSet<
         !candidate_urls.contains(&entry.url) || referenced_urls.contains(&entry.url)
     });
     rebuild_packages(session);
-}
-
-fn find_file_mut<'a>(
-    session: &'a mut SessionSnapshot,
-    file_id: &str,
-) -> Option<&'a mut FileSnapshot> {
-    session
-        .packages
-        .iter_mut()
-        .find_map(|package| package.files.iter_mut().find(|file| file.id == file_id))
 }
