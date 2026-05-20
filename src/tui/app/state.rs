@@ -331,16 +331,6 @@ impl App {
             .mutate_session_and_save(|session| SessionAdapter::update_url(session, url, update));
     }
 
-    pub(crate) fn remove_session_url(&mut self, url: &str) {
-        let _ = self.mutate_session_and_save(|session| SessionAdapter::remove_url(session, url));
-    }
-
-    pub(crate) fn remove_session_file(&mut self, file_id: &FileId) {
-        let _ = self.mutate_session_and_save(|session| {
-            SessionAdapter::remove_file(session, file_id.as_str())
-        });
-    }
-
     pub(crate) fn register_session_queued_file(
         &mut self,
         package_id: &str,
