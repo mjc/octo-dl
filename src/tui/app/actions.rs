@@ -13,9 +13,15 @@ use super::{
 const MAX_UI_ACTIONS_PER_TICK: usize = 64;
 
 impl App {
-    fn discard_visible_placeholder(&mut self, id: &FileId) {
+    fn forget_visible_file(&mut self, id: &FileId) {
+        self.overlay_files.shift_remove(id);
         self.files.retain(|file| file.id != *id);
-        self.visible_file_positions.remove(id);
+        self.visible_file_positions = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.id.clone(), index))
+            .collect();
         self.file_ui.remove(id);
     }
 
@@ -227,11 +233,7 @@ impl App {
                 .url_order
                 .retain(|url| url != &file.origin.submitted_url);
             let submitted_id = FileId::from(file.origin.submitted_url.as_str());
-            let _ = self
-                .overlay_files
-                .shift_remove(&submitted_id)
-                .map(|file| file.file);
-            self.discard_visible_placeholder(&submitted_id);
+            self.forget_visible_file(&submitted_id);
         }
         if !self.register_session_queued_file(
             &package_id.to_string(),
@@ -275,11 +277,7 @@ impl App {
 
     fn handle_session_url_fetched(&mut self, url: &str) {
         let url_id = FileId::from(url);
-        let _ = self
-            .overlay_files
-            .shift_remove(&url_id)
-            .map(|file| file.file);
-        self.discard_visible_placeholder(&url_id);
+        self.forget_visible_file(&url_id);
         self.sync_visible_files();
         self.update_session_url(url, SessionUrlUpdate::Fetched);
         self.recompute_totals();
@@ -426,15 +424,7 @@ impl App {
         self.reset_pending_files.remove(id);
 
         if preserve_output_artifact && !is_core_backed {
-            self.overlay_files.shift_remove(id);
-            self.files.retain(|file| file.id != *id);
-            self.visible_file_positions = self
-                .files
-                .iter()
-                .enumerate()
-                .map(|(index, file)| (file.id.clone(), index))
-                .collect();
-            self.file_ui.remove(id);
+            self.forget_visible_file(id);
             super::super::download::schedule_resume_artifact_delete(artifact_path);
             self.remove_session_file(id);
             self.sync_visible_files();
@@ -497,8 +487,7 @@ impl App {
         }
         self.apply_core_command(CoreCommand::DeletePackage { package_id });
         for source_id in source_ids {
-            self.overlay_files.shift_remove(&source_id);
-            self.discard_visible_placeholder(&source_id);
+            self.forget_visible_file(&source_id);
         }
     }
 
