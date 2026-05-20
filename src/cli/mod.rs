@@ -390,7 +390,7 @@ fn register_cli_package_in_session(
             package_entry.files.push(crate::core::queued_file_snapshot(
                 item.path.clone(),
                 package.id,
-                Some(source_url.to_string()),
+                source_url.to_string(),
                 item.path.clone(),
                 item.node.size(),
             ));
@@ -1018,7 +1018,7 @@ mod tests {
             files: vec![crate::core::queued_file_snapshot(
                 "episode-1.mkv".to_string(),
                 package_id,
-                Some("https://mega.nz/file/root".to_string()),
+                "https://mega.nz/file/root".to_string(),
                 "episode-1.mkv".to_string(),
                 128,
             )],
@@ -1040,7 +1040,7 @@ mod tests {
                 package_entry.files.push(crate::core::queued_file_snapshot(
                     path.to_string(),
                     package_id,
-                    Some("https://mega.nz/file/root".to_string()),
+                    "https://mega.nz/file/root".to_string(),
                     path.to_string(),
                     128,
                 ));

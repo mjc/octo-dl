@@ -211,7 +211,7 @@ fn remove_unreferenced_source_url(state: &mut DownloadState, source_url: &UrlId)
     if !state
         .files
         .values()
-        .any(|file| file.source_url.as_deref() == Some(source_url.as_str()))
+        .any(|file| file.source_url == *source_url)
     {
         state.url_order.retain(|url| url != source_url);
     }
@@ -437,7 +437,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                         let mut delta = None;
                         if let Some(file) = state.files.get_mut(&resolved.file_id) {
                             let before = FileDerivedState::from(&*file);
-                            file.source_url = Some(package.source_url.clone());
+                            file.source_url = package.source_url.clone();
                             file.path = resolved.path.clone();
                             file.size = resolved.size;
                             let after = FileDerivedState::from(&*file);
@@ -451,7 +451,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                         let file = FileState {
                             id: resolved.file_id.clone(),
                             package_id: incoming_package_id.clone(),
-                            source_url: Some(package.source_url.clone()),
+                            source_url: package.source_url.clone(),
                             path: resolved.path,
                             size: resolved.size,
                             lifecycle: FileLifecycle::Planned,
@@ -626,9 +626,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 {
                     state.packages.shift_remove(&before.package_id);
                 }
-                if let Some(source_url) = source_url {
-                    remove_unreferenced_source_url(state, &source_url);
-                }
+                remove_unreferenced_source_url(state, &source_url);
                 recompute_session_status(state);
             }
         }
@@ -638,9 +636,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 for file_id in package.file_ids {
                     if let Some(file) = state.files.shift_remove(&file_id) {
                         let before = FileDerivedState::from(&file);
-                        if let Some(source_url) = file.source_url.clone() {
-                            removed_source_urls.insert(source_url);
-                        }
+                        removed_source_urls.insert(file.source_url.clone());
                         remove_totals_contribution(state, before);
                     }
                 }
@@ -736,9 +732,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
 pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
     let mut url_errors = std::collections::HashMap::<UrlId, String>::new();
     for file in state.files.values() {
-        let Some(source_url) = file.source_url.as_ref() else {
-            continue;
-        };
+        let source_url = &file.source_url;
         if url_errors.contains_key(source_url) {
             continue;
         }
@@ -916,7 +910,7 @@ mod tests {
             FileState {
                 id: "file.bin".to_string().into(),
                 package_id: pkg_id,
-                source_url: Some("pkg".to_string()),
+                source_url: "pkg".to_string(),
                 path: "file.bin".to_string(),
                 size: 100,
                 lifecycle: FileLifecycle::Queued,
@@ -1106,7 +1100,7 @@ mod tests {
             FileState {
                 id: "a.bin".to_string().into(),
                 package_id: existing_id,
-                source_url: Some("https://mega.nz/folder/test".to_string()),
+                source_url: "https://mega.nz/folder/test".to_string(),
                 path: "folder/a.bin".to_string(),
                 size: 10,
                 lifecycle: FileLifecycle::Queued,
@@ -1175,7 +1169,7 @@ mod tests {
             FileState {
                 id: "a.bin".to_string().into(),
                 package_id: existing_id,
-                source_url: Some("https://mega.nz/folder/pkg-a".to_string()),
+                source_url: "https://mega.nz/folder/pkg-a".to_string(),
                 path: "a.bin".to_string(),
                 size: 10,
                 lifecycle: FileLifecycle::Failed,
@@ -1248,7 +1242,7 @@ mod tests {
             FileState {
                 id: "a.bin".to_string().into(),
                 package_id: old_id,
-                source_url: Some("https://mega.nz/folder/test".to_string()),
+                source_url: "https://mega.nz/folder/test".to_string(),
                 path: "folder/a.bin".to_string(),
                 size: 10,
                 lifecycle: FileLifecycle::Queued,

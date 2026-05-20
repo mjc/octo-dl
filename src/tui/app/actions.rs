@@ -428,16 +428,14 @@ impl App {
 
         let source_ids: Vec<_> = file_contexts
             .iter()
-            .filter_map(|(_, source_url)| source_url.as_deref().map(FileId::from))
+            .map(|(_, source_url)| FileId::from(source_url.as_str()))
             .collect();
 
         for (file_id, source_url) in &file_contexts {
             self.cancel_file_token(file_id);
             self.file_attempt_ids.remove(file_id);
             self.reset_pending_files.remove(file_id);
-            if let Some(source_url) = source_url {
-                self.urls.retain(|url| url != source_url);
-            }
+            self.urls.retain(|url| url != source_url);
         }
         self.apply_core_command(CoreCommand::DeletePackage { package_id });
         for source_id in source_ids {
@@ -498,9 +496,7 @@ impl App {
         let mut retried_file = false;
 
         for (file_id, source_url, core_failed) in package_files {
-            if let Some(source_url) = source_url {
-                source_urls.insert(source_url);
-            }
+            source_urls.insert(source_url);
             let retryable = core_failed
                 || self
                     .visible_file_context(&file_id)

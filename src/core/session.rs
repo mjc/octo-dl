@@ -94,8 +94,7 @@ pub struct SessionUrlSnapshot {
 pub struct FileSnapshot {
     pub id: FileId,
     pub package_id: PackageId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_url: Option<UrlId>,
+    pub source_url: UrlId,
     pub path: String,
     pub size: u64,
     pub lifecycle: FileLifecycle,
@@ -293,7 +292,7 @@ impl SessionSnapshot {
 pub fn queued_file_snapshot(
     file_id: impl Into<FileId>,
     package_id: PackageId,
-    source_url: Option<UrlId>,
+    source_url: UrlId,
     path: impl Into<String>,
     size: u64,
 ) -> FileSnapshot {
@@ -366,12 +365,10 @@ pub fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), String> {
                     file.id, file.package_id, package.id
                 ));
             }
-            if let Some(source_url) = &file.source_url
-                && !tracked_urls.contains(source_url)
-            {
+            if !tracked_urls.contains(&file.source_url) {
                 return Err(format!(
                     "file {} references untracked source_url {}",
-                    file.id, source_url
+                    file.id, file.source_url
                 ));
             }
         }
@@ -541,7 +538,7 @@ mod tests {
         paused.packages[0].files.push(FileSnapshot {
             id: "folder/file.bin".to_string().into(),
             package_id: PackageId::for_package_key(&PackageKey::new("Folder")),
-            source_url: Some("https://mega.nz/folder/root".to_string()),
+            source_url: "https://mega.nz/folder/root".to_string(),
             path: "folder/file.bin".to_string(),
             size: 10,
             lifecycle: FileLifecycle::Queued,
@@ -602,7 +599,7 @@ mod tests {
             FileSnapshot {
                 id: "folder/a.bin".to_string().into(),
                 package_id,
-                source_url: Some("https://mega.nz/folder/one".to_string()),
+                source_url: "https://mega.nz/folder/one".to_string(),
                 path: "folder/a.bin".to_string(),
                 size: 10,
                 lifecycle: FileLifecycle::Queued,
@@ -614,7 +611,7 @@ mod tests {
             FileSnapshot {
                 id: "folder/b.bin".to_string().into(),
                 package_id,
-                source_url: Some("https://mega.nz/folder/two".to_string()),
+                source_url: "https://mega.nz/folder/two".to_string(),
                 path: "folder/b.bin".to_string(),
                 size: 20,
                 lifecycle: FileLifecycle::Queued,

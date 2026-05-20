@@ -64,7 +64,7 @@ impl App {
             return Some(VisibleFileContext {
                 id: core_file.id.clone(),
                 status,
-                source_url: core_file.source_url.clone(),
+                source_url: Some(core_file.source_url.clone()),
                 artifact_path: core_file.path.clone(),
                 size: core_file.size,
                 counts_toward_progress: core_file.runtime.counts_in_run_totals

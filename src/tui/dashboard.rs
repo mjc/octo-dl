@@ -398,7 +398,7 @@ impl App {
                     let mut folder_conflict = false;
 
                     for file in package_files {
-                        source_url = source_url.or_else(|| file.source_url.clone());
+                        source_url = source_url.or_else(|| Some(file.source_url.clone()));
                         let folder = file.path.split('/').next().filter(|part| !part.is_empty());
                         match (common_folder, folder) {
                             (None, Some(folder)) => common_folder = Some(folder),

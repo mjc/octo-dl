@@ -195,7 +195,7 @@ impl App {
                         .core_state
                         .files
                         .get(&file_id)
-                        .and_then(|file| file.source_url.clone())
+                        .map(|file| file.source_url.clone())
                     else {
                         continue;
                     };
@@ -321,7 +321,7 @@ impl App {
             file_id: file_id.clone(),
         });
         if let Some(file) = self.core_state.files.get_mut(file_id) {
-            file.source_url = Some(source_url.to_string());
+            file.source_url = source_url.to_string();
             file.size = size;
             file.path = path.to_string();
             file.runtime.counts_in_run_totals = counts_toward_progress;
@@ -414,7 +414,7 @@ impl App {
                 .state
                 .files
                 .values()
-                .any(|file| file.source_url.as_deref() == Some(url.as_str()));
+                .any(|file| file.source_url == *url);
             if !has_files_for_url {
                 self.queue_url_placeholder(url.clone());
                 let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
