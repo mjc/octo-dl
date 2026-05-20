@@ -136,10 +136,8 @@ fn save_rejects_empty_synthetic_package_placeholders() {
         files: Vec::new(),
         error: Some("boom".to_string()),
     });
-    session.save().unwrap();
-
-    let reloaded = SessionSnapshot::latest().expect("canonical session should persist");
-    assert!(reloaded.packages.is_empty());
+    assert!(session.save().is_err());
+    assert!(SessionSnapshot::latest().is_none());
 }
 
 #[test]
@@ -360,7 +358,6 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
             message: None,
         },
     ];
-    session.sync_flat_files_from_packages();
     session.save().unwrap();
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();

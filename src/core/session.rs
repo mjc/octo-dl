@@ -9,7 +9,6 @@ use aes_gcm::{Aes128Gcm, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{DateTime, Utc};
-use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -116,8 +115,6 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub urls: Vec<SessionUrlSnapshot>,
     pub packages: Vec<PackageSnapshot>,
-    #[serde(skip)]
-    pub(crate) files: Vec<FileSnapshot>,
     pub config: DownloadConfig,
     pub credentials: SavedCredentials,
 }
@@ -126,13 +123,12 @@ impl SessionSnapshot {
     #[must_use]
     pub fn new(config: DownloadConfig, credentials: SavedCredentials) -> Self {
         Self {
-            version: 5,
+            version: 6,
             id: uuid::Uuid::new_v4().to_string(),
             created: Utc::now(),
             status: SessionRunStatus::InProgress,
             urls: Vec::new(),
             packages: Vec::new(),
-            files: Vec::new(),
             config,
             credentials,
         }
@@ -162,20 +158,17 @@ impl SessionSnapshot {
 
     #[must_use]
     pub fn state_path(&self) -> PathBuf {
-        Self::state_dir().join(format!("session-v5-{}.toml", self.id))
+        Self::state_dir().join(format!("session-v6-{}.toml", self.id))
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        let mut canonical = self.clone();
-        canonicalize_snapshot(&mut canonical)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        validate_snapshot(&canonical)
+        validate_snapshot(self)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let dir = Self::state_dir();
         std::fs::create_dir_all(&dir)?;
         let path = self.state_path();
         let tmp = path.with_extension("toml.tmp");
-        let toml = toml::to_string(&canonical)
+        let toml = toml::to_string(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(&tmp, toml)?;
         #[cfg(unix)]
@@ -189,10 +182,8 @@ impl SessionSnapshot {
 
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let contents = std::fs::read_to_string(path)?;
-        let mut snapshot: SessionSnapshot = toml::from_str(&contents)
+        let snapshot: SessionSnapshot = toml::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        canonicalize_snapshot(&mut snapshot)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         validate_snapshot(&snapshot)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         Ok(snapshot)
@@ -211,6 +202,13 @@ impl SessionSnapshot {
             if path.extension().is_none_or(|ext| ext != "toml") {
                 continue;
             }
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| !name.starts_with("session-v6-"))
+            {
+                continue;
+            }
             match Self::load(&path) {
                 Ok(snapshot) => canonical_sessions.push((path, snapshot)),
                 Err(error) => {
@@ -218,7 +216,6 @@ impl SessionSnapshot {
                         "Rejecting session {} during latest() scan: {error}",
                         path.display()
                     );
-                    preserve_rejected_session(&path);
                 }
             }
         }
@@ -228,16 +225,6 @@ impl SessionSnapshot {
                 .cmp(&session_resume_priority(&a.1))
                 .then_with(|| b.1.created.cmp(&a.1.created))
         });
-
-        let selected_path = canonical_sessions.first().map(|(path, _)| path.clone());
-        for (path, snapshot) in &canonical_sessions {
-            if Some(path) == selected_path.as_ref() {
-                continue;
-            }
-            if snapshot.status == SessionRunStatus::Completed || selected_path.is_some() {
-                let _ = std::fs::remove_file(path);
-            }
-        }
 
         canonical_sessions
             .into_iter()
@@ -251,7 +238,6 @@ impl SessionSnapshot {
             file.progress.visible_completed_bytes = file.size;
             file.runtime.active = false;
             file.runtime.counts_in_run_totals = false;
-            self.sync_flat_files_from_packages();
         }
     }
 
@@ -260,7 +246,6 @@ impl SessionSnapshot {
             file.lifecycle = FileLifecycle::Failed;
             file.message = Some(error.to_string());
             file.runtime.active = false;
-            self.sync_flat_files_from_packages();
         }
     }
 
@@ -299,17 +284,8 @@ impl SessionSnapshot {
             .flat_map(|package| package.files.iter())
     }
 
-    #[cfg(test)]
-    pub(crate) fn clear_flat_files_cache(&mut self) {
-        self.files.clear();
-    }
-
-    pub fn sync_flat_files_from_packages(&mut self) {
+    pub fn prune_empty_packages(&mut self) {
         self.packages.retain(|package| !package.files.is_empty());
-        self.files.clear();
-        for package in &mut self.packages {
-            self.files.extend(package.files.iter().cloned());
-        }
     }
 }
 
@@ -342,26 +318,6 @@ pub fn queued_file_snapshot(
     }
 }
 
-fn preserve_rejected_session(path: &Path) {
-    let backup = rejected_session_backup_path(path);
-    if let Err(error) = std::fs::rename(path, &backup) {
-        log::warn!(
-            "Failed to preserve rejected session {} as {}: {error}",
-            path.display(),
-            backup.display()
-        );
-        let _ = std::fs::remove_file(path);
-    }
-}
-
-fn rejected_session_backup_path(path: &Path) -> PathBuf {
-    let stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("session");
-    path.with_file_name(format!("{stem}.invalid.bak"))
-}
-
 fn session_resume_priority(snapshot: &SessionSnapshot) -> u8 {
     match snapshot.status {
         SessionRunStatus::Paused => 2,
@@ -369,35 +325,15 @@ fn session_resume_priority(snapshot: &SessionSnapshot) -> u8 {
         SessionRunStatus::Completed => 0,
     }
 }
-pub(crate) fn canonicalize_snapshot(snapshot: &mut SessionSnapshot) -> Result<(), String> {
-    if snapshot.version != 5 {
-        return Err(format!("unsupported session version {}", snapshot.version));
-    }
-    for package in &mut snapshot.packages {
-        let paths = package
-            .files
-            .iter()
-            .map(|file| file.path.clone())
-            .collect::<Vec<_>>();
-        package.display_name = canonical_package_display_name(&package.display_name, &paths);
-        package.key = PackageKey::new(package.display_name.clone());
-        for file in &mut package.files {
-            file.package_id = package.id;
-        }
-    }
-    snapshot.sync_flat_files_from_packages();
-    Ok(())
-}
-
 pub fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), String> {
-    if snapshot.version != 5 {
+    if snapshot.version != 6 {
         return Err(format!("unsupported session version {}", snapshot.version));
     }
-    if snapshot.urls.is_empty() && snapshot.packages.is_empty() && snapshot.files.is_empty() {
+    if snapshot.urls.is_empty() && snapshot.packages.is_empty() {
         return Err("empty sessions cannot be persisted".to_string());
     }
 
-    let mut packages_by_id = IndexMap::new();
+    let mut packages_by_id = std::collections::HashSet::new();
     let mut tracked_urls = std::collections::HashSet::new();
     for url in &snapshot.urls {
         if !tracked_urls.insert(url.url.clone()) {
@@ -407,7 +343,7 @@ pub fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), String> {
 
     let mut package_keys = std::collections::HashSet::new();
     for package in &snapshot.packages {
-        if packages_by_id.insert(package.id.clone(), package).is_some() {
+        if !packages_by_id.insert(package.id) {
             return Err(format!("duplicate package id {}", package.id));
         }
         if !package_keys.insert(package.key.clone()) {
@@ -441,36 +377,7 @@ pub fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), String> {
         }
     }
 
-    let flattened = snapshot
-        .packages
-        .iter()
-        .flat_map(|package| package.files.iter().cloned())
-        .collect::<Vec<_>>();
-    if flattened != snapshot.files {
-        return Err("session.files must mirror the flattened package file order".to_string());
-    }
-
     Ok(())
-}
-
-fn canonical_package_display_name(raw_display_name: &str, paths: &[String]) -> String {
-    if !raw_display_name.is_empty() && !looks_like_source_url(raw_display_name) {
-        return raw_display_name.to_string();
-    }
-    common_path_root(paths).unwrap_or_else(|| raw_display_name.to_string())
-}
-
-fn common_path_root(paths: &[String]) -> Option<String> {
-    let mut roots = paths.iter().filter_map(|path| {
-        let root = path.split('/').next()?;
-        (!root.is_empty()).then(|| root.to_string())
-    });
-    let first = roots.next()?;
-    roots.all(|root| root == first).then_some(first)
-}
-
-fn looks_like_source_url(value: &str) -> bool {
-    value.starts_with("https://") || value.starts_with("http://")
 }
 
 fn derive_machine_key() -> [u8; 16] {
@@ -568,17 +475,15 @@ mod tests {
     }
 
     #[test]
-    fn latest_deletes_non_canonical_sessions() {
+    fn latest_ignores_non_v6_sessions_without_cleanup() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
         let old_path = SessionSnapshot::state_dir().join("legacy.toml");
-        let backup = SessionSnapshot::state_dir().join("legacy.invalid.bak");
         std::fs::create_dir_all(SessionSnapshot::state_dir()).unwrap();
         std::fs::write(&old_path, "id = 'legacy'\n").unwrap();
 
         assert!(SessionSnapshot::latest().is_none());
-        assert!(!old_path.exists());
-        assert!(backup.exists());
+        assert!(old_path.exists());
     }
 
     #[test]
@@ -645,7 +550,6 @@ mod tests {
             runtime: RuntimeState::default(),
             message: None,
         });
-        paused.sync_flat_files_from_packages();
         paused.save().unwrap();
 
         let mut completed = SessionSnapshot::new(
@@ -662,7 +566,7 @@ mod tests {
         let latest = SessionSnapshot::latest().unwrap();
         assert_eq!(latest.status, SessionRunStatus::Paused);
         assert_eq!(latest.file_count(), 1);
-        assert!(!completed.state_path().exists());
+        assert!(completed.state_path().exists());
         assert!(paused.state_path().exists());
     }
 
@@ -720,7 +624,6 @@ mod tests {
                 message: None,
             },
         ];
-        session.sync_flat_files_from_packages();
         session.save().unwrap();
 
         let latest = SessionSnapshot::latest().unwrap();
@@ -730,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_session_is_rejected_and_preserved_as_invalid_backup() {
+    fn old_and_empty_sessions_are_ignored_without_legacy_cleanup() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
 
@@ -738,27 +641,17 @@ mod tests {
         std::fs::create_dir_all(SessionSnapshot::state_dir()).unwrap();
         std::fs::write(
             &path,
-            toml::to_string(&SessionSnapshot {
-                version: 5,
-                id: "empty".to_string().into(),
-                created: Utc::now(),
-                status: SessionRunStatus::Completed,
-                urls: Vec::new(),
-                packages: Vec::new(),
-                files: Vec::new(),
-                config: DownloadConfig::default(),
-                credentials: SavedCredentials::encrypt("a", "b", None),
-            })
-            .unwrap(),
+            r#"version = 5
+id = "empty"
+created = "2024-01-01T00:00:00Z"
+status = "completed"
+urls = []
+packages = []
+"#,
         )
         .unwrap();
 
         assert!(SessionSnapshot::latest().is_none());
-        assert!(!path.exists());
-        assert!(
-            SessionSnapshot::state_dir()
-                .join("session-v5-empty.invalid.bak")
-                .exists()
-        );
+        assert!(path.exists());
     }
 }

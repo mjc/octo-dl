@@ -324,7 +324,7 @@ fn upsert_package_metadata(
 }
 
 fn rebuild_packages(session: &mut SessionSnapshot) {
-    session.sync_flat_files_from_packages();
+    session.prune_empty_packages();
     if session.urls.is_empty() && session.packages.is_empty() {
         return;
     }

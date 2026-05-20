@@ -446,7 +446,7 @@ impl App {
     }
 
     fn persist_session(&mut self, session: SessionSnapshot) -> bool {
-        if session.urls.is_empty() && session.packages.is_empty() && session.files.is_empty() {
+        if session.urls.is_empty() && session.packages.is_empty() {
             let path = session.state_path();
             if let Err(error) = std::fs::remove_file(&path)
                 && error.kind() != std::io::ErrorKind::NotFound

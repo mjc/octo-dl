@@ -270,9 +270,7 @@ pub fn reconcile_restart(
     }
 }
 
-fn canonical_restart_session(mut snapshot: SessionSnapshot) -> SessionSnapshot {
-    crate::core::session::canonicalize_snapshot(&mut snapshot)
-        .expect("restart snapshots should already be canonical");
+fn canonical_restart_session(snapshot: SessionSnapshot) -> SessionSnapshot {
     crate::core::validate_snapshot(&snapshot).expect("restart snapshots should stay valid");
     snapshot
 }
@@ -291,8 +289,8 @@ mod tests {
     }
 
     fn sample_snapshot() -> SessionSnapshot {
-        let mut snapshot = SessionSnapshot {
-            version: 5,
+        let snapshot = SessionSnapshot {
+            version: 6,
             id: "session".to_string().into(),
             created: Utc::now(),
             status: SessionRunStatus::InProgress,
@@ -304,29 +302,26 @@ mod tests {
                 id: package_id("pkg", "https://mega.nz/file/test"),
                 key: crate::core::PackageKey::new("https://mega.nz/file/test".to_string().clone()),
                 display_name: "pkg".to_string(),
-                files: Vec::new(),
+                files: vec![FileSnapshot {
+                    id: "a.bin".to_string().into(),
+                    package_id: package_id("pkg", "https://mega.nz/file/test"),
+                    source_url: Some("https://mega.nz/file/test".to_string()),
+                    path: "a.bin".to_string(),
+                    size: 100,
+                    lifecycle: FileLifecycle::Queued,
+                    progress: FileProgressState::default(),
+                    desired: DesiredState::Present,
+                    runtime: RuntimeState {
+                        counts_in_run_totals: true,
+                        ..RuntimeState::default()
+                    },
+                    message: None,
+                }],
                 error: None,
-            }],
-            files: vec![FileSnapshot {
-                id: "a.bin".to_string().into(),
-                package_id: package_id("pkg", "https://mega.nz/file/test"),
-                source_url: Some("https://mega.nz/file/test".to_string()),
-                path: "a.bin".to_string(),
-                size: 100,
-                lifecycle: FileLifecycle::Queued,
-                progress: FileProgressState::default(),
-                desired: DesiredState::Present,
-                runtime: RuntimeState {
-                    counts_in_run_totals: true,
-                    ..RuntimeState::default()
-                },
-                message: None,
             }],
             config: crate::config::DownloadConfig::default(),
             credentials: SavedCredentials::encrypt("u", "p", None),
         };
-        snapshot.packages[0].files = snapshot.files.clone();
-        snapshot.sync_flat_files_from_packages();
         snapshot
     }
 
@@ -405,7 +400,7 @@ mod tests {
         };
         file.lifecycle = FileLifecycle::Failed;
         file.message = Some("corrupt".to_string());
-        snapshot.sync_flat_files_from_packages();
+        snapshot.prune_empty_packages();
 
         let restart = reconcile_restart(
             Some(snapshot),
@@ -506,7 +501,7 @@ mod tests {
                 error: None,
             },
         ];
-        snapshot.sync_flat_files_from_packages();
+        snapshot.prune_empty_packages();
         assert!(crate::core::session::validate_snapshot(&snapshot).is_err());
     }
 
@@ -524,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn build_restart_snapshot_prunes_stale_package_rows_from_in_memory_session() {
+    fn build_restart_snapshot_rejects_stale_package_rows() {
         let mut snapshot = sample_snapshot();
         snapshot.packages.push(PackageSnapshot {
             id: package_id("stale", "https://mega.nz/file/test"),
@@ -534,17 +529,7 @@ mod tests {
             error: Some("boom".to_string()),
         });
 
-        let restart = build_restart_snapshot(&snapshot);
-
-        assert_eq!(restart.state.packages.len(), 1);
-        let package = restart
-            .state
-            .packages
-            .values()
-            .next()
-            .expect("canonical package should remain");
-        assert_eq!(package.display_name, "pkg");
-        assert!(!restart.state.package_file_ids(&package.id).is_empty());
+        assert!(crate::core::validate_snapshot(&snapshot).is_err());
     }
 
     #[test]
