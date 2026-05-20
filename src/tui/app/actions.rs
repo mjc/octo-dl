@@ -387,23 +387,10 @@ impl App {
     }
 
     pub(crate) fn perform_delete_file_action(&mut self, id: &FileId) {
-        let context = self.visible_file_context(id);
-        let preserve_output_artifact = context
-            .as_ref()
-            .is_some_and(|context| matches!(context.status, super::FileStatus::Complete));
-        self.overlay_files.shift_remove(id);
         let is_core_backed = self.core_state.files.contains_key(id);
         self.cancel_file_token(id);
         self.file_attempt_ids.remove(id);
         self.reset_pending_files.remove(id);
-
-        if preserve_output_artifact && !is_core_backed {
-            self.forget_visible_file(id);
-            self.remove_session_file(id);
-            self.sync_visible_files();
-            self.recompute_totals();
-            return;
-        }
 
         if !is_core_backed && self.is_session_url(id.as_str()) {
             self.remove_session_url(id.as_str());
@@ -414,7 +401,8 @@ impl App {
                 file_id: id.clone(),
             });
         } else {
-            let _ = self.remove_overlay_file(id);
+            self.forget_visible_file(id);
+            self.sync_visible_files();
         }
         self.remove_session_file(id);
         if !is_core_backed {
