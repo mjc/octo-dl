@@ -46,12 +46,6 @@ impl App {
         self.overlay_files.get_mut(id).map(|file| &mut file.file)
     }
 
-    pub(crate) fn remove_overlay_file(&mut self, id: &FileId) -> Option<FileEntry> {
-        let removed = self.overlay_files.shift_remove(id).map(|file| file.file);
-        self.sync_visible_files();
-        removed
-    }
-
     pub(crate) fn visible_file_context(&self, id: &FileId) -> Option<VisibleFileContext> {
         if let Some(core_file) = self.core_state.files.get(id) {
             let status = match core_file.lifecycle {
@@ -89,14 +83,7 @@ impl App {
             });
         }
 
-        self.visible_file(id).map(|file| VisibleFileContext {
-            id: file.id.clone(),
-            status: file.status.clone(),
-            source_url: None,
-            artifact_path: file.name.clone(),
-            size: file.size,
-            counts_toward_progress: true,
-        })
+        None
     }
 
     pub(crate) fn show_overlay_error(
