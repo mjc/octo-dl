@@ -50,6 +50,7 @@ axum = { version = "0.8", features = ["ws", "http1"], optional = true }
 sysinfo = { version = "0.38", optional = true }
 regex = "1"
 serde_json = "1"
+smallvec = "1"
 tower-http = { version = "0.6", features = ["cors"], optional = true }
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 parking_lot = "0.12"
