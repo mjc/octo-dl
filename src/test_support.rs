@@ -148,7 +148,7 @@ pub fn push_file(
     let file = FileSnapshot {
         id: path.to_string().into(),
         package_id,
-        source_url: Some(source_url.clone()),
+        source_url: source_url.clone(),
         path: path.to_string(),
         size,
         lifecycle,

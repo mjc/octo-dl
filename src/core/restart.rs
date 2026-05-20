@@ -46,7 +46,7 @@ impl RestartSnapshot {
                 let mut saw_file_for_url = false;
                 let mut has_remaining = false;
                 for file in self.state.files.values() {
-                    if file.source_url.as_deref() != Some(url.as_str()) {
+                    if file.source_url != **url {
                         continue;
                     }
                     saw_file_for_url = true;
@@ -305,7 +305,7 @@ mod tests {
                 files: vec![FileSnapshot {
                     id: "a.bin".to_string().into(),
                     package_id: package_id("pkg", "https://mega.nz/file/test"),
-                    source_url: Some("https://mega.nz/file/test".to_string()),
+                    source_url: "https://mega.nz/file/test".to_string(),
                     path: "a.bin".to_string(),
                     size: 100,
                     lifecycle: FileLifecycle::Queued,
@@ -471,7 +471,7 @@ mod tests {
                 files: vec![FileSnapshot {
                     id: "a.bin".to_string().into(),
                     package_id: package_id(&source_url, &source_url),
-                    source_url: Some(source_url.clone()),
+                    source_url: source_url.clone(),
                     path: "folder/a.bin".to_string(),
                     size: 10,
                     lifecycle: FileLifecycle::Queued,
@@ -489,7 +489,7 @@ mod tests {
                 files: vec![FileSnapshot {
                     id: "b.bin".to_string().into(),
                     package_id: package_id("batch-dup", &source_url),
-                    source_url: Some(source_url.clone()),
+                    source_url: source_url.clone(),
                     path: "folder/b.bin".to_string(),
                     size: 20,
                     lifecycle: FileLifecycle::Queued,

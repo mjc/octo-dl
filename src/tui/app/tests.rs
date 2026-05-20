@@ -541,10 +541,7 @@ fn register_session_queued_file_uses_resolved_source_url_for_package_identity() 
     );
     let file = session.find_file("episode-1.mkv").unwrap();
     assert_eq!(file.package_id, package_id("batch-folder", "Batch Folder"));
-    assert_eq!(
-        file.source_url.as_deref(),
-        Some("https://mega.nz/folder/resolved")
-    );
+    assert_eq!(file.source_url, "https://mega.nz/folder/resolved");
 }
 
 #[test]
@@ -590,11 +587,11 @@ fn register_session_queued_file_dedupes_same_source_url_across_package_ids() {
     );
     assert!(session.iter_files().any(|file| {
         file.package_id == package_id("pkg-a", "Package A")
-            && file.source_url.as_deref() == Some("https://mega.nz/folder/root")
+            && file.source_url == "https://mega.nz/folder/root"
     }));
     assert!(session.iter_files().any(|file| {
         file.package_id == package_id("pkg-b", "Package B")
-            && file.source_url.as_deref() == Some("https://mega.nz/folder/root")
+            && file.source_url == "https://mega.nz/folder/root"
     }));
 }
 
@@ -1235,7 +1232,7 @@ fn mutate_session_and_save_preserves_in_memory_state_on_failed_save() {
 
     let _ = app.mutate_session_and_save(|session| {
         session.find_file_mut("episode-1.mkv").unwrap().source_url =
-            Some("https://mega.nz/file/other".to_string());
+            "https://mega.nz/file/other".to_string();
     });
 
     assert_eq!(

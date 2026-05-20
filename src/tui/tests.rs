@@ -330,7 +330,7 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
         crate::core::FileSnapshot {
             id: "Merged Folder/a.mkv".to_string().into(),
             package_id,
-            source_url: Some(source_a.to_string()),
+            source_url: source_a.to_string(),
             path: "Merged Folder/a.mkv".to_string(),
             size: 128,
             lifecycle: FileLifecycle::Queued,
@@ -345,7 +345,7 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
         crate::core::FileSnapshot {
             id: "Merged Folder/b.mkv".to_string().into(),
             package_id,
-            source_url: Some(source_b.to_string()),
+            source_url: source_b.to_string(),
             path: "Merged Folder/b.mkv".to_string(),
             size: 256,
             lifecycle: FileLifecycle::Queued,
