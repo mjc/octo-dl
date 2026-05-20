@@ -480,15 +480,6 @@ impl App {
                 (file_id, source_url)
             })
             .collect();
-        if file_contexts.is_empty() {
-            self.core_state.packages.shift_remove(&package_id);
-            let _ = self.mutate_session_and_save(|session| {
-                session.packages.retain(|package| package.id != package_id);
-            });
-            self.sync_visible_files();
-            self.recompute_totals();
-            return;
-        }
 
         let source_ids: Vec<_> = file_contexts
             .iter()
@@ -501,7 +492,6 @@ impl App {
             self.reset_pending_files.remove(file_id);
             self.deleted_files.insert(file_id.clone());
             if let Some(source_url) = source_url {
-                self.remove_session_url(source_url);
                 self.urls.retain(|url| url != source_url);
             }
         }
