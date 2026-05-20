@@ -6,6 +6,7 @@ use crate::core::model::{
 };
 use crate::core::restart::RestartSnapshot;
 use crate::core::session::{FileSnapshot, PackageSnapshot, SessionSnapshot};
+use smallvec::SmallVec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedFile {
@@ -104,6 +105,8 @@ pub enum CoreEffect {
     PublishStatusMessage(String),
     PublishViewSnapshot,
 }
+
+pub type CoreEffects = SmallVec<[CoreEffect; 2]>;
 
 fn should_persist_session(event: &CoreEvent) -> bool {
     !matches!(
@@ -309,8 +312,8 @@ fn maybe_debug_assert_invariants(state: &DownloadState) {
 #[cfg(not(debug_assertions))]
 fn maybe_debug_assert_invariants(_state: &DownloadState) {}
 
-pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
-    let mut effects = Vec::new();
+pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
+    let mut effects = CoreEffects::new();
     let persist_session = should_persist_session(&event);
     let mut full_refresh = false;
     match event {

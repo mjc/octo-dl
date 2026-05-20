@@ -13,7 +13,7 @@ pub use model::{
 };
 pub use progress::{DownloadProgressSink, ProgressDelta, RateEstimator};
 pub use reducer::{
-    CoreEffect, CoreEvent, PackageCollision, ResolvedFile, ResolvedPackage, reduce,
+    CoreEffect, CoreEffects, CoreEvent, PackageCollision, ResolvedFile, ResolvedPackage, reduce,
     snapshot_from_state,
 };
 pub use restart::{

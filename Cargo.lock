@@ -1530,6 +1530,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sluice",
+ "smallvec",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.18",

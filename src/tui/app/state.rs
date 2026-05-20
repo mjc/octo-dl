@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use indexmap::IndexMap;
 
 use crate::core::{
-    CoreCommand, CoreEffect, CoreEvent, FileId, PackageId, ResolvedFile, ResolvedPackage,
-    RestartSnapshot, SavedCredentials, SessionSnapshot, build_restart_snapshot, reduce,
-    snapshot_from_state,
+    CoreCommand, CoreEffect, CoreEffects, CoreEvent, FileId, PackageId, ResolvedFile,
+    ResolvedPackage, RestartSnapshot, SavedCredentials, SessionSnapshot, build_restart_snapshot,
+    reduce, snapshot_from_state,
 };
 
 use super::{App, FileStatus, SessionAdapter};
@@ -170,7 +170,7 @@ impl App {
         }
     }
 
-    fn apply_core_effects(&mut self, effects: Vec<CoreEffect>, should_sync_pending: bool) {
+    fn apply_core_effects(&mut self, effects: CoreEffects, should_sync_pending: bool) {
         let mut queued_file_map: IndexMap<String, Vec<FileId>> = IndexMap::new();
         for effect in effects {
             match effect {
