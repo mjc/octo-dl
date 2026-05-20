@@ -280,7 +280,7 @@ pub struct RuntimeState {
     pub reused_chunks: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FileLifecycle {
     #[default]
@@ -288,13 +288,23 @@ pub enum FileLifecycle {
     Queued,
     Downloading,
     Complete,
-    Failed,
+    Failed {
+        message: String,
+    },
 }
 
 impl FileLifecycle {
     #[must_use]
-    pub const fn is_terminal(self) -> bool {
+    pub const fn is_terminal(&self) -> bool {
         matches!(self, Self::Complete)
+    }
+
+    #[must_use]
+    pub fn failure_message(&self) -> Option<&str> {
+        match self {
+            Self::Failed { message } => Some(message),
+            _ => None,
+        }
     }
 }
 
@@ -333,8 +343,6 @@ pub struct FileState {
     pub progress: FileProgressState,
     pub desired: DesiredState,
     pub runtime: RuntimeState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -431,7 +439,7 @@ impl DownloadState {
                 !file.runtime.active
                     && !matches!(
                         file.lifecycle,
-                        FileLifecycle::Complete | FileLifecycle::Failed
+                        FileLifecycle::Complete | FileLifecycle::Failed { .. }
                     )
             })
             .map(|file| file.id.clone())

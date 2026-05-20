@@ -48,18 +48,15 @@ impl App {
 
     pub(crate) fn visible_file_context(&self, id: &FileId) -> Option<VisibleFileContext> {
         if let Some(core_file) = self.core_state.files.get(id) {
-            let status = match core_file.lifecycle {
+            let status = match &core_file.lifecycle {
                 crate::core::FileLifecycle::Planned | crate::core::FileLifecycle::Queued => {
                     FileStatus::Queued
                 }
                 crate::core::FileLifecycle::Downloading => FileStatus::Downloading,
                 crate::core::FileLifecycle::Complete => FileStatus::Complete,
-                crate::core::FileLifecycle::Failed => FileStatus::Error(
-                    core_file
-                        .message
-                        .clone()
-                        .unwrap_or_else(|| "failed".to_string()),
-                ),
+                crate::core::FileLifecycle::Failed { message } => {
+                    FileStatus::Error(message.clone())
+                }
             };
             return Some(VisibleFileContext {
                 id: core_file.id.clone(),

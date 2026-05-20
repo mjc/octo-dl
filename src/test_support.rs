@@ -117,33 +117,27 @@ pub fn push_file(
         package_id
     };
 
-    let (lifecycle, desired, active, counts_in_run_totals, visible_completed_bytes, message) =
-        match status {
-            FileFixtureStatus::Pending => (
-                FileLifecycle::Queued,
-                DesiredState::Present,
-                false,
-                true,
-                0,
-                None,
-            ),
-            FileFixtureStatus::Completed => (
-                FileLifecycle::Complete,
-                DesiredState::Present,
-                false,
-                false,
-                size,
-                None,
-            ),
-            FileFixtureStatus::Error(message) => (
-                FileLifecycle::Failed,
-                DesiredState::Present,
-                false,
-                true,
-                0,
-                Some(message),
-            ),
-        };
+    let (lifecycle, desired, active, counts_in_run_totals, visible_completed_bytes) = match status {
+        FileFixtureStatus::Pending => {
+            (FileLifecycle::Queued, DesiredState::Present, false, true, 0)
+        }
+        FileFixtureStatus::Completed => (
+            FileLifecycle::Complete,
+            DesiredState::Present,
+            false,
+            false,
+            size,
+        ),
+        FileFixtureStatus::Error(message) => (
+            FileLifecycle::Failed {
+                message: message.to_string(),
+            },
+            DesiredState::Present,
+            false,
+            true,
+            0,
+        ),
+    };
 
     let file = FileSnapshot {
         id: path.to_string().into(),
@@ -163,7 +157,6 @@ pub fn push_file(
             preexisting_complete: false,
             reused_chunks: 0,
         },
-        message,
     };
     let package = session
         .packages
