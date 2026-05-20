@@ -749,7 +749,11 @@ fn core_persisted_session_snapshot_is_saved_to_disk() {
 
     let session = crate::core::SessionSnapshot::latest().expect("session should be saved");
     assert_eq!(session.packages.len(), 1);
-    assert_eq!(session.packages[0].key.as_str(), "Root");
+    assert_eq!(
+        session.packages[0].key.as_str(),
+        "https://mega.nz/folder/root"
+    );
+    assert_eq!(session.packages[0].display_name, "Root");
     assert_eq!(session.file_count(), 1);
     assert_eq!(
         session.find_file("episode-1.mkv").unwrap().path,
@@ -956,8 +960,7 @@ fn shutdown_sync_refreshes_session_progress_skipped_during_hot_events() {
 
     let session = app.session.as_ref().expect("session should remain");
     let file = session
-        .files
-        .iter()
+        .iter_files()
         .find(|file| file.id == "file-id")
         .expect("file should exist in session");
     assert_eq!(file.progress.visible_completed_bytes, 0);
@@ -966,8 +969,7 @@ fn shutdown_sync_refreshes_session_progress_skipped_during_hot_events() {
 
     let session = app.session.as_ref().expect("session should remain");
     let file = session
-        .files
-        .iter()
+        .iter_files()
         .find(|file| file.id == "file-id")
         .expect("file should exist in session");
     assert_eq!(file.progress.visible_completed_bytes, 64);
@@ -1199,7 +1201,7 @@ fn mutate_session_and_save_reloads_canonical_snapshot() {
     app.install_session(session);
 
     let _ = app.mutate_session_and_save(|session| {
-        session.clear_flat_files_cache();
+        session.prune_empty_packages();
     });
 
     let session = app.session.as_ref().expect("session should remain");
@@ -1234,7 +1236,6 @@ fn mutate_session_and_save_preserves_in_memory_state_on_failed_save() {
     let _ = app.mutate_session_and_save(|session| {
         session.find_file_mut("episode-1.mkv").unwrap().source_url =
             Some("https://mega.nz/file/other".to_string());
-        session.sync_flat_files_from_packages();
     });
 
     assert_eq!(

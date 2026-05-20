@@ -781,7 +781,7 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
         })
         .collect();
     SessionSnapshot {
-        version: 5,
+        version: 6,
         id: state.session_meta.session_id.clone(),
         created: state.session_meta.created,
         status: state.session_meta.status,
@@ -794,7 +794,6 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
             })
             .collect(),
         packages,
-        files: Vec::new(),
         config: state.session_meta.config.clone(),
         credentials: state.session_meta.credentials.clone(),
     }

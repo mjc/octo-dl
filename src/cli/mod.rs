@@ -396,7 +396,7 @@ fn register_cli_package_in_session(
             ));
         }
     }
-    session.sync_flat_files_from_packages();
+    session.prune_empty_packages();
     crate::core::validate_snapshot(session).expect("cli session snapshots should stay canonical");
 }
 
@@ -953,8 +953,6 @@ mod tests {
             128,
             FileFixtureStatus::Pending,
         );
-        session.clear_flat_files_cache();
-
         persist_session(&mut session).unwrap();
 
         assert_eq!(
@@ -1048,7 +1046,7 @@ mod tests {
                 ));
             }
         }
-        session.sync_flat_files_from_packages();
+        session.prune_empty_packages();
         crate::core::validate_snapshot(&session).unwrap();
 
         assert_eq!(

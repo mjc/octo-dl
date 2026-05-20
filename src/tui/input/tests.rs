@@ -526,8 +526,7 @@ fn handle_main_input_delete_removes_session_entry_and_keeps_selection() {
 
     let session = app.session.as_ref().expect("session should remain");
     let statuses: Vec<_> = session
-        .files
-        .iter()
+        .iter_files()
         .map(|file| (file.path.as_str(), &file.lifecycle))
         .collect();
     assert_eq!(
@@ -575,7 +574,6 @@ fn handle_main_input_delete_last_file_removes_empty_session_file() {
         .expect("empty session should remain live");
     assert!(session.urls.is_empty());
     assert!(session.packages.is_empty());
-    assert!(session.files.is_empty());
 }
 
 #[test]

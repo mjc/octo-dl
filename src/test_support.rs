@@ -171,5 +171,4 @@ pub fn push_file(
         .find(|package| package.id == package_id)
         .expect("package should exist before pushing fixture file");
     package.files.push(file);
-    session.sync_flat_files_from_packages();
 }
