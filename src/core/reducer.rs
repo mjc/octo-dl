@@ -69,6 +69,9 @@ pub enum CoreEvent {
     FileDeleted {
         file_id: FileId,
     },
+    PackageDeleted {
+        package_id: PackageId,
+    },
     FileRetryRequested {
         file_id: FileId,
     },
@@ -599,10 +602,13 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
         CoreEvent::FileDeleted { file_id } => {
             if let Some(file) = state.files.shift_remove(&file_id) {
                 let before = FileDerivedState::from(&file);
-                effects.push(CoreEffect::DeleteOutputArtifacts {
-                    file_id: file.id.clone(),
-                    path: file.path.clone(),
-                });
+                let source_url = file.source_url.clone();
+                if !matches!(before.lifecycle, FileLifecycle::Complete) {
+                    effects.push(CoreEffect::DeleteOutputArtifacts {
+                        file_id: file.id.clone(),
+                        path: file.path.clone(),
+                    });
+                }
                 effects.push(CoreEffect::DeleteResumeArtifacts {
                     file_id: file.id.clone(),
                     path: file.path.clone(),
@@ -616,6 +622,38 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> Vec<CoreEffect> {
                     .is_some_and(|package| package.file_ids.is_empty())
                 {
                     state.packages.shift_remove(&before.package_id);
+                }
+                if let Some(source_url) = source_url
+                    && !state
+                        .files
+                        .values()
+                        .any(|file| file.source_url.as_deref() == Some(source_url.as_str()))
+                {
+                    state.url_order.retain(|url| url != &source_url);
+                }
+                recompute_session_status(state);
+            }
+        }
+        CoreEvent::PackageDeleted { package_id } => {
+            if let Some(package) = state.packages.shift_remove(&package_id) {
+                let mut removed_source_urls = std::collections::HashSet::new();
+                for file_id in package.file_ids {
+                    if let Some(file) = state.files.shift_remove(&file_id) {
+                        let before = FileDerivedState::from(&file);
+                        if let Some(source_url) = file.source_url.clone() {
+                            removed_source_urls.insert(source_url);
+                        }
+                        remove_totals_contribution(state, before);
+                    }
+                }
+                for source_url in removed_source_urls {
+                    if !state
+                        .files
+                        .values()
+                        .any(|file| file.source_url.as_deref() == Some(source_url.as_str()))
+                    {
+                        state.url_order.retain(|url| url != &source_url);
+                    }
                 }
                 recompute_session_status(state);
             }
@@ -1284,6 +1322,26 @@ mod tests {
     }
 
     #[test]
+    fn deleting_last_file_removes_source_url_from_resume_state() {
+        let mut state = sample_state();
+        state.url_order.push("pkg".to_string());
+
+        let effects = reduce(
+            &mut state,
+            CoreEvent::FileDeleted {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+
+        assert!(state.url_order.is_empty());
+        let saved = effects.iter().find_map(|effect| match effect {
+            CoreEffect::PersistSession(snapshot) => Some(snapshot),
+            _ => None,
+        });
+        assert!(saved.is_some_and(|snapshot| snapshot.urls.is_empty()));
+    }
+
+    #[test]
     fn starting_file_resets_stale_progress_from_previous_attempt() {
         let mut state = sample_state();
         reduce(
@@ -1395,6 +1453,33 @@ mod tests {
             },
         );
         assert!(effects.iter().any(|effect| matches!(
+            effect,
+            CoreEffect::DeleteOutputArtifacts { file_id, .. } if file_id == "file.bin"
+        )));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            CoreEffect::DeleteResumeArtifacts { file_id, .. } if file_id == "file.bin"
+        )));
+    }
+
+    #[test]
+    fn deleting_completed_file_keeps_output_artifact() {
+        let mut state = sample_state();
+        reduce(
+            &mut state,
+            CoreEvent::FileCompleted {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+
+        let effects = reduce(
+            &mut state,
+            CoreEvent::FileDeleted {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+
+        assert!(!effects.iter().any(|effect| matches!(
             effect,
             CoreEffect::DeleteOutputArtifacts { file_id, .. } if file_id == "file.bin"
         )));

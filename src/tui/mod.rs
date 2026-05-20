@@ -127,13 +127,7 @@ pub async fn run_api_only(
     } else {
         let host = explicit_api_host.flatten().unwrap_or(api_host);
         log::info!("Starting API server on {host}:{api_port}");
-        app.spawn_api_server(
-            host.clone(),
-            api_port,
-            Some(host),
-            shared_state,
-            false,
-        );
+        app.spawn_api_server(host.clone(), api_port, Some(host), shared_state, false);
     }
 
     log::info!("Entering headless event loop");

@@ -663,10 +663,14 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
 }
 
 #[test]
-fn ui_delete_file_removes_completed_artifact_from_disk() {
+fn ui_delete_file_keeps_completed_artifact_on_disk() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("completed.bin");
+    let part_path = dir.path().join("completed.bin.part");
+    let sidecar_path = dir.path().join("completed.bin.part.meta.json");
     std::fs::write(&file_path, b"done").unwrap();
+    std::fs::write(&part_path, b"partial").unwrap();
+    std::fs::write(&sidecar_path, b"{}").unwrap();
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
@@ -687,11 +691,13 @@ fn ui_delete_file_removes_completed_artifact_from_disk() {
     ));
 
     assert!(app.files.is_empty());
-    assert!(!file_path.exists());
+    assert!(file_path.exists());
+    assert!(!part_path.exists());
+    assert!(!sidecar_path.exists());
 }
 
 #[test]
-fn ui_delete_core_backed_file_removes_output_and_resume_artifacts() {
+fn ui_delete_core_backed_completed_file_keeps_output_and_removes_resume_artifacts() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("core-backed.bin");
     let part_path = dir.path().join("core-backed.bin.part");
@@ -728,9 +734,56 @@ fn ui_delete_core_backed_file_removes_output_and_resume_artifacts() {
 
     app.handle_ui_action(UiAction::DeleteFile(file_id.into()));
 
-    assert!(!file_path.exists());
+    assert!(file_path.exists());
     assert!(!part_path.exists());
     assert!(!sidecar_path.exists());
+}
+
+#[test]
+fn ui_delete_completed_package_leaves_filesystem_artifacts() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("pkg-complete.bin");
+    let part_path = dir.path().join("pkg-complete.bin.part");
+    let sidecar_path = dir.path().join("pkg-complete.bin.part.meta.json");
+    std::fs::write(&file_path, b"done").unwrap();
+    std::fs::write(&part_path, b"partial").unwrap();
+    std::fs::write(&sidecar_path, b"{}").unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+    let file_id = file_path.to_string_lossy().into_owned();
+    let package_id = package_id(
+        "https://mega.nz/file/core-delete-package",
+        "https://mega.nz/file/core-delete-package",
+    );
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id,
+            source_url: "https://mega.nz/file/core-delete-package".to_string(),
+            key: crate::core::PackageKey::new(
+                "https://mega.nz/file/core-delete-package"
+                    .to_string()
+                    .clone(),
+            ),
+            display_name: "Core Delete Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: file_id.clone().into(),
+                path: file_id.clone(),
+                size: 4,
+            }],
+            collision: None,
+        },
+    });
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: file_id.clone().into(),
+    });
+
+    app.handle_ui_action(UiAction::DeletePackage(package_id));
+
+    assert!(file_path.exists());
+    assert!(part_path.exists());
+    assert!(sidecar_path.exists());
+    assert!(app.files.is_empty());
 }
 
 #[test]

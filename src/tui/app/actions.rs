@@ -259,6 +259,14 @@ impl App {
         if self.deleted_files.contains(&file.id) {
             return;
         }
+        if !self
+            .core_state
+            .url_order
+            .iter()
+            .any(|url| url == &file.origin.source_url || url == &file.origin.submitted_url)
+        {
+            return;
+        }
         if !self.register_queued_file(&file) {
             return;
         }
@@ -404,14 +412,39 @@ impl App {
         let artifact_path = context
             .as_ref()
             .map_or_else(|| id.to_string(), |context| context.artifact_path.clone());
-        if let Some(context) = context.as_ref() {
+        let preserve_output_artifact = context
+            .as_ref()
+            .is_some_and(|context| matches!(context.status, super::FileStatus::Complete));
+        if let Some(context) = context.as_ref()
+            && !preserve_output_artifact
+        {
             let _ = self.ensure_core_file_from_context(context);
         }
         let is_core_backed = self.core_state.files.contains_key(id);
         self.cancel_file_token(id);
         self.file_attempt_ids.remove(id);
         self.reset_pending_files.remove(id);
-        self.deleted_files.insert(id.clone());
+
+        if preserve_output_artifact && !is_core_backed {
+            self.overlay_files.shift_remove(id);
+            self.files.retain(|file| file.id != *id);
+            self.visible_file_positions = self
+                .files
+                .iter()
+                .enumerate()
+                .map(|(index, file)| (file.id.clone(), index))
+                .collect();
+            self.file_ui.remove(id);
+            super::super::download::schedule_resume_artifact_delete(artifact_path);
+            self.remove_session_file(id);
+            self.sync_visible_files();
+            self.recompute_totals();
+            return;
+        }
+
+        if is_core_backed || !preserve_output_artifact {
+            self.deleted_files.insert(id.clone());
+        }
         if !is_core_backed && self.is_session_url(id.as_str()) {
             self.remove_session_url(id.as_str());
             self.urls.retain(|url| url != id.as_str());
@@ -420,9 +453,16 @@ impl App {
             self.apply_core_command(CoreCommand::DeleteFile {
                 file_id: id.clone(),
             });
+            if preserve_output_artifact {
+                super::super::download::schedule_resume_artifact_delete(artifact_path);
+            }
         } else {
             let _ = self.remove_overlay_file(id);
-            super::super::download::schedule_download_artifact_delete(artifact_path);
+            if preserve_output_artifact {
+                super::super::download::schedule_resume_artifact_delete(artifact_path);
+            } else {
+                super::super::download::schedule_download_artifact_delete(artifact_path);
+            }
         }
         self.remove_session_file(id);
         if !is_core_backed {
@@ -431,12 +471,16 @@ impl App {
     }
 
     pub(crate) fn perform_delete_package_action(&mut self, package_id: PackageId) {
-        let file_ids: Vec<_> = self
+        let file_contexts: Vec<_> = self
             .core_state
             .package_files(&package_id)
-            .map(|file| file.id.clone())
+            .map(|file| {
+                let file_id = file.id.clone();
+                let source_url = file.source_url.clone();
+                (file_id, source_url)
+            })
             .collect();
-        if file_ids.is_empty() {
+        if file_contexts.is_empty() {
             self.core_state.packages.shift_remove(&package_id);
             let _ = self.mutate_session_and_save(|session| {
                 session.packages.retain(|package| package.id != package_id);
@@ -446,8 +490,25 @@ impl App {
             return;
         }
 
-        for file_id in file_ids {
-            self.perform_delete_file_action(&file_id);
+        let source_ids: Vec<_> = file_contexts
+            .iter()
+            .filter_map(|(_, source_url)| source_url.as_deref().map(FileId::from))
+            .collect();
+
+        for (file_id, source_url) in &file_contexts {
+            self.cancel_file_token(file_id);
+            self.file_attempt_ids.remove(file_id);
+            self.reset_pending_files.remove(file_id);
+            self.deleted_files.insert(file_id.clone());
+            if let Some(source_url) = source_url {
+                self.remove_session_url(source_url);
+                self.urls.retain(|url| url != source_url);
+            }
+        }
+        self.apply_core_command(CoreCommand::DeletePackage { package_id });
+        for source_id in source_ids {
+            self.overlay_files.shift_remove(&source_id);
+            self.discard_visible_placeholder(&source_id);
         }
     }
 

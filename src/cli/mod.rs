@@ -66,7 +66,17 @@ fn append_cli_package_files<'a>(
         .iter_mut()
         .find(|entry| entry.id == package.id)
     {
-        existing.files.extend(package.files);
+        let mut known_paths = existing
+            .files
+            .iter()
+            .map(|item| item.path.clone())
+            .collect::<std::collections::HashSet<_>>();
+        existing.files.extend(
+            package
+                .files
+                .into_iter()
+                .filter(|item| known_paths.insert(item.path.clone())),
+        );
         existing.skipped += package.skipped;
         existing.partial += package.partial;
         return;
@@ -370,14 +380,21 @@ fn register_cli_package_in_session(
         .iter_mut()
         .find(|entry| entry.id == package.id)
         .expect("package should exist before registering package files");
+    let mut known_file_ids = package_entry
+        .files
+        .iter()
+        .map(|file| file.id.clone())
+        .collect::<std::collections::HashSet<_>>();
     for item in &package.files {
-        package_entry.files.push(crate::core::queued_file_snapshot(
-            item.path.clone(),
-            package.id,
-            Some(source_url.to_string()),
-            item.path.clone(),
-            item.node.size(),
-        ));
+        if known_file_ids.insert(item.path.clone().into()) {
+            package_entry.files.push(crate::core::queued_file_snapshot(
+                item.path.clone(),
+                package.id,
+                Some(source_url.to_string()),
+                item.path.clone(),
+                item.node.size(),
+            ));
+        }
     }
     session.sync_flat_files_from_packages();
     crate::core::validate_snapshot(session).expect("cli session snapshots should stay canonical");
@@ -406,9 +423,9 @@ async fn download_all(
     progress: &Arc<CliDownloadProgress>,
     builder: &mut SessionStatsBuilder,
     mut session_state: Option<&mut SessionSnapshot>,
-) -> crate::Result<()> {
+) -> crate::Result<bool> {
     if files.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let progress_trait: Arc<dyn DownloadProgress> = progress.clone();
@@ -440,6 +457,7 @@ async fn download_all(
     // Use aggregate peak, not per-file peak
     builder.set_peak_speed(progress.peak_speed());
 
+    let mut had_failures = false;
     for (path, result) in results {
         match result {
             Ok(file_stats) => {
@@ -449,6 +467,7 @@ async fn download_all(
                 }
             }
             Err(e) => {
+                had_failures = true;
                 let _ = progress.progress.println(format!("Download error: {e:?}"));
                 if let Some(ref mut state) = session_state.as_deref_mut() {
                     mark_session_file_error(state, &path, &e.to_string());
@@ -457,7 +476,7 @@ async fn download_all(
         }
     }
 
-    Ok(())
+    Ok(had_failures)
 }
 
 // ============================================================================
@@ -661,6 +680,7 @@ pub async fn run() -> crate::Result<()> {
     // Phase 1: Fetch all URLs and collect files
     println!("Fetching file lists from {} URL(s)...\n", config.urls.len());
     let mut all_nodes: Vec<(usize, String, mega::Nodes)> = Vec::new();
+    let mut had_fetch_failures = false;
     for (idx, url) in config.urls.iter().enumerate() {
         print!("  {url} ... ");
         match crate::fetch_public_nodes(&http, url).await {
@@ -673,6 +693,7 @@ pub async fn run() -> crate::Result<()> {
             }
             Err(e) => {
                 println!("ERROR: {e:?}");
+                had_fetch_failures = true;
                 ensure_session_url(&mut session_state, url).error = Some(e.to_string());
             }
         }
@@ -699,6 +720,13 @@ pub async fn run() -> crate::Result<()> {
         .collect();
 
     if all_files.is_empty() {
+        if had_fetch_failures {
+            session_state.status = SessionRunStatus::InProgress;
+            persist_session(&mut session_state)?;
+            return Err(crate::Error::Download(
+                "Failed to fetch one or more URLs".to_string(),
+            ));
+        }
         if total_skipped > 0 {
             println!("All files already downloaded.");
         }
@@ -720,7 +748,7 @@ pub async fn run() -> crate::Result<()> {
     let mut builder = SessionStatsBuilder::new();
     builder.set_skipped(total_skipped);
 
-    download_all(
+    let had_download_failures = download_all(
         &downloader,
         &all_files,
         &cli_progress,
@@ -733,6 +761,14 @@ pub async fn run() -> crate::Result<()> {
     progress.clear().ok();
     let session_stats = builder.build();
     print_summary(&session_stats);
+
+    if had_download_failures {
+        session_state.status = SessionRunStatus::InProgress;
+        persist_session(&mut session_state)?;
+        return Err(crate::Error::Download(
+            "One or more downloads failed".to_string(),
+        ));
+    }
 
     // Mark session as completed
     session_state.status = SessionRunStatus::Completed;
@@ -779,6 +815,7 @@ async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> cra
         remaining_urls.len()
     );
     let mut all_nodes: Vec<(usize, String, mega::Nodes)> = Vec::new();
+    let mut had_fetch_failures = false;
     for (url_idx, url) in &remaining_urls {
         print!("  {url} ... ");
         match crate::fetch_public_nodes(&http, url).await {
@@ -791,7 +828,10 @@ async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> cra
                 }
                 all_nodes.push((*url_idx, url.clone(), nodes));
             }
-            Err(e) => println!("ERROR: {e:?}"),
+            Err(e) => {
+                had_fetch_failures = true;
+                println!("ERROR: {e:?}");
+            }
         }
     }
 
@@ -827,6 +867,13 @@ async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> cra
         .collect();
 
     if all_files.is_empty() {
+        if had_fetch_failures {
+            session.status = SessionRunStatus::InProgress;
+            persist_session(&mut session)?;
+            return Err(crate::Error::Download(
+                "Failed to fetch one or more URLs".to_string(),
+            ));
+        }
         println!("All files already downloaded.");
         session.status = SessionRunStatus::Completed;
         persist_session(&mut session)?;
@@ -848,7 +895,7 @@ async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> cra
     let mut builder = SessionStatsBuilder::new();
     builder.set_skipped(total_skipped);
 
-    download_all(
+    let had_download_failures = download_all(
         &downloader,
         &all_files,
         &cli_progress,
@@ -861,6 +908,14 @@ async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> cra
     progress.clear().ok();
     let session_stats = builder.build();
     print_summary(&session_stats);
+
+    if had_download_failures {
+        session.status = SessionRunStatus::InProgress;
+        persist_session(&mut session)?;
+        return Err(crate::Error::Download(
+            "One or more downloads failed".to_string(),
+        ));
+    }
 
     session.status = SessionRunStatus::Completed;
     persist_session(&mut session)?;
@@ -949,5 +1004,62 @@ mod tests {
 
         let urls = resumable_urls(&session);
         assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn duplicate_session_package_registration_is_deduplicated() {
+        let mut session = session_snapshot(vec![(
+            "https://mega.nz/file/root",
+            UrlFixtureStatus::Fetched,
+        )]);
+        let package_id = crate::test_support::package_id("pkg", "pkg");
+        session.packages.push(PackageSnapshot {
+            id: package_id,
+            key: PackageKey::new("pkg"),
+            display_name: "pkg".to_string(),
+            files: vec![crate::core::queued_file_snapshot(
+                "episode-1.mkv".to_string(),
+                package_id,
+                Some("https://mega.nz/file/root".to_string()),
+                "episode-1.mkv".to_string(),
+                128,
+            )],
+            error: None,
+        });
+
+        let package_entry = session
+            .packages
+            .iter_mut()
+            .find(|entry| entry.id == package_id)
+            .expect("package exists");
+        let mut known_file_ids = package_entry
+            .files
+            .iter()
+            .map(|file| file.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for path in ["episode-1.mkv", "episode-1.mkv", "episode-2.mkv"] {
+            if known_file_ids.insert(path.to_string().into()) {
+                package_entry.files.push(crate::core::queued_file_snapshot(
+                    path.to_string(),
+                    package_id,
+                    Some("https://mega.nz/file/root".to_string()),
+                    path.to_string(),
+                    128,
+                ));
+            }
+        }
+        session.sync_flat_files_from_packages();
+        crate::core::validate_snapshot(&session).unwrap();
+
+        assert_eq!(
+            session
+                .iter_files()
+                .map(|file| file.id.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                crate::core::FileId::from("episode-1.mkv"),
+                crate::core::FileId::from("episode-2.mkv")
+            ]
+        );
     }
 }

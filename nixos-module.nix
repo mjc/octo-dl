@@ -82,7 +82,7 @@ in {
 
     group = lib.mkOption {
       type = lib.types.str;
-      default = "media";
+      default = "octo-dl";
       description = "Group under which the service runs.";
     };
 
@@ -150,6 +150,8 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
+    users.groups.${cfg.group} = {};
+
     users.users.${cfg.user} = {
       isSystemUser = true;
       group = cfg.group;

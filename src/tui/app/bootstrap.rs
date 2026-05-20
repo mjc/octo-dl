@@ -336,7 +336,8 @@ impl App {
 
         if let Some((email, password, mfa)) = service_config.credentials.decrypt_if_needed() {
             log::info!("Loaded fallback credentials from {}", config_path.display());
-            self.login.set_credentials_if_missing(&email, &password, &mfa);
+            self.login
+                .set_credentials_if_missing(&email, &password, &mfa);
             if self.api_key.is_none() {
                 self.api_key.clone_from(&service_config.api.api_key);
             }

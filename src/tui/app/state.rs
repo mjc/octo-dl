@@ -29,6 +29,7 @@ fn core_event_requires_pending_sync(event: &CoreEvent) -> bool {
             | CoreEvent::FileQueued { .. }
             | CoreEvent::FileCancelled { .. }
             | CoreEvent::FileDeleted { .. }
+            | CoreEvent::PackageDeleted { .. }
             | CoreEvent::FileRetryRequested { .. }
             | CoreEvent::FileResetRequested { .. }
             | CoreEvent::PackageMoveRequested { .. }

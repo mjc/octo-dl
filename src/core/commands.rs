@@ -1,4 +1,4 @@
-use crate::core::model::{FileId, UrlId};
+use crate::core::model::{FileId, PackageId, UrlId};
 use crate::core::reducer::CoreEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8,6 +8,9 @@ pub enum CoreCommand {
     },
     DeleteFile {
         file_id: FileId,
+    },
+    DeletePackage {
+        package_id: PackageId,
     },
     RetryFile {
         file_id: FileId,
@@ -31,6 +34,7 @@ impl CoreCommand {
         match self {
             Self::SubmitUrl { url } => CoreEvent::UrlSubmitted { url },
             Self::DeleteFile { file_id } => CoreEvent::FileDeleted { file_id },
+            Self::DeletePackage { package_id } => CoreEvent::PackageDeleted { package_id },
             Self::RetryFile { file_id } => CoreEvent::FileRetryRequested { file_id },
             Self::ResetFile { file_id } => CoreEvent::FileResetRequested { file_id },
             Self::MovePackage { package_id, delta } => {

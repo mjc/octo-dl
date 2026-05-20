@@ -282,14 +282,12 @@ pub(super) fn visible_rows_for(
             package_files.sort_by(|left, right| {
                 let left_status = file_status_from_core(left);
                 let right_status = file_status_from_core(right);
-                file_status_rank(&left_status)
-                    .cmp(&file_status_rank(&right_status))
-                    .then_with(|| natural_cmp(&left.path, &right.path))
-                    .then_with(|| left.id.cmp(&right.id))
+                let ordering = file_status_rank(&left_status).cmp(&file_status_rank(&right_status));
+                match sort.direction {
+                    SortDirection::Asc => ordering,
+                    SortDirection::Desc => ordering.reverse(),
+                }
             });
-            if matches!(sort.direction, SortDirection::Desc) {
-                package_files.reverse();
-            }
             rows.extend(
                 package_files
                     .into_iter()

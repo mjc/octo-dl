@@ -1,7 +1,7 @@
-use super::super::app::{App, FileEntry, FileStatus};
+use super::super::app::{App, FileEntry, FileStatus, UiAction};
 use super::super::event::{DownloadEvent, FileOrigin, QueuedFile};
 use super::*;
-use crate::core::{FileLifecycle, ProgressDelta, SessionRunStatus};
+use crate::core::{CoreEvent, FileLifecycle, ProgressDelta, SessionRunStatus};
 use crate::test_support::{
     FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, push_file, session_snapshot,
 };
@@ -75,6 +75,9 @@ fn handle_file_complete_marks_session_file_complete() {
 #[test]
 fn file_queued_clears_stale_error_state() {
     let mut app = test_app();
+    app.apply_core_event(CoreEvent::UrlSubmitted {
+        url: "https://mega.nz/folder/root".to_string(),
+    });
     app.files.push(FileEntry {
         id: "file-id".to_string().into(),
         name: "old-name.mkv".to_string(),
@@ -113,6 +116,7 @@ fn file_queued_bootstraps_and_saves_session() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
+    app.submit_url("https://mega.nz/file/new".to_string());
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "file-id".to_string().into(),
@@ -152,8 +156,64 @@ fn file_queued_does_not_clear_deleted_file_guard() {
     }));
 
     assert!(app.deleted_files.contains(&file_id));
-    assert!(app.files.is_empty());
+    assert!(
+        app.files.is_empty(),
+        "visible files after stale queue: {:?}",
+        app.files
+            .iter()
+            .map(|file| file.id.to_string())
+            .collect::<Vec<_>>()
+    );
     assert!(app.core_state.files.is_empty());
+}
+
+#[test]
+fn file_queued_after_package_delete_is_ignored_when_source_is_untracked() {
+    let mut app = test_app();
+    let source_url = "https://mega.nz/folder/delete-me".to_string();
+    let package_id = crate::test_support::package_id("delete-me", "Delete Me");
+
+    app.submit_url(source_url.clone());
+    app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
+        id: "known.bin".to_string().into(),
+        size: 128,
+        count_toward_progress: true,
+        origin: FileOrigin {
+            package_id: Some(package_id),
+            package_display_name: Some("Delete Me".to_string()),
+            source_url: source_url.clone(),
+            submitted_url: source_url.clone(),
+        },
+    }));
+    assert_eq!(app.core_state.files.len(), 1);
+
+    app.handle_ui_action(UiAction::DeletePackage(package_id));
+    assert!(app.core_state.files.is_empty());
+    assert!(app.core_state.packages.is_empty());
+    assert!(!app.urls.iter().any(|url| url == &source_url));
+
+    app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
+        id: "late.bin".to_string().into(),
+        size: 256,
+        count_toward_progress: true,
+        origin: FileOrigin {
+            package_id: Some(package_id),
+            package_display_name: Some("Delete Me".to_string()),
+            source_url,
+            submitted_url: "https://mega.nz/folder/delete-me".to_string(),
+        },
+    }));
+
+    assert!(
+        app.files.is_empty(),
+        "visible files after stale queue: {:?}",
+        app.files
+            .iter()
+            .map(|file| file.id.to_string())
+            .collect::<Vec<_>>()
+    );
+    assert!(app.core_state.files.is_empty());
+    assert!(app.core_state.packages.is_empty());
 }
 
 #[test]
@@ -196,32 +256,6 @@ fn url_level_error_replaces_placeholder_in_overlay() {
 }
 
 #[test]
-fn file_queued_is_not_blocked_by_deleted_url_like_file_id() {
-    let mut app = test_app();
-    let url = "https://mega.nz/folder/deleted".to_string();
-    app.deleted_files.insert(url.clone().into());
-
-    app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
-        id: "episode.mkv".to_string().into(),
-        size: 128,
-        count_toward_progress: true,
-        origin: FileOrigin {
-            package_id: Some(crate::test_support::package_id(
-                "batch-folder",
-                "Batch Folder",
-            )),
-            package_display_name: Some("Batch Folder".to_string()),
-            source_url: url.clone(),
-            submitted_url: url.clone(),
-        },
-    }));
-
-    assert_eq!(app.files.len(), 1);
-    assert_eq!(app.core_state.files.len(), 1);
-    assert_eq!(app.core_state.packages.len(), 1);
-}
-
-#[test]
 fn handle_file_complete_is_idempotent_for_visible_complete_rows() {
     let mut app = test_app();
     app.upsert_overlay_file(
@@ -249,6 +283,9 @@ fn handle_file_complete_is_idempotent_for_visible_complete_rows() {
 #[test]
 fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
     let mut app = test_app();
+    app.apply_core_event(CoreEvent::UrlSubmitted {
+        url: "https://mega.nz/file/root".to_string(),
+    });
     app.upsert_overlay_file(
         FileEntry {
             id: "episode.mkv".to_string().into(),
