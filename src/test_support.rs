@@ -117,19 +117,15 @@ pub fn push_file(
         package_id
     };
 
-    let (lifecycle, active, accounting, visible_completed_bytes) = match status {
-        FileFixtureStatus::Pending => (FileLifecycle::Queued, false, FileAccounting::CurrentRun, 0),
-        FileFixtureStatus::Completed => (
-            FileLifecycle::Complete,
-            false,
-            FileAccounting::Preexisting,
-            size,
-        ),
+    let (lifecycle, accounting, visible_completed_bytes) = match status {
+        FileFixtureStatus::Pending => (FileLifecycle::Queued, FileAccounting::CurrentRun, 0),
+        FileFixtureStatus::Completed => {
+            (FileLifecycle::Complete, FileAccounting::Preexisting, size)
+        }
         FileFixtureStatus::Error(message) => (
             FileLifecycle::Failed {
                 message: message.to_string(),
             },
-            false,
             FileAccounting::CurrentRun,
             0,
         ),
@@ -148,7 +144,6 @@ pub fn push_file(
         },
         runtime: RuntimeState {
             accounting,
-            active,
             reused_chunks: 0,
         },
     };

@@ -476,7 +476,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
             if let Some(file) = state.files.get_mut(&file_id) {
                 let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Queued;
-                file.runtime.active = false;
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
             }
@@ -491,7 +490,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 file.size = size;
                 file.lifecycle = FileLifecycle::Downloading;
                 file.progress = FileProgressState::default();
-                file.runtime.active = true;
                 file.runtime.accounting = FileAccounting::CurrentRun;
                 file.runtime.reused_chunks = 0;
                 let after = FileDerivedState::from(&*file);
@@ -525,7 +523,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                         .min(file.size);
                     if matches!(file.lifecycle, FileLifecycle::Queued) {
                         file.lifecycle = FileLifecycle::Downloading;
-                        file.runtime.active = true;
                     }
                 }
                 let after = FileDerivedState::from(&*file);
@@ -567,7 +564,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
             if let Some(file) = state.files.get_mut(&file_id) {
                 let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Complete;
-                file.runtime.active = false;
                 file.progress.visible_completed_bytes = file.size;
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
@@ -582,7 +578,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 let before = FileDerivedState::from(&*file);
                 if !file.lifecycle.is_terminal() {
                     file.lifecycle = FileLifecycle::Failed { message };
-                    file.runtime.active = false;
                 }
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
@@ -597,7 +592,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 let before = FileDerivedState::from(&*file);
                 if !file.lifecycle.is_terminal() {
                     file.lifecycle = FileLifecycle::Queued;
-                    file.runtime.active = false;
                 }
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
@@ -647,7 +641,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
             {
                 let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Queued;
-                file.runtime.active = false;
                 file.runtime.accounting = FileAccounting::CurrentRun;
                 file.progress.visible_completed_bytes = 0;
                 file.progress.downloaded_network_bytes = 0;
@@ -670,7 +663,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
             if let Some(file) = state.files.get_mut(&file_id) {
                 let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Queued;
-                file.runtime.active = false;
                 file.runtime.accounting = FileAccounting::CurrentRun;
                 file.progress = FileProgressState::default();
                 effects.push(CoreEffect::DeleteOutputArtifacts {
@@ -852,10 +844,6 @@ fn debug_assert_invariants(state: &DownloadState) {
                 .get(&file.package_id)
                 .is_some_and(|package| package.file_ids.contains(file_id)),
             "every file must appear in its package file_ids"
-        );
-        debug_assert!(
-            !matches!(file.lifecycle, FileLifecycle::Complete) || !file.runtime.active,
-            "complete files cannot remain active"
         );
         debug_assert!(
             state.totals.displayed_network_bytes <= state.totals.run_completed_bytes,
