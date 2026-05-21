@@ -65,7 +65,7 @@ impl App {
                 artifact_path: core_file.path.clone(),
                 size: core_file.size,
                 counts_toward_progress: matches!(
-                    core_file.runtime.accounting,
+                    core_file.accounting,
                     crate::core::FileAccounting::CurrentRun
                 ),
             });

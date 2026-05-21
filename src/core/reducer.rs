@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::core::model::{
     DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
-    PackageKey, PackageState, PackageStatus, RuntimeState, SessionRunStatus, UrlId,
+    PackageKey, PackageState, PackageStatus, SessionRunStatus, UrlId,
 };
 use crate::core::restart::RestartSnapshot;
 use crate::core::session::{FileSnapshot, PackageSnapshot, SessionSnapshot};
@@ -118,7 +118,7 @@ fn should_persist_session(event: &CoreEvent) -> bool {
 }
 
 fn counts_in_run_totals(file: &FileState) -> bool {
-    matches!(file.runtime.accounting, FileAccounting::CurrentRun)
+    matches!(file.accounting, FileAccounting::CurrentRun)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -456,10 +456,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                             size: resolved.size,
                             lifecycle: FileLifecycle::Planned,
                             progress: FileProgressState::default(),
-                            runtime: RuntimeState {
-                                accounting: FileAccounting::CurrentRun,
-                                ..RuntimeState::default()
-                            },
+                            accounting: FileAccounting::CurrentRun,
                         };
                         insert_file_state(state, file);
                     }
@@ -490,8 +487,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 file.size = size;
                 file.lifecycle = FileLifecycle::Downloading;
                 file.progress = FileProgressState::default();
-                file.runtime.accounting = FileAccounting::CurrentRun;
-                file.runtime.reused_chunks = 0;
+                file.accounting = FileAccounting::CurrentRun;
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
             }
@@ -535,7 +531,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
         CoreEvent::FileReuseDetected {
             file_id,
             reused_bytes,
-            reused_chunks,
+            reused_chunks: _,
         } => {
             let mut delta = None;
             if let Some(file) = state.files.get_mut(&file_id) {
@@ -550,8 +546,6 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                     .visible_completed_bytes
                     .saturating_add(reused_bytes)
                     .min(file.size);
-                file.runtime.reused_chunks =
-                    file.runtime.reused_chunks.saturating_add(reused_chunks);
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
             }
@@ -641,7 +635,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
             {
                 let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Queued;
-                file.runtime.accounting = FileAccounting::CurrentRun;
+                file.accounting = FileAccounting::CurrentRun;
                 file.progress.visible_completed_bytes = 0;
                 file.progress.downloaded_network_bytes = 0;
                 file.progress.verified_existing_bytes = 0;
@@ -663,7 +657,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
             if let Some(file) = state.files.get_mut(&file_id) {
                 let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Queued;
-                file.runtime.accounting = FileAccounting::CurrentRun;
+                file.accounting = FileAccounting::CurrentRun;
                 file.progress = FileProgressState::default();
                 effects.push(CoreEffect::DeleteOutputArtifacts {
                     path: file.path.clone(),
@@ -741,7 +735,7 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
                     size: file.size,
                     lifecycle: file.lifecycle.clone(),
                     progress: file.progress.clone(),
-                    runtime: file.runtime.clone(),
+                    accounting: file.accounting,
                 })
                 .collect::<Vec<_>>();
             if files.is_empty() {
@@ -790,7 +784,7 @@ fn recompute_derived(state: &mut DownloadState) {
 
     let mut totals = crate::core::model::TotalsState::default();
     for file in state.files.values() {
-        if !matches!(file.runtime.accounting, FileAccounting::CurrentRun) {
+        if !matches!(file.accounting, FileAccounting::CurrentRun) {
             continue;
         }
         totals.run_total_bytes = totals.run_total_bytes.saturating_add(file.size);
@@ -884,10 +878,7 @@ mod tests {
                 size: 100,
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
-                runtime: RuntimeState {
-                    accounting: FileAccounting::CurrentRun,
-                    ..RuntimeState::default()
-                },
+                accounting: FileAccounting::CurrentRun,
             },
         );
         state
@@ -1072,10 +1063,7 @@ mod tests {
                 size: 10,
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
-                runtime: RuntimeState {
-                    accounting: FileAccounting::CurrentRun,
-                    ..RuntimeState::default()
-                },
+                accounting: FileAccounting::CurrentRun,
             },
         );
 
@@ -1141,10 +1129,7 @@ mod tests {
                     message: "boom".to_string(),
                 },
                 progress: FileProgressState::default(),
-                runtime: RuntimeState {
-                    accounting: FileAccounting::CurrentRun,
-                    ..RuntimeState::default()
-                },
+                accounting: FileAccounting::CurrentRun,
             },
         );
 
@@ -1212,10 +1197,7 @@ mod tests {
                 size: 10,
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
-                runtime: RuntimeState {
-                    accounting: FileAccounting::CurrentRun,
-                    ..RuntimeState::default()
-                },
+                accounting: FileAccounting::CurrentRun,
             },
         );
 
@@ -1348,7 +1330,6 @@ mod tests {
         assert_eq!(file.progress.verified_existing_bytes, 0);
         assert_eq!(file.progress.visible_completed_bytes, 0);
         assert_eq!(file.progress.downloaded_network_bytes, 0);
-        assert_eq!(file.runtime.reused_chunks, 0);
         assert_eq!(state.totals.run_completed_bytes, 0);
         assert_eq!(state.totals.displayed_network_bytes, 0);
     }

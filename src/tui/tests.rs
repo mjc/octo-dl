@@ -335,10 +335,7 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
             size: 128,
             lifecycle: FileLifecycle::Queued,
             progress: crate::core::FileProgressState::default(),
-            runtime: crate::core::RuntimeState {
-                accounting: crate::core::FileAccounting::CurrentRun,
-                ..crate::core::RuntimeState::default()
-            },
+            accounting: crate::core::FileAccounting::CurrentRun,
         },
         crate::core::FileSnapshot {
             id: "Merged Folder/b.mkv".to_string().into(),
@@ -348,10 +345,7 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
             size: 256,
             lifecycle: FileLifecycle::Queued,
             progress: crate::core::FileProgressState::default(),
-            runtime: crate::core::RuntimeState {
-                accounting: crate::core::FileAccounting::CurrentRun,
-                ..crate::core::RuntimeState::default()
-            },
+            accounting: crate::core::FileAccounting::CurrentRun,
         },
     ];
     session.save().unwrap();

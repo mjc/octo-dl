@@ -263,18 +263,12 @@ pub enum PackageStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FileAccounting {
     #[default]
     CurrentRun,
     Preexisting,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct RuntimeState {
-    pub accounting: FileAccounting,
-    pub reused_chunks: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -338,7 +332,7 @@ pub struct FileState {
     pub size: u64,
     pub lifecycle: FileLifecycle,
     pub progress: FileProgressState,
-    pub runtime: RuntimeState,
+    pub accounting: FileAccounting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
