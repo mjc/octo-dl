@@ -158,11 +158,14 @@ impl SessionSnapshot {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
+        self.save_to_path(&self.state_path())
+    }
+
+    pub(crate) fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
         validate_snapshot(self)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let dir = Self::state_dir();
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(&dir)?;
-        let path = self.state_path();
         let tmp = path.with_extension("toml.tmp");
         let toml = toml::to_string(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

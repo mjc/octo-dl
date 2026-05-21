@@ -356,6 +356,7 @@ impl App {
         }
         self.drain_token_messages();
         let _ = self.drain_ui_actions(action_rx);
+        self.poll_session_persistence();
     }
 
     pub(crate) async fn run_headless_until_shutdown<F>(
@@ -402,6 +403,7 @@ impl App {
             let _ = self.drain_download_events(download_rx);
             let _ = self.drain_ui_actions(action_rx);
             self.drain_token_messages();
+            self.poll_session_persistence();
             if let Some(state_tx) = state_tx {
                 let _ = self.publish_dashboard_snapshot_if_observed(
                     state_tx,
@@ -410,6 +412,7 @@ impl App {
                 );
             }
         }
+        self.flush_session_persistence();
     }
 }
 

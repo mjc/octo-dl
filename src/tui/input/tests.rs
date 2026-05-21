@@ -533,6 +533,7 @@ fn handle_main_input_delete_removes_session_entry_and_keeps_selection() {
         Some(ConfirmAction::DeleteFile("first.bin".to_string().into()))
     );
     confirm(&mut app);
+    app.flush_session_persistence();
 
     assert_eq!(app.files.len(), 1);
     assert_eq!(app.files[0].id, "second.bin");
@@ -619,6 +620,7 @@ fn handle_main_input_delete_last_file_removes_empty_session_file() {
 
     handle_input(&mut app, key(KeyCode::Delete));
     confirm(&mut app);
+    app.flush_session_persistence();
 
     assert!(app.files.is_empty());
     assert!(!session_path.exists());
