@@ -247,7 +247,6 @@ pub enum ResumeReuseSource {
 
 const CURRENT_RESUME_SIDECAR_VERSION: u32 = 2;
 const SIDECAR_CHECKPOINT_CHUNK_INTERVAL: usize = 32;
-const MAX_RESUME_REVALIDATION_PARALLELISM: usize = 16;
 
 /// Returns the `.part` file path for a given final path.
 pub(crate) fn part_path(path: &str) -> PathBuf {
@@ -393,24 +392,14 @@ struct SidecarValidationInput<'a> {
     part_path: &'a Path,
     sidecar: &'a ResumeSidecar,
     file_size: u64,
-    aes_key: &'a [u8; 16],
-    aes_iv: &'a [u8; 8],
     expected_condensed_mac_b64: &'a str,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ResumeChunkValidationCandidate {
+struct TrustedResumeChunkCandidate {
     index: usize,
-    offset: u64,
     length: u64,
     expected_mac: [u8; 16],
-}
-
-#[derive(Debug)]
-struct ResumeChunkValidationResult {
-    index: usize,
-    length: u64,
-    actual_mac: [u8; 16],
 }
 
 async fn load_sidecar(path: &Path) -> Option<ResumeSidecar> {
@@ -452,68 +441,26 @@ async fn remove_file_if_exists(path: &Path) -> io::Result<()> {
     }
 }
 
-async fn revalidate_sidecar_candidate_lane<F: FileSystem>(
-    fs: &F,
-    part_path: &Path,
-    aes_key: [u8; 16],
-    aes_iv: [u8; 8],
-    candidates: Vec<ResumeChunkValidationCandidate>,
-) -> Vec<ResumeChunkValidationResult> {
-    let Some(max_len) = candidates
-        .iter()
-        .filter_map(|candidate| usize::try_from(candidate.length).ok())
-        .max()
-    else {
-        return Vec::new();
-    };
-    if max_len == 0 {
-        return Vec::new();
-    }
-
-    let mut buf = vec![0u8; max_len];
-    let mut trusted = Vec::new();
-
-    for candidate in candidates {
-        let Ok(chunk_len) = usize::try_from(candidate.length) else {
-            continue;
-        };
-        if fs
-            .read_exact_at(part_path, candidate.offset, &mut buf[..chunk_len])
-            .await
-            .is_err()
-        {
-            continue;
-        }
-
-        let mac_buf = std::mem::take(&mut buf);
-        let Ok((actual_mac, returned_buf)) = tokio::task::spawn_blocking(move || {
-            let actual_mac = mega::compute_mega_chunk_mac(&mac_buf[..chunk_len], &aes_key, &aes_iv);
-            (actual_mac, mac_buf)
-        })
-        .await
-        else {
-            break;
-        };
-        buf = returned_buf;
-
-        if actual_mac == candidate.expected_mac {
-            trusted.push(ResumeChunkValidationResult {
-                index: candidate.index,
-                length: candidate.length,
-                actual_mac,
-            });
-        }
-    }
-
-    trusted
-}
-
 async fn delete_sidecar(path: &Path) -> io::Result<()> {
     remove_file_if_exists(path).await
 }
 
+async fn sync_and_fingerprint_part(path: &Path) -> Option<FileFingerprint> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new().read(true).open(&path).ok()?;
+        file.sync_all().ok()?;
+        let metadata = file.metadata().ok()?;
+        Some(FileFingerprint::from_metadata(&metadata))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 fn spawn_sidecar_writer(
     path: PathBuf,
+    part_path: PathBuf,
 ) -> (
     tokio::sync::mpsc::UnboundedSender<ResumeSidecar>,
     JoinHandle<()>,
@@ -527,6 +474,7 @@ fn spawn_sidecar_writer(
             while let Ok(newer_snapshot) = rx.try_recv() {
                 snapshot = newer_snapshot;
             }
+            snapshot.part_fingerprint = sync_and_fingerprint_part(&part_path).await;
             if let Err(err) = save_sidecar_atomic(&path, &snapshot).await {
                 log::warn!(
                     "Failed to persist resume sidecar {} after verified chunk sync: {err}",
@@ -797,21 +745,12 @@ impl<F: FileSystem> Downloader<F> {
             return Ok(ResumeValidation::empty(boundaries.len()));
         };
 
-        let Some(aes_iv) = node.aes_iv() else {
-            return Ok(ResumeValidation {
-                sidecar_loaded: true,
-                ..ResumeValidation::empty(boundaries.len())
-            });
-        };
-
         Ok(self
             .revalidate_sidecar_chunks(SidecarValidationInput {
                 boundaries,
                 part_path,
                 sidecar: &sidecar,
                 file_size: node.size(),
-                aes_key: node.aes_key(),
-                aes_iv,
                 expected_condensed_mac_b64,
             })
             .await)
@@ -853,15 +792,14 @@ impl<F: FileSystem> Downloader<F> {
                 continue;
             };
 
-            candidates.push(ResumeChunkValidationCandidate {
+            candidates.push(TrustedResumeChunkCandidate {
                 index,
-                offset: boundary.offset,
                 length: boundary.length,
                 expected_mac,
             });
         }
 
-        let fast_trust_sidecar = match input.sidecar.part_fingerprint {
+        let trust_sidecar = match input.sidecar.part_fingerprint {
             Some(expected) => self
                 .fs
                 .file_fingerprint(input.part_path)
@@ -870,53 +808,17 @@ impl<F: FileSystem> Downloader<F> {
             None => false,
         };
 
-        if fast_trust_sidecar {
-            for candidate in candidates {
-                if validation.trusted_chunks[candidate.index].is_some() {
-                    continue;
-                }
-                validation.trusted_chunks[candidate.index] = Some(candidate.expected_mac);
-                validation.trusted_count = validation.trusted_count.saturating_add(1);
-                validation.trusted_bytes =
-                    validation.trusted_bytes.saturating_add(candidate.length);
-            }
-            if validation.trusted_count > 0 {
-                validation.source = Some(ResumeReuseSource::Sidecar);
-            }
+        if !trust_sidecar {
             return validation;
         }
 
-        let parallelism = self
-            .config
-            .chunks_per_file
-            .clamp(1, MAX_RESUME_REVALIDATION_PARALLELISM);
-        let lane_count = parallelism.min(candidates.len()).max(1);
-        let mut lanes = (0..lane_count).map(|_| Vec::new()).collect::<Vec<_>>();
-        for (position, candidate) in candidates.into_iter().enumerate() {
-            lanes[position % lane_count].push(candidate);
-        }
-
-        let mut lane_results = stream::iter(lanes)
-            .map(|lane| {
-                revalidate_sidecar_candidate_lane(
-                    &self.fs,
-                    input.part_path,
-                    *input.aes_key,
-                    *input.aes_iv,
-                    lane,
-                )
-            })
-            .buffer_unordered(lane_count);
-
-        while let Some(trusted_chunks) = lane_results.next().await {
-            for trusted in trusted_chunks {
-                if validation.trusted_chunks[trusted.index].is_some() {
-                    continue;
-                }
-                validation.trusted_chunks[trusted.index] = Some(trusted.actual_mac);
-                validation.trusted_count = validation.trusted_count.saturating_add(1);
-                validation.trusted_bytes = validation.trusted_bytes.saturating_add(trusted.length);
+        for candidate in candidates {
+            if validation.trusted_chunks[candidate.index].is_some() {
+                continue;
             }
+            validation.trusted_chunks[candidate.index] = Some(candidate.expected_mac);
+            validation.trusted_count = validation.trusted_count.saturating_add(1);
+            validation.trusted_bytes = validation.trusted_bytes.saturating_add(candidate.length);
         }
 
         if validation.trusted_count > 0 {
@@ -1005,7 +907,7 @@ impl<F: FileSystem> Downloader<F> {
             resume_validation.trusted_chunks,
         )));
         let trusted_for_download = tracker.lock().unwrap().trusted_chunks();
-        let (sidecar_updates_tx, sidecar_writer) = spawn_sidecar_writer(sp.clone());
+        let (sidecar_updates_tx, sidecar_writer) = spawn_sidecar_writer(sp.clone(), pp.clone());
         // The mega library calls the progress callback with the *cumulative*
         // total bytes downloaded so far, NOT a delta.  We use fetch_max (not
         // swap) so that out-of-order callbacks from parallel workers never
@@ -1634,21 +1536,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revalidate_sidecar_accepts_matching_chunk() {
+    async fn revalidate_sidecar_without_part_fingerprint_trusts_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let part = dir.path().join("file.bin.part");
         let file_size = 300_000_u64;
         let data = test_plaintext(usize_from_u64(file_size));
         tokio::fs::write(&part, &data).await.unwrap();
 
-        let aes_key = [7u8; 16];
-        let aes_iv = [3u8; 8];
         let expected = STANDARD.encode([9u8; 8]);
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
-        let first_data = chunk_data(&data, first);
-        let mac = mega::compute_mega_chunk_mac(first_data, &aes_key, &aes_iv);
-        let sidecar = sidecar_for_chunk(file_size, &expected, first.index, mac);
+        let sidecar = sidecar_for_chunk(file_size, &expected, first.index, [4u8; 16]);
 
         let validation = tokio_downloader()
             .revalidate_sidecar_chunks(SidecarValidationInput {
@@ -1656,16 +1554,14 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                aes_key: &aes_key,
-                aes_iv: &aes_iv,
                 expected_condensed_mac_b64: &expected,
             })
             .await;
 
         assert!(validation.sidecar_loaded);
-        assert_eq!(validation.trusted_count, 1);
-        assert_eq!(validation.trusted_bytes, first.length);
-        assert_eq!(validation.trusted_chunks[0], Some(mac));
+        assert_eq!(validation.trusted_count, 0);
+        assert_eq!(validation.trusted_bytes, 0);
+        assert!(validation.trusted_chunks[0].is_none());
         assert!(validation.trusted_chunks[1].is_none());
     }
 
@@ -1677,8 +1573,6 @@ mod tests {
         let data = test_plaintext(usize_from_u64(file_size));
         tokio::fs::write(&part, &data).await.unwrap();
 
-        let aes_key = [7u8; 16];
-        let aes_iv = [3u8; 8];
         let expected = STANDARD.encode([9u8; 8]);
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
@@ -1691,8 +1585,6 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                aes_key: &aes_key,
-                aes_iv: &aes_iv,
                 expected_condensed_mac_b64: &expected,
             })
             .await;
@@ -1703,7 +1595,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revalidate_sidecar_recomputes_when_part_fingerprint_is_stale() {
+    async fn revalidate_sidecar_trusts_nothing_when_part_fingerprint_is_stale() {
         let dir = tempfile::tempdir().unwrap();
         let part = dir.path().join("file.bin.part");
         let file_size = 300_000_u64;
@@ -1733,8 +1625,6 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                aes_key: &aes_key,
-                aes_iv: &aes_iv,
                 expected_condensed_mac_b64: &expected,
             })
             .await;
@@ -1745,7 +1635,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revalidate_sidecar_accepts_later_matching_duplicate_chunk() {
+    async fn revalidate_sidecar_with_matching_fingerprint_keeps_first_duplicate_chunk() {
         let dir = tempfile::tempdir().unwrap();
         let part = dir.path().join("file.bin.part");
         let file_size = 300_000_u64;
@@ -1759,7 +1649,7 @@ mod tests {
         let first = &boundaries[0];
         let first_data = chunk_data(&data, first);
         let mac = mega::compute_mega_chunk_mac(first_data, &aes_key, &aes_iv);
-        let sidecar = ResumeSidecar {
+        let mut sidecar = ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size,
             expected_condensed_mac_b64: expected.clone(),
@@ -1775,6 +1665,7 @@ mod tests {
             ],
             part_fingerprint: None,
         };
+        sidecar.part_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await;
 
         let validation = tokio_downloader()
             .revalidate_sidecar_chunks(SidecarValidationInput {
@@ -1782,15 +1673,13 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                aes_key: &aes_key,
-                aes_iv: &aes_iv,
                 expected_condensed_mac_b64: &expected,
             })
             .await;
 
         assert_eq!(validation.trusted_count, 1);
         assert_eq!(validation.trusted_bytes, first.length);
-        assert_eq!(validation.trusted_chunks[0], Some(mac));
+        assert_eq!(validation.trusted_chunks[0], Some([1u8; 16]));
     }
 
     #[tokio::test]
@@ -1801,8 +1690,6 @@ mod tests {
         let data = test_plaintext(usize_from_u64(file_size));
         tokio::fs::write(&part, &data).await.unwrap();
 
-        let aes_key = [7u8; 16];
-        let aes_iv = [3u8; 8];
         let expected = STANDARD.encode([9u8; 8]);
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let sidecar = sidecar_for_chunk(file_size, &expected, 0, [1u8; 16]);
@@ -1813,8 +1700,6 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                aes_key: &aes_key,
-                aes_iv: &aes_iv,
                 expected_condensed_mac_b64: &expected,
             })
             .await;
@@ -1851,8 +1736,6 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                aes_key: &aes_key,
-                aes_iv: &aes_iv,
                 expected_condensed_mac_b64: &expected,
             })
             .await;
@@ -1870,8 +1753,6 @@ mod tests {
         let data = test_plaintext(usize_from_u64(file_size));
         tokio::fs::write(&part, &data).await.unwrap();
 
-        let aes_key = [7u8; 16];
-        let aes_iv = [3u8; 8];
         let expected = STANDARD.encode([9u8; 8]);
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let sidecar = sidecar_for_chunk(file_size, "stale", 0, [1u8; 16]);
@@ -1882,8 +1763,6 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                aes_key: &aes_key,
-                aes_iv: &aes_iv,
                 expected_condensed_mac_b64: &expected,
             })
             .await;
@@ -1904,8 +1783,6 @@ mod tests {
         tokio::fs::write(&part, &data).await.unwrap();
 
         let expected = STANDARD.encode([9u8; 8]);
-        let aes_key = [7u8; 16];
-        let aes_iv = [3u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         save_sidecar_atomic(
             &sidecar,
@@ -1929,8 +1806,6 @@ mod tests {
                 part_path: &part,
                 sidecar: &loaded_sidecar,
                 file_size,
-                aes_key: &aes_key,
-                aes_iv: &aes_iv,
                 expected_condensed_mac_b64: &expected,
             })
             .await;
@@ -1980,8 +1855,6 @@ mod tests {
                 part_path: &part,
                 sidecar: &loaded_sidecar,
                 file_size,
-                aes_key: &aes_key,
-                aes_iv: &aes_iv,
                 expected_condensed_mac_b64: &expected,
             })
             .await;
@@ -2083,6 +1956,8 @@ mod tests {
     async fn sidecar_writer_persists_verified_snapshots_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let sidecar_path = dir.path().join("file.bin.part.meta.json");
+        let part_path = dir.path().join("file.bin.part");
+        tokio::fs::write(&part_path, b"partial").await.unwrap();
         let first = ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size: 42,
@@ -2107,7 +1982,7 @@ mod tests {
             ..first.clone()
         };
 
-        let (tx, handle) = spawn_sidecar_writer(sidecar_path.clone());
+        let (tx, handle) = spawn_sidecar_writer(sidecar_path.clone(), part_path.clone());
         tx.send(first).unwrap();
         tx.send(second.clone()).unwrap();
         drop(tx);
@@ -2115,6 +1990,10 @@ mod tests {
 
         let loaded = load_sidecar(&sidecar_path).await.unwrap();
         assert_eq!(loaded.verified_chunks, second.verified_chunks);
+        assert_eq!(
+            loaded.part_fingerprint,
+            TokioFileSystem::new().file_fingerprint(&part_path).await
+        );
     }
 
     #[tokio::test]
