@@ -273,7 +273,6 @@ pub enum FileAccounting {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RuntimeState {
-    pub active: bool,
     pub accounting: FileAccounting,
     pub reused_chunks: usize,
 }
@@ -433,11 +432,12 @@ impl DownloadState {
             .flat_map(|package| package.file_ids.iter())
             .filter_map(|file_id| self.files.get(file_id))
             .filter(|file| {
-                !file.runtime.active
-                    && !matches!(
-                        file.lifecycle,
-                        FileLifecycle::Complete | FileLifecycle::Failed { .. }
-                    )
+                !matches!(
+                    file.lifecycle,
+                    FileLifecycle::Downloading
+                        | FileLifecycle::Complete
+                        | FileLifecycle::Failed { .. }
+                )
             })
             .map(|file| file.id.clone())
             .collect()

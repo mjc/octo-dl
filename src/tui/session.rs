@@ -189,7 +189,6 @@ impl SessionAdapter {
                 file.size = size;
                 file.path = path.to_string();
                 file.lifecycle = FileLifecycle::Queued;
-                file.runtime.active = false;
                 file.runtime.accounting = crate::core::FileAccounting::CurrentRun;
             } else {
                 let mut file = session.packages[package_index].files.remove(file_index);
@@ -198,7 +197,6 @@ impl SessionAdapter {
                 file.size = size;
                 file.path = path.to_string();
                 file.lifecycle = FileLifecycle::Queued;
-                file.runtime.active = false;
                 file.runtime.accounting = crate::core::FileAccounting::CurrentRun;
                 let package = session
                     .packages

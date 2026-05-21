@@ -232,7 +232,6 @@ impl SessionSnapshot {
         if let Some(file) = self.find_file_mut(file_id) {
             file.lifecycle = FileLifecycle::Complete;
             file.progress.visible_completed_bytes = file.size;
-            file.runtime.active = false;
             file.runtime.accounting = FileAccounting::Preexisting;
         }
     }
@@ -242,7 +241,6 @@ impl SessionSnapshot {
             file.lifecycle = FileLifecycle::Failed {
                 message: error.to_string(),
             };
-            file.runtime.active = false;
         }
     }
 
@@ -306,7 +304,6 @@ pub fn queued_file_snapshot(
         progress: FileProgressState::default(),
         runtime: RuntimeState {
             accounting: FileAccounting::CurrentRun,
-            active: false,
             reused_chunks: 0,
         },
     }
