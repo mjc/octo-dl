@@ -109,6 +109,39 @@ fn new_without_explicit_config_loads_default_saved_credentials() {
 }
 
 #[test]
+fn interactive_startup_defers_auto_login_until_terminal_draws() {
+    let dir = tempdir().expect("state dir should exist");
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut app = App::new(9723, tx, true);
+    assert!(app.login.set_credentials(
+        "saved@example.com".to_string(),
+        "saved-secret".to_string(),
+        String::new()
+    ));
+
+    app.prepare_interactive_startup();
+
+    assert!(!app.login.logging_in);
+    assert!(app.client_rx.is_none());
+}
+
+#[test]
+fn disabled_shared_state_skips_initial_dashboard_snapshot() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let app = App::new(9723, tx, true);
+
+    let SharedStateChannels {
+        state_tx,
+        shared_state,
+        ..
+    } = app.shared_state_channels(false, DashboardUiMode::Tui);
+
+    assert!(shared_state.is_none());
+    assert!(state_tx.borrow().is_empty());
+}
+
+#[test]
 fn implicit_cwd_template_falls_back_to_state_config_credentials() {
     let state_dir = tempdir().expect("state dir should exist");
     let cwd_dir = tempdir().expect("cwd should exist");
