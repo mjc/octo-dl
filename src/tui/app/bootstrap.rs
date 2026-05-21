@@ -107,6 +107,7 @@ impl App {
             file_attempt_ids: HashMap::new(),
             reset_pending_files: HashSet::new(),
             session: None,
+            session_persistence: super::SessionPersistence::new(),
             core_state: DownloadState::new(SessionMeta {
                 config: DownloadConfig::default(),
                 ..SessionMeta::default()

@@ -730,6 +730,7 @@ fn core_persisted_session_snapshot_is_saved_to_disk() {
             collision: None,
         },
     });
+    app.flush_session_persistence();
 
     let session = crate::core::SessionSnapshot::latest().expect("session should be saved");
     assert_eq!(session.packages.len(), 1);

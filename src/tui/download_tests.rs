@@ -79,6 +79,7 @@ fn file_queued_bootstraps_and_saves_session() {
             submitted_url: "https://mega.nz/file/new".to_string(),
         },
     }));
+    app.flush_session_persistence();
 
     let saved = crate::core::SessionSnapshot::latest().expect("session should be saved");
     assert_eq!(saved.urls.len(), 1);

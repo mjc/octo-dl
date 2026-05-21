@@ -5,9 +5,10 @@ use indexmap::IndexMap;
 use crate::core::{
     CoreCommand, CoreEffect, CoreEffects, CoreEvent, FileAccounting, FileId, PackageId,
     ResolvedFile, ResolvedPackage, RestartSnapshot, SavedCredentials, SessionSnapshot,
-    build_restart_snapshot, reduce, snapshot_from_state,
+    build_restart_snapshot, reduce, snapshot_from_state, validate_snapshot,
 };
 
+use super::persistence::SessionPersistenceError;
 use super::{App, FileStatus, SessionAdapter};
 use crate::tui::event::DownloadRequest;
 
@@ -391,6 +392,27 @@ impl App {
         let _ = self.mutate_session_and_save(|session| {
             SessionAdapter::sync_for_shutdown(session, &visible)
         });
+        self.flush_session_persistence();
+    }
+
+    pub(crate) fn poll_session_persistence(&mut self) {
+        for error in self.session_persistence.drain_errors() {
+            match error {
+                SessionPersistenceError::Save { id, error } => {
+                    log::error!("Failed to save session {id}: {error}");
+                    self.status = format!("Failed to save session: {error}");
+                }
+                SessionPersistenceError::Remove { path, error } => {
+                    log::error!("Failed to remove empty session {}: {error}", path.display());
+                    self.status = format!("Failed to remove empty session: {error}");
+                }
+            }
+        }
+    }
+
+    pub(crate) fn flush_session_persistence(&mut self) {
+        self.session_persistence.flush();
+        self.poll_session_persistence();
     }
 
     pub(crate) fn update_download_status_message(&mut self) {
@@ -415,23 +437,21 @@ impl App {
     fn persist_session(&mut self, session: SessionSnapshot) -> bool {
         if session.urls.is_empty() && session.packages.is_empty() {
             let path = session.state_path();
-            if let Err(error) = std::fs::remove_file(&path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                log::error!("Failed to remove empty session {}: {error}", path.display());
-                self.status = format!("Failed to remove empty session: {error}");
-                return false;
-            }
+            self.session_persistence.remove(path);
             self.install_session(session);
             return true;
         }
 
-        if let Err(error) = session.save() {
+        if let Err(error) = validate_snapshot(&session)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        {
             log::error!("Failed to save session {}: {error}", session.id);
             self.status = format!("Failed to save session: {error}");
             return false;
         }
 
+        self.session_persistence
+            .save(session.clone(), session.state_path());
         self.install_session(session);
         true
     }

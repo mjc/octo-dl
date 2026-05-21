@@ -6,6 +6,8 @@ mod actions;
 mod bootstrap;
 #[path = "app/overlay.rs"]
 mod overlay;
+#[path = "app/persistence.rs"]
+mod persistence;
 #[path = "app/progress.rs"]
 mod progress;
 #[path = "app/runtime.rs"]
@@ -32,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 use crate::core::{DownloadState, FileId, PackageId, ProgressDelta, SessionSnapshot};
 use crate::tui::dashboard::DashboardUiMode;
 
+use self::persistence::SessionPersistence;
 pub(crate) use self::progress::FileUiState;
 use self::progress::TransferRate;
 pub use self::types::{
@@ -125,6 +128,7 @@ pub struct App {
     pub reset_pending_files: HashSet<FileId>,
     // Session
     pub session: Option<SessionSnapshot>,
+    pub(crate) session_persistence: SessionPersistence,
     pub core_state: DownloadState,
     // API port for display
     pub api_port: u16,
