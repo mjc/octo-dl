@@ -24,12 +24,7 @@ impl App {
         })
     }
 
-    pub(crate) fn upsert_overlay_file(
-        &mut self,
-        file: FileEntry,
-        source_url: Option<String>,
-        _counts_toward_progress: bool,
-    ) {
+    pub(crate) fn upsert_overlay_file(&mut self, file: FileEntry, source_url: Option<String>) {
         let row = match source_url {
             Some(source_url) => TransientRow::PendingUrl { file, source_url },
             None => TransientRow::UiError { file },
@@ -81,13 +76,7 @@ impl App {
         None
     }
 
-    pub(crate) fn show_overlay_error(
-        &mut self,
-        id: &FileId,
-        name: &str,
-        error: &str,
-        counts_toward_progress: bool,
-    ) {
+    pub(crate) fn show_overlay_error(&mut self, id: &FileId, name: &str, error: &str) {
         self.cancellation_tokens.remove(id);
         if self.core_state.files.contains_key(id) {
             // Core-backed rows are projected back into the TUI view.
@@ -105,14 +94,13 @@ impl App {
                     status: FileStatus::Error(error.to_string()),
                 },
                 None,
-                counts_toward_progress,
             );
         }
         self.reset_file_ui_rate(id);
     }
 
     pub(crate) fn show_ui_error_only(&mut self, name: &str, error: &str) {
-        self.show_overlay_error(&FileId::from(name), name, error, false);
+        self.show_overlay_error(&FileId::from(name), name, error);
     }
 }
 

@@ -471,7 +471,7 @@ impl App {
         } else {
             self.status = format!("Retry unavailable for {id}");
             if !self.core_state.files.contains_key(id) {
-                self.show_overlay_error(id, id.as_str(), "Retry unavailable for this file", true);
+                self.show_overlay_error(id, id.as_str(), "Retry unavailable for this file");
             }
         }
     }
@@ -538,7 +538,7 @@ impl App {
         };
         if self.ensure_core_file_from_context(&context).is_none() {
             if !self.core_state.files.contains_key(id) {
-                self.show_overlay_error(id, id.as_str(), "Reset unavailable for this file", true);
+                self.show_overlay_error(id, id.as_str(), "Reset unavailable for this file");
             }
             self.status = "Reset unavailable for selected file".to_string();
             self.recompute_totals();

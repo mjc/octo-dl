@@ -190,7 +190,6 @@ fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
             status: FileStatus::Complete,
         },
         Some("https://mega.nz/file/root".to_string()),
-        false,
     );
     app.recompute_totals();
 

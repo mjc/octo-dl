@@ -573,7 +573,7 @@ fn handle_main_input_delete_transient_row_forgets_it_without_session_state() {
             status: FileStatus::Queued,
         },
     ] {
-        app.upsert_overlay_file(file, Some("https://mega.nz/folder/root".to_string()), true);
+        app.upsert_overlay_file(file, Some("https://mega.nz/folder/root".to_string()));
     }
     app.recompute_totals();
     app.file_list_state.select(Some(0));
@@ -649,7 +649,7 @@ fn handle_main_input_delete_uses_visible_sorted_row() {
             status: FileStatus::Downloading,
         },
     ] {
-        app.upsert_overlay_file(file, None, true);
+        app.upsert_overlay_file(file, None);
     }
     app.file_list_state.select(Some(0));
 
@@ -753,7 +753,6 @@ fn handle_main_input_shift_d_keeps_completed_file_artifact() {
             status: FileStatus::Complete,
         },
         Some("https://mega.nz/file/shift-delete-complete".to_string()),
-        false,
     );
     app.file_list_state.select(Some(0));
 
@@ -881,7 +880,6 @@ fn handle_main_input_delete_keeps_completed_file_artifact() {
             status: FileStatus::Complete,
         },
         Some("https://mega.nz/file/complete".to_string()),
-        false,
     );
     app.file_list_state.select(Some(0));
 
@@ -979,7 +977,6 @@ fn retry_recomputes_totals_for_errored_file() {
             status: FileStatus::Error("boom".to_string()),
         },
         Some("https://mega.nz/file/error".to_string()),
-        true,
     );
     app.recompute_totals();
     app.file_list_state.select(Some(0));
