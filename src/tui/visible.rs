@@ -48,7 +48,7 @@ pub(super) fn sync_visible_files(
     expanded_packages: &HashSet<PackageId>,
     sort: &SortState,
     selected_row_identity: Option<TuiRow>,
-) {
+) -> Vec<TuiRow> {
     sync::sync_visible_files(
         files,
         visible_file_positions,
@@ -59,5 +59,5 @@ pub(super) fn sync_visible_files(
         expanded_packages,
         sort,
         selected_row_identity,
-    );
+    )
 }

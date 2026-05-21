@@ -60,6 +60,7 @@ pub struct App {
     pub urls: Vec<String>,
     // File queue (main content)
     pub files: Vec<FileEntry>,
+    cached_visible_rows: Vec<visible::TuiRow>,
     pub(crate) visible_file_positions: HashMap<FileId, usize>,
     pub(crate) overlay_files: IndexMap<FileId, TransientRow>,
     pub(crate) file_ui: HashMap<FileId, FileUiState>,
@@ -124,13 +125,24 @@ pub struct App {
 }
 
 impl App {
+    fn current_visible_rows(&self) -> Vec<visible::TuiRow> {
+        if self.cached_visible_rows.is_empty()
+            && !(self.files.is_empty()
+                && self.core_state.files.is_empty()
+                && self.overlay_files.is_empty())
+        {
+            return visible::visible_rows(self);
+        }
+        self.cached_visible_rows.clone()
+    }
+
     pub fn visible_rows(&self) -> Vec<visible::TuiRow> {
-        visible::visible_rows(self)
+        self.current_visible_rows()
     }
 
     pub fn selected_row(&self) -> Option<visible::TuiRow> {
         let selected = self.file_list_state.selected()?;
-        self.visible_rows().get(selected).cloned()
+        self.current_visible_rows().get(selected).cloned()
     }
 
     pub(crate) fn sync_visible_files(&mut self) {
@@ -142,7 +154,7 @@ impl App {
         &mut self,
         selected_row_identity: Option<visible::TuiRow>,
     ) {
-        visible::sync_visible_files(
+        self.cached_visible_rows = visible::sync_visible_files(
             &mut self.files,
             &mut self.visible_file_positions,
             &mut self.overlay_files,

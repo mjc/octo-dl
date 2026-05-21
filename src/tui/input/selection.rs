@@ -109,6 +109,7 @@ pub(super) fn toggle_selected_package(app: &mut App) {
         if !app.expanded_packages.insert(package_id) {
             app.expanded_packages.remove(&package_id);
         }
+        app.sync_visible_files();
     }
 }
 
@@ -116,6 +117,7 @@ pub(super) fn move_selected_queue_item(app: &mut App, delta: isize) {
     let selected = app.selected_row();
     if !matches!(app.sort.key, crate::tui::app::SortKey::Queue) {
         app.sort.key = crate::tui::app::SortKey::Queue;
+        app.sync_visible_files_preserving(selected.clone());
     }
     match selected {
         Some(TuiRow::Package(package_id)) => {
