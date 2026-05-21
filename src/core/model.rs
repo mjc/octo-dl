@@ -264,10 +264,17 @@ pub enum PackageStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FileAccounting {
+    #[default]
+    CurrentRun,
+    Preexisting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RuntimeState {
-    pub counts_in_run_totals: bool,
     pub active: bool,
-    pub preexisting_complete: bool,
+    pub accounting: FileAccounting,
     pub reused_chunks: usize,
 }
 

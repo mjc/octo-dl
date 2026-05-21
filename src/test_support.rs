@@ -1,7 +1,7 @@
 use crate::config::DownloadConfig;
 use crate::core::{
-    FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey, PackageSnapshot,
-    RuntimeState, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
+    FileAccounting, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
+    PackageSnapshot, RuntimeState, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -117,15 +117,20 @@ pub fn push_file(
         package_id
     };
 
-    let (lifecycle, active, counts_in_run_totals, visible_completed_bytes) = match status {
-        FileFixtureStatus::Pending => (FileLifecycle::Queued, false, true, 0),
-        FileFixtureStatus::Completed => (FileLifecycle::Complete, false, false, size),
+    let (lifecycle, active, accounting, visible_completed_bytes) = match status {
+        FileFixtureStatus::Pending => (FileLifecycle::Queued, false, FileAccounting::CurrentRun, 0),
+        FileFixtureStatus::Completed => (
+            FileLifecycle::Complete,
+            false,
+            FileAccounting::Preexisting,
+            size,
+        ),
         FileFixtureStatus::Error(message) => (
             FileLifecycle::Failed {
                 message: message.to_string(),
             },
             false,
-            true,
+            FileAccounting::CurrentRun,
             0,
         ),
     };
@@ -142,9 +147,8 @@ pub fn push_file(
             ..FileProgressState::default()
         },
         runtime: RuntimeState {
-            counts_in_run_totals,
+            accounting,
             active,
-            preexisting_complete: false,
             reused_chunks: 0,
         },
     };
