@@ -190,7 +190,7 @@ impl SessionAdapter {
                 file.path = path.to_string();
                 file.lifecycle = FileLifecycle::Queued;
                 file.runtime.active = false;
-                file.runtime.counts_in_run_totals = true;
+                file.runtime.accounting = crate::core::FileAccounting::CurrentRun;
             } else {
                 let mut file = session.packages[package_index].files.remove(file_index);
                 file.package_id = package_id.clone();
@@ -199,7 +199,7 @@ impl SessionAdapter {
                 file.path = path.to_string();
                 file.lifecycle = FileLifecycle::Queued;
                 file.runtime.active = false;
-                file.runtime.counts_in_run_totals = true;
+                file.runtime.accounting = crate::core::FileAccounting::CurrentRun;
                 let package = session
                     .packages
                     .iter_mut()

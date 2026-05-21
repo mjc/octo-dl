@@ -319,10 +319,11 @@ impl App {
             file.source_url = source_url.to_string();
             file.size = size;
             file.path = path.to_string();
-            file.runtime.counts_in_run_totals = counts_toward_progress;
-            if !counts_toward_progress {
-                file.runtime.preexisting_complete = true;
-            }
+            file.runtime.accounting = if counts_toward_progress {
+                crate::core::FileAccounting::CurrentRun
+            } else {
+                crate::core::FileAccounting::Preexisting
+            };
         }
     }
 

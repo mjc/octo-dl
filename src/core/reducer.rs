@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use crate::core::model::{
-    DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId, PackageKey,
-    PackageState, PackageStatus, RuntimeState, SessionRunStatus, UrlId,
+    DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
+    PackageKey, PackageState, PackageStatus, RuntimeState, SessionRunStatus, UrlId,
 };
 use crate::core::restart::RestartSnapshot;
 use crate::core::session::{FileSnapshot, PackageSnapshot, SessionSnapshot};
@@ -118,7 +118,7 @@ fn should_persist_session(event: &CoreEvent) -> bool {
 }
 
 fn counts_in_run_totals(file: &FileState) -> bool {
-    file.runtime.counts_in_run_totals && !file.runtime.preexisting_complete
+    matches!(file.runtime.accounting, FileAccounting::CurrentRun)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -457,7 +457,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                             lifecycle: FileLifecycle::Planned,
                             progress: FileProgressState::default(),
                             runtime: RuntimeState {
-                                counts_in_run_totals: true,
+                                accounting: FileAccounting::CurrentRun,
                                 ..RuntimeState::default()
                             },
                         };
@@ -492,8 +492,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 file.lifecycle = FileLifecycle::Downloading;
                 file.progress = FileProgressState::default();
                 file.runtime.active = true;
-                file.runtime.counts_in_run_totals = true;
-                file.runtime.preexisting_complete = false;
+                file.runtime.accounting = FileAccounting::CurrentRun;
                 file.runtime.reused_chunks = 0;
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
@@ -649,7 +648,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Queued;
                 file.runtime.active = false;
-                file.runtime.counts_in_run_totals = true;
+                file.runtime.accounting = FileAccounting::CurrentRun;
                 file.progress.visible_completed_bytes = 0;
                 file.progress.downloaded_network_bytes = 0;
                 file.progress.verified_existing_bytes = 0;
@@ -672,8 +671,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 let before = FileDerivedState::from(&*file);
                 file.lifecycle = FileLifecycle::Queued;
                 file.runtime.active = false;
-                file.runtime.counts_in_run_totals = true;
-                file.runtime.preexisting_complete = false;
+                file.runtime.accounting = FileAccounting::CurrentRun;
                 file.progress = FileProgressState::default();
                 effects.push(CoreEffect::DeleteOutputArtifacts {
                     path: file.path.clone(),
@@ -800,7 +798,7 @@ fn recompute_derived(state: &mut DownloadState) {
 
     let mut totals = crate::core::model::TotalsState::default();
     for file in state.files.values() {
-        if !file.runtime.counts_in_run_totals || file.runtime.preexisting_complete {
+        if !matches!(file.runtime.accounting, FileAccounting::CurrentRun) {
             continue;
         }
         totals.run_total_bytes = totals.run_total_bytes.saturating_add(file.size);
@@ -863,12 +861,6 @@ fn debug_assert_invariants(state: &DownloadState) {
             state.totals.displayed_network_bytes <= state.totals.run_completed_bytes,
             "network bytes cannot exceed visible completed bytes"
         );
-        if file.runtime.preexisting_complete {
-            debug_assert!(
-                !file.runtime.counts_in_run_totals,
-                "preexisting complete files cannot count in current-run totals"
-            );
-        }
     }
 }
 
@@ -905,7 +897,7 @@ mod tests {
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
                 runtime: RuntimeState {
-                    counts_in_run_totals: true,
+                    accounting: FileAccounting::CurrentRun,
                     ..RuntimeState::default()
                 },
             },
@@ -1093,7 +1085,7 @@ mod tests {
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
                 runtime: RuntimeState {
-                    counts_in_run_totals: true,
+                    accounting: FileAccounting::CurrentRun,
                     ..RuntimeState::default()
                 },
             },
@@ -1162,7 +1154,7 @@ mod tests {
                 },
                 progress: FileProgressState::default(),
                 runtime: RuntimeState {
-                    counts_in_run_totals: true,
+                    accounting: FileAccounting::CurrentRun,
                     ..RuntimeState::default()
                 },
             },
@@ -1233,7 +1225,7 @@ mod tests {
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
                 runtime: RuntimeState {
-                    counts_in_run_totals: true,
+                    accounting: FileAccounting::CurrentRun,
                     ..RuntimeState::default()
                 },
             },

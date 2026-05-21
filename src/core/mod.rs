@@ -7,9 +7,9 @@ pub mod session;
 
 pub use commands::CoreCommand;
 pub use model::{
-    DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId, PackageKey,
-    PackageState, PackageStatus, RuntimeState, SessionMeta, SessionRunStatus, TotalsState, UrlId,
-    visible_completed_bytes_for_display,
+    DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
+    PackageKey, PackageState, PackageStatus, RuntimeState, SessionMeta, SessionRunStatus,
+    TotalsState, UrlId, visible_completed_bytes_for_display,
 };
 pub use progress::{DownloadProgressSink, ProgressDelta, RateEstimator};
 pub use reducer::{

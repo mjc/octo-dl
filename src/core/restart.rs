@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::core::model::{
-    DownloadState, FileId, FileLifecycle, FileProgressState, FileState, PackageId, PackageState,
-    PackageStatus, SessionMeta, UrlId,
+    DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
+    PackageState, PackageStatus, SessionMeta, UrlId,
 };
 use crate::core::session::SessionSnapshot;
 use chrono::Utc;
@@ -210,8 +210,7 @@ pub fn reconcile_restart(
             if matches!(local.status, crate::download::FileStatus::Complete) {
                 file.lifecycle = FileLifecycle::Complete;
                 file.progress.visible_completed_bytes = file.size;
-                file.runtime.preexisting_complete = true;
-                file.runtime.counts_in_run_totals = false;
+                file.runtime.accounting = FileAccounting::Preexisting;
                 preexisting_complete_file_ids.push(file.id.clone());
                 files.insert(file.id.clone(), file);
                 continue;
@@ -223,17 +222,14 @@ pub fn reconcile_restart(
                     downloaded_network_bytes: 0,
                     visible_completed_bytes: local.verified_resume_bytes.min(file.size),
                 };
-                file.runtime.counts_in_run_totals = true;
-                file.runtime.preexisting_complete = false;
+                file.runtime.accounting = FileAccounting::CurrentRun;
                 resume_file_ids.push(file.id.clone());
             } else if matches!(file.lifecycle, FileLifecycle::Complete) {
-                file.runtime.preexisting_complete = true;
-                file.runtime.counts_in_run_totals = false;
+                file.runtime.accounting = FileAccounting::Preexisting;
                 preexisting_complete_file_ids.push(file.id.clone());
             } else {
                 file.lifecycle = FileLifecycle::Queued;
-                file.runtime.counts_in_run_totals = true;
-                file.runtime.preexisting_complete = false;
+                file.runtime.accounting = FileAccounting::CurrentRun;
                 file.progress = FileProgressState::default();
                 resume_file_ids.push(file.id.clone());
             }
@@ -307,7 +303,7 @@ mod tests {
                     lifecycle: FileLifecycle::Queued,
                     progress: FileProgressState::default(),
                     runtime: RuntimeState {
-                        counts_in_run_totals: true,
+                        accounting: FileAccounting::CurrentRun,
                         ..RuntimeState::default()
                     },
                 }],
@@ -357,8 +353,7 @@ mod tests {
             vec!["https://mega.nz/file/test".to_string()],
         );
         let file = &restart.state.files["a.bin"];
-        assert!(file.runtime.preexisting_complete);
-        assert!(!file.runtime.counts_in_run_totals);
+        assert_eq!(file.runtime.accounting, FileAccounting::Preexisting);
     }
 
     #[test]
@@ -377,8 +372,7 @@ mod tests {
         );
         let file = &restart.state.files["a.bin"];
         assert_eq!(file.lifecycle, FileLifecycle::Queued);
-        assert!(!file.runtime.preexisting_complete);
-        assert!(file.runtime.counts_in_run_totals);
+        assert_eq!(file.runtime.accounting, FileAccounting::CurrentRun);
         assert_eq!(file.progress.visible_completed_bytes, 0);
         assert_eq!(restart.resume_file_ids, vec!["a.bin".to_string()]);
     }

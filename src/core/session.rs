@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::DownloadConfig;
 use crate::core::model::{
-    FileId, FileLifecycle, FileProgressState, PackageId, PackageKey, RuntimeState,
+    FileAccounting, FileId, FileLifecycle, FileProgressState, PackageId, PackageKey, RuntimeState,
     SessionRunStatus, UrlId,
 };
 
@@ -233,7 +233,7 @@ impl SessionSnapshot {
             file.lifecycle = FileLifecycle::Complete;
             file.progress.visible_completed_bytes = file.size;
             file.runtime.active = false;
-            file.runtime.counts_in_run_totals = false;
+            file.runtime.accounting = FileAccounting::Preexisting;
         }
     }
 
@@ -305,9 +305,8 @@ pub fn queued_file_snapshot(
         lifecycle: FileLifecycle::Queued,
         progress: FileProgressState::default(),
         runtime: RuntimeState {
-            counts_in_run_totals: true,
+            accounting: FileAccounting::CurrentRun,
             active: false,
-            preexisting_complete: false,
             reused_chunks: 0,
         },
     }
