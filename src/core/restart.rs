@@ -353,6 +353,60 @@ mod tests {
     }
 
     #[test]
+    fn restart_keeps_url_resumable_when_only_some_files_are_preexisting_complete() {
+        let mut snapshot = sample_snapshot();
+        let package_id = package_id("pkg", "https://mega.nz/file/test");
+        snapshot.packages[0].files.push(FileSnapshot {
+            id: "b.bin".to_string().into(),
+            package_id,
+            source_url: "https://mega.nz/file/test".to_string(),
+            path: "b.bin".to_string(),
+            size: 200,
+            lifecycle: FileLifecycle::Queued,
+            progress: FileProgressState::default(),
+            accounting: FileAccounting::CurrentRun,
+        });
+
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot {
+                complete_files: vec![FilesystemFile {
+                    file_id: "a.bin".to_string().into(),
+                    size: 100,
+                }],
+                partial_files: vec![PartialFileSnapshot {
+                    file_id: "b.bin".to_string().into(),
+                    bytes: 80,
+                    has_sidecar: true,
+                    verified_bytes: 64,
+                }],
+            },
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        assert_eq!(restart.preexisting_complete_file_ids, vec!["a.bin"]);
+        assert_eq!(restart.resume_file_ids, vec!["b.bin"]);
+        assert_eq!(
+            restart.resumable_urls(),
+            vec!["https://mega.nz/file/test".to_string()]
+        );
+        assert_eq!(
+            restart.state.files["a.bin"].accounting,
+            FileAccounting::Preexisting
+        );
+        assert_eq!(
+            restart.state.files["b.bin"].accounting,
+            FileAccounting::CurrentRun
+        );
+        assert_eq!(
+            restart.state.files["b.bin"]
+                .progress
+                .visible_completed_bytes,
+            64
+        );
+    }
+
+    #[test]
     fn restart_treats_mismatched_complete_files_as_partial_queue() {
         let snapshot = sample_snapshot();
         let restart = reconcile_restart(
