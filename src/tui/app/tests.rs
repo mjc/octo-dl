@@ -456,7 +456,7 @@ fn file_queued_without_explicit_package_id_reuses_existing_package_for_url() {
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "episode-1.mkv".to_string().into(),
         size: 128,
-        count_toward_progress: true,
+        accounting: crate::core::FileAccounting::CurrentRun,
         origin: crate::tui::event::FileOrigin {
             package_id: None,
             package_display_name: None,
@@ -612,7 +612,7 @@ fn file_queued_retires_submitted_url_alias_after_resolution() {
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "episode-1.mkv".to_string().into(),
         size: 128,
-        count_toward_progress: true,
+        accounting: crate::core::FileAccounting::CurrentRun,
         origin: crate::tui::event::FileOrigin {
             package_id: Some(crate::test_support::package_id(
                 "batch-folder",
@@ -941,7 +941,13 @@ fn shutdown_sync_refreshes_session_progress_skipped_during_hot_events() {
     let mut session = session_snapshot(vec![(url.as_str(), UrlFixtureStatus::Fetched)]);
     push_file(&mut session, 0, "file-id", 128, FileFixtureStatus::Pending);
     app.session = Some(session);
-    app.ensure_core_file(&"file-id".into(), &url, "file-id", 128, true);
+    app.ensure_core_file(
+        &"file-id".into(),
+        &url,
+        "file-id",
+        128,
+        crate::core::FileAccounting::CurrentRun,
+    );
 
     app.apply_core_event(CoreEvent::FileStarted {
         file_id: "file-id".to_string().into(),
@@ -975,7 +981,13 @@ fn shutdown_sync_refreshes_session_progress_skipped_during_hot_events() {
 fn downloading_file_can_reach_full_progress_before_complete_event() {
     let mut app = test_app();
     let url = "https://mega.nz/file/root";
-    app.ensure_core_file(&"file-id".into(), url, "file-id", 100, true);
+    app.ensure_core_file(
+        &"file-id".into(),
+        url,
+        "file-id",
+        100,
+        crate::core::FileAccounting::CurrentRun,
+    );
 
     app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
         id: "file-id".to_string().into(),
@@ -1016,7 +1028,13 @@ fn downloading_file_can_reach_full_progress_before_complete_event() {
 fn restarting_completed_file_resets_visible_progress_before_new_deltas() {
     let mut app = test_app();
     let url = "https://mega.nz/file/root";
-    app.ensure_core_file(&"file-id".into(), url, "file-id", 100, true);
+    app.ensure_core_file(
+        &"file-id".into(),
+        url,
+        "file-id",
+        100,
+        crate::core::FileAccounting::CurrentRun,
+    );
     app.apply_core_event(CoreEvent::FileCompleted {
         file_id: "file-id".to_string().into(),
     });
@@ -1040,7 +1058,13 @@ fn restarting_completed_file_resets_visible_progress_before_new_deltas() {
 fn resume_reuse_then_progress_keeps_file_bandwidth_on_fresh_bytes_only() {
     let mut app = test_app();
     let url = "https://mega.nz/file/root";
-    app.ensure_core_file(&"file-id".into(), url, "file-id", 100, true);
+    app.ensure_core_file(
+        &"file-id".into(),
+        url,
+        "file-id",
+        100,
+        crate::core::FileAccounting::CurrentRun,
+    );
 
     app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
         id: "file-id".to_string().into(),

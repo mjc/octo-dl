@@ -114,7 +114,7 @@ impl App {
                 source_url,
                 &context.artifact_path,
                 context.size,
-                context.counts_toward_progress,
+                crate::core::FileAccounting::CurrentRun,
             );
         }
         source_url
@@ -243,7 +243,7 @@ impl App {
             &file.origin.source_url,
             file.id.as_str(),
             file.size,
-            file.count_toward_progress,
+            file.accounting,
         );
         true
     }

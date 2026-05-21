@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use crate::{
     DownloadProgress, FileStats,
-    core::{FileId, PackageId, ProgressDelta},
+    core::{FileAccounting, FileId, PackageId, ProgressDelta},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -28,7 +28,7 @@ pub struct FileOrigin {
 pub struct QueuedFile {
     pub id: FileId,
     pub size: u64,
-    pub count_toward_progress: bool,
+    pub accounting: FileAccounting,
     pub origin: FileOrigin,
 }
 
