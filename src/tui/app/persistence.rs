@@ -108,3 +108,58 @@ fn session_persistence_worker(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::SessionSnapshot;
+    use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
+
+    #[test]
+    fn save_and_flush_persists_session_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        let persistence = SessionPersistence::new();
+        let mut session = session_snapshot(vec![(
+            "https://mega.nz/file/root",
+            UrlFixtureStatus::Fetched,
+        )]);
+        push_file(
+            &mut session,
+            0,
+            "episode-1.mkv",
+            128,
+            FileFixtureStatus::Pending,
+        );
+
+        persistence.save(session.clone(), path.clone());
+        persistence.flush();
+
+        let loaded = SessionSnapshot::load(&path).unwrap();
+        assert_eq!(loaded.id, session.id);
+        let loaded_paths = loaded
+            .iter_files()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(loaded_paths, vec!["episode-1.mkv".to_string()]);
+        assert!(persistence.drain_errors().is_empty());
+    }
+
+    #[test]
+    fn remove_and_flush_deletes_session_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        let session = session_snapshot(vec![(
+            "https://mega.nz/file/root",
+            UrlFixtureStatus::Fetched,
+        )]);
+        session.save_to_path(&path).unwrap();
+        let persistence = SessionPersistence::new();
+
+        persistence.remove(path.clone());
+        persistence.flush();
+
+        assert!(!path.exists());
+        assert!(persistence.drain_errors().is_empty());
+    }
+}

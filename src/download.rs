@@ -1997,6 +1997,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sidecar_writer_saves_snapshot_without_fingerprint_when_part_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar_path = dir.path().join("file.bin.part.meta.json");
+        let part_path = dir.path().join("file.bin.part");
+        let snapshot = ResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size: 42,
+            expected_condensed_mac_b64: STANDARD.encode([9u8; 8]),
+            verified_chunks: vec![VerifiedChunkRecord {
+                index: 0,
+                mac_b64: STANDARD.encode([1u8; 16]),
+            }],
+            part_fingerprint: Some(FileFingerprint {
+                len: 999,
+                modified_ns: 999,
+                dev: None,
+                ino: None,
+            }),
+        };
+
+        let (tx, handle) = spawn_sidecar_writer(sidecar_path.clone(), part_path);
+        tx.send(snapshot).unwrap();
+        drop(tx);
+        finish_sidecar_writer(&sidecar_path, handle, SidecarWriterShutdown::Flush).await;
+
+        let loaded = load_sidecar(&sidecar_path).await.unwrap();
+        assert_eq!(loaded.verified_chunks.len(), 1);
+        assert_eq!(loaded.part_fingerprint, None);
+    }
+
+    #[tokio::test]
+    async fn sync_and_fingerprint_part_reports_missing_files_as_untrusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.part");
+
+        assert_eq!(sync_and_fingerprint_part(&missing).await, None);
+    }
+
+    #[tokio::test]
     async fn delete_resume_artifacts_removes_part_and_sidecar() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file.bin");
