@@ -247,6 +247,7 @@ pub enum ResumeReuseSource {
 
 const CURRENT_RESUME_SIDECAR_VERSION: u32 = 2;
 const SIDECAR_CHECKPOINT_CHUNK_INTERVAL: usize = 32;
+const MAX_RESUME_REVALIDATION_PARALLELISM: usize = 16;
 
 /// Returns the `.part` file path for a given final path.
 pub(crate) fn part_path(path: &str) -> PathBuf {
@@ -392,6 +393,14 @@ struct SidecarValidationInput<'a> {
     aes_key: &'a [u8; 16],
     aes_iv: &'a [u8; 8],
     expected_condensed_mac_b64: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResumeChunkValidationCandidate {
+    index: usize,
+    offset: u64,
+    length: u64,
+    expected_mac: [u8; 16],
 }
 
 async fn load_sidecar(path: &Path) -> Option<ResumeSidecar> {
@@ -759,21 +768,15 @@ impl<F: FileSystem> Downloader<F> {
         }
 
         let part_size = self.fs.file_size(input.part_path).await.unwrap_or(0);
-        let max_chunk_len = input
-            .boundaries
-            .iter()
-            .filter_map(|chunk| usize::try_from(chunk.length).ok())
-            .max()
-            .unwrap_or(0);
-        let mut scratch = vec![0u8; max_chunk_len];
+        let mut candidates = Vec::with_capacity(input.sidecar.verified_chunks.len());
 
         for record in &input.sidecar.verified_chunks {
-            let Some(boundary) = input.boundaries.get(record.index as usize) else {
+            let Ok(index) = usize::try_from(record.index) else {
                 continue;
             };
-            if validation.trusted_chunks[record.index as usize].is_some() {
+            let Some(boundary) = input.boundaries.get(index).copied() else {
                 continue;
-            }
+            };
             if boundary.offset.saturating_add(boundary.length) > part_size {
                 continue;
             }
@@ -784,24 +787,61 @@ impl<F: FileSystem> Downloader<F> {
                 continue;
             };
 
-            let Ok(chunk_len) = usize::try_from(boundary.length) else {
-                continue;
-            };
-            let buf = &mut scratch[..chunk_len];
-            if self
-                .fs
-                .read_exact_at(input.part_path, boundary.offset, buf)
+            candidates.push(ResumeChunkValidationCandidate {
+                index,
+                offset: boundary.offset,
+                length: boundary.length,
+                expected_mac,
+            });
+        }
+
+        let fs = &self.fs;
+        let part_path = input.part_path;
+        let aes_key = *input.aes_key;
+        let aes_iv = *input.aes_iv;
+        let parallelism = self
+            .config
+            .chunks_per_file
+            .clamp(1, MAX_RESUME_REVALIDATION_PARALLELISM);
+
+        let trusted_chunks = stream::iter(candidates)
+            .map(|candidate| async move {
+                let Ok(chunk_len) = usize::try_from(candidate.length) else {
+                    return None;
+                };
+                let mut buf = vec![0u8; chunk_len];
+                if fs
+                    .read_exact_at(part_path, candidate.offset, &mut buf)
+                    .await
+                    .is_err()
+                {
+                    return None;
+                }
+                let Ok(actual_mac) = tokio::task::spawn_blocking(move || {
+                    mega::compute_mega_chunk_mac(&buf, &aes_key, &aes_iv)
+                })
                 .await
-                .is_err()
-            {
+                else {
+                    return None;
+                };
+                (actual_mac == candidate.expected_mac).then_some((
+                    candidate.index,
+                    candidate.length,
+                    actual_mac,
+                ))
+            })
+            .buffer_unordered(parallelism)
+            .filter_map(|result| async move { result })
+            .collect::<Vec<_>>()
+            .await;
+
+        for (index, length, actual_mac) in trusted_chunks {
+            if validation.trusted_chunks[index].is_some() {
                 continue;
             }
-            let actual_mac = mega::compute_mega_chunk_mac(buf, input.aes_key, input.aes_iv);
-            if actual_mac == expected_mac {
-                validation.trusted_chunks[record.index as usize] = Some(actual_mac);
-                validation.trusted_count = validation.trusted_count.saturating_add(1);
-                validation.trusted_bytes = validation.trusted_bytes.saturating_add(boundary.length);
-            }
+            validation.trusted_chunks[index] = Some(actual_mac);
+            validation.trusted_count = validation.trusted_count.saturating_add(1);
+            validation.trusted_bytes = validation.trusted_bytes.saturating_add(length);
         }
 
         if validation.trusted_count > 0 {
@@ -1545,6 +1585,54 @@ mod tests {
         assert_eq!(validation.trusted_bytes, first.length);
         assert_eq!(validation.trusted_chunks[0], Some(mac));
         assert!(validation.trusted_chunks[1].is_none());
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_accepts_later_matching_duplicate_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let aes_key = [7u8; 16];
+        let aes_iv = [3u8; 8];
+        let expected = STANDARD.encode([9u8; 8]);
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let first = &boundaries[0];
+        let first_data = chunk_data(&data, first);
+        let mac = mega::compute_mega_chunk_mac(first_data, &aes_key, &aes_iv);
+        let sidecar = ResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size,
+            expected_condensed_mac_b64: expected.clone(),
+            verified_chunks: vec![
+                VerifiedChunkRecord {
+                    index: first.index,
+                    mac_b64: STANDARD.encode([1u8; 16]),
+                },
+                VerifiedChunkRecord {
+                    index: first.index,
+                    mac_b64: STANDARD.encode(mac),
+                },
+            ],
+        };
+
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(SidecarValidationInput {
+                boundaries: &boundaries,
+                part_path: &part,
+                sidecar: &sidecar,
+                file_size,
+                aes_key: &aes_key,
+                aes_iv: &aes_iv,
+                expected_condensed_mac_b64: &expected,
+            })
+            .await;
+
+        assert_eq!(validation.trusted_count, 1);
+        assert_eq!(validation.trusted_bytes, first.length);
+        assert_eq!(validation.trusted_chunks[0], Some(mac));
     }
 
     #[tokio::test]
