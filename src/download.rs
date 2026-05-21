@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::DownloadConfig;
 use crate::core::{PackageId, PackageKey, ProgressDelta};
 use crate::error::{Error, Result};
-use crate::fs::{FileSystem, TokioFileSystem};
+use crate::fs::{FileFingerprint, FileSystem, TokioFileSystem};
 use crate::progress::CumulativeProgress;
 use crate::stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBuilder};
 
@@ -298,6 +298,8 @@ struct ResumeSidecar {
     file_size: u64,
     expected_condensed_mac_b64: String,
     verified_chunks: Vec<VerifiedChunkRecord>,
+    #[serde(default)]
+    part_fingerprint: Option<FileFingerprint>,
 }
 
 #[derive(Debug)]
@@ -352,6 +354,7 @@ impl ResumeTracker {
                     })
                 })
                 .collect(),
+            part_fingerprint: None,
         }
     }
 
@@ -795,6 +798,31 @@ impl<F: FileSystem> Downloader<F> {
             });
         }
 
+        let fast_trust_sidecar = match input.sidecar.part_fingerprint {
+            Some(expected) => self
+                .fs
+                .file_fingerprint(input.part_path)
+                .await
+                .is_some_and(|actual| actual == expected),
+            None => false,
+        };
+
+        if fast_trust_sidecar {
+            for candidate in candidates {
+                if validation.trusted_chunks[candidate.index].is_some() {
+                    continue;
+                }
+                validation.trusted_chunks[candidate.index] = Some(candidate.expected_mac);
+                validation.trusted_count = validation.trusted_count.saturating_add(1);
+                validation.trusted_bytes =
+                    validation.trusted_bytes.saturating_add(candidate.length);
+            }
+            if validation.trusted_count > 0 {
+                validation.source = Some(ResumeReuseSource::Sidecar);
+            }
+            return validation;
+        }
+
         let fs = &self.fs;
         let part_path = input.part_path;
         let aes_key = *input.aes_key;
@@ -1063,7 +1091,9 @@ impl<F: FileSystem> Downloader<F> {
                 } else {
                     match self.fs.sync_file(ctx.part_path).await {
                         Ok(()) => {
-                            let snapshot = ctx.tracker.lock().unwrap().snapshot();
+                            let mut snapshot = ctx.tracker.lock().unwrap().snapshot();
+                            snapshot.part_fingerprint =
+                                self.fs.file_fingerprint(ctx.part_path).await;
                             if let Err(save_err) =
                                 save_sidecar_atomic(ctx.sidecar_path, &snapshot).await
                             {
@@ -1379,6 +1409,10 @@ mod tests {
             self.files.lock().unwrap().get(path).copied()
         }
 
+        async fn file_fingerprint(&self, _path: &Path) -> Option<FileFingerprint> {
+            None
+        }
+
         async fn create_dir_all(&self, _path: &Path) -> std::io::Result<()> {
             Ok(())
         }
@@ -1467,6 +1501,7 @@ mod tests {
                 index,
                 mac_b64: STANDARD.encode(mac),
             }],
+            part_fingerprint: None,
         }
     }
 
@@ -1588,6 +1623,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revalidate_sidecar_trusts_matching_part_fingerprint_without_reread() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let aes_key = [7u8; 16];
+        let aes_iv = [3u8; 8];
+        let expected = STANDARD.encode([9u8; 8]);
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let first = &boundaries[0];
+        let mut sidecar = sidecar_for_chunk(file_size, &expected, first.index, [4u8; 16]);
+        sidecar.part_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await;
+
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(SidecarValidationInput {
+                boundaries: &boundaries,
+                part_path: &part,
+                sidecar: &sidecar,
+                file_size,
+                aes_key: &aes_key,
+                aes_iv: &aes_iv,
+                expected_condensed_mac_b64: &expected,
+            })
+            .await;
+
+        assert_eq!(validation.trusted_count, 1);
+        assert_eq!(validation.trusted_bytes, first.length);
+        assert_eq!(validation.trusted_chunks[0], Some([4u8; 16]));
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_recomputes_when_part_fingerprint_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+        let mut stale_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await;
+        if let Some(fingerprint) = stale_fingerprint.as_mut() {
+            fingerprint.len = fingerprint.len.saturating_add(1);
+        }
+        let mut changed = data.clone();
+        changed[0] ^= 0xff;
+        tokio::fs::write(&part, &changed).await.unwrap();
+
+        let aes_key = [7u8; 16];
+        let aes_iv = [3u8; 8];
+        let expected = STANDARD.encode([9u8; 8]);
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let first = &boundaries[0];
+        let first_data = chunk_data(&data, first);
+        let mac = mega::compute_mega_chunk_mac(first_data, &aes_key, &aes_iv);
+        let mut sidecar = sidecar_for_chunk(file_size, &expected, first.index, mac);
+        sidecar.part_fingerprint = stale_fingerprint;
+
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(SidecarValidationInput {
+                boundaries: &boundaries,
+                part_path: &part,
+                sidecar: &sidecar,
+                file_size,
+                aes_key: &aes_key,
+                aes_iv: &aes_iv,
+                expected_condensed_mac_b64: &expected,
+            })
+            .await;
+
+        assert_eq!(validation.trusted_count, 0);
+        assert_eq!(validation.trusted_bytes, 0);
+        assert!(validation.trusted_chunks.iter().all(Option::is_none));
+    }
+
+    #[tokio::test]
     async fn revalidate_sidecar_accepts_later_matching_duplicate_chunk() {
         let dir = tempfile::tempdir().unwrap();
         let part = dir.path().join("file.bin.part");
@@ -1616,6 +1726,7 @@ mod tests {
                     mac_b64: STANDARD.encode(mac),
                 },
             ],
+            part_fingerprint: None,
         };
 
         let validation = tokio_downloader()
@@ -1759,6 +1870,7 @@ mod tests {
                     index: 0,
                     mac_b64: STANDARD.encode([1u8; 16]),
                 }],
+                part_fingerprint: None,
             },
         )
         .await
@@ -1808,6 +1920,7 @@ mod tests {
                     index: first.index,
                     mac_b64: STANDARD.encode(mac),
                 }],
+                part_fingerprint: None,
             },
         )
         .await
@@ -1844,6 +1957,7 @@ mod tests {
                 index: 0,
                 mac_b64: STANDARD.encode([1u8; 16]),
             }],
+            part_fingerprint: None,
         };
 
         save_sidecar_atomic(&sidecar_path, &sidecar).await.unwrap();
@@ -1880,6 +1994,7 @@ mod tests {
                         mac_b64: STANDARD.encode([2u8; 16]),
                     },
                 ],
+                part_fingerprint: None,
             },
         )
         .await
@@ -1908,6 +2023,7 @@ mod tests {
                     index: 0,
                     mac_b64: STANDARD.encode([1u8; 16]),
                 }],
+                part_fingerprint: None,
             },
         )
         .await
@@ -1928,6 +2044,7 @@ mod tests {
                 index: 0,
                 mac_b64: STANDARD.encode([1u8; 16]),
             }],
+            part_fingerprint: None,
         };
         let second = ResumeSidecar {
             verified_chunks: vec![

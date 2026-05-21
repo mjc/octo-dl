@@ -1,8 +1,52 @@
 //! File system abstraction for testability.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::UNIX_EPOCH;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileFingerprint {
+    pub len: u64,
+    pub modified_ns: u128,
+    #[serde(default)]
+    pub dev: Option<u64>,
+    #[serde(default)]
+    pub ino: Option<u64>,
+}
+
+impl FileFingerprint {
+    #[must_use]
+    pub fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        let modified_ns = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self {
+                len: metadata.len(),
+                modified_ns,
+                dev: Some(metadata.dev()),
+                ino: Some(metadata.ino()),
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            Self {
+                len: metadata.len(),
+                modified_ns,
+                dev: None,
+                ino: None,
+            }
+        }
+    }
+}
 
 /// Abstraction over file system operations for testability.
 #[async_trait]
@@ -12,6 +56,9 @@ pub trait FileSystem: Send + Sync {
 
     /// Returns the size of a file if it exists.
     async fn file_size(&self, path: &Path) -> Option<u64>;
+
+    /// Returns a stable-enough fingerprint for detecting unchanged files.
+    async fn file_fingerprint(&self, path: &Path) -> Option<FileFingerprint>;
 
     /// Creates all directories in the given path.
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
@@ -60,6 +107,13 @@ impl FileSystem for TokioFileSystem {
 
     async fn file_size(&self, path: &Path) -> Option<u64> {
         tokio::fs::metadata(path).await.ok().map(|m| m.len())
+    }
+
+    async fn file_fingerprint(&self, path: &Path) -> Option<FileFingerprint> {
+        tokio::fs::metadata(path)
+            .await
+            .ok()
+            .map(|metadata| FileFingerprint::from_metadata(&metadata))
     }
 
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
