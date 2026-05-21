@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::DownloadConfig;
 use crate::core::model::{
-    FileAccounting, FileId, FileLifecycle, FileProgressState, PackageId, PackageKey, RuntimeState,
+    FileAccounting, FileId, FileLifecycle, FileProgressState, PackageId, PackageKey,
     SessionRunStatus, UrlId,
 };
 
@@ -99,7 +99,7 @@ pub struct FileSnapshot {
     pub size: u64,
     pub lifecycle: FileLifecycle,
     pub progress: FileProgressState,
-    pub runtime: RuntimeState,
+    pub accounting: FileAccounting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,7 +232,7 @@ impl SessionSnapshot {
         if let Some(file) = self.find_file_mut(file_id) {
             file.lifecycle = FileLifecycle::Complete;
             file.progress.visible_completed_bytes = file.size;
-            file.runtime.accounting = FileAccounting::Preexisting;
+            file.accounting = FileAccounting::Preexisting;
         }
     }
 
@@ -302,10 +302,7 @@ pub fn queued_file_snapshot(
         size,
         lifecycle: FileLifecycle::Queued,
         progress: FileProgressState::default(),
-        runtime: RuntimeState {
-            accounting: FileAccounting::CurrentRun,
-            reused_chunks: 0,
-        },
+        accounting: FileAccounting::CurrentRun,
     }
 }
 
@@ -535,7 +532,7 @@ mod tests {
             size: 10,
             lifecycle: FileLifecycle::Queued,
             progress: FileProgressState::default(),
-            runtime: RuntimeState::default(),
+            accounting: FileAccounting::CurrentRun,
         });
         paused.save().unwrap();
 
@@ -594,7 +591,7 @@ mod tests {
                 size: 10,
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
-                runtime: RuntimeState::default(),
+                accounting: FileAccounting::CurrentRun,
             },
             FileSnapshot {
                 id: "folder/b.bin".to_string().into(),
@@ -604,7 +601,7 @@ mod tests {
                 size: 20,
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
-                runtime: RuntimeState::default(),
+                accounting: FileAccounting::CurrentRun,
             },
         ];
         session.save().unwrap();

@@ -1,7 +1,7 @@
 use crate::config::DownloadConfig;
 use crate::core::{
     FileAccounting, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
-    PackageSnapshot, RuntimeState, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
+    PackageSnapshot, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -142,10 +142,7 @@ pub fn push_file(
             visible_completed_bytes,
             ..FileProgressState::default()
         },
-        runtime: RuntimeState {
-            accounting,
-            reused_chunks: 0,
-        },
+        accounting,
     };
     let package = session
         .packages

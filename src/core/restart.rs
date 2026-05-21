@@ -194,7 +194,7 @@ pub fn reconcile_restart(
                 size: file.size,
                 lifecycle: file.lifecycle.clone(),
                 progress: file.progress.clone(),
-                runtime: file.runtime.clone(),
+                accounting: file.accounting,
             };
             let observed = crate::download::ObservedLocalFile {
                 final_size: complete_map.get(&file.id).copied(),
@@ -210,7 +210,7 @@ pub fn reconcile_restart(
             if matches!(local.status, crate::download::FileStatus::Complete) {
                 file.lifecycle = FileLifecycle::Complete;
                 file.progress.visible_completed_bytes = file.size;
-                file.runtime.accounting = FileAccounting::Preexisting;
+                file.accounting = FileAccounting::Preexisting;
                 preexisting_complete_file_ids.push(file.id.clone());
                 files.insert(file.id.clone(), file);
                 continue;
@@ -222,14 +222,14 @@ pub fn reconcile_restart(
                     downloaded_network_bytes: 0,
                     visible_completed_bytes: local.verified_resume_bytes.min(file.size),
                 };
-                file.runtime.accounting = FileAccounting::CurrentRun;
+                file.accounting = FileAccounting::CurrentRun;
                 resume_file_ids.push(file.id.clone());
             } else if matches!(file.lifecycle, FileLifecycle::Complete) {
-                file.runtime.accounting = FileAccounting::Preexisting;
+                file.accounting = FileAccounting::Preexisting;
                 preexisting_complete_file_ids.push(file.id.clone());
             } else {
                 file.lifecycle = FileLifecycle::Queued;
-                file.runtime.accounting = FileAccounting::CurrentRun;
+                file.accounting = FileAccounting::CurrentRun;
                 file.progress = FileProgressState::default();
                 resume_file_ids.push(file.id.clone());
             }
@@ -270,7 +270,6 @@ fn canonical_restart_session(snapshot: SessionSnapshot) -> SessionSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::RuntimeState;
     use crate::core::model::SessionRunStatus;
     use crate::core::session::{
         FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
@@ -302,10 +301,7 @@ mod tests {
                     size: 100,
                     lifecycle: FileLifecycle::Queued,
                     progress: FileProgressState::default(),
-                    runtime: RuntimeState {
-                        accounting: FileAccounting::CurrentRun,
-                        ..RuntimeState::default()
-                    },
+                    accounting: FileAccounting::CurrentRun,
                 }],
                 error: None,
             }],
@@ -353,7 +349,7 @@ mod tests {
             vec!["https://mega.nz/file/test".to_string()],
         );
         let file = &restart.state.files["a.bin"];
-        assert_eq!(file.runtime.accounting, FileAccounting::Preexisting);
+        assert_eq!(file.accounting, FileAccounting::Preexisting);
     }
 
     #[test]
@@ -372,7 +368,7 @@ mod tests {
         );
         let file = &restart.state.files["a.bin"];
         assert_eq!(file.lifecycle, FileLifecycle::Queued);
-        assert_eq!(file.runtime.accounting, FileAccounting::CurrentRun);
+        assert_eq!(file.accounting, FileAccounting::CurrentRun);
         assert_eq!(file.progress.visible_completed_bytes, 0);
         assert_eq!(restart.resume_file_ids, vec!["a.bin".to_string()]);
     }
@@ -465,7 +461,7 @@ mod tests {
                     size: 10,
                     lifecycle: FileLifecycle::Queued,
                     progress: FileProgressState::default(),
-                    runtime: RuntimeState::default(),
+                    accounting: FileAccounting::CurrentRun,
                 }],
                 error: None,
             },
@@ -481,7 +477,7 @@ mod tests {
                     size: 20,
                     lifecycle: FileLifecycle::Queued,
                     progress: FileProgressState::default(),
-                    runtime: RuntimeState::default(),
+                    accounting: FileAccounting::CurrentRun,
                 }],
                 error: None,
             },
