@@ -151,6 +151,7 @@ impl SessionAdapter {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn register_queued_file(
         session: &mut SessionSnapshot,
         package_id: &str,
@@ -252,6 +253,7 @@ impl SessionAdapter {
     }
 }
 
+#[cfg(test)]
 fn ensure_package_identity(
     session: &mut SessionSnapshot,
     package_id: &str,
