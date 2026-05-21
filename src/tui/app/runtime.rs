@@ -145,7 +145,6 @@ impl App {
                     status: FileStatus::Queued,
                 },
                 Some(url),
-                false,
             );
         }
         self.recompute_totals();

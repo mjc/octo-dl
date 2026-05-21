@@ -148,7 +148,6 @@ fn dashboard_json_contains_visible_file_state_without_internal_fields() {
             status: FileStatus::Downloading,
         },
         Some("https://mega.nz/file/abc".to_string()),
-        true,
     );
     app.file_ui.insert(
         "stable/file.bin".to_string().into(),
@@ -771,7 +770,6 @@ fn download_status_message_reflects_actual_activity() {
             status: FileStatus::Queued,
         },
         Some("https://mega.nz/folder/root".to_string()),
-        true,
     );
     app.recompute_totals();
     app.update_download_status_message();

@@ -721,7 +721,6 @@ fn ui_delete_file_keeps_completed_artifact_on_disk() {
             status: FileStatus::Complete,
         },
         Some("https://mega.nz/file/completed".to_string()),
-        false,
     );
 
     app.handle_ui_action(UiAction::DeleteFile(
