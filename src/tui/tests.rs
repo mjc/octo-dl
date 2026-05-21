@@ -1314,7 +1314,7 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
     harness.inject_download(DownloadEvent::FileQueued(QueuedFile {
         id: "a.bin".to_string().into(),
         size: 128,
-        count_toward_progress: true,
+        accounting: crate::core::FileAccounting::CurrentRun,
         origin: crate::tui::event::FileOrigin {
             package_id: None,
             package_display_name: None,

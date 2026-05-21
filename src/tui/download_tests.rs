@@ -39,7 +39,7 @@ fn file_queued_clears_stale_error_state() {
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "file-id".to_string().into(),
         size: 128,
-        count_toward_progress: true,
+        accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
             package_id: None,
             package_display_name: None,
@@ -71,7 +71,7 @@ fn file_queued_bootstraps_and_saves_session() {
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "file-id".to_string().into(),
         size: 128,
-        count_toward_progress: true,
+        accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
             package_id: None,
             package_display_name: None,
@@ -97,7 +97,7 @@ fn file_queued_after_package_delete_is_ignored_when_source_is_untracked() {
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "known.bin".to_string().into(),
         size: 128,
-        count_toward_progress: true,
+        accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
             package_id: Some(package_id),
             package_display_name: Some("Delete Me".to_string()),
@@ -115,7 +115,7 @@ fn file_queued_after_package_delete_is_ignored_when_source_is_untracked() {
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "late.bin".to_string().into(),
         size: 256,
-        count_toward_progress: true,
+        accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
             package_id: Some(package_id),
             package_display_name: Some("Delete Me".to_string()),
@@ -196,7 +196,7 @@ fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "episode.mkv".to_string().into(),
         size: 128,
-        count_toward_progress: false,
+        accounting: crate::core::FileAccounting::Preexisting,
         origin: FileOrigin {
             package_id: None,
             package_display_name: None,
@@ -365,7 +365,7 @@ fn progress_deltas_do_not_exceed_file_size() {
         "https://mega.nz/file/test",
         "test.bin",
         file_size,
-        true,
+        crate::core::FileAccounting::CurrentRun,
     );
 
     app.handle_download_event(DownloadEvent::FileStart {
@@ -409,7 +409,7 @@ fn cumulative_values_as_deltas_are_capped_at_file_size() {
         "https://mega.nz/file/test",
         "test.bin",
         file_size,
-        true,
+        crate::core::FileAccounting::CurrentRun,
     );
 
     app.handle_download_event(DownloadEvent::FileStart {

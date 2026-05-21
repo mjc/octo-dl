@@ -55,10 +55,6 @@ impl App {
                 source_url: Some(core_file.source_url.clone()),
                 artifact_path: core_file.path.clone(),
                 size: core_file.size,
-                counts_toward_progress: matches!(
-                    core_file.accounting,
-                    crate::core::FileAccounting::CurrentRun
-                ),
             });
         }
 
@@ -69,7 +65,6 @@ impl App {
                 source_url: None,
                 artifact_path: overlay.file().name.clone(),
                 size: overlay.file().size,
-                counts_toward_progress: false,
             });
         }
 

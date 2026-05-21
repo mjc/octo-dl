@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use indexmap::IndexMap;
 
 use crate::core::{
-    CoreCommand, CoreEffect, CoreEffects, CoreEvent, FileId, PackageId, ResolvedFile,
-    ResolvedPackage, RestartSnapshot, SavedCredentials, SessionSnapshot, build_restart_snapshot,
-    reduce, snapshot_from_state,
+    CoreCommand, CoreEffect, CoreEffects, CoreEvent, FileAccounting, FileId, PackageId,
+    ResolvedFile, ResolvedPackage, RestartSnapshot, SavedCredentials, SessionSnapshot,
+    build_restart_snapshot, reduce, snapshot_from_state,
 };
 
 use super::{App, FileStatus, SessionAdapter};
@@ -272,16 +272,10 @@ impl App {
         source_url: &str,
         path: &str,
         size: u64,
-        counts_toward_progress: bool,
+        accounting: FileAccounting,
     ) {
         self.ensure_core_file_in_package(
-            file_id,
-            source_url,
-            source_url,
-            source_url,
-            path,
-            size,
-            counts_toward_progress,
+            file_id, source_url, source_url, source_url, path, size, accounting,
         );
     }
 
@@ -293,7 +287,7 @@ impl App {
         source_url: &str,
         path: &str,
         size: u64,
-        counts_toward_progress: bool,
+        accounting: FileAccounting,
     ) {
         self.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
@@ -319,11 +313,7 @@ impl App {
             file.source_url = source_url.to_string();
             file.size = size;
             file.path = path.to_string();
-            file.accounting = if counts_toward_progress {
-                crate::core::FileAccounting::CurrentRun
-            } else {
-                crate::core::FileAccounting::Preexisting
-            };
+            file.accounting = accounting;
         }
     }
 

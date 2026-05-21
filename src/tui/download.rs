@@ -13,7 +13,7 @@ use futures_util::FutureExt;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::{FileId, PackageId};
+use crate::core::{FileAccounting, FileId, PackageId};
 use crate::{DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, is_dlc_path};
 use dirs;
 
@@ -146,11 +146,11 @@ struct QueuedDownload {
 }
 
 impl QueuedDownload {
-    fn queued_event(&self, count_toward_progress: bool) -> QueuedFile {
+    fn queued_event(&self, accounting: FileAccounting) -> QueuedFile {
         QueuedFile {
             id: self.item.path.clone().into(),
             size: self.item.node.size(),
-            count_toward_progress,
+            accounting,
             origin: self.resolved.file_origin(),
         }
     }
@@ -199,13 +199,17 @@ impl CollectedBatch {
 
     fn emit_file_queue_events(&self, event_tx: &mpsc::UnboundedSender<DownloadEvent>) {
         for item in &self.queued_items {
-            let _ = event_tx.send(DownloadEvent::FileQueued(item.queued_event(true)));
+            let _ = event_tx.send(DownloadEvent::FileQueued(
+                item.queued_event(FileAccounting::CurrentRun),
+            ));
         }
     }
 
     fn emit_completed_file_events(&self, event_tx: &mpsc::UnboundedSender<DownloadEvent>) {
         for item in &self.completed_items {
-            let _ = event_tx.send(DownloadEvent::FileQueued(item.queued_event(false)));
+            let _ = event_tx.send(DownloadEvent::FileQueued(
+                item.queued_event(FileAccounting::Preexisting),
+            ));
             let _ = event_tx.send(item.complete_event());
         }
     }
