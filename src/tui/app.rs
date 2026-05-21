@@ -37,7 +37,7 @@ pub use self::types::{
     NoCredentialsFallback, Popup, QuitPolicy, SharedAppState, SortDirection, SortKey, SortState,
     UiAction,
 };
-pub(crate) use self::types::{OverlayFile, SharedStateChannels, VisibleFileContext};
+pub(crate) use self::types::{SharedStateChannels, TransientRow, VisibleFileContext};
 
 use super::event::DownloadRequest;
 use super::event::{DownloadEvent, QueuedFile, TokenMessage};
@@ -61,7 +61,7 @@ pub struct App {
     // File queue (main content)
     pub files: Vec<FileEntry>,
     pub(crate) visible_file_positions: HashMap<FileId, usize>,
-    pub(crate) overlay_files: IndexMap<FileId, OverlayFile>,
+    pub(crate) overlay_files: IndexMap<FileId, TransientRow>,
     pub(crate) file_ui: HashMap<FileId, FileUiState>,
     pub(crate) queued_file_effects: IndexMap<String, Vec<FileId>>,
     pub file_list_state: ListState,

@@ -229,10 +229,30 @@ pub struct FileEntry {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct OverlayFile {
-    pub file: FileEntry,
-    pub source_url: Option<String>,
-    pub counts_toward_progress: bool,
+pub(crate) enum TransientRow {
+    PendingUrl { file: FileEntry, source_url: String },
+    UiError { file: FileEntry },
+}
+
+impl TransientRow {
+    pub(crate) const fn file(&self) -> &FileEntry {
+        match self {
+            Self::PendingUrl { file, .. } | Self::UiError { file } => file,
+        }
+    }
+
+    pub(crate) fn file_mut(&mut self) -> &mut FileEntry {
+        match self {
+            Self::PendingUrl { file, .. } | Self::UiError { file } => file,
+        }
+    }
+
+    pub(crate) fn source_url(&self) -> Option<&str> {
+        match self {
+            Self::PendingUrl { source_url, .. } => Some(source_url),
+            Self::UiError { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

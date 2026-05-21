@@ -7,7 +7,7 @@ use crate::core::{DownloadState, FileId, FileLifecycle, FileState, PackageId, Pa
 
 use super::TuiRow;
 use super::rows::visible_rows_for;
-use crate::tui::app::{FileEntry, FileStatus, FileUiState, OverlayFile, SortState};
+use crate::tui::app::{FileEntry, FileStatus, FileUiState, SortState, TransientRow};
 
 fn project_core_file(
     file: &FileState,
@@ -45,7 +45,7 @@ fn project_core_file(
 pub(super) fn sync_visible_files(
     files: &mut Vec<FileEntry>,
     visible_file_positions: &mut HashMap<FileId, usize>,
-    overlay_files: &mut IndexMap<FileId, OverlayFile>,
+    overlay_files: &mut IndexMap<FileId, TransientRow>,
     file_ui: &mut HashMap<FileId, FileUiState>,
     file_list_state: &mut ListState,
     core_state: &DownloadState,
@@ -72,7 +72,7 @@ pub(super) fn sync_visible_files(
 
     for (id, entry) in overlay_files.iter() {
         if !core_file_ids.contains(id) {
-            next_files.push(entry.file.clone());
+            next_files.push(entry.file().clone());
         }
     }
 

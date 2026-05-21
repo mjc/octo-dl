@@ -167,7 +167,7 @@ impl App {
             .or_else(|| {
                 self.overlay_files
                     .get(file_id)
-                    .map(|file| file.file.downloaded)
+                    .map(|file| file.file().downloaded)
             })
             .or_else(|| self.visible_file(file_id).map(|file| file.downloaded))
             .unwrap_or(0);
@@ -222,33 +222,11 @@ impl App {
     }
 
     pub fn recompute_totals(&mut self) {
-        let mut total_size = 0_u64;
-        let mut total_downloaded = 0_u64;
-        let mut files_completed = 0_usize;
-        let mut files_total = 0_usize;
-        let mut total_network_downloaded = 0_u64;
-
-        for (id, overlay) in &self.overlay_files {
-            if self.core_state.files.contains_key(id) || !overlay.counts_toward_progress {
-                continue;
-            }
-            let file = &overlay.file;
-            total_size = total_size.saturating_add(file.size);
-            total_downloaded = total_downloaded.saturating_add(file.downloaded);
-            total_network_downloaded = total_network_downloaded.saturating_add(file.downloaded);
-            if matches!(file.status, FileStatus::Complete) {
-                files_completed = files_completed.saturating_add(1);
-            }
-            if !matches!(file.status, FileStatus::Error(_)) {
-                files_total = files_total.saturating_add(1);
-            }
-        }
-
-        self.overlay_total_size = total_size;
-        self.overlay_total_downloaded = total_downloaded;
-        self.overlay_files_completed = files_completed;
-        self.overlay_files_total = files_total;
-        self.overlay_total_network_downloaded = total_network_downloaded;
+        self.overlay_total_size = 0;
+        self.overlay_total_downloaded = 0;
+        self.overlay_files_completed = 0;
+        self.overlay_files_total = 0;
+        self.overlay_total_network_downloaded = 0;
         self.apply_cached_totals();
     }
 

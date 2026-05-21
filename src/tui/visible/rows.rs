@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use crate::core::{DownloadState, FileId, FileLifecycle, PackageId, PackageStatus};
 
 use super::TuiRow;
-use crate::tui::app::{FileEntry, FileStatus, OverlayFile, SortDirection, SortKey, SortState};
+use crate::tui::app::{FileEntry, FileStatus, SortDirection, SortKey, SortState, TransientRow};
 
 struct PackageProjection<'a> {
     order: usize,
@@ -55,7 +55,7 @@ fn package_projections(
 
 fn package_sort_key_for<'a>(
     file_sort_keys: &'a HashMap<&'a str, (usize, &'a str)>,
-    overlay_files: &'a IndexMap<FileId, OverlayFile>,
+    overlay_files: &'a IndexMap<FileId, TransientRow>,
     file: &'a FileEntry,
 ) -> (usize, &'a str) {
     if let Some((order, display_name)) = file_sort_keys.get(file.id.as_str()) {
@@ -66,7 +66,7 @@ fn package_sort_key_for<'a>(
         usize::MAX,
         overlay_files
             .get(&file.id)
-            .and_then(|file| file.source_url.as_deref())
+            .and_then(TransientRow::source_url)
             .unwrap_or(file.id.as_str()),
     )
 }
@@ -83,7 +83,7 @@ fn file_status_rank(status: &FileStatus) -> u8 {
 fn sorted_file_indices_with_keys(
     files: &[FileEntry],
     file_sort_keys: &HashMap<&str, (usize, &str)>,
-    overlay_files: &IndexMap<FileId, OverlayFile>,
+    overlay_files: &IndexMap<FileId, TransientRow>,
 ) -> Vec<usize> {
     let mut indices: Vec<_> = (0..files.len()).collect();
     indices.sort_by(|&left, &right| {
@@ -111,7 +111,7 @@ fn sorted_file_indices_with_keys(
 pub(super) fn sorted_file_indices(
     files: &[FileEntry],
     core_state: &DownloadState,
-    overlay_files: &IndexMap<FileId, OverlayFile>,
+    overlay_files: &IndexMap<FileId, TransientRow>,
 ) -> Vec<usize> {
     let (_, file_sort_keys) = package_projections(core_state);
     sorted_file_indices_with_keys(files, &file_sort_keys, overlay_files)
@@ -166,17 +166,16 @@ fn file_is_visible_in_package(core_state: &DownloadState, file_id: &FileId) -> b
     core_state.files.contains_key(file_id)
 }
 
-fn overlay_row_is_hidden_placeholder(file: &FileEntry, overlay: Option<&OverlayFile>) -> bool {
+fn overlay_row_is_hidden_placeholder(file: &FileEntry, overlay: Option<&TransientRow>) -> bool {
     matches!(file.status, FileStatus::Queued)
         && file.size == 0
-        && overlay
-            .is_some_and(|overlay| overlay.source_url.is_none() && !overlay.counts_toward_progress)
+        && overlay.is_some_and(|overlay| matches!(overlay, TransientRow::UiError { .. }))
 }
 
 fn package_has_visible_content(
     package_projections: &IndexMap<PackageId, PackageProjection<'_>>,
     core_state: &DownloadState,
-    overlay_files: &IndexMap<FileId, OverlayFile>,
+    overlay_files: &IndexMap<FileId, TransientRow>,
     package_id: &PackageId,
 ) -> bool {
     let Some(package) = core_state.packages.get(package_id) else {
@@ -213,7 +212,7 @@ fn package_has_visible_children(
 pub(super) fn visible_rows_for(
     files: &[FileEntry],
     core_state: &DownloadState,
-    overlay_files: &IndexMap<FileId, OverlayFile>,
+    overlay_files: &IndexMap<FileId, TransientRow>,
     expanded_packages: &HashSet<PackageId>,
     sort: &SortState,
 ) -> Vec<TuiRow> {
