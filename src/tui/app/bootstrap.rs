@@ -188,7 +188,6 @@ impl App {
     pub(crate) fn prepare_interactive_startup(&mut self) {
         self.resume_latest_session();
         self.load_credentials_from_env();
-        self.auto_login(NoCredentialsFallback::ShowPopup);
     }
 
     pub(crate) fn prepare_headless_startup(&mut self) -> io::Result<()> {
@@ -209,7 +208,10 @@ impl App {
         ui_mode: DashboardUiMode,
     ) -> SharedStateChannels {
         let (action_tx, action_rx) = mpsc::unbounded_channel::<UiAction>();
-        let (state_tx, state_rx) = watch::channel(self.dashboard_json(ui_mode, false));
+        let initial_state = enabled
+            .then(|| self.dashboard_json(ui_mode, false))
+            .unwrap_or_default();
+        let (state_tx, state_rx) = watch::channel(initial_state);
         let shared_state = enabled.then_some(SharedAppState {
             action_tx,
             state_rx,

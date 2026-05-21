@@ -8,7 +8,7 @@ use ratatui::backend::CrosstermBackend;
 use sysinfo::System;
 use tokio::sync::{mpsc, watch};
 
-use super::app::{App, UiAction};
+use super::app::{App, NoCredentialsFallback, UiAction};
 use super::draw::draw;
 use super::event::DownloadEvent;
 use super::input::{handle_input, handle_paste, request_quit};
@@ -75,11 +75,16 @@ async fn run_interactive_tui_loop(
     let pid = sysinfo::get_current_pid().ok();
     let mut needs_draw = true;
     let mut download_state_dirty = false;
+    let mut auto_login_after_first_draw = true;
 
     loop {
         if needs_draw {
             terminal.draw(|f| draw(f, app))?;
             needs_draw = false;
+            if auto_login_after_first_draw {
+                auto_login_after_first_draw = false;
+                app.auto_login(NoCredentialsFallback::ShowPopup);
+            }
         }
 
         tokio::select! {
