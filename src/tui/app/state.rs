@@ -456,19 +456,7 @@ impl App {
             return false;
         }
 
-        match SessionSnapshot::load(&session.state_path()) {
-            Ok(saved) => {
-                self.install_session(saved);
-                true
-            }
-            Err(error) => {
-                log::error!(
-                    "Failed to reload canonical session {} after save: {error}",
-                    session.id
-                );
-                self.status = format!("Failed to save session: {error}");
-                false
-            }
-        }
+        self.install_session(session);
+        true
     }
 }

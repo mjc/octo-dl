@@ -52,7 +52,7 @@ pub(super) fn sync_visible_files(
     expanded_packages: &HashSet<PackageId>,
     sort: &SortState,
     selected_row_identity: Option<TuiRow>,
-) {
+) -> Vec<TuiRow> {
     let selected_row = file_list_state.selected().unwrap_or(0);
     let core_file_ids: HashSet<_> = core_state.files.keys().cloned().collect();
     let existing: IndexMap<_, _> = std::mem::take(files)
@@ -91,12 +91,12 @@ pub(super) fn sync_visible_files(
             .position(|row| *row == selected_row_identity)
         {
             file_list_state.select(Some(display_row));
-            return;
+            return visible_rows;
         }
 
         if let Some(display_row) = fallback_selection_row(&selected_row_identity, &visible_rows) {
             file_list_state.select(Some(display_row));
-            return;
+            return visible_rows;
         }
     }
 
@@ -105,6 +105,7 @@ pub(super) fn sync_visible_files(
     } else {
         file_list_state.select(Some(selected_row.min(visible_rows.len().saturating_sub(1))));
     }
+    visible_rows
 }
 
 fn fallback_selection_row(
