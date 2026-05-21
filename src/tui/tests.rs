@@ -23,6 +23,32 @@ use tokio::sync::{mpsc, watch};
 
 use super::app::{FileStatus, Popup, UiAction};
 
+fn resolve_active_test_file(app: &mut App, source_url: &str, file_id: &str, path: String) {
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id(source_url, source_url),
+            source_url: source_url.to_string(),
+            key: crate::core::PackageKey::new(source_url.to_string()),
+            display_name: "Test Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: file_id.to_string().into(),
+                path,
+                size: 100,
+            }],
+            collision: None,
+        },
+    });
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: file_id.to_string().into(),
+        size: 100,
+    });
+    app.apply_core_event(CoreEvent::FileProgress {
+        file_id: file_id.to_string().into(),
+        total_bytes_delta: 80,
+        network_bytes_delta: 80,
+    });
+}
+
 #[test]
 fn resume_session_requeues_urls() {
     let dir = tempdir().unwrap();
@@ -547,26 +573,52 @@ fn ui_retry_file_recomputes_totals() {
     let mut app = App::new(0, event_tx, true);
     let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel();
     app.url_tx = url_tx;
-    app.upsert_overlay_file(
-        app::FileEntry {
-            id: "error.bin".to_string().into(),
-            name: "error.bin".to_string(),
-            size: 100,
-            downloaded: 20,
-            status: FileStatus::Error("boom".to_string()),
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id("https://mega.nz/file/error", "https://mega.nz/file/error"),
+            source_url: "https://mega.nz/file/error".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/error".to_string()),
+            display_name: "Error".to_string(),
+            files: vec![ResolvedFile {
+                file_id: "error.bin".to_string().into(),
+                path: "error.bin".to_string(),
+                size: 100,
+            }],
+            collision: None,
         },
-        Some("https://mega.nz/file/error".to_string()),
-        true,
-    );
+    });
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: "error.bin".to_string().into(),
+        size: 100,
+    });
+    app.apply_core_event(CoreEvent::FileProgress {
+        file_id: "error.bin".to_string().into(),
+        total_bytes_delta: 20,
+        network_bytes_delta: 20,
+    });
+    app.apply_core_event(CoreEvent::FileFailed {
+        file_id: "error.bin".to_string().into(),
+        message: "boom".to_string(),
+    });
+    app.expanded_packages.insert(package_id(
+        "https://mega.nz/file/error",
+        "https://mega.nz/file/error",
+    ));
+    app.sync_visible_files();
     app.recompute_totals();
 
-    assert_eq!(app.files_total, 0);
+    assert_eq!(app.files_total, 1);
     assert_eq!(app.total_downloaded, 20);
 
     app.handle_ui_action(UiAction::RetryFile("error.bin".to_string().into()));
 
-    assert_eq!(app.files[0].status, FileStatus::Queued);
-    assert_eq!(app.files[0].downloaded, 0);
+    let file = app
+        .files
+        .iter()
+        .find(|file| file.id == "error.bin")
+        .expect("retried file should remain visible");
+    assert_eq!(file.status, FileStatus::Queued);
+    assert_eq!(file.downloaded, 0);
     assert_eq!(app.files_total, 1);
     assert_eq!(app.total_downloaded, 0);
     assert_eq!(
@@ -955,16 +1007,11 @@ fn ui_reset_file_resets_progress_and_requeues_url() {
     let mut app = App::new(0, event_tx, true);
     let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel();
     app.url_tx = url_tx;
-    app.upsert_overlay_file(
-        app::FileEntry {
-            id: "active.bin".to_string().into(),
-            name: file_path.to_string_lossy().into_owned(),
-            size: 100,
-            downloaded: 80,
-            status: FileStatus::Downloading,
-        },
-        Some("https://mega.nz/file/reset".to_string()),
-        true,
+    resolve_active_test_file(
+        &mut app,
+        "https://mega.nz/file/reset",
+        "active.bin",
+        file_path.to_string_lossy().into_owned(),
     );
 
     app.handle_ui_action(UiAction::ResetFile("active.bin".to_string().into()));
@@ -988,16 +1035,11 @@ fn ui_reset_file_resets_progress_and_requeues_url() {
 fn reset_file_ignores_late_completion_until_new_attempt_starts() {
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
-    app.upsert_overlay_file(
-        app::FileEntry {
-            id: "active.bin".to_string().into(),
-            name: "active.bin".to_string(),
-            size: 100,
-            downloaded: 80,
-            status: FileStatus::Downloading,
-        },
-        Some("https://mega.nz/file/reset".to_string()),
-        true,
+    resolve_active_test_file(
+        &mut app,
+        "https://mega.nz/file/reset",
+        "active.bin",
+        "active.bin".to_string(),
     );
 
     app.handle_ui_action(UiAction::ResetFile("active.bin".to_string().into()));
@@ -1014,16 +1056,11 @@ fn reset_file_ignores_late_completion_until_new_attempt_starts() {
 fn reset_file_ignores_late_error_until_new_attempt_starts() {
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
-    app.upsert_overlay_file(
-        app::FileEntry {
-            id: "active.bin".to_string().into(),
-            name: "active.bin".to_string(),
-            size: 100,
-            downloaded: 80,
-            status: FileStatus::Downloading,
-        },
-        Some("https://mega.nz/file/reset".to_string()),
-        true,
+    resolve_active_test_file(
+        &mut app,
+        "https://mega.nz/file/reset",
+        "active.bin",
+        "active.bin".to_string(),
     );
 
     app.handle_ui_action(UiAction::ResetFile("active.bin".to_string().into()));
@@ -1041,16 +1078,11 @@ fn reset_file_ignores_late_error_until_new_attempt_starts() {
 fn reset_file_accepts_new_terminal_events_after_restart() {
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
-    app.upsert_overlay_file(
-        app::FileEntry {
-            id: "active.bin".to_string().into(),
-            name: "active.bin".to_string(),
-            size: 100,
-            downloaded: 80,
-            status: FileStatus::Downloading,
-        },
-        Some("https://mega.nz/file/reset".to_string()),
-        true,
+    resolve_active_test_file(
+        &mut app,
+        "https://mega.nz/file/reset",
+        "active.bin",
+        "active.bin".to_string(),
     );
 
     app.handle_ui_action(UiAction::ResetFile("active.bin".to_string().into()));

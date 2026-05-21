@@ -1,4 +1,4 @@
-use super::{App, FileEntry, FileStatus, OverlayFile, VisibleFileContext};
+use super::{App, FileEntry, FileStatus, TransientRow, VisibleFileContext};
 use crate::core::FileId;
 
 impl App {
@@ -18,10 +18,9 @@ impl App {
         }
 
         self.overlay_files.get(file_id).map(|file| {
-            file.source_url
-                .as_deref()
+            file.source_url()
                 .filter(|label| !label.starts_with("http://") && !label.starts_with("https://"))
-                .map_or_else(|| folder_label_from_path(&file.file.name), str::to_string)
+                .map_or_else(|| folder_label_from_path(&file.file().name), str::to_string)
         })
     }
 
@@ -29,21 +28,18 @@ impl App {
         &mut self,
         file: FileEntry,
         source_url: Option<String>,
-        counts_toward_progress: bool,
+        _counts_toward_progress: bool,
     ) {
-        self.overlay_files.insert(
-            file.id.clone(),
-            OverlayFile {
-                file,
-                source_url,
-                counts_toward_progress,
-            },
-        );
+        let row = match source_url {
+            Some(source_url) => TransientRow::PendingUrl { file, source_url },
+            None => TransientRow::UiError { file },
+        };
+        self.overlay_files.insert(row.file().id.clone(), row);
         self.sync_visible_files();
     }
 
     pub(crate) fn overlay_file_mut(&mut self, id: &FileId) -> Option<&mut FileEntry> {
-        self.overlay_files.get_mut(id).map(|file| &mut file.file)
+        self.overlay_files.get_mut(id).map(TransientRow::file_mut)
     }
 
     pub(crate) fn visible_file_context(&self, id: &FileId) -> Option<VisibleFileContext> {
@@ -73,12 +69,12 @@ impl App {
 
         if let Some(overlay) = self.overlay_files.get(id) {
             return Some(VisibleFileContext {
-                id: overlay.file.id.clone(),
-                status: overlay.file.status.clone(),
-                source_url: overlay.source_url.clone(),
-                artifact_path: overlay.file.name.clone(),
-                size: overlay.file.size,
-                counts_toward_progress: overlay.counts_toward_progress,
+                id: overlay.file().id.clone(),
+                status: overlay.file().status.clone(),
+                source_url: None,
+                artifact_path: overlay.file().name.clone(),
+                size: overlay.file().size,
+                counts_toward_progress: false,
             });
         }
 

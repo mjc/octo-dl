@@ -169,7 +169,7 @@ fn url_level_error_replaces_placeholder_in_overlay() {
         .overlay_files
         .get(url.as_str())
         .expect("url-level errors should remain in overlay");
-    assert!(matches!(overlay.file.status, FileStatus::Error(ref msg) if msg == "bad folder"));
+    assert!(matches!(overlay.file().status, FileStatus::Error(ref msg) if msg == "bad folder"));
     let session = app.session.as_ref().expect("session should remain");
     assert_eq!(session.urls[0].url, url);
     assert_eq!(session.urls[0].error.as_deref(), Some("bad folder"));

@@ -106,7 +106,9 @@ impl App {
 
     fn ensure_core_file_from_context(&mut self, context: &VisibleFileContext) -> Option<String> {
         let source_url = context.source_url.clone();
-        if let Some(source_url) = source_url.as_ref() {
+        if let Some(source_url) = source_url.as_ref()
+            && !self.core_state.files.contains_key(&context.id)
+        {
             self.ensure_core_file(
                 &context.id,
                 source_url,
@@ -160,7 +162,7 @@ impl App {
         let _ = self
             .overlay_files
             .shift_remove(&FileId::from(url))
-            .map(|file| file.file);
+            .map(|row| row.file().clone());
         self.sync_visible_files();
         self.show_ui_error_only(url, error);
     }

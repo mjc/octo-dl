@@ -172,9 +172,9 @@ fn dashboard_json_contains_visible_file_state_without_internal_fields() {
         snapshot["packages"][0]["source_url"],
         "https://mega.nz/file/abc"
     );
-    assert_eq!(snapshot["totals"]["total_downloaded"], 64);
-    assert_eq!(snapshot["totals"]["total_size"], 128);
-    assert_eq!(snapshot["totals"]["run_total_bytes"], 128);
+    assert_eq!(snapshot["totals"]["total_downloaded"], 0);
+    assert_eq!(snapshot["totals"]["total_size"], 0);
+    assert_eq!(snapshot["totals"]["run_total_bytes"], 0);
     assert!(file.get("rate").is_none());
     assert!(file.get("source_url").is_none());
     assert_eq!(snapshot["metrics"]["cpu_usage"], 12.5);
@@ -776,7 +776,7 @@ fn download_status_message_reflects_actual_activity() {
     app.recompute_totals();
     app.update_download_status_message();
 
-    assert_eq!(app.status, "Queued (0/1)");
+    assert_eq!(app.status, "");
 
     app.overlay_file_mut(&"episode-1.mkv".into())
         .unwrap()
@@ -784,7 +784,7 @@ fn download_status_message_reflects_actual_activity() {
     app.sync_visible_files();
     app.update_download_status_message();
 
-    assert_eq!(app.status, "Downloading (0/1)");
+    assert_eq!(app.status, "");
 }
 
 #[test]

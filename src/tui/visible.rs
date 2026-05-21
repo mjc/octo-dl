@@ -8,7 +8,7 @@ use ratatui::widgets::ListState;
 
 use super::app::App;
 use crate::core::{DownloadState, FileId, PackageId};
-use crate::tui::app::{FileEntry, FileUiState, OverlayFile, SortState};
+use crate::tui::app::{FileEntry, FileUiState, SortState, TransientRow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TuiRow {
@@ -33,7 +33,7 @@ pub(super) fn visible_rows(app: &App) -> Vec<TuiRow> {
 pub(super) fn sorted_file_indices(
     files: &[FileEntry],
     core_state: &DownloadState,
-    overlay_files: &IndexMap<FileId, OverlayFile>,
+    overlay_files: &IndexMap<FileId, TransientRow>,
 ) -> Vec<usize> {
     rows::sorted_file_indices(files, core_state, overlay_files)
 }
@@ -41,7 +41,7 @@ pub(super) fn sorted_file_indices(
 pub(super) fn sync_visible_files(
     files: &mut Vec<FileEntry>,
     visible_file_positions: &mut HashMap<FileId, usize>,
-    overlay_files: &mut IndexMap<FileId, OverlayFile>,
+    overlay_files: &mut IndexMap<FileId, TransientRow>,
     file_ui: &mut HashMap<FileId, FileUiState>,
     file_list_state: &mut ListState,
     core_state: &DownloadState,

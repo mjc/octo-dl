@@ -50,6 +50,19 @@ fn activate_url_input(app: &mut App) {
     app.url_input_cursor = app.url_input.chars().count();
 }
 
+fn resolve_test_package(app: &mut App, source_url: &str, files: Vec<ResolvedFile>) {
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id(source_url, source_url),
+            source_url: source_url.to_string(),
+            key: crate::core::PackageKey::new(source_url.to_string()),
+            display_name: "Test Package".to_string(),
+            files,
+            collision: None,
+        },
+    });
+}
+
 fn confirm(app: &mut App) {
     assert_eq!(app.popup, Popup::Confirm);
     handle_input(app, key(KeyCode::Char('y')));
@@ -474,26 +487,29 @@ fn handle_main_input_delete_removes_session_entry_and_keeps_selection() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
-    for file in [
-        FileEntry {
-            id: "first.bin".to_string().into(),
-            name: "first.bin".to_string(),
-            size: 10,
-            downloaded: 0,
-            status: FileStatus::Queued,
-        },
-        FileEntry {
-            id: "second.bin".to_string().into(),
-            name: "second.bin".to_string(),
-            size: 20,
-            downloaded: 0,
-            status: FileStatus::Queued,
-        },
-    ] {
-        app.upsert_overlay_file(file, Some("https://mega.nz/folder/root".to_string()), true);
-    }
+    resolve_test_package(
+        &mut app,
+        "https://mega.nz/folder/root",
+        vec![
+            ResolvedFile {
+                file_id: "first.bin".to_string().into(),
+                path: "first.bin".to_string(),
+                size: 10,
+            },
+            ResolvedFile {
+                file_id: "second.bin".to_string().into(),
+                path: "second.bin".to_string(),
+                size: 20,
+            },
+        ],
+    );
+    app.expanded_packages.insert(package_id(
+        "https://mega.nz/folder/root",
+        "https://mega.nz/folder/root",
+    ));
+    app.sync_visible_files();
     app.recompute_totals();
-    app.file_list_state.select(Some(0));
+    app.file_list_state.select(Some(1));
 
     let mut session = session_snapshot(vec![(
         "https://mega.nz/folder/root",
@@ -531,11 +547,49 @@ fn handle_main_input_delete_removes_session_entry_and_keeps_selection() {
         .collect();
     assert_eq!(
         statuses,
-        vec![("second.bin", &crate::core::FileLifecycle::Queued)]
+        vec![("second.bin", &crate::core::FileLifecycle::Planned)]
     );
     let saved = crate::core::SessionSnapshot::load(&session_path).unwrap();
     assert!(saved.find_file("first.bin").is_none());
     assert!(saved.find_file("second.bin").is_some());
+}
+
+#[test]
+fn handle_main_input_delete_transient_row_forgets_it_without_session_state() {
+    let mut app = test_app();
+    for file in [
+        FileEntry {
+            id: "first.bin".to_string().into(),
+            name: "first.bin".to_string(),
+            size: 10,
+            downloaded: 0,
+            status: FileStatus::Queued,
+        },
+        FileEntry {
+            id: "second.bin".to_string().into(),
+            name: "second.bin".to_string(),
+            size: 20,
+            downloaded: 0,
+            status: FileStatus::Queued,
+        },
+    ] {
+        app.upsert_overlay_file(file, Some("https://mega.nz/folder/root".to_string()), true);
+    }
+    app.recompute_totals();
+    app.file_list_state.select(Some(0));
+
+    handle_input(&mut app, key(KeyCode::Delete));
+    assert_eq!(
+        app.pending_confirmation,
+        Some(ConfirmAction::DeleteFile("first.bin".to_string().into()))
+    );
+    confirm(&mut app);
+
+    assert_eq!(app.files.len(), 1);
+    assert_eq!(app.files[0].id, "second.bin");
+    assert_eq!(app.file_list_state.selected(), Some(0));
+    assert_eq!(app.total_size, 0);
+    assert!(app.session.is_none());
 }
 
 #[test]
@@ -754,20 +808,32 @@ fn handle_main_input_shift_r_resets_selected_file_from_scratch() {
     let (url_tx, mut url_rx) = mpsc::unbounded_channel();
     app.url_tx = url_tx;
     let token = tokio_util::sync::CancellationToken::new();
-    app.upsert_overlay_file(
-        FileEntry {
-            id: "active.bin".to_string().into(),
-            name: final_path.to_string_lossy().into_owned(),
+    resolve_test_package(
+        &mut app,
+        "https://mega.nz/file/reset",
+        vec![ResolvedFile {
+            file_id: "active.bin".to_string().into(),
+            path: final_path.to_string_lossy().into_owned(),
             size: 100,
-            downloaded: 80,
-            status: FileStatus::Downloading,
-        },
-        Some("https://mega.nz/file/reset".to_string()),
-        true,
+        }],
     );
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: "active.bin".to_string().into(),
+        size: 100,
+    });
+    app.apply_core_event(CoreEvent::FileProgress {
+        file_id: "active.bin".to_string().into(),
+        total_bytes_delta: 80,
+        network_bytes_delta: 80,
+    });
+    app.expanded_packages.insert(package_id(
+        "https://mega.nz/file/reset",
+        "https://mega.nz/file/reset",
+    ));
+    app.sync_visible_files();
     app.cancellation_tokens
         .insert("active.bin".to_string().into(), token.clone());
-    app.file_list_state.select(Some(0));
+    app.file_list_state.select(Some(1));
 
     handle_input(&mut app, key(KeyCode::Char('R')));
     assert_eq!(
@@ -919,22 +985,18 @@ fn retry_recomputes_totals_for_errored_file() {
     app.file_list_state.select(Some(0));
 
     assert_eq!(app.files_total, 0);
-    assert_eq!(app.total_downloaded, 42);
+    assert_eq!(app.total_downloaded, 0);
 
     handle_input(&mut app, key(KeyCode::Char('r')));
 
-    assert_eq!(app.files[0].status, FileStatus::Queued);
-    assert_eq!(app.files[0].downloaded, 0);
-    assert_eq!(app.files_total, 1);
-    assert_eq!(app.total_downloaded, 0);
     assert_eq!(
-        url_rx.try_recv().unwrap(),
-        DownloadRequest::ResumeFileIds {
-            source_url: "https://mega.nz/file/error".to_string(),
-            file_ids: vec!["error.bin".to_string().into()],
-            attempt_ids: std::collections::HashMap::from([("error.bin".to_string().into(), 1)]),
-        }
+        app.files[0].status,
+        FileStatus::Error("Retry unavailable for this file".to_string())
     );
+    assert_eq!(app.files[0].downloaded, 42);
+    assert_eq!(app.files_total, 0);
+    assert_eq!(app.total_downloaded, 0);
+    assert!(url_rx.try_recv().is_err());
 }
 
 #[test]

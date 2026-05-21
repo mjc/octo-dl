@@ -278,7 +278,7 @@ impl App {
                     .or_else(|| {
                         self.overlay_files
                             .get(&file.id)
-                            .and_then(|overlay| overlay.source_url.clone())
+                            .and_then(|overlay| overlay.source_url().map(str::to_string))
                     })
                     .unwrap_or_default();
                 DashboardFileRow {
@@ -465,7 +465,7 @@ impl App {
                     source_url: self
                         .overlay_files
                         .get(&file.id)
-                        .and_then(|overlay| overlay.source_url.clone())
+                        .and_then(|overlay| overlay.source_url().map(str::to_string))
                         .unwrap_or_else(|| file.id.to_string()),
                     display_name: file.name.clone(),
                     status,
