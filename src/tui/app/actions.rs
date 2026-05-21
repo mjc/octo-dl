@@ -226,16 +226,6 @@ impl App {
             let submitted_id = FileId::from(file.origin.submitted_url.as_str());
             self.forget_visible_file(&submitted_id);
         }
-        if !self.register_session_queued_file(
-            &package_id.to_string(),
-            &package_display_name,
-            &file.origin.submitted_url,
-            &file.origin.source_url,
-            &file.id,
-            file.size,
-        ) {
-            return false;
-        }
         self.ensure_core_file_in_package(
             &file.id,
             &package_id.to_string(),

@@ -386,26 +386,23 @@ fn visible_file_context_prefers_core_state_over_stale_visible_row() {
 }
 
 #[test]
-fn register_session_queued_file_preserves_explicit_package_identity() {
-    let dir = tempdir().unwrap();
-    let _guard = StateDirectoryGuard::set(dir.path());
-    let mut app = test_app();
-    app.session = Some(session_snapshot(vec![(
+fn session_adapter_register_queued_file_preserves_explicit_package_identity() {
+    let mut session = session_snapshot(vec![(
         "https://mega.nz/folder/root",
         UrlFixtureStatus::Fetched,
-    )]));
+    )]);
 
-    let should_queue = app.register_session_queued_file(
+    let should_queue = SessionAdapter::register_queued_file(
+        &mut session,
         "batch-folder",
         "Batch Folder",
         "https://mega.nz/folder/root",
         "https://mega.nz/folder/root",
-        &"episode-1.mkv".into(),
+        "episode-1.mkv",
         128,
     );
 
     assert!(should_queue);
-    let session = app.session.as_ref().unwrap();
     assert_eq!(session.packages.len(), 1);
     assert_eq!(
         session.packages[0].id,
@@ -494,31 +491,24 @@ fn file_queued_without_explicit_package_id_reuses_existing_package_for_url() {
 }
 
 #[test]
-fn register_session_queued_file_uses_resolved_source_url_for_package_identity() {
-    let dir = tempdir().unwrap();
-    let _guard = StateDirectoryGuard::set(dir.path());
-    let mut app = test_app();
-    app.session = Some(session_snapshot(vec![(
-        "bundle.dlc",
-        UrlFixtureStatus::Fetched,
-    )]));
+fn session_adapter_register_queued_file_uses_resolved_source_url_for_package_identity() {
+    let mut session = session_snapshot(vec![("bundle.dlc", UrlFixtureStatus::Fetched)]);
 
-    let should_queue = app.register_session_queued_file(
+    let should_queue = SessionAdapter::register_queued_file(
+        &mut session,
         "batch-folder",
         "Batch Folder",
         "bundle.dlc",
         "https://mega.nz/folder/resolved",
-        &"episode-1.mkv".into(),
+        "episode-1.mkv",
         128,
     );
 
     assert!(should_queue);
-    let session = app.session.as_ref().unwrap();
     assert_eq!(
         session.packages.len(),
         1,
-        "status={} urls={:?} files={:?}",
-        app.status,
+        "urls={:?} files={:?}",
         session.urls,
         session
             .iter_files()
@@ -544,33 +534,31 @@ fn register_session_queued_file_uses_resolved_source_url_for_package_identity() 
 }
 
 #[test]
-fn register_session_queued_file_dedupes_same_source_url_across_package_ids() {
-    let dir = tempdir().unwrap();
-    let _guard = StateDirectoryGuard::set(dir.path());
-    let mut app = test_app();
-    app.session = Some(session_snapshot(vec![(
+fn session_adapter_register_queued_file_dedupes_same_source_url_across_package_ids() {
+    let mut session = session_snapshot(vec![(
         "https://mega.nz/folder/root",
         UrlFixtureStatus::Fetched,
-    )]));
+    )]);
 
-    assert!(app.register_session_queued_file(
+    assert!(SessionAdapter::register_queued_file(
+        &mut session,
         "pkg-a",
         "Package A",
         "https://mega.nz/folder/root",
         "https://mega.nz/folder/root",
-        &"episode-1.mkv".into(),
+        "episode-1.mkv",
         128,
     ));
-    assert!(app.register_session_queued_file(
+    assert!(SessionAdapter::register_queued_file(
+        &mut session,
         "pkg-b",
         "Package B",
         "https://mega.nz/folder/root",
         "https://mega.nz/folder/root",
-        &"episode-2.mkv".into(),
+        "episode-2.mkv",
         256,
     ));
 
-    let session = app.session.as_ref().unwrap();
     assert_eq!(session.packages.len(), 2);
     assert!(
         session

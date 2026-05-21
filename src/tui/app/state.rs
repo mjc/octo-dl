@@ -317,30 +317,6 @@ impl App {
         }
     }
 
-    pub(crate) fn register_session_queued_file(
-        &mut self,
-        package_id: &str,
-        package_display_name: &str,
-        submitted_url: &str,
-        source_url: &str,
-        path: &FileId,
-        size: u64,
-    ) -> bool {
-        self.ensure_session_for_pending_urls();
-        self.mutate_session_and_save(|session| {
-            SessionAdapter::register_queued_file(
-                session,
-                package_id,
-                package_display_name,
-                submitted_url,
-                source_url,
-                path.as_str(),
-                size,
-            )
-        })
-        .unwrap_or(true)
-    }
-
     pub(crate) fn mutate_session_and_save<R>(
         &mut self,
         f: impl FnOnce(&mut SessionSnapshot) -> R,

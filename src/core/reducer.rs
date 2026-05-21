@@ -112,6 +112,7 @@ fn should_persist_session(event: &CoreEvent) -> bool {
     !matches!(
         event,
         CoreEvent::FileProgress { .. }
+            | CoreEvent::FileStarted { .. }
             | CoreEvent::FileReuseDetected { .. }
             | CoreEvent::Tick { .. }
     )
@@ -1524,6 +1525,24 @@ mod tests {
             effects
                 .iter()
                 .any(|effect| matches!(effect, CoreEffect::PublishViewSnapshot))
+        );
+    }
+
+    #[test]
+    fn file_started_events_do_not_emit_session_persist_effect() {
+        let mut state = sample_state();
+        let effects = reduce(
+            &mut state,
+            CoreEvent::FileStarted {
+                file_id: "file.bin".to_string().into(),
+                size: 100,
+            },
+        );
+
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, CoreEffect::PersistSession(..)))
         );
     }
 

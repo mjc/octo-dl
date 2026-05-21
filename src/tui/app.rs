@@ -18,7 +18,9 @@ mod tests;
 #[path = "app/types.rs"]
 mod types;
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -44,6 +46,17 @@ use super::event::{DownloadEvent, QueuedFile, TokenMessage};
 use super::session::SessionAdapter;
 use super::visible;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct VisibleRowsCacheKey {
+    files_len: usize,
+    core_files_len: usize,
+    core_packages_len: usize,
+    overlay_files_len: usize,
+    expanded_hash: u64,
+    sort_key: u8,
+    sort_direction: u8,
+}
+
 pub struct App {
     pub popup: Popup,
     pub pending_confirmation: Option<ConfirmAction>,
@@ -61,6 +74,7 @@ pub struct App {
     // File queue (main content)
     pub files: Vec<FileEntry>,
     cached_visible_rows: Vec<visible::TuiRow>,
+    cached_visible_rows_key: VisibleRowsCacheKey,
     pub(crate) visible_file_positions: HashMap<FileId, usize>,
     pub(crate) overlay_files: IndexMap<FileId, TransientRow>,
     pub(crate) file_ui: HashMap<FileId, FileUiState>,
@@ -125,12 +139,33 @@ pub struct App {
 }
 
 impl App {
+    fn visible_rows_cache_key(&self) -> VisibleRowsCacheKey {
+        let mut expanded = self.expanded_packages.iter().copied().collect::<Vec<_>>();
+        expanded.sort_unstable();
+        let mut hasher = DefaultHasher::new();
+        expanded.hash(&mut hasher);
+
+        VisibleRowsCacheKey {
+            files_len: self.files.len(),
+            core_files_len: self.core_state.files.len(),
+            core_packages_len: self.core_state.packages.len(),
+            overlay_files_len: self.overlay_files.len(),
+            expanded_hash: hasher.finish(),
+            sort_key: match self.sort.key {
+                SortKey::Queue => 0,
+                SortKey::Status => 1,
+                SortKey::Name => 2,
+                SortKey::Percent => 3,
+            },
+            sort_direction: match self.sort.direction {
+                SortDirection::Asc => 0,
+                SortDirection::Desc => 1,
+            },
+        }
+    }
+
     fn current_visible_rows(&self) -> Vec<visible::TuiRow> {
-        if self.cached_visible_rows.is_empty()
-            && !(self.files.is_empty()
-                && self.core_state.files.is_empty()
-                && self.overlay_files.is_empty())
-        {
+        if self.cached_visible_rows_key != self.visible_rows_cache_key() {
             return visible::visible_rows(self);
         }
         self.cached_visible_rows.clone()
@@ -154,7 +189,7 @@ impl App {
         &mut self,
         selected_row_identity: Option<visible::TuiRow>,
     ) {
-        self.cached_visible_rows = visible::sync_visible_files(
+        let visible_rows = visible::sync_visible_files(
             &mut self.files,
             &mut self.visible_file_positions,
             &mut self.overlay_files,
@@ -165,6 +200,8 @@ impl App {
             &self.sort,
             selected_row_identity,
         );
+        self.cached_visible_rows_key = self.visible_rows_cache_key();
+        self.cached_visible_rows = visible_rows;
     }
 
     pub fn dashboard_json(&self, ui_mode: DashboardUiMode, read_only: bool) -> String {

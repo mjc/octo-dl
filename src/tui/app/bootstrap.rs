@@ -71,6 +71,7 @@ impl App {
             urls: Vec::new(),
             files: Vec::new(),
             cached_visible_rows: Vec::new(),
+            cached_visible_rows_key: Default::default(),
             visible_file_positions: HashMap::new(),
             overlay_files: IndexMap::new(),
             file_ui: HashMap::new(),
