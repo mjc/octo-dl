@@ -337,12 +337,25 @@ impl ResumeTracker {
 
     fn snapshot(&mut self) -> ResumeSidecar {
         self.dirty_chunks = 0;
-        resume_sidecar_from_chunk_macs(
-            self.file_size,
-            self.expected_condensed_mac_b64.clone(),
-            &self.chunk_macs,
-            None,
-        )
+        ResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size: self.file_size,
+            expected_condensed_mac_b64: self.expected_condensed_mac_b64.clone(),
+            verified_chunks: self
+                .chunk_macs
+                .iter()
+                .enumerate()
+                .filter_map(|(index, mac)| {
+                    mac.and_then(|mac| {
+                        Some(VerifiedChunkRecord {
+                            index: u32::try_from(index).ok()?,
+                            mac_b64: STANDARD.encode(mac),
+                        })
+                    })
+                })
+                .collect(),
+            part_fingerprint: None,
+        }
     }
 
     fn checkpoint_snapshot(&mut self) -> Option<ResumeSidecar> {
@@ -351,32 +364,6 @@ impl ResumeTracker {
 
     fn trusted_chunks(&self) -> Vec<Option<[u8; 16]>> {
         self.chunk_macs.clone()
-    }
-}
-
-fn resume_sidecar_from_chunk_macs(
-    file_size: u64,
-    expected_condensed_mac_b64: String,
-    chunk_macs: &[Option<[u8; 16]>],
-    part_fingerprint: Option<FileFingerprint>,
-) -> ResumeSidecar {
-    ResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size,
-        expected_condensed_mac_b64,
-        verified_chunks: chunk_macs
-            .iter()
-            .enumerate()
-            .filter_map(|(index, mac)| {
-                mac.and_then(|mac| {
-                    Some(VerifiedChunkRecord {
-                        index: u32::try_from(index).ok()?,
-                        mac_b64: STANDARD.encode(mac),
-                    })
-                })
-            })
-            .collect(),
-        part_fingerprint,
     }
 }
 
@@ -419,6 +406,13 @@ struct ResumeChunkValidationCandidate {
     expected_mac: [u8; 16],
 }
 
+#[derive(Debug)]
+struct ResumeChunkValidationResult {
+    index: usize,
+    length: u64,
+    actual_mac: [u8; 16],
+}
+
 async fn load_sidecar(path: &Path) -> Option<ResumeSidecar> {
     let data = tokio::fs::read(path).await.ok()?;
     serde_json::from_slice(&data).ok()
@@ -456,6 +450,62 @@ async fn remove_file_if_exists(path: &Path) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+async fn revalidate_sidecar_candidate_lane<F: FileSystem>(
+    fs: &F,
+    part_path: &Path,
+    aes_key: [u8; 16],
+    aes_iv: [u8; 8],
+    candidates: Vec<ResumeChunkValidationCandidate>,
+) -> Vec<ResumeChunkValidationResult> {
+    let Some(max_len) = candidates
+        .iter()
+        .filter_map(|candidate| usize::try_from(candidate.length).ok())
+        .max()
+    else {
+        return Vec::new();
+    };
+    if max_len == 0 {
+        return Vec::new();
+    }
+
+    let mut buf = vec![0u8; max_len];
+    let mut trusted = Vec::new();
+
+    for candidate in candidates {
+        let Ok(chunk_len) = usize::try_from(candidate.length) else {
+            continue;
+        };
+        if fs
+            .read_exact_at(part_path, candidate.offset, &mut buf[..chunk_len])
+            .await
+            .is_err()
+        {
+            continue;
+        }
+
+        let mac_buf = std::mem::take(&mut buf);
+        let Ok((actual_mac, returned_buf)) = tokio::task::spawn_blocking(move || {
+            let actual_mac = mega::compute_mega_chunk_mac(&mac_buf[..chunk_len], &aes_key, &aes_iv);
+            (actual_mac, mac_buf)
+        })
+        .await
+        else {
+            break;
+        };
+        buf = returned_buf;
+
+        if actual_mac == candidate.expected_mac {
+            trusted.push(ResumeChunkValidationResult {
+                index: candidate.index,
+                length: candidate.length,
+                actual_mac,
+            });
+        }
+    }
+
+    trusted
 }
 
 async fn delete_sidecar(path: &Path) -> io::Result<()> {
@@ -754,7 +804,7 @@ impl<F: FileSystem> Downloader<F> {
             });
         };
 
-        let validation = self
+        Ok(self
             .revalidate_sidecar_chunks(SidecarValidationInput {
                 boundaries,
                 part_path,
@@ -764,27 +814,7 @@ impl<F: FileSystem> Downloader<F> {
                 aes_iv,
                 expected_condensed_mac_b64,
             })
-            .await;
-
-        if validation.trusted_count > 0 {
-            let part_fingerprint = self.fs.file_fingerprint(part_path).await;
-            if part_fingerprint.is_some() && sidecar.part_fingerprint != part_fingerprint {
-                let upgraded = resume_sidecar_from_chunk_macs(
-                    node.size(),
-                    expected_condensed_mac_b64.to_string(),
-                    &validation.trusted_chunks,
-                    part_fingerprint,
-                );
-                if let Err(err) = save_sidecar_atomic(sidecar_path, &upgraded).await {
-                    log::warn!(
-                        "Failed to upgrade resume sidecar fingerprint {}: {err}",
-                        sidecar_path.display()
-                    );
-                }
-            }
-        }
-
-        Ok(validation)
+            .await)
     }
 
     async fn revalidate_sidecar_chunks(
@@ -856,53 +886,37 @@ impl<F: FileSystem> Downloader<F> {
             return validation;
         }
 
-        let fs = &self.fs;
-        let part_path = input.part_path;
-        let aes_key = *input.aes_key;
-        let aes_iv = *input.aes_iv;
         let parallelism = self
             .config
             .chunks_per_file
             .clamp(1, MAX_RESUME_REVALIDATION_PARALLELISM);
+        let lane_count = parallelism.min(candidates.len()).max(1);
+        let mut lanes = (0..lane_count).map(|_| Vec::new()).collect::<Vec<_>>();
+        for (position, candidate) in candidates.into_iter().enumerate() {
+            lanes[position % lane_count].push(candidate);
+        }
 
-        let trusted_chunks = stream::iter(candidates)
-            .map(|candidate| async move {
-                let Ok(chunk_len) = usize::try_from(candidate.length) else {
-                    return None;
-                };
-                let mut buf = vec![0u8; chunk_len];
-                if fs
-                    .read_exact_at(part_path, candidate.offset, &mut buf)
-                    .await
-                    .is_err()
-                {
-                    return None;
-                }
-                let Ok(actual_mac) = tokio::task::spawn_blocking(move || {
-                    mega::compute_mega_chunk_mac(&buf, &aes_key, &aes_iv)
-                })
-                .await
-                else {
-                    return None;
-                };
-                (actual_mac == candidate.expected_mac).then_some((
-                    candidate.index,
-                    candidate.length,
-                    actual_mac,
-                ))
+        let mut lane_results = stream::iter(lanes)
+            .map(|lane| {
+                revalidate_sidecar_candidate_lane(
+                    &self.fs,
+                    input.part_path,
+                    *input.aes_key,
+                    *input.aes_iv,
+                    lane,
+                )
             })
-            .buffer_unordered(parallelism)
-            .filter_map(|result| async move { result })
-            .collect::<Vec<_>>()
-            .await;
+            .buffer_unordered(lane_count);
 
-        for (index, length, actual_mac) in trusted_chunks {
-            if validation.trusted_chunks[index].is_some() {
-                continue;
+        while let Some(trusted_chunks) = lane_results.next().await {
+            for trusted in trusted_chunks {
+                if validation.trusted_chunks[trusted.index].is_some() {
+                    continue;
+                }
+                validation.trusted_chunks[trusted.index] = Some(trusted.actual_mac);
+                validation.trusted_count = validation.trusted_count.saturating_add(1);
+                validation.trusted_bytes = validation.trusted_bytes.saturating_add(trusted.length);
             }
-            validation.trusted_chunks[index] = Some(actual_mac);
-            validation.trusted_count = validation.trusted_count.saturating_add(1);
-            validation.trusted_bytes = validation.trusted_bytes.saturating_add(length);
         }
 
         if validation.trusted_count > 0 {
