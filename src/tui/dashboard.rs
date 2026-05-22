@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
+use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize};
 
-use crate::core::{FileLifecycle, PackageStatus};
+use crate::core::{FileId, FileLifecycle, FileState, PackageId, PackageStatus};
 use crate::{DownloadConfig, format_bytes, format_duration};
 
 use super::app::{App, FileStatus, Popup};
@@ -256,7 +257,518 @@ impl From<&FileStatus> for DashboardFileStatus {
     }
 }
 
+#[derive(Serialize)]
+struct DashboardStateRef<'a> {
+    authenticated: bool,
+    paused: bool,
+    logging_in: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    login_error: Option<&'a str>,
+    popup: Popup,
+    ui_mode: DashboardUiMode,
+    read_only: bool,
+    status: &'a str,
+    packages: DashboardPackagesRef<'a>,
+    files: DashboardFilesRef<'a>,
+    rows: DashboardRowsRef<'a>,
+    totals: DashboardTotals,
+    metrics: DashboardMetrics,
+    config: &'a DownloadConfig,
+}
+
+struct DashboardPackagesRef<'a>(&'a App);
+
+struct DashboardFilesRef<'a>(&'a App);
+
+struct DashboardRowsRef<'a> {
+    rows: super::app::VisibleRowsSnapshot<'a>,
+}
+
+struct CorePackageRowRef<'a> {
+    app: &'a App,
+    package: &'a crate::core::PackageState,
+    stats: CorePackageStats<'a>,
+}
+
+struct LegacyPackageRowRef<'a> {
+    app: &'a App,
+    file: &'a super::app::FileEntry,
+}
+
+struct DashboardFileRowRef<'a> {
+    app: &'a App,
+    file: &'a super::app::FileEntry,
+}
+
+struct PackageFileIdsRef<'a> {
+    app: &'a App,
+    package_id: PackageId,
+}
+
+struct SingleFileIdRef<'a>(&'a FileId);
+
+#[derive(Clone, Copy)]
+struct CorePackageStats<'a> {
+    source_url: &'a str,
+    present_files: usize,
+    completed_files: usize,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    downloading: bool,
+    verifying: bool,
+    folder_label: Option<&'a str>,
+    folder_conflict: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+enum DashboardFileStatusRef<'a> {
+    Queued,
+    Downloading,
+    Verifying,
+    Complete,
+    Error { message: &'a str },
+}
+
+impl<'a> DashboardStateRef<'a> {
+    fn new(app: &'a App, ui_mode: DashboardUiMode, read_only: bool) -> Self {
+        Self {
+            authenticated: app.authenticated,
+            paused: app.paused,
+            logging_in: app.login.logging_in,
+            login_error: app.login.error.as_deref(),
+            popup: app.popup,
+            ui_mode,
+            read_only,
+            status: &app.status,
+            packages: DashboardPackagesRef(app),
+            files: DashboardFilesRef(app),
+            rows: DashboardRowsRef {
+                rows: app.visible_rows_snapshot(),
+            },
+            totals: app.dashboard_totals(),
+            metrics: DashboardMetrics {
+                cpu_usage: app.cpu_usage,
+                memory_rss: app.memory_rss,
+                api_port: app.api_port,
+            },
+            config: &app.config.config,
+        }
+    }
+}
+
+impl Serialize for DashboardPackagesRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let app = self.0;
+        let mut seq = serializer.serialize_seq(None)?;
+        if !app.core_state.packages.is_empty() {
+            for package in app.core_state.packages.values() {
+                let stats = CorePackageStats::new(app, package.id);
+                if stats.present_files == 0 {
+                    continue;
+                }
+                seq.serialize_element(&CorePackageRowRef {
+                    app,
+                    package,
+                    stats,
+                })?;
+            }
+        } else {
+            for file in &app.files {
+                seq.serialize_element(&LegacyPackageRowRef { app, file })?;
+            }
+        }
+        seq.end()
+    }
+}
+
+impl Serialize for DashboardFilesRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.files.len()))?;
+        for file in &self.0.files {
+            seq.serialize_element(&DashboardFileRowRef { app: self.0, file })?;
+        }
+        seq.end()
+    }
+}
+
+impl Serialize for DashboardRowsRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let rows = self.rows.as_slice();
+        let mut seq = serializer.serialize_seq(Some(rows.len()))?;
+        for row in rows {
+            seq.serialize_element(&DashboardRowRef(row))?;
+        }
+        seq.end()
+    }
+}
+
+impl Serialize for CorePackageRowRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let status = if self.stats.downloading || self.stats.verifying {
+            PackageStatus::Downloading
+        } else {
+            self.package.status
+        };
+        let expanded = self.app.expanded_packages.contains(&self.package.id)
+            || matches!(self.package.status, PackageStatus::Failed);
+        let folder_label = (!self.stats.folder_conflict)
+            .then_some(self.stats.folder_label)
+            .flatten();
+        let mut row = serializer.serialize_struct("DashboardPackageRow", 13)?;
+        row.serialize_field("id", &DisplayRef(self.package.id))?;
+        row.serialize_field("source_url", self.stats.source_url)?;
+        row.serialize_field("display_name", &self.package.display_name)?;
+        row.serialize_field("status", &status)?;
+        row.serialize_field(
+            "file_ids",
+            &PackageFileIdsRef {
+                app: self.app,
+                package_id: self.package.id,
+            },
+        )?;
+        row.serialize_field("present_files", &self.stats.present_files)?;
+        row.serialize_field("completed_files", &self.stats.completed_files)?;
+        row.serialize_field("downloaded_bytes", &self.stats.downloaded_bytes)?;
+        row.serialize_field("total_bytes", &self.stats.total_bytes)?;
+        row.serialize_field(
+            "percent",
+            &percent(self.stats.downloaded_bytes, self.stats.total_bytes),
+        )?;
+        row.serialize_field("expanded", &expanded)?;
+        if let Some(folder_label) = folder_label {
+            row.serialize_field("folder_label", folder_label)?;
+        }
+        if let Some(error) = self.package.error.as_deref() {
+            row.serialize_field("error", error)?;
+        }
+        row.end()
+    }
+}
+
+impl Serialize for LegacyPackageRowRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let status = if matches!(self.file.status, FileStatus::Error(_)) {
+            PackageStatus::Failed
+        } else if matches!(self.file.status, FileStatus::Downloading) {
+            PackageStatus::Downloading
+        } else if matches!(self.file.status, FileStatus::Complete) {
+            PackageStatus::Complete
+        } else {
+            PackageStatus::Queued
+        };
+        let downloaded = if matches!(self.file.status, FileStatus::Complete) {
+            self.file.size
+        } else if self.file.size > 0 && self.file.downloaded >= self.file.size {
+            self.file.size.saturating_sub(1)
+        } else {
+            self.file.downloaded.min(self.file.size)
+        };
+        let source_url = self
+            .app
+            .overlay_files
+            .get(&self.file.id)
+            .and_then(|overlay| overlay.source_url())
+            .unwrap_or_else(|| self.file.id.as_str());
+        let mut row = serializer.serialize_struct("DashboardPackageRow", 13)?;
+        row.serialize_field("id", self.file.id.as_str())?;
+        row.serialize_field("source_url", source_url)?;
+        row.serialize_field("display_name", &self.file.name)?;
+        row.serialize_field("status", &status)?;
+        row.serialize_field("file_ids", &SingleFileIdRef(&self.file.id))?;
+        row.serialize_field("present_files", &1_usize)?;
+        row.serialize_field(
+            "completed_files",
+            &usize::from(matches!(self.file.status, FileStatus::Complete)),
+        )?;
+        row.serialize_field("downloaded_bytes", &downloaded)?;
+        row.serialize_field("total_bytes", &self.file.size)?;
+        row.serialize_field("percent", &percent(downloaded, self.file.size))?;
+        row.serialize_field("expanded", &false)?;
+        if let FileStatus::Error(message) = &self.file.status {
+            row.serialize_field("error", message)?;
+        }
+        row.end()
+    }
+}
+
+impl Serialize for DashboardFileRowRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let package_id = self
+            .app
+            .core_state
+            .files
+            .get(&self.file.id)
+            .map(|core_file| PackageIdRef::Core(core_file.package_id))
+            .or_else(|| {
+                self.app
+                    .overlay_files
+                    .get(&self.file.id)
+                    .and_then(|overlay| overlay.source_url().map(PackageIdRef::Overlay))
+            })
+            .unwrap_or(PackageIdRef::Empty);
+        let status = file_status_ref(self.app, self.file);
+        let package_label = package_label_for_file_ref(self.app, &self.file.id);
+        let mut row = serializer.serialize_struct("DashboardFileRow", 8)?;
+        row.serialize_field("id", self.file.id.as_str())?;
+        row.serialize_field("package_id", &package_id)?;
+        row.serialize_field("name", &self.file.name)?;
+        row.serialize_field("size", &self.file.size)?;
+        row.serialize_field("downloaded", &self.file.downloaded)?;
+        row.serialize_field("speed", &self.app.file_speed(&self.file.id))?;
+        row.serialize_field("status", &status)?;
+        if let Some(package_label) = package_label {
+            row.serialize_field("package_label", &package_label)?;
+        }
+        row.end()
+    }
+}
+
+impl Serialize for PackageFileIdsRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let len = self
+            .app
+            .core_state
+            .files
+            .values()
+            .filter(|file| file.package_id == self.package_id)
+            .count();
+        let mut seq = serializer.serialize_seq(Some(len))?;
+        for file in self
+            .app
+            .core_state
+            .files
+            .values()
+            .filter(|file| file.package_id == self.package_id)
+        {
+            seq.serialize_element(file.id.as_str())?;
+        }
+        seq.end()
+    }
+}
+
+impl Serialize for SingleFileIdRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(1))?;
+        seq.serialize_element(self.0.as_str())?;
+        seq.end()
+    }
+}
+
+struct DashboardRowRef<'a>(&'a TuiRow);
+
+impl Serialize for DashboardRowRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            TuiRow::Package(package_id) => {
+                let mut row = serializer.serialize_struct("DashboardRow", 2)?;
+                row.serialize_field("kind", "package")?;
+                row.serialize_field("package_id", &DisplayRef(*package_id))?;
+                row.end()
+            }
+            TuiRow::File {
+                package_id,
+                file_id,
+            } => {
+                let mut row = serializer.serialize_struct("DashboardRow", 3)?;
+                row.serialize_field("kind", "file")?;
+                row.serialize_field("package_id", &OptionalPackageIdRef(*package_id))?;
+                row.serialize_field("file_id", file_id.as_str())?;
+                row.end()
+            }
+        }
+    }
+}
+
+struct DisplayRef<T>(T);
+
+impl<T> Serialize for DisplayRef<T>
+where
+    T: std::fmt::Display,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(&self.0)
+    }
+}
+
+struct OptionalPackageIdRef(Option<PackageId>);
+
+impl Serialize for OptionalPackageIdRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if let Some(package_id) = self.0 {
+            serializer.collect_str(&package_id)
+        } else {
+            serializer.serialize_str("")
+        }
+    }
+}
+
+enum PackageIdRef<'a> {
+    Core(PackageId),
+    Overlay(&'a str),
+    Empty,
+}
+
+impl Serialize for PackageIdRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Core(package_id) => serializer.collect_str(package_id),
+            Self::Overlay(package_id) => serializer.serialize_str(package_id),
+            Self::Empty => serializer.serialize_str(""),
+        }
+    }
+}
+
+enum PackageLabelRef<'a> {
+    Borrowed(&'a str),
+    Folder(&'a str),
+}
+
+impl Serialize for PackageLabelRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Borrowed(label) | Self::Folder(label) => serializer.serialize_str(label),
+        }
+    }
+}
+
+impl<'a> CorePackageStats<'a> {
+    fn new(app: &'a App, package_id: PackageId) -> Self {
+        let mut stats = Self {
+            source_url: "",
+            present_files: 0,
+            completed_files: 0,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            downloading: false,
+            verifying: false,
+            folder_label: None,
+            folder_conflict: false,
+        };
+        for file in app
+            .core_state
+            .files
+            .values()
+            .filter(|file| file.package_id == package_id)
+        {
+            stats.record_file(app, file);
+        }
+        stats
+    }
+
+    fn record_file(&mut self, app: &App, file: &'a FileState) {
+        if self.source_url.is_empty() {
+            self.source_url = &file.source_url;
+        }
+        self.downloading |= matches!(file.lifecycle, FileLifecycle::Downloading);
+        self.verifying |= app.is_verification_active(&file.id);
+        let folder = file.path.split('/').next().filter(|part| !part.is_empty());
+        match (self.folder_label, folder) {
+            (None, Some(folder)) => self.folder_label = Some(folder),
+            (Some(existing), Some(folder)) if existing == folder => {}
+            (Some(_), Some(_)) => self.folder_conflict = true,
+            _ => {}
+        }
+
+        let file_complete = matches!(file.lifecycle, FileLifecycle::Complete);
+        let visible = if file_complete {
+            file.size
+        } else {
+            crate::core::visible_completed_bytes_for_display(file)
+        };
+        self.present_files += 1;
+        self.completed_files += usize::from(file_complete);
+        self.downloaded_bytes = self.downloaded_bytes.saturating_add(visible);
+        self.total_bytes = self.total_bytes.saturating_add(file.size);
+    }
+}
+
+fn file_status_ref<'a>(app: &App, file: &'a super::app::FileEntry) -> DashboardFileStatusRef<'a> {
+    if app.is_verification_active(&file.id) {
+        return DashboardFileStatusRef::Verifying;
+    }
+    match &file.status {
+        FileStatus::Queued => DashboardFileStatusRef::Queued,
+        FileStatus::Downloading => DashboardFileStatusRef::Downloading,
+        FileStatus::Complete => DashboardFileStatusRef::Complete,
+        FileStatus::Error(message) => DashboardFileStatusRef::Error { message },
+    }
+}
+
+fn package_label_for_file_ref<'a>(app: &'a App, file_id: &FileId) -> Option<PackageLabelRef<'a>> {
+    if let Some(core_file) = app.core_state.files.get(file_id) {
+        let configured = app
+            .core_state
+            .packages
+            .get(&core_file.package_id)
+            .map(|package| package.display_name.as_str());
+        if configured
+            .is_some_and(|label| !label.starts_with("http://") && !label.starts_with("https://"))
+        {
+            return configured.map(PackageLabelRef::Borrowed);
+        }
+        return Some(PackageLabelRef::Folder(folder_label_from_path_ref(
+            &core_file.path,
+        )));
+    }
+
+    app.overlay_files.get(file_id).map(|file| {
+        file.source_url()
+            .filter(|label| !label.starts_with("http://") && !label.starts_with("https://"))
+            .map_or_else(
+                || PackageLabelRef::Folder(folder_label_from_path_ref(&file.file().name)),
+                PackageLabelRef::Borrowed,
+            )
+    })
+}
+
+fn folder_label_from_path_ref(path: &str) -> &str {
+    path.split('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(path)
+}
+
 impl App {
+    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub fn dashboard_state(
         &self,
@@ -334,6 +846,15 @@ impl App {
         }
     }
 
+    pub(crate) fn borrowed_dashboard_json(
+        &self,
+        ui_mode: DashboardUiMode,
+        read_only: bool,
+    ) -> String {
+        serde_json::to_string(&DashboardStateRef::new(self, ui_mode, read_only))
+            .expect("dashboard state should serialize")
+    }
+
     fn dashboard_totals(&self) -> DashboardTotals {
         let (run_total_bytes, run_completed_bytes, run_file_total, run_file_completed) =
             if self.core_state.files.is_empty() {
@@ -364,6 +885,7 @@ impl App {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn dashboard_packages(&self) -> Vec<DashboardPackageRow> {
         if !self.core_state.packages.is_empty() {
             let mut package_files = self
@@ -621,6 +1143,124 @@ mod tests {
     use crate::core::{CoreEvent, ResolvedFile, ResolvedPackage};
     use crate::test_support::package_id;
     use tokio::sync::mpsc;
+
+    fn assert_borrowed_json_matches_owned_state(
+        app: &App,
+        ui_mode: DashboardUiMode,
+        read_only: bool,
+    ) {
+        let borrowed: serde_json::Value =
+            serde_json::from_str(&app.dashboard_json(ui_mode, read_only)).unwrap();
+        let owned = serde_json::to_value(app.dashboard_state(ui_mode, read_only)).unwrap();
+        assert_eq!(borrowed, owned);
+    }
+
+    fn resolve_test_package(app: &mut App, display_name: &str, files: Vec<(&str, &str, u64)>) {
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/pkg"),
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string()),
+                display_name: display_name.to_string(),
+                files: files
+                    .into_iter()
+                    .map(|(file_id, path, size)| ResolvedFile {
+                        file_id: file_id.into(),
+                        path: path.to_string(),
+                        size,
+                    })
+                    .collect(),
+                collision: None,
+            },
+        });
+    }
+
+    #[test]
+    fn borrowed_dashboard_json_matches_owned_core_package_projection() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx, true);
+        app.status = "busy".to_string();
+        app.paused = true;
+        app.login.error = Some("bad credentials".to_string());
+        resolve_test_package(
+            &mut app,
+            "Package",
+            vec![
+                ("one.bin", "folder/one.bin", 100),
+                ("two.bin", "folder/two.bin", 300),
+            ],
+        );
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: "one.bin".into(),
+            size: 100,
+        });
+        app.apply_core_event(CoreEvent::FileProgress {
+            file_id: "one.bin".into(),
+            total_bytes_delta: 40,
+            network_bytes_delta: 40,
+        });
+
+        assert_borrowed_json_matches_owned_state(&app, DashboardUiMode::Headless, true);
+    }
+
+    #[test]
+    fn borrowed_dashboard_json_matches_owned_legacy_overlay_error_projection() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx, true);
+        app.show_overlay_error(&"overlay.bin".into(), "folder/overlay.bin", "boom");
+        app.status = "failed".to_string();
+
+        assert_borrowed_json_matches_owned_state(&app, DashboardUiMode::Tui, false);
+    }
+
+    #[test]
+    fn borrowed_dashboard_json_matches_owned_verification_projection() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx, true);
+        resolve_test_package(
+            &mut app,
+            "https://mega.nz/folder/pkg",
+            vec![("file.bin", "folder/file.bin", 100)],
+        );
+        let file_id: FileId = "file.bin".into();
+        app.verifying_files.insert(file_id.clone());
+        app.verification_inflight_files.insert(file_id.clone());
+        app.verification_targets
+            .insert(file_id, crate::tui::app::VerificationTarget::Resume);
+
+        assert_borrowed_json_matches_owned_state(&app, DashboardUiMode::Attached, true);
+    }
+
+    #[test]
+    fn borrowed_dashboard_json_matches_owned_expanded_row_projection() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx, true);
+        let package_id = package_id("pkg", "https://mega.nz/folder/pkg");
+        resolve_test_package(
+            &mut app,
+            "Package",
+            vec![("file.bin", "folder/file.bin", 100)],
+        );
+        app.expanded_packages.insert(package_id);
+        app.sync_visible_files();
+
+        assert_borrowed_json_matches_owned_state(&app, DashboardUiMode::Tui, false);
+    }
+
+    #[test]
+    fn borrowed_dashboard_json_matches_owned_without_visible_row_cache() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx, true);
+        app.files.push(super::super::app::FileEntry {
+            id: "loose.bin".into(),
+            name: "loose.bin".to_string(),
+            size: 42,
+            downloaded: 7,
+            status: FileStatus::Downloading,
+        });
+
+        assert_borrowed_json_matches_owned_state(&app, DashboardUiMode::Tui, false);
+    }
 
     #[test]
     fn dashboard_projection_uses_core_package_totals() {
