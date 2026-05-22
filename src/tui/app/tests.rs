@@ -10,7 +10,7 @@ use crate::{
         FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id, push_file,
         session_snapshot,
     },
-    tui::{DashboardUiMode, visible::TuiRow},
+    tui::{DashboardUiMode, app::VerificationTarget, visible::TuiRow},
 };
 
 fn test_app() -> App {
@@ -50,6 +50,8 @@ fn mark_verification_inflight(app: &mut App, id: &str) -> crate::core::FileId {
     let file_id = crate::core::FileId::from(id);
     app.verifying_files.insert(file_id.clone());
     app.verification_inflight_files.insert(file_id.clone());
+    app.verification_targets
+        .insert(file_id.clone(), VerificationTarget::Resume);
     app.apply_core_event(CoreEvent::FileVerificationStarted {
         file_id: file_id.clone(),
     });
@@ -373,6 +375,8 @@ fn verification_progress_updates_visible_file_without_network_rate() {
     app.verifying_files.insert("file.bin".to_string().into());
     app.verification_inflight_files
         .insert("file.bin".to_string().into());
+    app.verification_targets
+        .insert("file.bin".to_string().into(), VerificationTarget::Completed);
     app.apply_core_event(CoreEvent::FileVerificationStarted {
         file_id: "file.bin".to_string().into(),
     });
@@ -419,6 +423,8 @@ fn completed_file_verified_preserves_existing_complete_lifecycle() {
     });
     app.verifying_files.insert(file_id.clone());
     app.verification_inflight_files.insert(file_id.clone());
+    app.verification_targets
+        .insert(file_id.clone(), VerificationTarget::Completed);
     app.apply_core_event(CoreEvent::FileVerificationStarted {
         file_id: file_id.clone(),
     });
@@ -496,6 +502,8 @@ fn verification_skipped_clears_resume_verification_state() {
     });
     app.verifying_files.insert(file_id.clone());
     app.verification_inflight_files.insert(file_id.clone());
+    app.verification_targets
+        .insert(file_id.clone(), VerificationTarget::Resume);
     app.apply_core_event(CoreEvent::FileVerificationStarted {
         file_id: file_id.clone(),
     });
@@ -536,6 +544,8 @@ fn verification_skipped_restores_completed_file_lifecycle() {
     });
     app.verifying_files.insert(file_id.clone());
     app.verification_inflight_files.insert(file_id.clone());
+    app.verification_targets
+        .insert(file_id.clone(), VerificationTarget::Completed);
     app.apply_core_event(CoreEvent::FileVerificationStarted {
         file_id: file_id.clone(),
     });
@@ -772,6 +782,28 @@ fn reverify_package_clears_stale_verify_state_for_never_started_files() {
     }
     assert!(url_rx.try_recv().is_err());
     assert_eq!(app.status, "No package file(s) have resume data to verify");
+}
+
+#[test]
+fn verification_progress_requires_explicit_target() {
+    let mut app = test_app();
+    let file_id: crate::core::FileId = "file.bin".to_string().into();
+    resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
+    app.verifying_files.insert(file_id.clone());
+    app.verification_inflight_files.insert(file_id.clone());
+    app.apply_core_event(CoreEvent::FileVerificationStarted {
+        file_id: file_id.clone(),
+    });
+
+    app.handle_verification_progress_event(file_id.clone(), 75);
+
+    assert_eq!(
+        app.core_state.files[&file_id]
+            .progress
+            .visible_completed_bytes,
+        0
+    );
+    assert_eq!(app.visible_file(&file_id).unwrap().downloaded, 0);
 }
 
 #[test]

@@ -286,7 +286,7 @@ impl App {
                     size: file.size,
                     downloaded: file.downloaded,
                     speed: self.file_speed(&file.id),
-                    status: if self.verification_inflight_files.contains(&file.id) {
+                    status: if self.is_verification_active(&file.id) {
                         DashboardFileStatus::Verifying
                     } else {
                         DashboardFileStatus::from(&file.status)
@@ -404,7 +404,7 @@ impl App {
                     for file in package_files {
                         source_url = source_url.or_else(|| Some(file.source_url.clone()));
                         package_downloading |= matches!(file.lifecycle, FileLifecycle::Downloading);
-                        package_verifying |= self.verification_inflight_files.contains(&file.id);
+                        package_verifying |= self.is_verification_active(&file.id);
                         let folder = file.path.split('/').next().filter(|part| !part.is_empty());
                         match (common_folder, folder) {
                             (None, Some(folder)) => common_folder = Some(folder),
@@ -720,7 +720,43 @@ mod tests {
             .insert("file.bin".to_string().into());
         let state = app.dashboard_state(DashboardUiMode::Tui, false);
 
+        assert_eq!(state.files[0].status, DashboardFileStatus::Queued);
+
+        app.verification_targets.insert(
+            "file.bin".to_string().into(),
+            crate::tui::app::VerificationTarget::Resume,
+        );
+        let state = app.dashboard_state(DashboardUiMode::Tui, false);
+
         assert_eq!(state.files[0].status, DashboardFileStatus::Verifying);
+    }
+
+    #[test]
+    fn dashboard_package_ignores_stale_inflight_without_target() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx, true);
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/pkg"),
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string()),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "file.bin".to_string().into(),
+                    path: "file.bin".to_string(),
+                    size: 100,
+                }],
+                collision: None,
+            },
+        });
+        app.verifying_files.insert("file.bin".to_string().into());
+        app.verification_inflight_files
+            .insert("file.bin".to_string().into());
+
+        let state = app.dashboard_state(DashboardUiMode::Tui, false);
+
+        assert_eq!(state.packages[0].status, PackageStatus::Queued);
+        assert_eq!(state.files[0].status, DashboardFileStatus::Queued);
     }
 
     #[test]

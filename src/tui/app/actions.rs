@@ -6,25 +6,22 @@ use crate::{
     format_bytes,
 };
 
-use super::{App, ProgressDelta, QueuedFile, SessionAdapter, UiAction, VisibleFileContext};
+use super::{
+    App, ProgressDelta, QueuedFile, SessionAdapter, UiAction, VerificationTarget,
+    VisibleFileContext,
+};
 
 const MAX_UI_ACTIONS_PER_TICK: usize = 64;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ReverifyTarget {
-    Resume,
-    Completed,
-}
-
-fn reverify_target_for_core_file(file: &crate::core::FileState) -> Option<ReverifyTarget> {
+fn reverify_target_for_core_file(file: &crate::core::FileState) -> Option<VerificationTarget> {
     match &file.lifecycle {
-        FileLifecycle::Complete => Some(ReverifyTarget::Completed),
-        FileLifecycle::Downloading => Some(ReverifyTarget::Resume),
+        FileLifecycle::Complete => Some(VerificationTarget::Completed),
+        FileLifecycle::Downloading => Some(VerificationTarget::Resume),
         FileLifecycle::Planned | FileLifecycle::Queued | FileLifecycle::Failed { .. } => {
             (file.progress.visible_completed_bytes > 0
                 || file.progress.verified_existing_bytes > 0
                 || file.progress.downloaded_network_bytes > 0)
-                .then_some(ReverifyTarget::Resume)
+                .then_some(VerificationTarget::Resume)
         }
     }
 }
@@ -33,6 +30,7 @@ impl App {
     fn clear_verification_state(&mut self, id: &FileId) {
         self.verifying_files.remove(id);
         self.verification_inflight_files.remove(id);
+        self.verification_targets.remove(id);
         self.reverify_pending_files.remove(id);
     }
 
@@ -210,6 +208,7 @@ impl App {
 
         self.verifying_files.remove(&id);
         self.verification_inflight_files.remove(&id);
+        self.verification_targets.remove(&id);
         self.apply_core_event(CoreEvent::FileFailed {
             file_id: id.clone(),
             message: error.clone(),
@@ -307,6 +306,7 @@ impl App {
         }
         self.verifying_files.remove(&id);
         self.verification_inflight_files.remove(&id);
+        self.verification_targets.remove(&id);
         self.reset_pending_files.remove(&id);
         if self.reverify_pending_files.remove(&id) {
             self.apply_core_event(CoreEvent::FileResumeStarted {
@@ -353,6 +353,10 @@ impl App {
         }
         if !self.verification_inflight_files.contains(&id) {
             log::info!("Ignoring verification progress for skipped file: {id}");
+            return;
+        }
+        if !self.verification_targets.contains_key(&id) {
+            log::info!("Ignoring verification progress without target: {id}");
             return;
         }
         if !self.core_state.files.contains_key(&id) {
@@ -407,6 +411,7 @@ impl App {
             verified_chunks: chunks,
         });
         self.verification_inflight_files.remove(&id);
+        self.verification_targets.remove(&id);
         if !self.reverify_pending_files.contains(&id) {
             self.verifying_files.remove(&id);
         }
@@ -421,6 +426,7 @@ impl App {
     pub(crate) fn handle_completed_file_verified_event(&mut self, id: FileId, bytes: u64) {
         self.verifying_files.remove(&id);
         self.verification_inflight_files.remove(&id);
+        self.verification_targets.remove(&id);
         if !self.core_state.files.contains_key(&id) {
             log::info!("Ignoring completed-file verification for untracked file: {id}");
             return;
@@ -689,6 +695,7 @@ impl App {
         self.cancel_file_token(id);
         self.verifying_files.insert(id.clone());
         self.verification_inflight_files.insert(id.clone());
+        self.verification_targets.insert(id.clone(), target);
         self.apply_core_event(CoreEvent::FileVerificationStarted {
             file_id: id.clone(),
         });
@@ -701,7 +708,7 @@ impl App {
             self.reverify_pending_files.insert(id.clone());
         }
         self.reset_pending_files.remove(id);
-        let request = if target == ReverifyTarget::Completed {
+        let request = if target == VerificationTarget::Completed {
             crate::tui::event::DownloadRequest::VerifyCompletedFileIds {
                 source_url,
                 file_ids: vec![id.clone()],
@@ -713,7 +720,7 @@ impl App {
             }
         };
         let _ = self.url_tx.send(request);
-        self.status = if target == ReverifyTarget::Completed {
+        self.status = if target == VerificationTarget::Completed {
             format!("Verifying completed file {id}...")
         } else {
             format!("Reverifying resume data for {id}...")
@@ -750,6 +757,7 @@ impl App {
             self.cancel_file_token(&file_id);
             self.verifying_files.insert(file_id.clone());
             self.verification_inflight_files.insert(file_id.clone());
+            self.verification_targets.insert(file_id.clone(), target);
             self.apply_core_event(CoreEvent::FileVerificationStarted {
                 file_id: file_id.clone(),
             });
@@ -763,7 +771,7 @@ impl App {
             }
             self.reset_pending_files.remove(&file_id);
 
-            let grouped = if target == ReverifyTarget::Completed {
+            let grouped = if target == VerificationTarget::Completed {
                 &mut grouped_completed
             } else {
                 &mut grouped_resume
