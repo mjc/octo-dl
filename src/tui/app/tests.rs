@@ -802,6 +802,20 @@ fn pending_empty_package_placeholder_is_visible() {
 }
 
 #[test]
+fn selected_row_uses_valid_visible_row_cache() {
+    let mut app = test_app();
+    let cached_row = TuiRow::File {
+        package_id: None,
+        file_id: "cached-placeholder".to_string().into(),
+    };
+    app.cached_visible_rows_key = app.visible_rows_cache_key();
+    app.cached_visible_rows = vec![cached_row.clone()];
+    app.file_list_state.select(Some(0));
+
+    assert_eq!(app.selected_row(), Some(cached_row));
+}
+
+#[test]
 fn bookmarklet_added_url_placeholder_is_visible_with_existing_packages() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
