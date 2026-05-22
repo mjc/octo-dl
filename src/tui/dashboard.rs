@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::io;
 use std::time::Duration;
 
 use indexmap::IndexMap;
@@ -855,6 +856,19 @@ impl App {
             .expect("dashboard state should serialize")
     }
 
+    pub(crate) fn write_borrowed_dashboard_json(
+        &self,
+        ui_mode: DashboardUiMode,
+        read_only: bool,
+        output: &mut String,
+    ) {
+        serde_json::to_writer(
+            StringJsonWriter(output),
+            &DashboardStateRef::new(self, ui_mode, read_only),
+        )
+        .expect("dashboard state should serialize")
+    }
+
     fn dashboard_totals(&self) -> DashboardTotals {
         let (run_total_bytes, run_completed_bytes, run_file_total, run_file_completed) =
             if self.core_state.files.is_empty() {
@@ -1016,6 +1030,22 @@ impl App {
                 }
             })
             .collect()
+    }
+}
+
+struct StringJsonWriter<'a>(&'a mut String);
+
+impl io::Write for StringJsonWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let text = std::str::from_utf8(buf).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "serde_json wrote non-utf8 data")
+        })?;
+        self.0.push_str(text);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 

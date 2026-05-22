@@ -273,7 +273,10 @@ impl App {
             read_only,
         };
         if self.dashboard_cache_key != Some(key) {
-            self.dashboard_json_cache = self.dashboard_json(ui_mode, read_only);
+            let mut cache = std::mem::take(&mut self.dashboard_json_cache);
+            cache.clear();
+            self.write_borrowed_dashboard_json(ui_mode, read_only, &mut cache);
+            self.dashboard_json_cache = cache;
             self.dashboard_cache_key = Some(key);
         }
         self.dashboard_json_cache.clone()
