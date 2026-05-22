@@ -117,8 +117,15 @@ async fn run_interactive_tui_loop(
             }
             _ = tick.tick() => {
                 tick_count = tick_count.saturating_add(1);
-                dashboard_dirty |=
-                    app.handle_terminal_tick(download_rx, action_rx, tick_count, &mut sys, pid);
+                let publish_active_transfer_ticks = state_tx.receiver_count() > 1;
+                dashboard_dirty |= app.handle_terminal_tick(
+                    download_rx,
+                    action_rx,
+                    tick_count,
+                    &mut sys,
+                    pid,
+                    publish_active_transfer_ticks,
+                );
                 needs_draw = true;
                 download_state_dirty = false;
             }

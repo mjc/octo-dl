@@ -1195,6 +1195,7 @@ impl ScenarioHarness {
             self.tick_count,
             &mut self.sys,
             self.pid,
+            false,
         );
     }
 

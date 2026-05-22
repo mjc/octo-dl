@@ -3,7 +3,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 use indexmap::{IndexMap, IndexSet};
@@ -415,11 +418,10 @@ impl DownloadProgress for FileProgress {
     }
 }
 
-#[derive(Clone)]
 struct VerificationProgress {
     tx: mpsc::UnboundedSender<DownloadEvent>,
     id: FileId,
-    pending_bytes: Arc<Mutex<u64>>,
+    pending_bytes: AtomicU64,
 }
 
 impl VerificationProgress {
@@ -427,19 +429,12 @@ impl VerificationProgress {
         Self {
             tx,
             id,
-            pending_bytes: Arc::new(Mutex::new(0)),
+            pending_bytes: AtomicU64::new(0),
         }
     }
 
     fn flush_pending(&self) {
-        let bytes_delta = {
-            let Ok(mut pending_bytes) = self.pending_bytes.lock() else {
-                return;
-            };
-            let bytes_delta = *pending_bytes;
-            *pending_bytes = 0;
-            bytes_delta
-        };
+        let bytes_delta = self.pending_bytes.swap(0, Ordering::AcqRel);
         self.send_progress(bytes_delta);
     }
 
@@ -456,18 +451,13 @@ impl VerificationProgress {
 
 impl DownloadProgress for VerificationProgress {
     fn on_progress(&self, _name: &str, delta: ProgressDelta) {
-        let bytes_delta = {
-            let Ok(mut pending_bytes) = self.pending_bytes.lock() else {
-                return;
-            };
-            *pending_bytes = pending_bytes.saturating_add(delta.total_bytes_delta);
-            if *pending_bytes < VERIFICATION_PROGRESS_EVENT_BYTES {
-                return;
-            }
-            let bytes_delta = *pending_bytes;
-            *pending_bytes = 0;
-            bytes_delta
-        };
+        let previous = self
+            .pending_bytes
+            .fetch_add(delta.total_bytes_delta, Ordering::AcqRel);
+        if previous.saturating_add(delta.total_bytes_delta) < VERIFICATION_PROGRESS_EVENT_BYTES {
+            return;
+        }
+        let bytes_delta = self.pending_bytes.swap(0, Ordering::AcqRel);
         self.send_progress(bytes_delta);
     }
 }
@@ -808,7 +798,7 @@ async fn verify_completed_files(
     runtime: &DownloadRuntime,
     tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) {
-    let requested = file_ids.into_iter().collect::<HashSet<_>>();
+    let mut requested = file_ids.into_iter().collect::<HashSet<_>>();
     let sources = resolve_submitted_url(&source_url, &runtime.http, &runtime.dlc_cache, tx).await;
     let progress: Arc<dyn DownloadProgress> = Arc::new(crate::NoProgress);
     let mut matched = 0usize;
@@ -827,9 +817,11 @@ async fn verify_completed_files(
         };
         let collected = runtime.downloader.collect_files(&nodes, &progress).await;
         for item in collected.completed {
-            if !requested.contains(&FileId::from(item.path.as_str())) {
+            let id = FileId::from(item.path.as_str());
+            if !requested.contains(&id) {
                 continue;
             }
+            requested.remove(&id);
             matched = matched.saturating_add(1);
             items.push(crate::OwnedDownloadItem {
                 path: item.path,
@@ -880,6 +872,12 @@ async fn verify_completed_files(
             "No completed file(s) found to verify for {source_url}"
         )));
     }
+    for id in requested {
+        let _ = tx.send(DownloadEvent::VerificationSkipped {
+            id,
+            completed: true,
+        });
+    }
 }
 
 async fn reverify_resume_files(
@@ -888,7 +886,7 @@ async fn reverify_resume_files(
     runtime: &DownloadRuntime,
     tx: &mpsc::UnboundedSender<DownloadEvent>,
 ) -> HashMap<FileId, crate::ResumeReverify> {
-    let requested = file_ids.into_iter().collect::<HashSet<_>>();
+    let mut requested = file_ids.into_iter().collect::<HashSet<_>>();
     let reverified = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let sources = resolve_submitted_url(&source_url, &runtime.http, &runtime.dlc_cache, tx).await;
     let progress: Arc<dyn DownloadProgress> = Arc::new(crate::NoProgress);
@@ -912,9 +910,11 @@ async fn reverify_resume_files(
             .into_iter()
             .chain(collected.completed.into_iter())
         {
-            if !requested.contains(&FileId::from(item.path.as_str())) {
+            let id = FileId::from(item.path.as_str());
+            if !requested.contains(&id) {
                 continue;
             }
+            requested.remove(&id);
             matched = matched.saturating_add(1);
             items.push(crate::OwnedDownloadItem {
                 path: item.path,
@@ -982,6 +982,12 @@ async fn reverify_resume_files(
         let _ = tx.send(DownloadEvent::StatusMessage(format!(
             "No matching file(s) found to reverify for {source_url}"
         )));
+    }
+    for id in requested {
+        let _ = tx.send(DownloadEvent::VerificationSkipped {
+            id,
+            completed: false,
+        });
     }
 
     match Arc::try_unwrap(reverified) {

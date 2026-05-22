@@ -212,6 +212,9 @@ impl App {
             DownloadEvent::CompletedFileVerified { id, bytes } => {
                 self.handle_completed_file_verified_event(id, bytes);
             }
+            DownloadEvent::VerificationSkipped { id, completed } => {
+                self.handle_verification_skipped_event(id, completed);
+            }
             DownloadEvent::FileComplete { id, attempt_id } => {
                 self.handle_file_complete_event(id, attempt_id);
             }
@@ -365,6 +368,7 @@ impl App {
         tick_count: u32,
         sys: &mut System,
         pid: Option<sysinfo::Pid>,
+        publish_active_transfer_ticks: bool,
     ) -> bool {
         let mut dashboard_dirty = false;
 
@@ -374,7 +378,7 @@ impl App {
         }
 
         dashboard_dirty |= self.drain_download_events(download_rx);
-        dashboard_dirty |= self.has_active_dashboard_transfer();
+        dashboard_dirty |= publish_active_transfer_ticks && self.has_active_dashboard_transfer();
         self.update_speeds();
         if tick_count.is_multiple_of(50) {
             self.log_progress_summary();
@@ -548,7 +552,14 @@ mod tests {
                 .expect("download event should send");
         }
 
-        assert!(app.handle_terminal_tick(&mut download_rx, &mut action_rx, 1, &mut sys, None));
+        assert!(app.handle_terminal_tick(
+            &mut download_rx,
+            &mut action_rx,
+            1,
+            &mut sys,
+            None,
+            false,
+        ));
 
         assert_eq!(download_rx.len(), 10);
         assert_eq!(
@@ -565,7 +576,14 @@ mod tests {
         let (_action_tx, mut action_rx) = mpsc::unbounded_channel();
         let mut sys = System::new();
 
-        assert!(!app.handle_terminal_tick(&mut download_rx, &mut action_rx, 1, &mut sys, None));
+        assert!(!app.handle_terminal_tick(
+            &mut download_rx,
+            &mut action_rx,
+            1,
+            &mut sys,
+            None,
+            false,
+        ));
     }
 
     #[test]
@@ -584,7 +602,40 @@ mod tests {
             status: FileStatus::Downloading,
         });
 
-        assert!(app.handle_terminal_tick(&mut download_rx, &mut action_rx, 1, &mut sys, None));
+        assert!(app.handle_terminal_tick(
+            &mut download_rx,
+            &mut action_rx,
+            1,
+            &mut sys,
+            None,
+            true,
+        ));
+    }
+
+    #[test]
+    fn terminal_tick_skips_active_transfer_dashboard_publish_without_remote_client() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let (_download_tx, mut download_rx) = mpsc::unbounded_channel();
+        let (_action_tx, mut action_rx) = mpsc::unbounded_channel();
+        let mut sys = System::new();
+
+        app.files.push(FileEntry {
+            id: "file.bin".into(),
+            name: "file.bin".to_string(),
+            size: 100,
+            downloaded: 1,
+            status: FileStatus::Downloading,
+        });
+
+        assert!(!app.handle_terminal_tick(
+            &mut download_rx,
+            &mut action_rx,
+            1,
+            &mut sys,
+            None,
+            false,
+        ));
     }
 
     #[test]
@@ -657,6 +708,8 @@ mod tests {
             },
         });
         app.verifying_files.insert("file.bin".to_string().into());
+        app.verification_inflight_files
+            .insert("file.bin".to_string().into());
         app.apply_core_event(crate::core::CoreEvent::FileVerificationStarted {
             file_id: "file.bin".to_string().into(),
         });
@@ -677,5 +730,44 @@ mod tests {
             .expect("file should exist");
         assert_eq!(file.progress.visible_completed_bytes, 25);
         assert_eq!(file.progress.downloaded_network_bytes, 0);
+    }
+
+    #[test]
+    fn drain_download_events_applies_verification_skip() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let (download_tx, mut download_rx) = mpsc::unbounded_channel();
+
+        app.apply_core_event(crate::core::CoreEvent::PackageResolved {
+            package: crate::core::ResolvedPackage {
+                id: crate::test_support::package_id("pkg", "https://mega.nz/file/root"),
+                source_url: "https://mega.nz/file/root".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+                display_name: "Package".to_string(),
+                files: vec![crate::core::ResolvedFile {
+                    file_id: "file.bin".to_string().into(),
+                    path: "file.bin".to_string(),
+                    size: 100,
+                }],
+                collision: None,
+            },
+        });
+        app.verifying_files.insert("file.bin".to_string().into());
+        app.verification_inflight_files
+            .insert("file.bin".to_string().into());
+        app.apply_core_event(crate::core::CoreEvent::FileVerificationStarted {
+            file_id: "file.bin".to_string().into(),
+        });
+
+        download_tx
+            .send(DownloadEvent::VerificationSkipped {
+                id: "file.bin".into(),
+                completed: false,
+            })
+            .expect("verification skip should send");
+
+        assert!(app.drain_download_events(&mut download_rx));
+        assert!(!app.verifying_files.contains("file.bin"));
+        assert!(!app.verification_inflight_files.contains("file.bin"));
     }
 }

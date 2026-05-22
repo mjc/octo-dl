@@ -95,6 +95,10 @@ pub enum DownloadEvent {
         id: FileId,
         bytes: u64,
     },
+    VerificationSkipped {
+        id: FileId,
+        completed: bool,
+    },
     FileComplete {
         id: FileId,
         attempt_id: u64,
