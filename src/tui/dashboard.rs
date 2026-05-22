@@ -192,15 +192,6 @@ pub struct DashboardChrome<'a> {
 
 impl<'a> DashboardChrome<'a> {
     #[must_use]
-    pub const fn new(url_input: &'a str, url_input_cursor: usize, url_input_active: bool) -> Self {
-        Self {
-            url_input,
-            url_input_cursor,
-            url_input_active,
-        }
-    }
-
-    #[must_use]
     pub const fn read_only() -> Self {
         Self {
             url_input: "",
