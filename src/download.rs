@@ -626,6 +626,47 @@ fn revalidation_buffer_len(remaining: u64) -> usize {
         .expect("bounded revalidation read length fits usize")
 }
 
+async fn compute_completed_file_mac_from_file(
+    final_path: &Path,
+    file_size: u64,
+    aes_key: &[u8; 16],
+    aes_iv: &[u8; 8],
+    progress: Option<(&str, &dyn DownloadProgress)>,
+) -> Result<[u8; 8]> {
+    if file_size == 0 {
+        let file = tokio::fs::File::open(final_path).await?;
+        return Ok(mega::compute_condensed_mac(file.compat(), file_size, aes_key, aes_iv).await?);
+    }
+
+    let mut condensed_mac = mega::MegaCondensedMac::new(aes_key);
+    let mut file = std::fs::File::open(final_path)?;
+    let mut buffer = [0; REVALIDATION_BUFFER_BYTES];
+    for boundary in mega::mega_chunk_boundaries_iter(file_size) {
+        let mut mac = mega::MegaChunkMac::new(aes_key, aes_iv);
+        let mut offset = boundary.offset;
+        let end = boundary.offset.saturating_add(boundary.length);
+        file.seek(std::io::SeekFrom::Start(boundary.offset))?;
+        while offset < end {
+            let read_len = revalidation_buffer_len(end - offset);
+            let read_buffer = &mut buffer[..read_len];
+            file.read_exact(read_buffer)?;
+            mac.update(read_buffer);
+            if let Some((name, progress)) = progress {
+                progress.on_progress(
+                    name,
+                    ProgressDelta {
+                        total_bytes_delta: u64::try_from(read_len).unwrap_or(0),
+                        network_bytes_delta: 0,
+                    },
+                );
+            }
+            offset = offset.saturating_add(u64::try_from(read_len).unwrap_or(0));
+        }
+        condensed_mac.update_chunk_mac(&mac.finalize());
+    }
+    Ok(condensed_mac.finalize())
+}
+
 fn resume_fingerprint_matches(expected: FileFingerprint, actual: FileFingerprint) -> bool {
     expected.len == actual.len
         && expected.modified_ns == actual.modified_ns
@@ -1270,56 +1311,14 @@ impl<F: FileSystem> Downloader<F> {
         aes_iv: [u8; 8],
         progress: Option<(&str, &dyn DownloadProgress)>,
     ) -> Result<[u8; 8]> {
-        if node.size() == 0 {
-            let file = tokio::fs::File::open(final_path).await?;
-            return Ok(mega::compute_condensed_mac(
-                file.compat(),
-                node.size(),
-                node.aes_key(),
-                &aes_iv,
-            )
-            .await?);
-        }
-
-        let processor = mega::ParallelMacProcessor::new(node.size(), node.aes_key(), &aes_iv);
-        let boundaries = mega::mega_chunk_boundaries(node.size());
-        let mut file = std::fs::File::open(final_path)?;
-        let mut buffer = [0; REVALIDATION_BUFFER_BYTES];
-        for boundary in boundaries {
-            let mut mac = mega::MegaChunkMac::new(node.aes_key(), &aes_iv);
-            let mut offset = boundary.offset;
-            let end = boundary.offset.saturating_add(boundary.length);
-            file.seek(std::io::SeekFrom::Start(boundary.offset))?;
-            while offset < end {
-                let read_len = revalidation_buffer_len(end - offset);
-                let read_buffer = &mut buffer[..read_len];
-                file.read_exact(read_buffer)?;
-                mac.update(read_buffer);
-                if let Some((name, progress)) = progress {
-                    progress.on_progress(
-                        name,
-                        ProgressDelta {
-                            total_bytes_delta: u64::try_from(read_len).unwrap_or(0),
-                            network_bytes_delta: 0,
-                        },
-                    );
-                }
-                offset = offset.saturating_add(u64::try_from(read_len).unwrap_or(0));
-            }
-            let index = usize::try_from(boundary.index)
-                .map_err(|_| Error::Download("MEGA chunk index overflow".to_string()))?;
-            if !processor.set_chunk_mac(index, mac.finalize()) {
-                let mut message = String::with_capacity(64);
-                let _ = write!(
-                    message,
-                    "MEGA chunk index {index} outside completed file MAC processor"
-                );
-                return Err(Error::Download(message));
-            }
-        }
-        processor
-            .finalize()
-            .ok_or_else(|| Error::Download("Completed file MAC missing chunk data".to_string()))
+        compute_completed_file_mac_from_file(
+            final_path,
+            node.size(),
+            node.aes_key(),
+            &aes_iv,
+            progress,
+        )
+        .await
     }
 
     /// Downloads a single file using atomic `.part` file semantics.
@@ -1963,6 +1962,7 @@ mod tests {
     struct RecordingProgress {
         total: std::sync::atomic::AtomicU64,
         network: std::sync::atomic::AtomicU64,
+        max_delta: std::sync::atomic::AtomicU64,
         calls: std::sync::atomic::AtomicUsize,
     }
 
@@ -1974,8 +1974,27 @@ mod tests {
                 delta.network_bytes_delta,
                 std::sync::atomic::Ordering::SeqCst,
             );
+            self.max_delta
+                .fetch_max(delta.total_bytes_delta, std::sync::atomic::Ordering::SeqCst);
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+    }
+
+    async fn expected_condensed_mac(data: &[u8]) -> [u8; 8] {
+        mega::compute_condensed_mac(
+            futures::io::Cursor::new(data),
+            data.len() as u64,
+            &TEST_AES_KEY,
+            &TEST_AES_IV,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn write_test_file(dir: &tempfile::TempDir, name: &str, data: &[u8]) -> PathBuf {
+        let path = dir.path().join(name);
+        tokio::fs::write(&path, data).await.unwrap();
+        path
     }
 
     #[test]
@@ -2041,6 +2060,119 @@ mod tests {
             &config,
             &Error::Cancelled,
         ));
+    }
+
+    #[tokio::test]
+    async fn completed_file_mac_matches_mega_condensed_mac_for_boundary_cases() {
+        for size in [
+            0,
+            1,
+            15,
+            16,
+            17,
+            REVALIDATION_BUFFER_BYTES - 1,
+            REVALIDATION_BUFFER_BYTES,
+            REVALIDATION_BUFFER_BYTES + 1,
+            1280 * 1024,
+            1280 * 1024 + 13,
+            2 * 1024 * 1024 + 17,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let data = test_incompressible_plaintext(size);
+            let path = write_test_file(&dir, "complete.bin", &data).await;
+
+            let actual = compute_completed_file_mac_from_file(
+                &path,
+                data.len() as u64,
+                &TEST_AES_KEY,
+                &TEST_AES_IV,
+                None,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(actual, expected_condensed_mac(&data).await, "size {size}");
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_file_mac_reports_progress_for_each_fixed_read_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = test_incompressible_plaintext(1280 * 1024 + 13);
+        let path = write_test_file(&dir, "complete.bin", &data).await;
+        let progress = RecordingProgress::default();
+        let expected_calls: usize = mega::mega_chunk_boundaries_iter(data.len() as u64)
+            .map(|chunk| chunk.length.div_ceil(REVALIDATION_BUFFER_BYTES as u64) as usize)
+            .sum();
+
+        let actual = compute_completed_file_mac_from_file(
+            &path,
+            data.len() as u64,
+            &TEST_AES_KEY,
+            &TEST_AES_IV,
+            Some(("complete.bin", &progress)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(actual, expected_condensed_mac(&data).await);
+        assert_eq!(
+            progress.total.load(std::sync::atomic::Ordering::SeqCst),
+            data.len() as u64
+        );
+        assert_eq!(
+            progress.network.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            progress.calls.load(std::sync::atomic::Ordering::SeqCst),
+            expected_calls
+        );
+        assert!(
+            progress.max_delta.load(std::sync::atomic::Ordering::SeqCst)
+                <= REVALIDATION_BUFFER_BYTES as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_file_mac_does_not_emit_progress_for_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = Vec::new();
+        let path = write_test_file(&dir, "empty.bin", &data).await;
+        let progress = RecordingProgress::default();
+
+        let actual = compute_completed_file_mac_from_file(
+            &path,
+            0,
+            &TEST_AES_KEY,
+            &TEST_AES_IV,
+            Some(("empty.bin", &progress)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(actual, expected_condensed_mac(&data).await);
+        assert_eq!(progress.total.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(progress.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn completed_file_mac_rejects_short_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = test_incompressible_plaintext(64 * 1024);
+        let path = write_test_file(&dir, "short.bin", &data).await;
+
+        let err = compute_completed_file_mac_from_file(
+            &path,
+            data.len() as u64 + 1,
+            &TEST_AES_KEY,
+            &TEST_AES_IV,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Io(_)));
     }
 
     #[tokio::test]
