@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -79,19 +80,25 @@ fn dashboard_file_item(
     let prefix_label = if include_package {
         file.package_label
             .as_deref()
-            .map(|label| format!("[{}] ", compact_label(label)))
+            .map(package_prefix_label)
             .unwrap_or_default()
     } else {
         String::new()
     };
     let detail = dashboard_file_detail(file);
-    let prefix = format!("   {icon} ");
+    let mut prefix = String::with_capacity(6);
+    prefix.push_str("   ");
+    prefix.push_str(icon);
+    prefix.push(' ');
     let prefix_width = text_width(&prefix);
     let detail_width = text_width(&detail).min(content_width / 2);
     let detail = truncate_end(&detail, detail_width);
     let detail_width = text_width(&detail);
+    let mut display_name = String::with_capacity(prefix_label.len() + file.name.len());
+    display_name.push_str(&prefix_label);
+    display_name.push_str(&file.name);
     let name = truncate_end(
-        &format!("{prefix_label}{}", file.name),
+        &display_name,
         content_width
             .saturating_sub(prefix_width)
             .saturating_sub(detail_width)
@@ -108,8 +115,11 @@ fn dashboard_file_item(
     if selected {
         row_style = row_style.add_modifier(Modifier::BOLD);
     }
+    let mut label = String::with_capacity(prefix.len() + name.len());
+    label.push_str(&prefix);
+    label.push_str(&name);
     ListItem::new(Line::from(vec![
-        Span::styled(format!("{prefix}{name}"), row_style),
+        Span::styled(label, row_style),
         Span::raw(filler),
         Span::styled(detail, Style::default().fg(detail_color)),
     ]))
@@ -132,7 +142,12 @@ fn dashboard_package_item(
         ""
     };
     let detail = dashboard_package_detail(package, speed_label, content_width);
-    let prefix = format!(" {marker} {icon} ");
+    let mut prefix = String::with_capacity(6);
+    prefix.push(' ');
+    prefix.push_str(marker);
+    prefix.push(' ');
+    prefix.push_str(icon);
+    prefix.push(' ');
     let prefix_width = text_width(&prefix);
     let detail_width = text_width(&detail).min(content_width / 2);
     let detail = truncate_end(&detail, detail_width);
@@ -155,8 +170,11 @@ fn dashboard_package_item(
     if selected {
         row_style = row_style.add_modifier(Modifier::BOLD);
     }
+    let mut label = String::with_capacity(prefix.len() + name.len());
+    label.push_str(&prefix);
+    label.push_str(&name);
     ListItem::new(Line::from(vec![
-        Span::styled(format!("{prefix}{name}"), row_style),
+        Span::styled(label, row_style),
         Span::raw(filler),
         Span::styled(detail, Style::default().fg(Color::DarkGray)),
     ]))
@@ -167,23 +185,22 @@ fn dashboard_package_detail(
     speed_label: &str,
     content_width: usize,
 ) -> String {
-    let full = format!(
-        "{}/{} files  {} / {}  {:>3}%  {speed_label}",
-        package.completed_files,
-        package.present_files,
-        format_bytes(package.downloaded_bytes),
-        format_bytes(package.total_bytes),
-        package.percent
+    let downloaded = format_bytes(package.downloaded_bytes);
+    let total = format_bytes(package.total_bytes);
+    let mut full = String::with_capacity(40 + downloaded.len() + total.len() + speed_label.len());
+    let _ = write!(
+        full,
+        "{}/{} files  {downloaded} / {total}  {:>3}%  {speed_label}",
+        package.completed_files, package.present_files, package.percent
     );
     if text_width(&full) <= content_width / 2 {
         return full;
     }
-    let compact = format!(
-        "{}/{}  {}  {:>3}%  {speed_label}",
-        package.completed_files,
-        package.present_files,
-        format_bytes(package.total_bytes),
-        package.percent
+    let mut compact = String::with_capacity(24 + total.len() + speed_label.len());
+    let _ = write!(
+        compact,
+        "{}/{}  {total}  {:>3}%  {speed_label}",
+        package.completed_files, package.present_files, package.percent
     );
     truncate_end(&compact, content_width / 2)
 }
@@ -206,6 +223,15 @@ fn display_dashboard_package_name(package: &DashboardPackageRow) -> String {
             .next()
             .unwrap_or(&package.display_name),
     )
+}
+
+fn package_prefix_label(label: &str) -> String {
+    let compact = compact_label(label);
+    let mut prefixed = String::with_capacity(compact.len() + 3);
+    prefixed.push('[');
+    prefixed.push_str(&compact);
+    prefixed.push_str("] ");
+    prefixed
 }
 
 pub(super) fn dashboard_status_line(
@@ -234,14 +260,14 @@ pub(super) fn dashboard_status_line(
 
     if width <= 16 && error_count > 0 {
         return vec![Span::styled(
-            format!("{error_count} failed"),
+            failed_count_label(error_count),
             Style::default().fg(Color::Red),
         )];
     }
 
     if width <= 32 && downloading > 0 {
-        let activity = format!("Dl {downloading}, {queued} q");
-        let failure = (error_count > 0).then(|| format!("{error_count} failed"));
+        let activity = compact_activity_label(downloading, queued);
+        let failure = (error_count > 0).then(|| failed_count_label(error_count));
         if let Some(failure) = failure {
             return vec![
                 Span::styled(activity, Style::default().fg(Color::Cyan)),
@@ -277,7 +303,7 @@ pub(super) fn dashboard_status_line(
         if !parts.is_empty() {
             parts.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
         }
-        let error_text = selected_error.unwrap_or_else(|| format!("{error_count} failed"));
+        let error_text = selected_error.unwrap_or_else(|| failed_count_label(error_count));
         parts.push(Span::styled(
             truncate_end(&error_text, width.saturating_sub(12)),
             Style::default().fg(Color::Red),
@@ -320,15 +346,34 @@ fn dashboard_effective_status(state: &DownloadDashboardState) -> String {
         .filter(|file| file.status.is_queued())
         .count();
     if downloading > 0 {
-        return format!("Downloading {downloading} file(s), {queued} queued");
+        let mut status = String::with_capacity(40);
+        let _ = write!(status, "Downloading {downloading} file(s), {queued} queued");
+        return status;
     }
     if state.totals.files_total > 0 {
-        return format!(
+        let mut status = String::with_capacity(40);
+        let _ = write!(
+            status,
             "Queued {} file(s), {}/{} complete",
             queued, state.totals.files_completed, state.totals.files_total
         );
+        return status;
     }
-    format!("Queued {} file(s)", state.files.len())
+    let mut status = String::with_capacity(24);
+    let _ = write!(status, "Queued {} file(s)", state.files.len());
+    status
+}
+
+fn failed_count_label(error_count: usize) -> String {
+    let mut label = String::with_capacity(16);
+    let _ = write!(label, "{error_count} failed");
+    label
+}
+
+fn compact_activity_label(downloading: usize, queued: usize) -> String {
+    let mut label = String::with_capacity(16);
+    let _ = write!(label, "Dl {downloading}, {queued} q");
+    label
 }
 
 pub(super) fn controls_label_from_snapshot(
@@ -369,30 +414,34 @@ pub(super) fn dashboard_aggregate_progress_label(
     pct: u16,
     width: u16,
 ) -> String {
-    let bytes = format!(
-        "{} / {}",
-        format_bytes(state.totals.total_downloaded),
-        format_bytes(state.totals.total_size)
-    );
+    let downloaded = format_bytes(state.totals.total_downloaded);
+    let total = format_bytes(state.totals.total_size);
+    let mut bytes = String::with_capacity(downloaded.len() + total.len() + 3);
+    bytes.push_str(&downloaded);
+    bytes.push_str(" / ");
+    bytes.push_str(&total);
     let transfer = dashboard_transfer_label(state);
-    let full = format!(
+    let mut full = String::with_capacity(32 + bytes.len() + transfer.len());
+    let _ = write!(
+        full,
         "{pct}%  {}/{} files  {bytes}  {transfer}",
         state.totals.files_completed, state.totals.files_total
     );
     if full.chars().count() <= usize::from(width.saturating_sub(2)) {
         return full;
     }
-    let compact = format!(
+    let mut compact = String::with_capacity(20 + transfer.len());
+    let _ = write!(
+        compact,
         "{pct}%  {}/{}  {transfer}",
         state.totals.files_completed, state.totals.files_total
     );
     if compact.chars().count() <= usize::from(width.saturating_sub(2)) {
         return compact;
     }
-    truncate_end(
-        &format!("{pct}%  {transfer}"),
-        usize::from(width.saturating_sub(2)),
-    )
+    let mut shortest = String::with_capacity(6 + transfer.len());
+    let _ = write!(shortest, "{pct}%  {transfer}");
+    truncate_end(&shortest, usize::from(width.saturating_sub(2)))
 }
 
 pub(super) fn focused_url_input_view(
@@ -452,8 +501,18 @@ fn mega_url_label(value: &str) -> Option<String> {
     let path = &value[start..];
     let mut parts = path.split(['/', '#']);
     match (parts.next(), parts.next()) {
-        (Some("folder"), Some(id)) if !id.is_empty() => Some(format!("Folder {id}")),
-        (Some("file"), Some(id)) if !id.is_empty() => Some(format!("File {id}")),
+        (Some("folder"), Some(id)) if !id.is_empty() => {
+            let mut label = String::with_capacity("Folder ".len() + id.len());
+            label.push_str("Folder ");
+            label.push_str(id);
+            Some(label)
+        }
+        (Some("file"), Some(id)) if !id.is_empty() => {
+            let mut label = String::with_capacity("File ".len() + id.len());
+            label.push_str("File ");
+            label.push_str(id);
+            Some(label)
+        }
         _ => None,
     }
 }

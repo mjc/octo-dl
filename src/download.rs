@@ -1,5 +1,6 @@
 //! Core download logic and abstractions.
 
+use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -265,11 +266,17 @@ const SIDECAR_CHECKPOINT_CHUNK_INTERVAL: usize = 32;
 
 /// Returns the `.part` file path for a given final path.
 pub(crate) fn part_path(path: &str) -> PathBuf {
-    PathBuf::from(format!("{path}.part"))
+    let mut part = String::with_capacity(path.len() + ".part".len());
+    part.push_str(path);
+    part.push_str(".part");
+    PathBuf::from(part)
 }
 
 pub(crate) fn sidecar_path(path: &str) -> PathBuf {
-    PathBuf::from(format!("{path}.part.meta.json"))
+    let mut sidecar = String::with_capacity(path.len() + ".part.meta.json".len());
+    sidecar.push_str(path);
+    sidecar.push_str(".part.meta.json");
+    PathBuf::from(sidecar)
 }
 
 pub(crate) fn resume_sidecar_verified_bytes(path: &str) -> Option<u64> {
@@ -1105,16 +1112,23 @@ impl<F: FileSystem> Downloader<F> {
         progress: Option<&dyn DownloadProgress>,
     ) -> Result<CompletedFileVerify> {
         let final_path = Path::new(path);
-        let size = self
-            .fs
-            .file_size(final_path)
-            .await
-            .ok_or_else(|| Error::Download(format!("Completed file is missing: {path}")))?;
+        let size = self.fs.file_size(final_path).await.ok_or_else(|| {
+            let mut message =
+                String::with_capacity("Completed file is missing: ".len() + path.len());
+            message.push_str("Completed file is missing: ");
+            message.push_str(path);
+            Error::Download(message)
+        })?;
         if size != node.size() {
-            return Err(Error::Download(format!(
+            let mut message = String::with_capacity(
+                "Completed file size mismatch for : local= remote=".len() + path.len() + 40,
+            );
+            let _ = write!(
+                message,
                 "Completed file size mismatch for {path}: local={size} remote={}",
                 node.size()
-            )));
+            );
+            return Err(Error::Download(message));
         }
 
         let aes_iv = node.aes_iv().ok_or(mega::Error::MissingNodeAesIv)?;
@@ -1177,9 +1191,12 @@ impl<F: FileSystem> Downloader<F> {
             let index = usize::try_from(boundary.index)
                 .map_err(|_| Error::Download("MEGA chunk index overflow".to_string()))?;
             if !processor.set_chunk_mac(index, mac.finalize()) {
-                return Err(Error::Download(format!(
+                let mut message = String::with_capacity(64);
+                let _ = write!(
+                    message,
                     "MEGA chunk index {index} outside completed file MAC processor"
-                )));
+                );
+                return Err(Error::Download(message));
             }
         }
         processor
@@ -1645,7 +1662,12 @@ fn common_collected_root(collected: &CollectedFiles<'_>) -> Option<String> {
 }
 
 fn single_file_package_path(file_name: &str) -> String {
-    format!("{}/{}", stemmed_package_name(file_name), file_name)
+    let package_name = stemmed_package_name(file_name);
+    let mut path = String::with_capacity(package_name.len() + file_name.len() + 1);
+    path.push_str(&package_name);
+    path.push('/');
+    path.push_str(file_name);
+    path
 }
 
 fn stemmed_package_name(file_name: &str) -> String {

@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use indexmap::IndexMap;
@@ -511,7 +512,10 @@ pub fn aggregate_transfer_label(state: &DownloadDashboardState) -> String {
         return aggregate_activity_label(state);
     }
 
-    let speed = format!("{}/s", format_bytes(state.totals.current_speed));
+    let formatted_speed = format_bytes(state.totals.current_speed);
+    let mut speed = String::with_capacity(formatted_speed.len() + 2);
+    speed.push_str(&formatted_speed);
+    speed.push_str("/s");
     let remaining = state
         .totals
         .total_size
@@ -521,10 +525,12 @@ pub fn aggregate_transfer_label(state: &DownloadDashboardState) -> String {
     }
 
     let eta_secs = remaining.div_ceil(state.totals.current_speed).max(1);
-    format!(
-        "{speed}  eta {}",
-        format_duration(Duration::from_secs(eta_secs))
-    )
+    let eta = format_duration(Duration::from_secs(eta_secs));
+    let mut label = String::with_capacity(speed.len() + eta.len() + 7);
+    label.push_str(&speed);
+    label.push_str("  eta ");
+    label.push_str(&eta);
+    label
 }
 
 #[must_use]
@@ -539,7 +545,9 @@ pub fn aggregate_activity_label(state: &DownloadDashboardState) -> String {
         .filter(|file| file.status.is_queued())
         .count();
     if queued > 0 {
-        return format!("{queued} queued");
+        let mut label = String::with_capacity(16);
+        let _ = write!(label, "{queued} queued");
+        return label;
     }
 
     "idle".to_string()
@@ -563,21 +571,38 @@ pub fn file_detail(file: &DashboardFileRow) -> String {
             let speed = if matches!(file.status, DashboardFileStatus::Verifying) {
                 "  verify".to_string()
             } else if file.speed > 0 {
-                format!("  {}/s", format_bytes(file.speed))
+                let formatted_speed = format_bytes(file.speed);
+                let mut speed = String::with_capacity(formatted_speed.len() + 4);
+                speed.push_str("  ");
+                speed.push_str(&formatted_speed);
+                speed.push_str("/s");
+                speed
             } else {
                 "  active".to_string()
             };
-            format!("[{bar}] {pct}%{speed}")
+            let mut detail = String::with_capacity(bar.len() + speed.len() + 8);
+            let _ = write!(detail, "[{bar}] {pct}%{speed}");
+            detail
         }
         DashboardFileStatus::Queued => "queued".to_string(),
-        DashboardFileStatus::Complete => format!("{}  done", format_bytes(file.size)),
+        DashboardFileStatus::Complete => {
+            let formatted_size = format_bytes(file.size);
+            let mut detail = String::with_capacity(formatted_size.len() + 6);
+            detail.push_str(&formatted_size);
+            detail.push_str("  done");
+            detail
+        }
         DashboardFileStatus::Error { message } => message.clone(),
     }
 }
 
 fn progress_bar(downloaded: u64, total: u64, width: usize) -> String {
     if total == 0 {
-        return "\u{2591}".repeat(width);
+        let mut bar = String::with_capacity(width * "\u{2591}".len());
+        for _ in 0..width {
+            bar.push('\u{2591}');
+        }
+        return bar;
     }
     #[allow(
         clippy::cast_precision_loss,
@@ -587,7 +612,14 @@ fn progress_bar(downloaded: u64, total: u64, width: usize) -> String {
     let filled = ((downloaded as f64 / total as f64) * width as f64) as usize;
     let filled = filled.min(width);
     let empty = width - filled;
-    format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty))
+    let mut bar = String::with_capacity(width * "\u{2588}".len());
+    for _ in 0..filled {
+        bar.push('\u{2588}');
+    }
+    for _ in 0..empty {
+        bar.push('\u{2591}');
+    }
+    bar
 }
 
 #[cfg(test)]
