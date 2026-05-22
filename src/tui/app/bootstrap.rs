@@ -72,6 +72,9 @@ impl App {
             files: Vec::new(),
             cached_visible_rows: Vec::new(),
             cached_visible_rows_key: Default::default(),
+            dashboard_revision: 0,
+            dashboard_cache_key: None,
+            dashboard_json_cache: String::new(),
             visible_file_positions: HashMap::new(),
             overlay_files: IndexMap::new(),
             file_ui: HashMap::new(),
@@ -109,6 +112,7 @@ impl App {
             reverify_pending_files: HashSet::new(),
             verifying_files: HashSet::new(),
             verification_inflight_files: HashSet::new(),
+            verification_targets: HashMap::new(),
             session: None,
             session_persistence: super::SessionPersistence::new(),
             core_state: DownloadState::new(SessionMeta {

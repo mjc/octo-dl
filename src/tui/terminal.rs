@@ -137,6 +137,7 @@ async fn run_interactive_tui_loop(
         }
 
         if state_sync_enabled && dashboard_dirty && publish_dashboard_now {
+            app.mark_dashboard_dirty();
             let _ = app.publish_snapshot_if_observed(state_tx);
             dashboard_dirty = false;
         }
