@@ -3,7 +3,6 @@
 use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
@@ -326,7 +325,7 @@ struct ResumeSidecar {
 #[derive(Debug)]
 struct ResumeTracker {
     file_size: u64,
-    expected_condensed_mac_b64: String,
+    expected_condensed_mac: [u8; 8],
     chunk_macs: Vec<Option<[u8; 16]>>,
     dirty_chunks: usize,
 }
@@ -334,12 +333,12 @@ struct ResumeTracker {
 impl ResumeTracker {
     const fn new(
         file_size: u64,
-        expected_condensed_mac_b64: String,
+        expected_condensed_mac: [u8; 8],
         chunk_macs: Vec<Option<[u8; 16]>>,
     ) -> Self {
         Self {
             file_size,
-            expected_condensed_mac_b64,
+            expected_condensed_mac,
             chunk_macs,
             dirty_chunks: 0,
         }
@@ -361,7 +360,7 @@ impl ResumeTracker {
         ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size: self.file_size,
-            expected_condensed_mac_b64: self.expected_condensed_mac_b64.clone(),
+            expected_condensed_mac_b64: STANDARD.encode(self.expected_condensed_mac),
             verified_chunks: self
                 .chunk_macs
                 .iter()
@@ -381,10 +380,6 @@ impl ResumeTracker {
 
     fn checkpoint_snapshot(&mut self) -> Option<ResumeSidecar> {
         (self.dirty_chunks >= SIDECAR_CHECKPOINT_CHUNK_INTERVAL).then(|| self.snapshot())
-    }
-
-    fn trusted_chunks(&self) -> Vec<Option<[u8; 16]>> {
-        self.chunk_macs.clone()
     }
 }
 
@@ -524,6 +519,46 @@ fn spawn_sidecar_writer(
     (tx, handle)
 }
 
+struct RunningSidecarWriter {
+    tx: tokio::sync::mpsc::UnboundedSender<ResumeSidecar>,
+    handle: JoinHandle<()>,
+}
+
+struct LazySidecarWriter {
+    path: PathBuf,
+    part_path: PathBuf,
+    running: Mutex<Option<RunningSidecarWriter>>,
+}
+
+impl LazySidecarWriter {
+    const fn new(path: PathBuf, part_path: PathBuf) -> Self {
+        Self {
+            path,
+            part_path,
+            running: Mutex::new(None),
+        }
+    }
+
+    fn send(&self, snapshot: ResumeSidecar) {
+        let mut running = self.running.lock().unwrap();
+        if running.is_none() {
+            let (tx, handle) = spawn_sidecar_writer(self.path.clone(), self.part_path.clone());
+            *running = Some(RunningSidecarWriter { tx, handle });
+        }
+        if let Some(writer) = running.as_ref() {
+            let _ = writer.tx.send(snapshot);
+        }
+    }
+
+    async fn finish(&self, shutdown: SidecarWriterShutdown) {
+        let running = self.running.lock().unwrap().take();
+        if let Some(RunningSidecarWriter { tx, handle }) = running {
+            drop(tx);
+            finish_sidecar_writer(&self.path, handle, shutdown).await;
+        }
+    }
+}
+
 enum SidecarWriterShutdown {
     Flush,
     Abort,
@@ -560,11 +595,15 @@ async fn finish_sidecar_writer(
     }
 }
 
-fn encode_expected_mac(node: &mega::Node) -> Result<String> {
+fn expected_mac(node: &mega::Node) -> Result<[u8; 8]> {
     let mac = node
         .condensed_mac()
         .ok_or(mega::Error::MissingCondensedMac)?;
-    Ok(STANDARD.encode(mac))
+    Ok(*mac)
+}
+
+fn encode_expected_mac(node: &mega::Node) -> Result<String> {
+    Ok(STANDARD.encode(expected_mac(node)?))
 }
 
 const fn should_reuse_resume_state(force_overwrite: bool, trust_resume_state: bool) -> bool {
@@ -578,25 +617,6 @@ const fn is_condensed_mac_mismatch(error: &Error) -> bool {
 const fn should_delete_resume_state_on_error(config: &DownloadConfig, error: &Error) -> bool {
     is_condensed_mac_mismatch(error)
         || (config.cleanup_on_error && !matches!(error, Error::Cancelled))
-}
-
-fn consume_reused_bytes(remaining: &AtomicU64, delta: u64) -> u64 {
-    let mut current = remaining.load(Ordering::Relaxed);
-    loop {
-        if current == 0 || delta == 0 {
-            return 0;
-        }
-        let consumed = delta.min(current);
-        match remaining.compare_exchange_weak(
-            current,
-            current - consumed,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return consumed,
-            Err(next) => current = next,
-        }
-    }
 }
 
 fn revalidation_buffer_len(remaining: u64) -> usize {
@@ -1238,7 +1258,7 @@ impl<F: FileSystem> Downloader<F> {
 
         let pp = part_path(path);
         let sp = sidecar_path(path);
-        let expected_condensed_mac_b64 = encode_expected_mac(node)?;
+        let expected_condensed_mac = expected_mac(node)?;
         let boundaries = mega::mega_chunk_boundaries(node.size());
         log::debug!(
             "Download resume setup for {path}: size={} trust_resume_state={} force_overwrite={} part={} sidecar={} chunks={}",
@@ -1249,20 +1269,22 @@ impl<F: FileSystem> Downloader<F> {
             sp.display(),
             boundaries.len()
         );
-        let resume_validation =
-            if !should_reuse_resume_state(self.config.force_overwrite, trust_resume_state) {
-                ResumeValidation::empty(boundaries.len())
-            } else {
-                self.revalidate_resume_chunks(
-                    node,
-                    &boundaries,
-                    &pp,
-                    &sp,
-                    &expected_condensed_mac_b64,
-                    None,
-                )
-                .await?
-            };
+        let reuse_resume_state =
+            should_reuse_resume_state(self.config.force_overwrite, trust_resume_state);
+        let resume_validation = if reuse_resume_state {
+            let expected_condensed_mac_b64 = STANDARD.encode(expected_condensed_mac);
+            self.revalidate_resume_chunks(
+                node,
+                &boundaries,
+                &pp,
+                &sp,
+                &expected_condensed_mac_b64,
+                None,
+            )
+            .await?
+        } else {
+            ResumeValidation::empty(boundaries.len())
+        };
         log::debug!(
             "Download resume validation for {path}: sidecar_loaded={} trusted_chunks={} trusted_bytes={} source={:?}",
             resume_validation.sidecar_loaded,
@@ -1293,44 +1315,36 @@ impl<F: FileSystem> Downloader<F> {
             .open_part_file(&pp, node.size(), preserve_existing)
             .await?;
 
-        let name_clone = name.clone();
+        let trusted_for_download = resume_validation.trusted_chunks.clone();
         let tracker = Arc::new(Mutex::new(ResumeTracker::new(
             node.size(),
-            expected_condensed_mac_b64,
+            expected_condensed_mac,
             resume_validation.trusted_chunks,
         )));
-        let trusted_for_download = tracker.lock().unwrap().trusted_chunks();
-        let (sidecar_updates_tx, sidecar_writer) = spawn_sidecar_writer(sp.clone(), pp.clone());
+        let sidecar_writer = Arc::new(LazySidecarWriter::new(sp.clone(), pp.clone()));
         // The mega library calls the progress callback with the *cumulative*
         // total bytes downloaded so far, NOT a delta.  We use fetch_max (not
         // swap) so that out-of-order callbacks from parallel workers never
         // regress the high-water mark.
         let cumulative = Arc::new(CumulativeProgress::with_high_water(trusted_bytes));
-        // Reused bytes are reported once through on_resume_reused. The MEGA callback
-        // high-water starts after them, so every subsequent delta is fresh network data.
-        let reused_remaining = Arc::new(AtomicU64::new(0));
         let stats_clone = Arc::clone(&stats);
         let progress_clone = Arc::clone(progress);
         let name_for_cb = name.clone();
         let progress_cb = move |cumulative_bytes: u64| {
             let delta = cumulative.delta(cumulative_bytes);
             if delta > 0 {
-                let reused_delta = consume_reused_bytes(&reused_remaining, delta);
-                let fresh_delta = delta.saturating_sub(reused_delta);
-                if fresh_delta > 0 {
-                    let _ = stats_clone.record_bytes(fresh_delta);
-                }
+                let _ = stats_clone.record_bytes(delta);
                 progress_clone.on_progress(
                     &name_for_cb,
                     ProgressDelta {
                         total_bytes_delta: delta,
-                        network_bytes_delta: fresh_delta,
+                        network_bytes_delta: delta,
                     },
                 );
             }
         };
         let verify_tracker = Arc::clone(&tracker);
-        let sidecar_updates_tx_for_cb = sidecar_updates_tx.clone();
+        let sidecar_writer_for_cb = Arc::clone(&sidecar_writer);
         let chunk_verified_cb = move |index: u32, mac: [u8; 16]| {
             let snapshot = {
                 let mut guard = verify_tracker.lock().unwrap();
@@ -1338,7 +1352,7 @@ impl<F: FileSystem> Downloader<F> {
                 guard.checkpoint_snapshot()
             };
             if let Some(snapshot) = snapshot {
-                let _ = sidecar_updates_tx_for_cb.send(snapshot);
+                sidecar_writer_for_cb.send(snapshot);
             }
         };
 
@@ -1373,13 +1387,12 @@ impl<F: FileSystem> Downloader<F> {
                 .await
                 .map_err(Error::Mega)
         };
-        drop(sidecar_updates_tx);
         let sidecar_shutdown = if download_result.is_ok() {
             SidecarWriterShutdown::Abort
         } else {
             SidecarWriterShutdown::Flush
         };
-        finish_sidecar_writer(&sp, sidecar_writer, sidecar_shutdown).await;
+        sidecar_writer.finish(sidecar_shutdown).await;
         self.finish_download_result(
             DownloadFinishContext {
                 node,
@@ -1390,7 +1403,7 @@ impl<F: FileSystem> Downloader<F> {
                 stats: &stats,
                 tracker: &tracker,
                 progress,
-                name: &name_clone,
+                name: &name,
             },
             download_result,
         )
@@ -1483,35 +1496,26 @@ impl<F: FileSystem> Downloader<F> {
             return Ok(builder.build());
         }
 
-        let peak_speed = Arc::new(AtomicU64::new(0));
-
-        let results: Vec<_> = stream::iter(files)
-            .map(|item| {
-                let peak_tracker = Arc::clone(&peak_speed);
-                async move {
-                    let result = self
-                        .download_file(item.node, &item.path, progress, false, None)
-                        .await;
-                    if let Ok(ref stats) = result {
-                        peak_tracker.fetch_max(stats.peak_speed, Ordering::Relaxed);
-                    }
-                    result
-                }
+        let mut peak_speed = 0;
+        let mut downloads = stream::iter(files)
+            .map(|item| async move {
+                self.download_file(item.node, &item.path, progress, false, None)
+                    .await
             })
-            .buffer_unordered(self.config.concurrent_files)
-            .collect()
-            .await;
+            .buffer_unordered(self.config.concurrent_files);
 
-        builder.set_peak_speed(peak_speed.load(Ordering::Relaxed));
-
-        for result in results {
+        while let Some(result) = downloads.next().await {
             match result {
-                Ok(file_stats) => builder.add_download(&file_stats),
+                Ok(file_stats) => {
+                    peak_speed = peak_speed.max(file_stats.peak_speed);
+                    builder.add_download(&file_stats);
+                }
                 Err(e) => {
                     log::error!("Download failed: {e}");
                 }
             }
         }
+        builder.set_peak_speed(peak_speed);
 
         Ok(builder.build())
     }
@@ -1540,35 +1544,26 @@ impl<F: FileSystem> Downloader<F> {
             return Ok(builder.build());
         }
 
-        let peak_speed = Arc::new(AtomicU64::new(0));
-
-        let results: Vec<_> = stream::iter(files)
-            .map(|item| {
-                let peak_tracker = Arc::clone(&peak_speed);
-                async move {
-                    let result = self
-                        .download_file(&item.node, &item.path, progress, false, None)
-                        .await;
-                    if let Ok(ref stats) = result {
-                        peak_tracker.fetch_max(stats.peak_speed, Ordering::Relaxed);
-                    }
-                    result
-                }
+        let mut peak_speed = 0;
+        let mut downloads = stream::iter(files)
+            .map(|item| async move {
+                self.download_file(&item.node, &item.path, progress, false, None)
+                    .await
             })
-            .buffer_unordered(self.config.concurrent_files)
-            .collect()
-            .await;
+            .buffer_unordered(self.config.concurrent_files);
 
-        builder.set_peak_speed(peak_speed.load(Ordering::Relaxed));
-
-        for result in results {
+        while let Some(result) = downloads.next().await {
             match result {
-                Ok(file_stats) => builder.add_download(&file_stats),
+                Ok(file_stats) => {
+                    peak_speed = peak_speed.max(file_stats.peak_speed);
+                    builder.add_download(&file_stats);
+                }
                 Err(e) => {
                     log::error!("Download failed: {e}");
                 }
             }
         }
+        builder.set_peak_speed(peak_speed);
 
         Ok(builder.build())
     }
@@ -1911,17 +1906,6 @@ mod tests {
     }
 
     #[test]
-    fn consume_reused_bytes_caps_at_remaining() {
-        let remaining = AtomicU64::new(100);
-
-        assert_eq!(consume_reused_bytes(&remaining, 60), 60);
-        assert_eq!(remaining.load(Ordering::Relaxed), 40);
-        assert_eq!(consume_reused_bytes(&remaining, 60), 40);
-        assert_eq!(remaining.load(Ordering::Relaxed), 0);
-        assert_eq!(consume_reused_bytes(&remaining, 60), 0);
-    }
-
-    #[test]
     fn resume_progress_high_water_ignores_initial_trusted_callback() {
         let trusted_bytes = 1_024;
         let cumulative = CumulativeProgress::with_high_water(trusted_bytes);
@@ -1933,15 +1917,10 @@ mod tests {
     fn resume_progress_after_high_water_counts_fresh_bytes_as_network() {
         let trusted_bytes = 1_024;
         let cumulative = CumulativeProgress::with_high_water(trusted_bytes);
-        let reused_remaining = AtomicU64::new(0);
 
         let delta = cumulative.delta(trusted_bytes + 512);
-        let reused_delta = consume_reused_bytes(&reused_remaining, delta);
-        let fresh_delta = delta.saturating_sub(reused_delta);
 
         assert_eq!(delta, 512);
-        assert_eq!(reused_delta, 0);
-        assert_eq!(fresh_delta, 512);
     }
 
     #[test]
