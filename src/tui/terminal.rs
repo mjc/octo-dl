@@ -79,6 +79,7 @@ async fn run_interactive_tui_loop(
     let mut auto_login_after_first_draw = true;
 
     loop {
+        let mut publish_dashboard_now = false;
         if needs_draw {
             terminal.draw(|f| draw(f, app))?;
             needs_draw = false;
@@ -93,6 +94,7 @@ async fn run_interactive_tui_loop(
                 request_quit(app);
                 needs_draw = true;
                 dashboard_dirty = true;
+                publish_dashboard_now = true;
             }
             Some(event) = input_rx.recv() => {
                 match event {
@@ -102,6 +104,7 @@ async fn run_interactive_tui_loop(
                 }
                 needs_draw = true;
                 dashboard_dirty = true;
+                publish_dashboard_now = true;
             }
             Some(event) = download_rx.recv() => {
                 app.handle_download_event(event);
@@ -114,6 +117,7 @@ async fn run_interactive_tui_loop(
                 let _ = app.drain_ui_actions(action_rx);
                 needs_draw = true;
                 dashboard_dirty = true;
+                publish_dashboard_now = true;
             }
             _ = tick.tick() => {
                 tick_count = tick_count.saturating_add(1);
@@ -128,10 +132,11 @@ async fn run_interactive_tui_loop(
                 );
                 needs_draw = true;
                 download_state_dirty = false;
+                publish_dashboard_now = true;
             }
         }
 
-        if state_sync_enabled && dashboard_dirty {
+        if state_sync_enabled && dashboard_dirty && publish_dashboard_now {
             let _ = app.publish_snapshot_if_observed(state_tx);
             dashboard_dirty = false;
         }

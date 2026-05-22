@@ -929,6 +929,40 @@ fn handle_main_input_alt_r_skips_never_started_file() {
 }
 
 #[test]
+fn handle_main_input_alt_r_clears_stale_verify_state_for_never_started_file() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    resolve_test_package(
+        &mut app,
+        "https://mega.nz/file/reverify",
+        vec![ResolvedFile {
+            file_id: "queued.bin".to_string().into(),
+            path: "queued.bin".to_string(),
+            size: 100,
+        }],
+    );
+    let file_id: crate::core::FileId = "queued.bin".to_string().into();
+    app.verifying_files.insert(file_id.clone());
+    app.verification_inflight_files.insert(file_id.clone());
+    app.expanded_packages.insert(package_id(
+        "https://mega.nz/file/reverify",
+        "https://mega.nz/file/reverify",
+    ));
+    app.sync_visible_files();
+    app.file_list_state.select(Some(1));
+
+    handle_input(&mut app, alt_key(KeyCode::Char('r')));
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert_eq!(app.files[0].status, FileStatus::Queued);
+    assert_eq!(app.files[0].downloaded, 0);
+    assert_eq!(app.status, "Reverify unavailable for selected file");
+    assert!(url_rx.try_recv().is_err());
+}
+
+#[test]
 fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
     let mut app = test_app();
     let (url_tx, mut url_rx) = mpsc::unbounded_channel();

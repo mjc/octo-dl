@@ -286,7 +286,7 @@ impl App {
                     size: file.size,
                     downloaded: file.downloaded,
                     speed: self.file_speed(&file.id),
-                    status: if self.verifying_files.contains(&file.id) {
+                    status: if self.verification_inflight_files.contains(&file.id) {
                         DashboardFileStatus::Verifying
                     } else {
                         DashboardFileStatus::from(&file.status)
@@ -404,7 +404,7 @@ impl App {
                     for file in package_files {
                         source_url = source_url.or_else(|| Some(file.source_url.clone()));
                         package_downloading |= matches!(file.lifecycle, FileLifecycle::Downloading);
-                        package_verifying |= self.verifying_files.contains(&file.id);
+                        package_verifying |= self.verification_inflight_files.contains(&file.id);
                         let folder = file.path.split('/').next().filter(|part| !part.is_empty());
                         match (common_folder, folder) {
                             (None, Some(folder)) => common_folder = Some(folder),
@@ -697,6 +697,30 @@ mod tests {
         assert_eq!(state.packages[0].percent, 100);
         assert_eq!(state.files[0].downloaded, 100);
         assert_eq!(state.files[0].status, DashboardFileStatus::Downloading);
+    }
+
+    #[test]
+    fn dashboard_projection_uses_inflight_verification_for_verify_status() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx, true);
+        app.files.push(super::super::app::FileEntry {
+            id: "file.bin".to_string().into(),
+            name: "file.bin".to_string(),
+            size: 100,
+            downloaded: 0,
+            status: FileStatus::Queued,
+        });
+        app.verifying_files.insert("file.bin".to_string().into());
+
+        let state = app.dashboard_state(DashboardUiMode::Tui, false);
+
+        assert_eq!(state.files[0].status, DashboardFileStatus::Queued);
+
+        app.verification_inflight_files
+            .insert("file.bin".to_string().into());
+        let state = app.dashboard_state(DashboardUiMode::Tui, false);
+
+        assert_eq!(state.files[0].status, DashboardFileStatus::Verifying);
     }
 
     #[test]
