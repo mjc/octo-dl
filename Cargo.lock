@@ -738,6 +738,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
 
 [[package]]
+name = "futures-timer"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af43fadb8a98512d547e37b4e92e0ced13e205c061b87b4623eff01d918d6968"
+
+[[package]]
 name = "futures-util"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1359,7 +1365,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mega"
 version = "0.8.0"
-source = "git+https://github.com/mjc/mega-rs.git?branch=parallel-download#9ec5fd8ba331460079323702be7d3a354df15730"
+source = "git+https://github.com/mjc/mega-rs.git?branch=parallel-download#f387cb1b10a340df0a46ff00c93fcb4acf5b327b"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1372,6 +1378,7 @@ dependencies = [
  "crc32fast",
  "ctr",
  "futures",
+ "futures-timer",
  "hkdf",
  "hmac",
  "num-bigint-dig",
