@@ -383,7 +383,7 @@ fn render_file_row_app(
         FileStatus::Complete => ("\u{2713}", Color::Green),
         FileStatus::Error(_) => ("\u{2717}", Color::Red),
     };
-    let detail_color = if app.verification_inflight_files.contains(file_id) {
+    let detail_color = if app.is_verification_active(file_id) {
         Color::Blue
     } else if matches!(status, FileStatus::Downloading) {
         Color::Yellow
@@ -411,7 +411,7 @@ fn render_file_row_app(
         detail_width,
         text_width(display_name),
     );
-    let mut row_style = Style::default().fg(if app.verification_inflight_files.contains(file_id) {
+    let mut row_style = Style::default().fg(if app.is_verification_active(file_id) {
         Color::Blue
     } else {
         color
@@ -559,7 +559,7 @@ impl<'a> PackageRowStats<'a> {
                 continue;
             }
             stats.downloading |= matches!(file.lifecycle, FileLifecycle::Downloading);
-            stats.verifying |= app.verification_inflight_files.contains(&file.id);
+            stats.verifying |= app.is_verification_active(&file.id);
             stats.record_folder(file.path.split('/').next().filter(|part| !part.is_empty()));
 
             let file_complete = matches!(file.lifecycle, FileLifecycle::Complete);
@@ -682,7 +682,7 @@ fn render_clipped_text(
 }
 
 fn file_status_for_draw(app: &App, file: &FileEntry) -> FileStatus {
-    if app.verification_inflight_files.contains(&file.id) {
+    if app.is_verification_active(&file.id) {
         FileStatus::Downloading
     } else {
         file.status.clone()
@@ -710,7 +710,7 @@ enum ActiveDetailSuffix {
 
 impl<'a> FileDetail<'a> {
     fn new(app: &App, file: &'a FileEntry, status: &'a FileStatus) -> Self {
-        let verifying = app.verification_inflight_files.contains(&file.id);
+        let verifying = app.is_verification_active(&file.id);
         if verifying || matches!(status, FileStatus::Downloading) {
             #[allow(
                 clippy::cast_precision_loss,
@@ -1250,8 +1250,7 @@ fn aggregate_transfer_label_app(app: &App) -> String {
 fn aggregate_activity_label_app(app: &App) -> String {
     if app.current_speed > 0
         || app.files.iter().any(|file| {
-            matches!(file.status, FileStatus::Downloading)
-                || app.verification_inflight_files.contains(&file.id)
+            matches!(file.status, FileStatus::Downloading) || app.is_verification_active(&file.id)
         })
     {
         return "active".to_string();
@@ -1807,7 +1806,9 @@ mod tests {
         });
         let verifying_id: crate::core::FileId = "two.bin".to_string().into();
         app.verifying_files.insert(verifying_id.clone());
-        app.verification_inflight_files.insert(verifying_id);
+        app.verification_inflight_files.insert(verifying_id.clone());
+        app.verification_targets
+            .insert(verifying_id, crate::tui::app::VerificationTarget::Resume);
 
         let stats = PackageRowStats::new(&app, package_id);
 
@@ -2270,7 +2271,9 @@ mod tests {
             status: FileStatus::Queued,
         });
         app.verifying_files.insert(file_id.clone());
-        app.verification_inflight_files.insert(file_id);
+        app.verification_inflight_files.insert(file_id.clone());
+        app.verification_targets
+            .insert(file_id, crate::tui::app::VerificationTarget::Resume);
 
         let buffer = render_buffer(&mut app, 100, 24);
         let area = buffer.area;
@@ -2295,7 +2298,7 @@ mod tests {
     }
 
     #[test]
-    fn draw_main_does_not_show_verify_for_non_inflight_bookkeeping() {
+    fn draw_main_does_not_show_verify_without_explicit_target() {
         let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
         let mut app = App::new(9723, tx, true);
         let file_id: crate::core::FileId = "queued.bin".to_string().into();
@@ -2306,13 +2309,14 @@ mod tests {
             downloaded: 0,
             status: FileStatus::Queued,
         });
-        app.verifying_files.insert(file_id);
+        app.verifying_files.insert(file_id.clone());
+        app.verification_inflight_files.insert(file_id);
 
         let buffer = render_buffer(&mut app, 100, 24);
 
         assert!(
             !buffer_contains_text_with_color(&buffer, "queued.bin", Color::Blue),
-            "bookkeeping-only verify state should not render as active verification"
+            "inflight bookkeeping without a target should not render as active verification"
         );
     }
 
@@ -2368,7 +2372,9 @@ mod tests {
             file_id: file_id.clone(),
         });
         app.verifying_files.insert(file_id.clone());
-        app.verification_inflight_files.insert(file_id);
+        app.verification_inflight_files.insert(file_id.clone());
+        app.verification_targets
+            .insert(file_id, crate::tui::app::VerificationTarget::Completed);
 
         let buffer = render_buffer(&mut app, 100, 24);
 
