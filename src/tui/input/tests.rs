@@ -862,6 +862,227 @@ fn handle_main_input_shift_r_resets_selected_file_from_scratch() {
 }
 
 #[test]
+fn handle_main_input_alt_r_reverifies_selected_file() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    resolve_test_package(
+        &mut app,
+        "https://mega.nz/file/reverify",
+        vec![ResolvedFile {
+            file_id: "active.bin".to_string().into(),
+            path: "active.bin".to_string(),
+            size: 100,
+        }],
+    );
+    app.expanded_packages.insert(package_id(
+        "https://mega.nz/file/reverify",
+        "https://mega.nz/file/reverify",
+    ));
+    app.sync_visible_files();
+    app.file_list_state.select(Some(1));
+
+    handle_input(&mut app, alt_key(KeyCode::Char('r')));
+
+    assert_eq!(app.popup, Popup::None);
+    assert_eq!(app.pending_confirmation, None);
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::ReverifyFileIds {
+            source_url: "https://mega.nz/file/reverify".to_string(),
+            file_ids: vec!["active.bin".to_string().into()],
+        }
+    );
+}
+
+#[test]
+fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    let token = tokio_util::sync::CancellationToken::new();
+    resolve_test_package(
+        &mut app,
+        "https://mega.nz/file/reverify",
+        vec![ResolvedFile {
+            file_id: "active.bin".to_string().into(),
+            path: "active.bin".to_string(),
+            size: 100,
+        }],
+    );
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: "active.bin".to_string().into(),
+        size: 100,
+    });
+    app.apply_core_event(CoreEvent::FileReuseDetected {
+        file_id: "active.bin".to_string().into(),
+        reused_bytes: 60,
+        reused_chunks: 1,
+    });
+    app.cancellation_tokens
+        .insert("active.bin".to_string().into(), token.clone());
+    app.expanded_packages.insert(package_id(
+        "https://mega.nz/file/reverify",
+        "https://mega.nz/file/reverify",
+    ));
+    app.sync_visible_files();
+    app.file_list_state.select(Some(1));
+
+    handle_input(&mut app, alt_key(KeyCode::Char('R')));
+
+    assert!(token.is_cancelled());
+    assert!(app.verifying_files.contains("active.bin"));
+    assert_eq!(app.files[0].status, FileStatus::Queued);
+    assert_eq!(
+        app.files[0].downloaded, 0,
+        "verification should show its own progress from zero"
+    );
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::ReverifyFileIds {
+            source_url: "https://mega.nz/file/reverify".to_string(),
+            file_ids: vec!["active.bin".to_string().into()],
+        }
+    );
+    assert!(url_rx.try_recv().is_err());
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::VerificationProgress {
+        id: "active.bin".to_string().into(),
+        bytes_delta: 40,
+    });
+    assert!(app.verifying_files.contains("active.bin"));
+    assert_eq!(
+        app.files[0].downloaded, 40,
+        "blue verification progress should advance as bytes are checked"
+    );
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::ResumeReverified {
+        id: "active.bin".to_string().into(),
+        chunks: 1,
+        bytes: 70,
+    });
+    assert!(app.verifying_files.contains("active.bin"));
+    assert_eq!(
+        app.files[0].downloaded, 70,
+        "Alt-R should publish the newly verified percent before resuming the progress bar"
+    );
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
+        id: "active.bin".to_string().into(),
+        size: 100,
+        attempt_id: 0,
+    });
+    assert!(!app.verifying_files.contains("active.bin"));
+    assert_eq!(
+        app.files[0].downloaded, 70,
+        "Alt-R resume start should preserve the newly verified percent"
+    );
+}
+
+#[test]
+fn handle_main_input_alt_r_verifies_completed_file_instead_of_resume_sidecar() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    resolve_test_package(
+        &mut app,
+        "https://mega.nz/file/reverify",
+        vec![ResolvedFile {
+            file_id: "complete.bin".to_string().into(),
+            path: "complete.bin".to_string(),
+            size: 100,
+        }],
+    );
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: "complete.bin".to_string().into(),
+    });
+    app.expanded_packages.insert(package_id(
+        "https://mega.nz/file/reverify",
+        "https://mega.nz/file/reverify",
+    ));
+    app.sync_visible_files();
+    app.file_list_state.select(Some(1));
+
+    handle_input(&mut app, alt_key(KeyCode::Char('r')));
+
+    assert!(app.verifying_files.contains("complete.bin"));
+    assert_eq!(
+        app.files[0].downloaded, 0,
+        "completed-file verification should show verification progress from zero"
+    );
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::VerifyCompletedFileIds {
+            source_url: "https://mega.nz/file/reverify".to_string(),
+            file_ids: vec!["complete.bin".to_string().into()],
+        }
+    );
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::VerificationProgress {
+        id: "complete.bin".to_string().into(),
+        bytes_delta: 55,
+    });
+    assert_eq!(app.files[0].downloaded, 55);
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::CompletedFileVerified {
+        id: "complete.bin".to_string().into(),
+        bytes: 100,
+    });
+    assert!(!app.verifying_files.contains("complete.bin"));
+    assert_eq!(app.files[0].status, FileStatus::Complete);
+}
+
+#[test]
+fn handle_main_input_alt_r_on_package_verifies_all_files_by_kind() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    let source_url = "https://mega.nz/folder/reverify";
+    resolve_test_package(
+        &mut app,
+        source_url,
+        (0..5)
+            .map(|index| ResolvedFile {
+                file_id: format!("file-{index}.bin").into(),
+                path: format!("file-{index}.bin"),
+                size: 100,
+            })
+            .collect(),
+    );
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: "file-4.bin".to_string().into(),
+    });
+    app.sync_visible_files();
+    app.file_list_state.select(Some(0));
+
+    handle_input(&mut app, alt_key(KeyCode::Char('r')));
+
+    for index in 0..5 {
+        let file_id = crate::core::FileId::from(format!("file-{index}.bin").as_str());
+        assert!(app.verifying_files.contains(&file_id));
+    }
+    assert!(app.files.iter().all(|file| file.downloaded == 0));
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::ReverifyFileIds {
+            source_url: source_url.to_string(),
+            file_ids: (0..4)
+                .map(|index| crate::core::FileId::from(format!("file-{index}.bin").as_str()))
+                .collect(),
+        }
+    );
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::VerifyCompletedFileIds {
+            source_url: source_url.to_string(),
+            file_ids: vec!["file-4.bin".to_string().into()],
+        }
+    );
+    assert!(url_rx.try_recv().is_err());
+    assert!(app.status.contains("4 at a time"));
+}
+
+#[test]
 fn handle_main_input_delete_keeps_completed_file_artifact() {
     let dir = tempdir().unwrap();
     let final_path = dir.path().join("complete.bin");

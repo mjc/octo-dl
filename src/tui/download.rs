@@ -1,6 +1,7 @@
 //! Download task management and transport-side event emission.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,18 +10,22 @@ use indexmap::{IndexMap, IndexSet};
 #[path = "download_tests.rs"]
 mod tests;
 
-use futures_util::FutureExt;
+use futures_util::{FutureExt, StreamExt, stream};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::{FileAccounting, FileId, PackageId};
-use crate::{DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, is_dlc_path};
+use crate::{
+    DlcKeyCache, DownloadConfig, DownloadProgress, core::ProgressDelta, format_bytes, is_dlc_path,
+};
 use dirs;
 
 use super::event::{
     DownloadChannels, DownloadEvent, DownloadRequest, FileOrigin, QueuedFile, TokenMessage,
     TuiProgress,
 };
+
+const PACKAGE_REVERIFY_CONCURRENCY: usize = 4;
 
 pub(crate) fn schedule_resume_artifact_delete(path: String) {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -247,6 +252,7 @@ struct SchedulerState {
     pending_queue: VecDeque<FileId>,
     available_downloads: HashMap<FileId, QueuedDownload>,
     active_downloads: HashSet<FileId>,
+    exclusive_resume_target: Option<FileId>,
     join_set: tokio::task::JoinSet<DownloadTaskResult>,
 }
 
@@ -257,6 +263,7 @@ impl SchedulerState {
             pending_queue: VecDeque::new(),
             available_downloads: HashMap::new(),
             active_downloads: HashSet::new(),
+            exclusive_resume_target: None,
             join_set: tokio::task::JoinSet::new(),
         }
     }
@@ -275,21 +282,87 @@ impl SchedulerState {
         batch
     }
 
-    fn finish_download(&mut self, file_id: &FileId) {
+    fn finish_download(&mut self, file_id: &FileId, result: &crate::Result<crate::FileStats>) {
         self.active_downloads.remove(file_id);
-        self.available_downloads.remove(file_id);
+        if !matches!(result, Err(crate::Error::Cancelled)) {
+            self.available_downloads.remove(file_id);
+        }
         self.rebuild_pending_queue();
+    }
+
+    fn pause_file_ids(&mut self, file_ids: &[FileId]) -> Vec<QueuedDownload> {
+        let mut paused = Vec::new();
+        for file_id in file_ids {
+            if let Some(download) = self.available_downloads.remove(file_id) {
+                paused.push(download);
+            }
+        }
+        self.desired_pending_order
+            .retain(|file_id| !file_ids.contains(file_id));
+        self.pending_queue
+            .retain(|file_id| !file_ids.contains(file_id));
+        paused
+    }
+
+    fn unpause_downloads(&mut self, downloads: impl IntoIterator<Item = QueuedDownload>) {
+        for download in downloads {
+            let file_id = FileId::from(download.item.path.as_str());
+            self.available_downloads.insert(file_id.clone(), download);
+            if !self.desired_pending_order.contains(&file_id) {
+                self.desired_pending_order.push(file_id.clone());
+            }
+            self.exclusive_resume_target = Some(file_id);
+        }
+        self.rebuild_pending_queue();
+    }
+
+    fn clear_exclusive_resume_target(&mut self, file_id: &FileId) {
+        if self
+            .exclusive_resume_target
+            .as_ref()
+            .is_some_and(|target| target == file_id)
+        {
+            self.exclusive_resume_target = None;
+        }
     }
 
     fn rebuild_pending_queue(&mut self) {
         self.pending_queue.clear();
-        self.pending_queue
-            .extend(self.desired_pending_order.iter().filter_map(|file_id| {
-                (self.available_downloads.contains_key(file_id)
-                    && !self.active_downloads.contains(file_id))
-                .then(|| file_id.clone())
-            }));
+        self.pending_queue.extend(select_startable_file_ids(
+            &VecDeque::from(self.desired_pending_order.clone()),
+            &self.available_downloads.keys().cloned().collect(),
+            &self.active_downloads,
+            &None,
+            usize::MAX,
+        ));
     }
+}
+
+fn select_startable_file_ids(
+    pending_queue: &VecDeque<FileId>,
+    available_file_ids: &HashSet<FileId>,
+    active_downloads: &HashSet<FileId>,
+    exclusive_resume_target: &Option<FileId>,
+    capacity: usize,
+) -> Vec<FileId> {
+    if capacity == 0 {
+        return Vec::new();
+    }
+    if let Some(target) = exclusive_resume_target {
+        if available_file_ids.contains(target) && !active_downloads.contains(target) {
+            return vec![target.clone()];
+        }
+        return Vec::new();
+    }
+
+    pending_queue
+        .iter()
+        .filter(|file_id| {
+            available_file_ids.contains(*file_id) && !active_downloads.contains(*file_id)
+        })
+        .take(capacity)
+        .cloned()
+        .collect()
 }
 
 struct FileProgress {
@@ -338,6 +411,35 @@ impl DownloadProgress for FileProgress {
             attempt_id: self.attempt_id,
         });
     }
+}
+
+#[derive(Clone)]
+struct VerificationProgress {
+    tx: mpsc::UnboundedSender<DownloadEvent>,
+    id: FileId,
+}
+
+impl DownloadProgress for VerificationProgress {
+    fn on_progress(&self, _name: &str, delta: ProgressDelta) {
+        let _ = self.tx.send(DownloadEvent::VerificationProgress {
+            id: self.id.clone(),
+            bytes_delta: delta.total_bytes_delta,
+        });
+    }
+}
+
+async fn for_each_verification_item<T, F, Fut>(items: Vec<T>, limit: usize, f: F)
+where
+    T: Send + 'static,
+    F: Fn(T) -> Fut + Clone,
+    Fut: Future<Output = ()> + Send,
+{
+    stream::iter(items)
+        .for_each_concurrent(limit.max(1), move |item| {
+            let f = f.clone();
+            async move { f(item).await }
+        })
+        .await;
 }
 
 #[allow(clippy::too_many_lines)]
@@ -434,6 +536,18 @@ fn queue_download_request_events(
                 file_ids.len()
             )));
         }
+        DownloadRequest::ReverifyFileIds { file_ids, .. } => {
+            let _ = tx.send(DownloadEvent::StatusMessage(format!(
+                "Reverifying {} file(s)...",
+                file_ids.len()
+            )));
+        }
+        DownloadRequest::VerifyCompletedFileIds { file_ids, .. } => {
+            let _ = tx.send(DownloadEvent::StatusMessage(format!(
+                "Verifying {} completed file(s)...",
+                file_ids.len()
+            )));
+        }
         DownloadRequest::SyncPendingOrder { .. } => {}
     }
 }
@@ -455,6 +569,38 @@ async fn handle_download_request(
             let collected = scheduler.register_resolved_batch(collected);
             collected.emit_events(tx);
             let _ = token_tx;
+            true
+        }
+        DownloadRequest::ReverifyFileIds {
+            source_url,
+            file_ids,
+        } => {
+            let paused = scheduler.pause_file_ids(&file_ids);
+            queue_download_request_events(
+                &DownloadRequest::ReverifyFileIds {
+                    source_url: source_url.clone(),
+                    file_ids: file_ids.clone(),
+                },
+                tx,
+            );
+            let reverified = reverify_resume_files(source_url, file_ids, runtime, tx).await;
+            scheduler.unpause_downloads(paused.into_iter().filter(|download| {
+                reverified.contains_key(&FileId::from(download.item.path.as_str()))
+            }));
+            true
+        }
+        DownloadRequest::VerifyCompletedFileIds {
+            source_url,
+            file_ids,
+        } => {
+            queue_download_request_events(
+                &DownloadRequest::VerifyCompletedFileIds {
+                    source_url: source_url.clone(),
+                    file_ids: file_ids.clone(),
+                },
+                tx,
+            );
+            verify_completed_files(source_url, file_ids, runtime, tx).await;
             true
         }
         DownloadRequest::SyncPendingOrder { file_ids } => {
@@ -506,7 +652,9 @@ async fn resolve_download_requests(
                 }
                 entry.1.extend(attempt_ids.clone());
             }
-            DownloadRequest::SyncPendingOrder { .. } => {}
+            DownloadRequest::ReverifyFileIds { .. }
+            | DownloadRequest::VerifyCompletedFileIds { .. }
+            | DownloadRequest::SyncPendingOrder { .. } => {}
         }
     }
 
@@ -610,6 +758,195 @@ fn expand_dlc_path(url: &str) -> Result<String, String> {
     Ok(url.replacen('~', home.to_string_lossy().as_ref(), 1))
 }
 
+async fn verify_completed_files(
+    source_url: String,
+    file_ids: Vec<FileId>,
+    runtime: &DownloadRuntime,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+) {
+    let requested = file_ids.into_iter().collect::<HashSet<_>>();
+    let sources = resolve_submitted_url(&source_url, &runtime.http, &runtime.dlc_cache, tx).await;
+    let progress: Arc<dyn DownloadProgress> = Arc::new(crate::NoProgress);
+    let mut matched = 0usize;
+    let mut items = Vec::new();
+
+    for source in sources {
+        let nodes = match fetch_node_set(&source, &runtime.http).await {
+            Ok(nodes) => nodes,
+            Err(error) => {
+                let _ = tx.send(DownloadEvent::ScopeError {
+                    scope: source.source_url,
+                    error,
+                });
+                continue;
+            }
+        };
+        let collected = runtime.downloader.collect_files(&nodes, &progress).await;
+        for item in collected.completed {
+            if !requested.contains(&FileId::from(item.path.as_str())) {
+                continue;
+            }
+            matched = matched.saturating_add(1);
+            items.push(crate::OwnedDownloadItem {
+                path: item.path,
+                node: item.node.clone(),
+                was_partial: item.was_partial,
+            });
+        }
+    }
+
+    let downloader = Arc::clone(&runtime.downloader);
+    let tx_for_items = tx.clone();
+    for_each_verification_item(items, PACKAGE_REVERIFY_CONCURRENCY, move |item| {
+        let downloader = Arc::clone(&downloader);
+        let tx = tx_for_items.clone();
+        async move {
+            let id = FileId::from(item.path.as_str());
+            let progress = VerificationProgress {
+                tx: tx.clone(),
+                id: id.clone(),
+            };
+            match downloader
+                .verify_completed_file_with_progress(&item.node, &item.path, Some(&progress))
+                .await
+            {
+                Ok(result) => {
+                    let _ = tx.send(DownloadEvent::CompletedFileVerified {
+                        id,
+                        bytes: result.bytes,
+                    });
+                    let _ = tx.send(DownloadEvent::StatusMessage(format!(
+                        "Verified {}: {} final file OK",
+                        item.path,
+                        format_bytes(result.bytes)
+                    )));
+                }
+                Err(error) => {
+                    let _ = tx.send(DownloadEvent::ScopeError {
+                        scope: item.path,
+                        error: format!("Final verification failed: {error}"),
+                    });
+                }
+            }
+        }
+    })
+    .await;
+
+    if matched == 0 {
+        let _ = tx.send(DownloadEvent::StatusMessage(format!(
+            "No completed file(s) found to verify for {source_url}"
+        )));
+    }
+}
+
+async fn reverify_resume_files(
+    source_url: String,
+    file_ids: Vec<FileId>,
+    runtime: &DownloadRuntime,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+) -> HashMap<FileId, crate::ResumeReverify> {
+    let requested = file_ids.into_iter().collect::<HashSet<_>>();
+    let reverified = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let sources = resolve_submitted_url(&source_url, &runtime.http, &runtime.dlc_cache, tx).await;
+    let progress: Arc<dyn DownloadProgress> = Arc::new(crate::NoProgress);
+    let mut matched = 0usize;
+    let mut items = Vec::new();
+
+    for source in sources {
+        let nodes = match fetch_node_set(&source, &runtime.http).await {
+            Ok(nodes) => nodes,
+            Err(error) => {
+                let _ = tx.send(DownloadEvent::ScopeError {
+                    scope: source.source_url,
+                    error,
+                });
+                continue;
+            }
+        };
+        let collected = runtime.downloader.collect_files(&nodes, &progress).await;
+        for item in collected
+            .to_download
+            .into_iter()
+            .chain(collected.completed.into_iter())
+        {
+            if !requested.contains(&FileId::from(item.path.as_str())) {
+                continue;
+            }
+            matched = matched.saturating_add(1);
+            items.push(crate::OwnedDownloadItem {
+                path: item.path,
+                node: item.node.clone(),
+                was_partial: item.was_partial,
+            });
+        }
+    }
+
+    let downloader = Arc::clone(&runtime.downloader);
+    let tx_for_items = tx.clone();
+    let reverified_for_items = Arc::clone(&reverified);
+    for_each_verification_item(items, PACKAGE_REVERIFY_CONCURRENCY, move |item| {
+        let downloader = Arc::clone(&downloader);
+        let tx = tx_for_items.clone();
+        let reverified = Arc::clone(&reverified_for_items);
+        async move {
+            let id = FileId::from(item.path.as_str());
+            let progress = VerificationProgress {
+                tx: tx.clone(),
+                id: id.clone(),
+            };
+            match downloader
+                .reverify_resume_file_with_progress(&item.node, &item.path, Some(&progress))
+                .await
+            {
+                Ok(result) if result.sidecar_loaded => {
+                    let _ = tx.send(DownloadEvent::ResumeReverified {
+                        id: id.clone(),
+                        chunks: result.chunks,
+                        bytes: result.bytes,
+                    });
+                    reverified.lock().await.insert(id, result);
+                    let _ = tx.send(DownloadEvent::StatusMessage(format!(
+                        "Reverified {}: {} chunk(s), {} reusable",
+                        item.path,
+                        result.chunks,
+                        format_bytes(result.bytes)
+                    )));
+                }
+                Ok(result) => {
+                    let _ = tx.send(DownloadEvent::ResumeReverified {
+                        id: id.clone(),
+                        chunks: 0,
+                        bytes: 0,
+                    });
+                    reverified.lock().await.insert(id, result);
+                    let _ = tx.send(DownloadEvent::StatusMessage(format!(
+                        "Reverified {}: no resume sidecar",
+                        item.path
+                    )));
+                }
+                Err(error) => {
+                    let _ = tx.send(DownloadEvent::ScopeError {
+                        scope: item.path,
+                        error: format!("Reverify failed: {error}"),
+                    });
+                }
+            }
+        }
+    })
+    .await;
+
+    if matched == 0 {
+        let _ = tx.send(DownloadEvent::StatusMessage(format!(
+            "No matching file(s) found to reverify for {source_url}"
+        )));
+    }
+
+    match Arc::try_unwrap(reverified) {
+        Ok(mutex) => mutex.into_inner(),
+        Err(shared) => shared.lock().await.clone(),
+    }
+}
+
 fn handle_download_join_result(
     result: Result<DownloadTaskResult, tokio::task::JoinError>,
     scheduler: &mut SchedulerState,
@@ -617,7 +954,7 @@ fn handle_download_join_result(
 ) {
     match result {
         Ok(task) => {
-            scheduler.finish_download(&task.id);
+            scheduler.finish_download(&task.id, &task.result);
             if let Err(error) = task.result
                 && !matches!(error, crate::Error::Cancelled)
             {
@@ -648,16 +985,33 @@ fn start_pending_downloads(
         return;
     }
 
-    while scheduler.active_downloads.len() < runtime.concurrent_files {
-        let Some(file_id) = scheduler.pending_queue.pop_front() else {
-            break;
-        };
+    let capacity = runtime
+        .concurrent_files
+        .saturating_sub(scheduler.active_downloads.len());
+    let available_file_ids = scheduler
+        .available_downloads
+        .keys()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let startable = select_startable_file_ids(
+        &scheduler.pending_queue,
+        &available_file_ids,
+        &scheduler.active_downloads,
+        &scheduler.exclusive_resume_target,
+        capacity,
+    );
+
+    for file_id in startable {
         let Some(item) = scheduler.available_downloads.get(&file_id).cloned() else {
             continue;
         };
+        scheduler
+            .pending_queue
+            .retain(|pending| pending != &file_id);
         if !scheduler.active_downloads.insert(file_id.clone()) {
             continue;
         }
+        scheduler.clear_exclusive_resume_target(&file_id);
         let cancel_token = register_download_token(&item, token_tx);
         spawn_file_download(
             &mut scheduler.join_set,

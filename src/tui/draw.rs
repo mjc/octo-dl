@@ -634,6 +634,42 @@ mod tests {
     }
 
     #[test]
+    fn draw_main_colors_verification_progress_blue() {
+        let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
+        let mut app = App::new(9723, tx, true);
+        let file_id: crate::core::FileId = "verify.bin".to_string().into();
+        app.files.push(FileEntry {
+            id: file_id.clone(),
+            name: "verify.bin".to_string(),
+            size: 100,
+            downloaded: 40,
+            status: FileStatus::Queued,
+        });
+        app.verifying_files.insert(file_id);
+
+        let buffer = render_buffer(&mut app, 100, 24);
+        let area = buffer.area;
+        let mut saw_blue_progress = false;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = buffer.cell((x, y)).expect("cell should exist");
+                if cell.symbol() == "4" && cell.fg == Color::Blue {
+                    saw_blue_progress = true;
+                    break;
+                }
+            }
+            if saw_blue_progress {
+                break;
+            }
+        }
+
+        assert!(
+            saw_blue_progress,
+            "verification progress should render in blue"
+        );
+    }
+
+    #[test]
     fn draw_main_failed_packages_expand_by_default() {
         let mut app = test_app();
         app.apply_core_event(CoreEvent::PackageResolved {

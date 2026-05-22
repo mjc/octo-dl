@@ -51,6 +51,14 @@ pub enum DownloadRequest {
         file_ids: Vec<FileId>,
         attempt_ids: HashMap<FileId, u64>,
     },
+    ReverifyFileIds {
+        source_url: String,
+        file_ids: Vec<FileId>,
+    },
+    VerifyCompletedFileIds {
+        source_url: String,
+        file_ids: Vec<FileId>,
+    },
     SyncPendingOrder {
         file_ids: Vec<FileId>,
     },
@@ -68,11 +76,24 @@ pub enum DownloadEvent {
         delta: ProgressDelta,
         attempt_id: u64,
     },
+    VerificationProgress {
+        id: FileId,
+        bytes_delta: u64,
+    },
     ResumeReused {
         id: FileId,
         chunks: usize,
         bytes: u64,
         attempt_id: u64,
+    },
+    ResumeReverified {
+        id: FileId,
+        chunks: usize,
+        bytes: u64,
+    },
+    CompletedFileVerified {
+        id: FileId,
+        bytes: u64,
     },
     FileComplete {
         id: FileId,

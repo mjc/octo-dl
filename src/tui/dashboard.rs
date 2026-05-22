@@ -30,6 +30,7 @@ pub enum DashboardRow {
 pub enum DashboardFileStatus {
     Queued,
     Downloading,
+    Verifying,
     Complete,
     Error { message: String },
 }
@@ -38,6 +39,11 @@ impl DashboardFileStatus {
     #[must_use]
     pub const fn is_downloading(&self) -> bool {
         matches!(self, Self::Downloading)
+    }
+
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        matches!(self, Self::Downloading | Self::Verifying)
     }
 
     #[must_use]
@@ -288,7 +294,11 @@ impl App {
                     size: file.size,
                     downloaded: file.downloaded,
                     speed: self.file_speed(&file.id),
-                    status: DashboardFileStatus::from(&file.status),
+                    status: if self.verifying_files.contains(&file.id) {
+                        DashboardFileStatus::Verifying
+                    } else {
+                        DashboardFileStatus::from(&file.status)
+                    },
                     package_label: self.package_label_for_file(&file.id),
                 }
             })
@@ -519,8 +529,7 @@ pub fn aggregate_transfer_label(state: &DownloadDashboardState) -> String {
 
 #[must_use]
 pub fn aggregate_activity_label(state: &DownloadDashboardState) -> String {
-    if state.totals.current_speed > 0 || state.files.iter().any(|file| file.status.is_downloading())
-    {
+    if state.totals.current_speed > 0 || state.files.iter().any(|file| file.status.is_active()) {
         return "active".to_string();
     }
 
@@ -539,7 +548,7 @@ pub fn aggregate_activity_label(state: &DownloadDashboardState) -> String {
 #[must_use]
 pub fn file_detail(file: &DashboardFileRow) -> String {
     match &file.status {
-        DashboardFileStatus::Downloading => {
+        DashboardFileStatus::Downloading | DashboardFileStatus::Verifying => {
             #[allow(
                 clippy::cast_precision_loss,
                 clippy::cast_possible_truncation,
@@ -551,7 +560,9 @@ pub fn file_detail(file: &DashboardFileRow) -> String {
                 0
             };
             let bar = progress_bar(file.downloaded, file.size, 10);
-            let speed = if file.speed > 0 {
+            let speed = if matches!(file.status, DashboardFileStatus::Verifying) {
+                "  verify".to_string()
+            } else if file.speed > 0 {
                 format!("  {}/s", format_bytes(file.speed))
             } else {
                 "  active".to_string()
