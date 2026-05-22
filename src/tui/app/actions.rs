@@ -679,6 +679,8 @@ impl App {
             .get(id)
             .and_then(reverify_target_for_core_file)
         else {
+            self.clear_verification_state(id);
+            self.refresh_visible_core_file(id);
             self.status = "Reverify unavailable for selected file".to_string();
             self.recompute_totals();
             return;
@@ -721,19 +723,28 @@ impl App {
     pub(crate) fn perform_reverify_package_action(&mut self, package_id: PackageId) {
         let mut grouped_resume: Vec<(String, Vec<FileId>)> = Vec::new();
         let mut grouped_completed: Vec<(String, Vec<FileId>)> = Vec::new();
+        let mut skipped_stale_files = Vec::new();
         let files = self
             .core_state
             .package_files(&package_id)
-            .filter_map(|file| {
-                let target = reverify_target_for_core_file(file)?;
-                Some((
+            .filter_map(|file| match reverify_target_for_core_file(file) {
+                Some(target) => Some((
                     file.id.clone(),
                     file.source_url.clone(),
                     file.lifecycle.clone(),
                     target,
-                ))
+                )),
+                None => {
+                    skipped_stale_files.push(file.id.clone());
+                    None
+                }
             })
             .collect::<Vec<_>>();
+
+        for file_id in skipped_stale_files {
+            self.clear_verification_state(&file_id);
+            self.refresh_visible_core_file(&file_id);
+        }
 
         for (file_id, source_url, lifecycle, target) in files {
             self.cancel_file_token(&file_id);

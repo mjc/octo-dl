@@ -743,6 +743,38 @@ fn reverify_package_with_only_never_started_files_is_noop() {
 }
 
 #[test]
+fn reverify_package_clears_stale_verify_state_for_never_started_files() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    let package_id = resolve_package(
+        &mut app,
+        "https://mega.nz/folder/root",
+        &[("one.bin", 100), ("two.bin", 100)],
+    );
+    let one = crate::core::FileId::from("one.bin");
+    let two = crate::core::FileId::from("two.bin");
+    app.verifying_files.insert(one.clone());
+    app.verifying_files.insert(two.clone());
+    app.verification_inflight_files.insert(one.clone());
+    app.verification_inflight_files.insert(two.clone());
+
+    app.perform_reverify_package_action(package_id);
+
+    for file_id in [one, two] {
+        assert!(!app.verifying_files.contains(&file_id));
+        assert!(!app.verification_inflight_files.contains(&file_id));
+        assert_eq!(
+            app.visible_file(&file_id).unwrap().status,
+            FileStatus::Queued
+        );
+        assert_eq!(app.visible_file(&file_id).unwrap().downloaded, 0);
+    }
+    assert!(url_rx.try_recv().is_err());
+    assert_eq!(app.status, "No package file(s) have resume data to verify");
+}
+
+#[test]
 fn reverify_package_includes_failed_file_with_partial_progress() {
     let mut app = test_app();
     let (url_tx, mut url_rx) = mpsc::unbounded_channel();

@@ -347,7 +347,11 @@ impl App {
         ui_mode: DashboardUiMode,
         read_only: bool,
     ) -> bool {
-        if state_tx.receiver_count() > 0 {
+        let observed = match ui_mode {
+            DashboardUiMode::Tui => state_tx.receiver_count() > 1,
+            DashboardUiMode::Headless | DashboardUiMode::Attached => state_tx.receiver_count() > 0,
+        };
+        if observed {
             state_tx.send_replace(self.dashboard_json(ui_mode, read_only));
             return true;
         }
@@ -358,7 +362,7 @@ impl App {
         self.files
             .iter()
             .any(|file| matches!(file.status, FileStatus::Downloading))
-            || !self.verifying_files.is_empty()
+            || !self.verification_inflight_files.is_empty()
     }
 
     pub(crate) fn handle_terminal_tick(
@@ -536,6 +540,40 @@ mod tests {
             serde_json::from_str(shared_state.state_rx.borrow().as_str())
                 .expect("shared state should contain valid JSON");
         assert_eq!(snapshot["status"], "updated from runtime");
+    }
+
+    #[test]
+    fn tui_dashboard_snapshot_skips_single_internal_receiver() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let crate::tui::app::SharedStateChannels {
+            state_tx,
+            shared_state,
+            ..
+        } = app.shared_state_channels(true, DashboardUiMode::Tui);
+        let shared_state = shared_state.expect("shared state should be enabled");
+        let initial = shared_state.state_rx.borrow().clone();
+
+        app.status = "should not publish".to_string();
+
+        assert!(!app.publish_dashboard_snapshot_if_observed(
+            &state_tx,
+            DashboardUiMode::Tui,
+            false,
+        ));
+        assert_eq!(shared_state.state_rx.borrow().as_str(), initial);
+
+        let _remote_rx = shared_state.state_rx.clone();
+
+        assert!(
+            app.publish_dashboard_snapshot_if_observed(&state_tx, DashboardUiMode::Tui, false,)
+        );
+        assert!(
+            shared_state
+                .state_rx
+                .borrow()
+                .contains("should not publish")
+        );
     }
 
     #[test]
