@@ -619,6 +619,40 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_snapshot_reuses_json_buffer_capacity() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let crate::tui::app::SharedStateChannels {
+            state_tx,
+            shared_state,
+            ..
+        } = app.shared_state_channels(true, DashboardUiMode::Headless);
+        let _shared_state = shared_state.expect("shared state should be enabled");
+
+        app.status = "x".repeat(16 * 1024);
+        app.mark_dashboard_dirty();
+        assert!(app.publish_dashboard_snapshot_if_observed(
+            &state_tx,
+            DashboardUiMode::Headless,
+            false,
+        ));
+        let capacity = app.dashboard_json_cache.capacity();
+        let ptr = app.dashboard_json_cache.as_ptr();
+
+        app.status = "short".to_string();
+        app.mark_dashboard_dirty();
+        assert!(app.publish_dashboard_snapshot_if_observed(
+            &state_tx,
+            DashboardUiMode::Headless,
+            false,
+        ));
+
+        assert_eq!(app.dashboard_json_cache.capacity(), capacity);
+        assert_eq!(app.dashboard_json_cache.as_ptr(), ptr);
+        assert!(app.dashboard_json_cache.contains("short"));
+    }
+
+    #[test]
     fn terminal_tick_bounds_download_event_drain_to_keep_input_responsive() {
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let mut app = App::new(9723, event_tx, true);
