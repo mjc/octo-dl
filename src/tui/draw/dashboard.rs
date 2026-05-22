@@ -186,22 +186,27 @@ fn dashboard_package_detail(
     speed_label: &str,
     content_width: usize,
 ) -> String {
-    let downloaded = format_bytes(package.downloaded_bytes);
-    let total = format_bytes(package.total_bytes);
-    let mut full = String::with_capacity(40 + downloaded.len() + total.len() + speed_label.len());
+    let mut full = String::with_capacity(72 + speed_label.len());
     let _ = write!(
         full,
-        "{}/{} files  {downloaded} / {total}  {:>3}%  {speed_label}",
-        package.completed_files, package.present_files, package.percent
+        "{}/{} files  {} / {}  {:>3}%  {speed_label}",
+        package.completed_files,
+        package.present_files,
+        format_bytes(package.downloaded_bytes),
+        format_bytes(package.total_bytes),
+        package.percent
     );
     if text_width(&full) <= content_width / 2 {
         return full;
     }
-    let mut compact = String::with_capacity(24 + total.len() + speed_label.len());
+    let mut compact = String::with_capacity(48 + speed_label.len());
     let _ = write!(
         compact,
-        "{}/{}  {total}  {:>3}%  {speed_label}",
-        package.completed_files, package.present_files, package.percent
+        "{}/{}  {}  {:>3}%  {speed_label}",
+        package.completed_files,
+        package.present_files,
+        format_bytes(package.total_bytes),
+        package.percent
     );
     truncate_end(&compact, content_width / 2)
 }
@@ -415,12 +420,13 @@ pub(super) fn dashboard_aggregate_progress_label(
     pct: u16,
     width: u16,
 ) -> String {
-    let downloaded = format_bytes(state.totals.total_downloaded);
-    let total = format_bytes(state.totals.total_size);
-    let mut bytes = String::with_capacity(downloaded.len() + total.len() + 3);
-    bytes.push_str(&downloaded);
-    bytes.push_str(" / ");
-    bytes.push_str(&total);
+    let mut bytes = String::with_capacity(32);
+    let _ = write!(
+        bytes,
+        "{} / {}",
+        format_bytes(state.totals.total_downloaded),
+        format_bytes(state.totals.total_size)
+    );
     let transfer = dashboard_transfer_label(state);
     let mut full = String::with_capacity(32 + bytes.len() + transfer.len());
     let _ = write!(

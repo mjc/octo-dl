@@ -63,6 +63,9 @@ pub enum CoreEvent {
         file_id: FileId,
         bytes_delta: u64,
     },
+    FileVerificationCompleted {
+        file_id: FileId,
+    },
     FileReuseDetected {
         file_id: FileId,
         reused_bytes: u64,
@@ -134,6 +137,7 @@ fn should_persist_session(event: &CoreEvent) -> bool {
             | CoreEvent::FileResumeReverified { .. }
             | CoreEvent::FileVerificationStarted { .. }
             | CoreEvent::FileVerificationProgress { .. }
+            | CoreEvent::FileVerificationCompleted { .. }
             | CoreEvent::Tick { .. }
     )
 }
@@ -313,6 +317,20 @@ fn apply_file_change(
         recompute_package_status(state, after.package_id);
     }
     recompute_session_status(state);
+}
+
+fn complete_file(state: &mut DownloadState, file_id: &FileId) {
+    let mut delta = None;
+    if let Some(file) = state.files.get_mut(file_id) {
+        let before = FileDerivedState::from(&*file);
+        file.lifecycle = FileLifecycle::Complete;
+        file.progress.visible_completed_bytes = file.size;
+        let after = FileDerivedState::from(&*file);
+        delta = Some((before, after));
+    }
+    if let Some((before, after)) = delta {
+        apply_file_change(state, file_id, before, after);
+    }
 }
 
 fn insert_file_state(state: &mut DownloadState, file: FileState) {
@@ -641,17 +659,10 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
             }
         }
         CoreEvent::FileCompleted { file_id } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id) {
-                let before = FileDerivedState::from(&*file);
-                file.lifecycle = FileLifecycle::Complete;
-                file.progress.visible_completed_bytes = file.size;
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
-            }
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
-            }
+            complete_file(state, &file_id);
+        }
+        CoreEvent::FileVerificationCompleted { file_id } => {
+            complete_file(state, &file_id);
         }
         CoreEvent::FileFailed { file_id, message } => {
             let mut delta = None;
@@ -1496,6 +1507,58 @@ mod tests {
         assert_eq!(state.totals.displayed_network_bytes, 0);
         assert!(
             !effects
+                .iter()
+                .any(|effect| matches!(effect, CoreEffect::PersistSession(_)))
+        );
+    }
+
+    #[test]
+    fn verification_completed_restores_complete_state_without_persisting() {
+        let mut state = sample_state();
+        reduce(
+            &mut state,
+            CoreEvent::FileCompleted {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+        reduce(
+            &mut state,
+            CoreEvent::FileVerificationStarted {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+
+        let effects = reduce(
+            &mut state,
+            CoreEvent::FileVerificationCompleted {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+
+        let file = &state.files["file.bin"];
+        assert_eq!(file.lifecycle, FileLifecycle::Complete);
+        assert_eq!(file.progress.visible_completed_bytes, file.size);
+        assert_eq!(state.totals.run_completed_bytes, file.size);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, CoreEffect::PersistSession(_)))
+        );
+    }
+
+    #[test]
+    fn normal_file_completed_still_persists_session() {
+        let mut state = sample_state();
+
+        let effects = reduce(
+            &mut state,
+            CoreEvent::FileCompleted {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+
+        assert!(
+            effects
                 .iter()
                 .any(|effect| matches!(effect, CoreEffect::PersistSession(_)))
         );

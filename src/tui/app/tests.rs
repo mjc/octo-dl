@@ -359,6 +359,51 @@ fn verification_progress_updates_visible_file_without_network_rate() {
 }
 
 #[test]
+fn completed_file_verified_preserves_existing_complete_lifecycle() {
+    let mut app = test_app();
+    let file_id: crate::core::FileId = "file.bin".to_string().into();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id("pkg", "https://mega.nz/file/root"),
+            source_url: "https://mega.nz/file/root".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+            display_name: "Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: file_id.clone(),
+                path: "file.bin".to_string(),
+                size: 100,
+            }],
+            collision: None,
+        },
+    });
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: file_id.clone(),
+    });
+    app.verifying_files.insert(file_id.clone());
+    app.apply_core_event(CoreEvent::FileVerificationStarted {
+        file_id: file_id.clone(),
+    });
+    app.refresh_visible_core_file(&file_id);
+    assert_eq!(
+        app.core_state.files.get(&file_id).unwrap().lifecycle,
+        FileLifecycle::Queued
+    );
+
+    app.handle_completed_file_verified_event(file_id.clone(), 100);
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(matches!(
+        app.core_state.files.get(&file_id).unwrap().lifecycle,
+        FileLifecycle::Complete
+    ));
+    assert_eq!(
+        app.visible_file(&file_id).unwrap().status,
+        FileStatus::Complete
+    );
+    assert_eq!(app.status, "Verified file.bin: 100 B");
+}
+
+#[test]
 fn verification_progress_is_ignored_after_verification_finishes() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
