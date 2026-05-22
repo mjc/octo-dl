@@ -3,6 +3,8 @@
 mod dashboard;
 mod popup;
 
+use std::fmt::Write as _;
+
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
@@ -47,14 +49,20 @@ pub fn draw_dashboard(
         DashboardUiMode::Attached => " octo-dl attached ",
     };
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let title_right = format!(
-        " {}% CPU | {} RAM | API: {}{}{}",
+    let ram = format_bytes(state.metrics.memory_rss);
+    let mut title_right = String::with_capacity(32 + ram.len());
+    let _ = write!(
+        title_right,
+        " {}% CPU | {ram} RAM | API: {}",
         (state.metrics.cpu_usage as u16).min(999),
-        format_bytes(state.metrics.memory_rss),
         state.metrics.api_port,
-        if state.paused { " | PAUSED" } else { "" },
-        if state.read_only { " | READ-ONLY" } else { "" }
     );
+    if state.paused {
+        title_right.push_str(" | PAUSED");
+    }
+    if state.read_only {
+        title_right.push_str(" | READ-ONLY");
+    }
 
     let outer = Block::default()
         .title(title)
