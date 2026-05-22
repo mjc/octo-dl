@@ -200,6 +200,14 @@ impl App {
         &self.cached_visible_rows
     }
 
+    pub(crate) fn visible_rows_snapshot(&self) -> VisibleRowsSnapshot<'_> {
+        if self.cached_visible_rows_key == self.visible_rows_cache_key() {
+            VisibleRowsSnapshot::Borrowed(&self.cached_visible_rows)
+        } else {
+            VisibleRowsSnapshot::Owned(visible::visible_rows(self))
+        }
+    }
+
     pub(crate) fn ensure_visible_rows_cache(&mut self) {
         if self.cached_visible_rows_key != self.visible_rows_cache_key() {
             let visible_rows = visible::visible_rows(self);
@@ -247,8 +255,7 @@ impl App {
     }
 
     pub fn dashboard_json(&self, ui_mode: DashboardUiMode, read_only: bool) -> String {
-        serde_json::to_string(&self.dashboard_state(ui_mode, read_only))
-            .expect("dashboard state should serialize")
+        self.borrowed_dashboard_json(ui_mode, read_only)
     }
 
     pub(crate) fn mark_dashboard_dirty(&mut self) {
@@ -281,4 +288,18 @@ impl App {
 pub(crate) enum VerificationTarget {
     Resume,
     Completed,
+}
+
+pub(crate) enum VisibleRowsSnapshot<'a> {
+    Borrowed(&'a [visible::TuiRow]),
+    Owned(Vec<visible::TuiRow>),
+}
+
+impl<'a> VisibleRowsSnapshot<'a> {
+    pub(crate) fn as_slice(&self) -> &[visible::TuiRow] {
+        match self {
+            Self::Borrowed(rows) => rows,
+            Self::Owned(rows) => rows,
+        }
+    }
 }
