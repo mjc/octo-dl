@@ -60,6 +60,13 @@ struct VisibleRowsCacheKey {
     sort_direction: u8,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DashboardCacheKey {
+    revision: u64,
+    ui_mode: DashboardUiMode,
+    read_only: bool,
+}
+
 pub struct App {
     pub popup: Popup,
     pub pending_confirmation: Option<ConfirmAction>,
@@ -78,6 +85,9 @@ pub struct App {
     pub files: Vec<FileEntry>,
     cached_visible_rows: Vec<visible::TuiRow>,
     cached_visible_rows_key: VisibleRowsCacheKey,
+    dashboard_revision: u64,
+    dashboard_cache_key: Option<DashboardCacheKey>,
+    dashboard_json_cache: String,
     pub(crate) visible_file_positions: HashMap<FileId, usize>,
     pub(crate) overlay_files: IndexMap<FileId, TransientRow>,
     pub(crate) file_ui: HashMap<FileId, FileUiState>,
@@ -132,6 +142,7 @@ pub struct App {
     pub verifying_files: HashSet<FileId>,
     // Files allowed to accept verification progress callbacks.
     pub(crate) verification_inflight_files: HashSet<FileId>,
+    pub(crate) verification_targets: HashMap<FileId, VerificationTarget>,
     // Session
     pub session: Option<SessionSnapshot>,
     pub(crate) session_persistence: SessionPersistence,
@@ -239,4 +250,35 @@ impl App {
         serde_json::to_string(&self.dashboard_state(ui_mode, read_only))
             .expect("dashboard state should serialize")
     }
+
+    pub(crate) fn mark_dashboard_dirty(&mut self) {
+        self.dashboard_revision = self.dashboard_revision.wrapping_add(1);
+    }
+
+    pub(crate) fn cached_dashboard_json(
+        &mut self,
+        ui_mode: DashboardUiMode,
+        read_only: bool,
+    ) -> String {
+        let key = DashboardCacheKey {
+            revision: self.dashboard_revision,
+            ui_mode,
+            read_only,
+        };
+        if self.dashboard_cache_key != Some(key) {
+            self.dashboard_json_cache = self.dashboard_json(ui_mode, read_only);
+            self.dashboard_cache_key = Some(key);
+        }
+        self.dashboard_json_cache.clone()
+    }
+
+    pub(crate) fn is_verification_active(&self, id: &FileId) -> bool {
+        self.verification_targets.contains_key(id) && self.verification_inflight_files.contains(id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VerificationTarget {
+    Resume,
+    Completed,
 }

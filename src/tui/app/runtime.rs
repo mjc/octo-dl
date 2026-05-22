@@ -337,12 +337,15 @@ impl App {
         }
     }
 
-    pub(crate) fn publish_snapshot_if_observed(&self, state_tx: &watch::Sender<String>) -> bool {
+    pub(crate) fn publish_snapshot_if_observed(
+        &mut self,
+        state_tx: &watch::Sender<String>,
+    ) -> bool {
         self.publish_dashboard_snapshot_if_observed(state_tx, DashboardUiMode::Tui, false)
     }
 
     pub(crate) fn publish_dashboard_snapshot_if_observed(
-        &self,
+        &mut self,
         state_tx: &watch::Sender<String>,
         ui_mode: DashboardUiMode,
         read_only: bool,
@@ -352,7 +355,7 @@ impl App {
             DashboardUiMode::Headless | DashboardUiMode::Attached => state_tx.receiver_count() > 0,
         };
         if observed {
-            state_tx.send_replace(self.dashboard_json(ui_mode, read_only));
+            state_tx.send_replace(self.cached_dashboard_json(ui_mode, read_only));
             return true;
         }
         false
@@ -362,7 +365,7 @@ impl App {
         self.files
             .iter()
             .any(|file| matches!(file.status, FileStatus::Downloading))
-            || !self.verification_inflight_files.is_empty()
+            || !self.verification_targets.is_empty()
     }
 
     pub(crate) fn handle_terminal_tick(
@@ -417,6 +420,7 @@ impl App {
                     if let Some(evt) = event {
                         self.handle_download_event(evt);
                         if let Some(state_tx) = state_tx {
+                            self.mark_dashboard_dirty();
                             let _ = self.publish_dashboard_snapshot_if_observed(
                                 state_tx,
                                 DashboardUiMode::Headless,
@@ -447,6 +451,7 @@ impl App {
             self.drain_token_messages();
             self.poll_session_persistence();
             if dashboard_dirty && let Some(state_tx) = state_tx {
+                self.mark_dashboard_dirty();
                 let _ = self.publish_dashboard_snapshot_if_observed(
                     state_tx,
                     DashboardUiMode::Headless,
@@ -574,6 +579,43 @@ mod tests {
                 .borrow()
                 .contains("should not publish")
         );
+    }
+
+    #[test]
+    fn dashboard_snapshot_reuses_cache_until_revision_changes() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let crate::tui::app::SharedStateChannels {
+            state_tx,
+            shared_state,
+            ..
+        } = app.shared_state_channels(true, DashboardUiMode::Headless);
+        let shared_state = shared_state.expect("shared state should be enabled");
+
+        app.status = "first".to_string();
+        app.mark_dashboard_dirty();
+        assert!(app.publish_dashboard_snapshot_if_observed(
+            &state_tx,
+            DashboardUiMode::Headless,
+            false,
+        ));
+        assert!(shared_state.state_rx.borrow().contains("first"));
+
+        app.status = "second".to_string();
+        assert!(app.publish_dashboard_snapshot_if_observed(
+            &state_tx,
+            DashboardUiMode::Headless,
+            false,
+        ));
+        assert!(shared_state.state_rx.borrow().contains("first"));
+
+        app.mark_dashboard_dirty();
+        assert!(app.publish_dashboard_snapshot_if_observed(
+            &state_tx,
+            DashboardUiMode::Headless,
+            false,
+        ));
+        assert!(shared_state.state_rx.borrow().contains("second"));
     }
 
     #[test]
@@ -748,6 +790,10 @@ mod tests {
         app.verifying_files.insert("file.bin".to_string().into());
         app.verification_inflight_files
             .insert("file.bin".to_string().into());
+        app.verification_targets.insert(
+            "file.bin".to_string().into(),
+            crate::tui::app::VerificationTarget::Resume,
+        );
         app.apply_core_event(crate::core::CoreEvent::FileVerificationStarted {
             file_id: "file.bin".to_string().into(),
         });
@@ -793,6 +839,10 @@ mod tests {
         app.verifying_files.insert("file.bin".to_string().into());
         app.verification_inflight_files
             .insert("file.bin".to_string().into());
+        app.verification_targets.insert(
+            "file.bin".to_string().into(),
+            crate::tui::app::VerificationTarget::Resume,
+        );
         app.apply_core_event(crate::core::CoreEvent::FileVerificationStarted {
             file_id: "file.bin".to_string().into(),
         });
