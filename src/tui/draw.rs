@@ -3,6 +3,7 @@
 mod dashboard;
 mod popup;
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
@@ -16,7 +17,7 @@ use crate::format_bytes;
 use self::dashboard::{
     compact_label, controls_label_from_snapshot, dashboard_aggregate_progress_label,
     dashboard_row_items, dashboard_status_line, focused_url_input_view, mega_url_label,
-    package_status_style, text_width, truncate_end,
+    package_status_style, text_width, truncate_end, truncate_end_cow,
 };
 use super::app::{App, FileEntry, FileStatus, Popup};
 use super::dashboard::{DashboardChrome, DashboardUiMode, DownloadDashboardState, clamp_selection};
@@ -398,39 +399,31 @@ fn render_file_row_app(
     };
     let prefix_label = if include_package {
         app.package_label_for_file(file_id)
-            .as_deref()
-            .map(package_prefix_label_app)
-            .unwrap_or_default()
     } else {
-        String::new()
+        None
     };
     let detail = file_detail_app(app, file, &status);
-    let mut prefix = String::with_capacity(6);
-    prefix.push_str("   ");
-    prefix.push_str(icon);
-    prefix.push(' ');
-    let prefix_width = text_width(&prefix);
+    let prefix_width = 5;
     let detail_width = text_width(&detail).min(content_width / 2);
-    let detail = truncate_end(&detail, detail_width);
+    let detail = truncate_end_cow(&detail, detail_width);
     let detail_width = text_width(&detail);
-    let mut display_name = String::with_capacity(prefix_label.len() + file.name.len());
-    display_name.push_str(&prefix_label);
-    display_name.push_str(&file.name);
-    let name = truncate_end(
-        &display_name,
-        content_width
-            .saturating_sub(prefix_width)
-            .saturating_sub(detail_width)
-            .saturating_sub(1),
-    );
+    let name_width = content_width
+        .saturating_sub(prefix_width)
+        .saturating_sub(detail_width)
+        .saturating_sub(1);
+    let owned_display_name;
+    let display_name = if let Some(prefix_label) = prefix_label {
+        owned_display_name = prefixed_file_label(&prefix_label, &file.name);
+        owned_display_name.as_str()
+    } else {
+        file.name.as_str()
+    };
+    let name = truncate_end_cow(display_name, name_width);
     let name_width = text_width(&name);
     let filler_width = content_width
         .saturating_sub(prefix_width)
         .saturating_sub(name_width)
         .saturating_sub(detail_width);
-    let mut label = String::with_capacity(prefix.len() + name.len());
-    label.push_str(&prefix);
-    label.push_str(&name);
     let mut row_style = Style::default().fg(if app.verifying_files.contains(file_id) {
         Color::Blue
     } else {
@@ -444,13 +437,26 @@ fn render_file_row_app(
         x,
         y,
         [
-            (&label, row_style),
+            ("   ", row_style),
+            (icon, row_style),
+            (" ", row_style),
+            (&name, row_style),
             ("", row_style),
             (&detail, Style::default().fg(detail_color)),
         ],
         filler_width,
         selected,
     );
+}
+
+fn prefixed_file_label(prefix_label: &str, file_name: &str) -> String {
+    let compact = compact_label(prefix_label);
+    let mut prefixed = String::with_capacity(compact.len() + file_name.len() + 3);
+    prefixed.push('[');
+    prefixed.push_str(&compact);
+    prefixed.push_str("] ");
+    prefixed.push_str(file_name);
+    prefixed
 }
 
 fn render_package_row_app(
@@ -516,21 +522,15 @@ fn render_package_row_app(
         speed_label,
         content_width,
     );
-    let mut prefix = String::with_capacity(6);
-    prefix.push(' ');
-    prefix.push_str(marker);
-    prefix.push(' ');
-    prefix.push_str(icon);
-    prefix.push(' ');
-    let prefix_width = text_width(&prefix);
+    let prefix_width = 5;
     let detail_width = text_width(&detail).min(content_width / 2);
-    let detail = truncate_end(&detail, detail_width);
+    let detail = truncate_end_cow(&detail, detail_width);
     let detail_width = text_width(&detail);
     let name_source = package_display_name_app(
         &package.display_name,
         (!folder_conflict).then_some(common_folder).flatten(),
     );
-    let name = truncate_end(
+    let name = truncate_end_cow(
         &name_source,
         content_width
             .saturating_sub(prefix_width)
@@ -542,9 +542,6 @@ fn render_package_row_app(
         .saturating_sub(prefix_width)
         .saturating_sub(name_width)
         .saturating_sub(detail_width);
-    let mut label = String::with_capacity(prefix.len() + name.len());
-    label.push_str(&prefix);
-    label.push_str(&name);
     let mut row_style = Style::default().fg(color);
     if selected {
         row_style = row_style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
@@ -554,7 +551,12 @@ fn render_package_row_app(
         x,
         y,
         [
-            (&label, row_style),
+            (" ", row_style),
+            (marker, row_style),
+            (" ", row_style),
+            (icon, row_style),
+            (" ", row_style),
+            (&name, row_style),
             ("", row_style),
             (&detail, Style::default().fg(Color::DarkGray)),
         ],
@@ -571,8 +573,8 @@ fn render_segments<const N: usize>(
     filler_width: usize,
     selected: bool,
 ) {
-    for (index, (text, style)) in segments.into_iter().enumerate() {
-        if index == 1 {
+    for (text, style) in segments {
+        if text.is_empty() {
             x = x.saturating_add(u16::try_from(filler_width).unwrap_or(u16::MAX));
             continue;
         }
@@ -594,7 +596,7 @@ fn file_status_for_draw(app: &App, file: &FileEntry) -> FileStatus {
     }
 }
 
-fn file_detail_app(app: &App, file: &FileEntry, status: &FileStatus) -> String {
+fn file_detail_app<'a>(app: &App, file: &'a FileEntry, status: &'a FileStatus) -> Cow<'a, str> {
     if app.verifying_files.contains(&file.id) || matches!(status, FileStatus::Downloading) {
         #[allow(
             clippy::cast_precision_loss,
@@ -606,44 +608,48 @@ fn file_detail_app(app: &App, file: &FileEntry, status: &FileStatus) -> String {
         } else {
             0
         };
-        let bar = progress_bar_app(file.downloaded, file.size, 10);
-        let speed = if app.verifying_files.contains(&file.id) {
-            "  verify".to_string()
-        } else if app.file_speed(&file.id) > 0 {
-            let formatted_speed = format_bytes(app.file_speed(&file.id));
-            let mut speed = String::with_capacity(formatted_speed.len() + 4);
-            speed.push_str("  ");
-            speed.push_str(&formatted_speed);
-            speed.push_str("/s");
-            speed
+        let file_speed = app.file_speed(&file.id);
+        let formatted_speed = if !app.verifying_files.contains(&file.id) && file_speed > 0 {
+            Some(format_bytes(file_speed))
         } else {
-            "  active".to_string()
+            None
         };
-        let mut detail = String::with_capacity(bar.len() + speed.len() + 8);
-        let _ = write!(detail, "[{bar}] {pct}%{speed}");
-        return detail;
+        let speed_extra = formatted_speed.as_ref().map_or(8, |speed| speed.len() + 4);
+        let mut detail = String::with_capacity(10 * "\u{2588}".len() + speed_extra + 8);
+        detail.push('[');
+        push_progress_bar_app(&mut detail, file.downloaded, file.size, 10);
+        let _ = write!(detail, "] {pct}%");
+        if app.verifying_files.contains(&file.id) {
+            detail.push_str("  verify");
+        } else if let Some(speed) = formatted_speed {
+            detail.push_str("  ");
+            detail.push_str(&speed);
+            detail.push_str("/s");
+        } else {
+            detail.push_str("  active");
+        }
+        return Cow::Owned(detail);
     }
     match status {
-        FileStatus::Queued => "queued".to_string(),
+        FileStatus::Queued => Cow::Borrowed("queued"),
         FileStatus::Complete => {
             let formatted_size = format_bytes(file.size);
             let mut detail = String::with_capacity(formatted_size.len() + 6);
             detail.push_str(&formatted_size);
             detail.push_str("  done");
-            detail
+            Cow::Owned(detail)
         }
-        FileStatus::Error(message) => message.clone(),
+        FileStatus::Error(message) => Cow::Borrowed(message),
         FileStatus::Downloading => unreachable!("downloading handled above"),
     }
 }
 
-fn progress_bar_app(downloaded: u64, total: u64, width: usize) -> String {
+fn push_progress_bar_app(out: &mut String, downloaded: u64, total: u64, width: usize) {
     if total == 0 {
-        let mut bar = String::with_capacity(width * "\u{2591}".len());
         for _ in 0..width {
-            bar.push('\u{2591}');
+            out.push('\u{2591}');
         }
-        return bar;
+        return;
     }
     #[allow(
         clippy::cast_precision_loss,
@@ -653,14 +659,12 @@ fn progress_bar_app(downloaded: u64, total: u64, width: usize) -> String {
     let filled = ((downloaded as f64 / total as f64) * width as f64) as usize;
     let filled = filled.min(width);
     let empty = width - filled;
-    let mut bar = String::with_capacity(width * "\u{2588}".len());
     for _ in 0..filled {
-        bar.push('\u{2588}');
+        out.push('\u{2588}');
     }
     for _ in 0..empty {
-        bar.push('\u{2591}');
+        out.push('\u{2591}');
     }
-    bar
 }
 
 fn package_detail_app(
@@ -701,15 +705,6 @@ fn package_display_name_app(display_name: &str, folder_label: Option<&str>) -> S
         return label;
     }
     compact_label(display_name.split('#').next().unwrap_or(display_name))
-}
-
-fn package_prefix_label_app(label: &str) -> String {
-    let compact = compact_label(label);
-    let mut prefixed = String::with_capacity(compact.len() + 3);
-    prefixed.push('[');
-    prefixed.push_str(&compact);
-    prefixed.push_str("] ");
-    prefixed
 }
 
 fn aggregate_progress_label_app(app: &App, pct: u16, width: u16) -> String {

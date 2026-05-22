@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -526,32 +527,36 @@ pub(super) fn compact_label(value: &str) -> String {
 }
 
 pub(super) fn truncate_end(value: &str, max_chars: usize) -> String {
+    truncate_end_cow(value, max_chars).into_owned()
+}
+
+pub(super) fn truncate_end_cow(value: &str, max_chars: usize) -> Cow<'_, str> {
     if max_chars == 0 {
-        return String::new();
+        return Cow::Borrowed("");
     }
     if value.is_ascii() {
         if value.len() <= max_chars {
-            return value.to_string();
+            return Cow::Borrowed(value);
         }
         if max_chars <= 1 {
-            return "\u{2026}".to_string();
+            return Cow::Borrowed("\u{2026}");
         }
         let mut truncated = value[..max_chars.saturating_sub(1)].to_string();
         truncated.push('\u{2026}');
-        return truncated;
+        return Cow::Owned(truncated);
     }
     if text_width(value) <= max_chars {
-        return value.to_string();
+        return Cow::Borrowed(value);
     }
     if max_chars <= 1 {
-        return "\u{2026}".to_string();
+        return Cow::Borrowed("\u{2026}");
     }
     let mut truncated = value
         .chars()
         .take(max_chars.saturating_sub(1))
         .collect::<String>();
     truncated.push('\u{2026}');
-    truncated
+    Cow::Owned(truncated)
 }
 
 pub(super) fn text_width(value: &str) -> usize {
