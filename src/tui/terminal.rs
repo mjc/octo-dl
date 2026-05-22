@@ -75,6 +75,7 @@ async fn run_interactive_tui_loop(
     let pid = sysinfo::get_current_pid().ok();
     let mut needs_draw = true;
     let mut download_state_dirty = false;
+    let mut dashboard_dirty = state_sync_enabled;
     let mut auto_login_after_first_draw = true;
 
     loop {
@@ -91,6 +92,7 @@ async fn run_interactive_tui_loop(
             () = &mut shutdown => {
                 request_quit(app);
                 needs_draw = true;
+                dashboard_dirty = true;
             }
             Some(event) = input_rx.recv() => {
                 match event {
@@ -99,27 +101,32 @@ async fn run_interactive_tui_loop(
                     _ => {}
                 }
                 needs_draw = true;
+                dashboard_dirty = true;
             }
             Some(event) = download_rx.recv() => {
                 app.handle_download_event(event);
                 let _ = app.drain_download_events(download_rx);
                 download_state_dirty = true;
+                dashboard_dirty = true;
             }
             Some(action) = action_rx.recv() => {
                 app.handle_ui_action(action);
                 let _ = app.drain_ui_actions(action_rx);
                 needs_draw = true;
+                dashboard_dirty = true;
             }
             _ = tick.tick() => {
                 tick_count = tick_count.saturating_add(1);
-                app.handle_terminal_tick(download_rx, action_rx, tick_count, &mut sys, pid);
+                dashboard_dirty |=
+                    app.handle_terminal_tick(download_rx, action_rx, tick_count, &mut sys, pid);
                 needs_draw = true;
                 download_state_dirty = false;
             }
         }
 
-        if state_sync_enabled {
+        if state_sync_enabled && dashboard_dirty {
             let _ = app.publish_snapshot_if_observed(state_tx);
+            dashboard_dirty = false;
         }
 
         if download_state_dirty {
