@@ -854,6 +854,19 @@ fn download_status_message_reflects_actual_activity() {
 }
 
 #[test]
+fn login_failure_status_adds_single_context_prefix() {
+    let mut app = test_app();
+
+    app.complete_login(false, Some("invalid RSA private key format".to_string()));
+
+    assert_eq!(
+        app.login.error.as_deref(),
+        Some("invalid RSA private key format")
+    );
+    assert_eq!(app.status, "Login failed: invalid RSA private key format");
+}
+
+#[test]
 fn visible_rows_hide_empty_failed_packages() {
     let mut app = test_app();
     let package_id = package_id("failed", "https://mega.nz/folder/failed");

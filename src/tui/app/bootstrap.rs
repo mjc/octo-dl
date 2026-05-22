@@ -295,7 +295,7 @@ impl App {
             if let Err(e) = mega_client.login(&email, &password, mfa.as_deref()).await {
                 let _ = tx.send(DownloadEvent::LoginResult {
                     success: false,
-                    error: Some(format!("Login failed: {e}")),
+                    error: Some(e.to_string()),
                 });
                 return;
             }
