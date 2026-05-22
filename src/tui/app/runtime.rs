@@ -351,6 +351,13 @@ impl App {
         false
     }
 
+    fn has_active_dashboard_transfer(&self) -> bool {
+        self.files
+            .iter()
+            .any(|file| matches!(file.status, FileStatus::Downloading))
+            || !self.verifying_files.is_empty()
+    }
+
     pub(crate) fn handle_terminal_tick(
         &mut self,
         download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
@@ -358,19 +365,25 @@ impl App {
         tick_count: u32,
         sys: &mut System,
         pid: Option<sysinfo::Pid>,
-    ) {
+    ) -> bool {
+        let mut dashboard_dirty = false;
+
         if tick_count.is_multiple_of(50) {
             self.refresh_resource_usage(sys, pid);
+            dashboard_dirty = true;
         }
 
-        let _ = self.drain_download_events(download_rx);
+        dashboard_dirty |= self.drain_download_events(download_rx);
+        dashboard_dirty |= self.has_active_dashboard_transfer();
         self.update_speeds();
         if tick_count.is_multiple_of(50) {
             self.log_progress_summary();
         }
         self.drain_token_messages();
-        let _ = self.drain_ui_actions(action_rx);
+        dashboard_dirty |= self.drain_ui_actions(action_rx);
         self.poll_session_persistence();
+
+        dashboard_dirty
     }
 
     pub(crate) async fn run_headless_until_shutdown<F>(
@@ -395,6 +408,13 @@ impl App {
                 event = download_rx.recv() => {
                     if let Some(evt) = event {
                         self.handle_download_event(evt);
+                        if let Some(state_tx) = state_tx {
+                            let _ = self.publish_dashboard_snapshot_if_observed(
+                                state_tx,
+                                DashboardUiMode::Headless,
+                                false,
+                            );
+                        }
                     } else {
                         log::warn!("Event channel closed");
                         break;
@@ -414,11 +434,11 @@ impl App {
                 }
             }
 
-            let _ = self.drain_download_events(download_rx);
-            let _ = self.drain_ui_actions(action_rx);
+            let dashboard_dirty =
+                self.drain_download_events(download_rx) | self.drain_ui_actions(action_rx);
             self.drain_token_messages();
             self.poll_session_persistence();
-            if let Some(state_tx) = state_tx {
+            if dashboard_dirty && let Some(state_tx) = state_tx {
                 let _ = self.publish_dashboard_snapshot_if_observed(
                     state_tx,
                     DashboardUiMode::Headless,
@@ -528,13 +548,43 @@ mod tests {
                 .expect("download event should send");
         }
 
-        app.handle_terminal_tick(&mut download_rx, &mut action_rx, 1, &mut sys, None);
+        assert!(app.handle_terminal_tick(&mut download_rx, &mut action_rx, 1, &mut sys, None));
 
         assert_eq!(download_rx.len(), 10);
         assert_eq!(
             app.status,
             format!("status {}", MAX_DOWNLOAD_EVENTS_PER_TICK - 1)
         );
+    }
+
+    #[test]
+    fn terminal_tick_does_not_dirty_dashboard_when_idle() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let (_download_tx, mut download_rx) = mpsc::unbounded_channel();
+        let (_action_tx, mut action_rx) = mpsc::unbounded_channel();
+        let mut sys = System::new();
+
+        assert!(!app.handle_terminal_tick(&mut download_rx, &mut action_rx, 1, &mut sys, None));
+    }
+
+    #[test]
+    fn terminal_tick_dirties_dashboard_for_active_transfer_speed_refresh() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let (_download_tx, mut download_rx) = mpsc::unbounded_channel();
+        let (_action_tx, mut action_rx) = mpsc::unbounded_channel();
+        let mut sys = System::new();
+
+        app.files.push(FileEntry {
+            id: "file.bin".into(),
+            name: "file.bin".to_string(),
+            size: 100,
+            downloaded: 1,
+            status: FileStatus::Downloading,
+        });
+
+        assert!(app.handle_terminal_tick(&mut download_rx, &mut action_rx, 1, &mut sys, None));
     }
 
     #[test]
