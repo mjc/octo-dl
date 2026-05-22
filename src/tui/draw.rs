@@ -3,7 +3,6 @@
 mod dashboard;
 mod popup;
 
-use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
@@ -402,11 +401,9 @@ fn render_file_row_app(
     } else {
         None
     };
-    let detail = file_detail_app(app, file, &status);
+    let detail = FileDetail::new(app, file, &status);
     let prefix_width = 5;
-    let detail_width = text_width(&detail).min(content_width / 2);
-    let detail = truncate_end_cow(&detail, detail_width);
-    let detail_width = text_width(&detail);
+    let detail_width = detail.width().min(content_width / 2);
     let name_width = content_width
         .saturating_sub(prefix_width)
         .saturating_sub(detail_width)
@@ -418,8 +415,7 @@ fn render_file_row_app(
     } else {
         file.name.as_str()
     };
-    let name = truncate_end_cow(display_name, name_width);
-    let name_width = text_width(&name);
+    let name_width = truncated_text_width(display_name, name_width);
     let filler_width = content_width
         .saturating_sub(prefix_width)
         .saturating_sub(name_width)
@@ -432,21 +428,15 @@ fn render_file_row_app(
     if selected {
         row_style = row_style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
     }
-    render_segments(
-        frame,
-        x,
-        y,
-        [
-            ("   ", row_style),
-            (icon, row_style),
-            (" ", row_style),
-            (&name, row_style),
-            ("", row_style),
-            (&detail, Style::default().fg(detail_color)),
-        ],
-        filler_width,
-        selected,
-    );
+    let row_style = selected_style(row_style, selected);
+    let detail_style = selected_style(Style::default().fg(detail_color), selected);
+    let mut cursor = x;
+    render_text(frame, &mut cursor, y, "   ", row_style);
+    render_text(frame, &mut cursor, y, icon, row_style);
+    render_text(frame, &mut cursor, y, " ", row_style);
+    render_truncated_text(frame, &mut cursor, y, display_name, name_width, row_style);
+    cursor = cursor.saturating_add(u16::try_from(filler_width).unwrap_or(u16::MAX));
+    detail.render(frame, &mut cursor, y, detail_width, detail_style);
 }
 
 fn prefixed_file_label(prefix_label: &str, file_name: &str) -> String {
@@ -477,10 +467,14 @@ fn render_package_row_app(
     let mut size = 0_u64;
     let mut common_folder = None;
     let mut folder_conflict = false;
+    let mut package_downloading = false;
+    let mut package_verifying = false;
     for file in app.core_state.files.values() {
         if file.package_id != package_id {
             continue;
         }
+        package_downloading |= matches!(file.lifecycle, FileLifecycle::Downloading);
+        package_verifying |= app.verifying_files.contains(&file.id);
         let folder = file.path.split('/').next().filter(|part| !part.is_empty());
         match (common_folder, folder) {
             (None, Some(folder)) => common_folder = Some(folder),
@@ -502,13 +496,18 @@ fn render_package_row_app(
     let percent = percent(downloaded, size);
     let expanded = app.expanded_packages.contains(&package_id)
         || matches!(package.status, PackageStatus::Failed);
-    let (icon, color) = package_status_style(package.status, percent);
+    let (icon, mut color) = package_status_style(package.status, percent);
+    if package_downloading || package_verifying {
+        color = Color::Yellow;
+    }
     let marker = if present > 1 {
         if expanded { "-" } else { "+" }
     } else {
         " "
     };
-    let speed_label = if matches!(package.status, PackageStatus::Downloading) {
+    let speed_label = if package_verifying {
+        "verify"
+    } else if package_downloading || matches!(package.status, PackageStatus::Downloading) {
         "active"
     } else {
         ""
@@ -578,14 +577,90 @@ fn render_segments<const N: usize>(
             x = x.saturating_add(u16::try_from(filler_width).unwrap_or(u16::MAX));
             continue;
         }
-        let style = if selected {
-            style.bg(Color::DarkGray)
-        } else {
-            style
-        };
-        frame.buffer_mut().set_string(x, y, text, style);
-        x = x.saturating_add(u16::try_from(text_width(text)).unwrap_or(u16::MAX));
+        render_text(frame, &mut x, y, text, selected_style(style, selected));
     }
+}
+
+fn selected_style(style: Style, selected: bool) -> Style {
+    if selected {
+        style.bg(Color::DarkGray)
+    } else {
+        style
+    }
+}
+
+fn render_text(frame: &mut ratatui::Frame, x: &mut u16, y: u16, text: &str, style: Style) {
+    frame.buffer_mut().set_string(*x, y, text, style);
+    *x = x.saturating_add(u16::try_from(text_width(text)).unwrap_or(u16::MAX));
+}
+
+fn truncated_text_width(value: &str, max_width: usize) -> usize {
+    if max_width == 0 {
+        return 0;
+    }
+    text_width(value).min(max_width)
+}
+
+fn render_truncated_text(
+    frame: &mut ratatui::Frame,
+    x: &mut u16,
+    y: u16,
+    value: &str,
+    max_width: usize,
+    style: Style,
+) {
+    if max_width == 0 {
+        return;
+    }
+    if text_width(value) <= max_width {
+        render_text(frame, x, y, value, style);
+        return;
+    }
+    if max_width <= 1 {
+        render_text(frame, x, y, "\u{2026}", style);
+        return;
+    }
+
+    let prefix_width = max_width - 1;
+    if value.is_ascii() {
+        let prefix = &value[..prefix_width.min(value.len())];
+        render_text(frame, x, y, prefix, style);
+        render_text(frame, x, y, "\u{2026}", style);
+        return;
+    }
+
+    let mut written = 0_usize;
+    for ch in value.chars() {
+        if written >= prefix_width {
+            break;
+        }
+        let mut buf = [0_u8; 4];
+        let text = ch.encode_utf8(&mut buf);
+        render_text(frame, x, y, text, style);
+        written += text_width(text);
+    }
+    render_text(frame, x, y, "\u{2026}", style);
+}
+
+fn render_clipped_text(
+    frame: &mut ratatui::Frame,
+    x: &mut u16,
+    y: u16,
+    remaining: &mut usize,
+    text: &str,
+    style: Style,
+) {
+    if *remaining == 0 {
+        return;
+    }
+    let width = text_width(text);
+    if width <= *remaining {
+        render_text(frame, x, y, text, style);
+        *remaining -= width;
+        return;
+    }
+    render_truncated_text(frame, x, y, text, *remaining, style);
+    *remaining = 0;
 }
 
 fn file_status_for_draw(app: &App, file: &FileEntry) -> FileStatus {
@@ -596,75 +671,211 @@ fn file_status_for_draw(app: &App, file: &FileEntry) -> FileStatus {
     }
 }
 
-fn file_detail_app<'a>(app: &App, file: &'a FileEntry, status: &'a FileStatus) -> Cow<'a, str> {
-    if app.verifying_files.contains(&file.id) || matches!(status, FileStatus::Downloading) {
+enum FileDetail<'a> {
+    Borrowed(&'a str),
+    Complete(String),
+    Active {
+        downloaded: u64,
+        size: u64,
+        pct: u64,
+        suffix: ActiveDetailSuffix,
+    },
+}
+
+enum ActiveDetailSuffix {
+    Active,
+    Verify,
+    Speed(String),
+}
+
+impl<'a> FileDetail<'a> {
+    fn new(app: &App, file: &'a FileEntry, status: &'a FileStatus) -> Self {
+        let verifying = app.verifying_files.contains(&file.id);
+        if verifying || matches!(status, FileStatus::Downloading) {
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
+            let pct = if file.size > 0 {
+                ((file.downloaded as f64 / file.size as f64 * 100.0) as u64).min(100)
+            } else {
+                0
+            };
+            let file_speed = app.file_speed(&file.id);
+            let suffix = if verifying {
+                ActiveDetailSuffix::Verify
+            } else if file_speed > 0 {
+                ActiveDetailSuffix::Speed(format_bytes(file_speed))
+            } else {
+                ActiveDetailSuffix::Active
+            };
+            return Self::Active {
+                downloaded: file.downloaded,
+                size: file.size,
+                pct,
+                suffix,
+            };
+        }
+        match status {
+            FileStatus::Queued => Self::Borrowed("queued"),
+            FileStatus::Complete => {
+                let formatted_size = format_bytes(file.size);
+                let mut detail = String::with_capacity(formatted_size.len() + 6);
+                detail.push_str(&formatted_size);
+                detail.push_str("  done");
+                Self::Complete(detail)
+            }
+            FileStatus::Error(message) => Self::Borrowed(message),
+            FileStatus::Downloading => unreachable!("downloading handled above"),
+        }
+    }
+
+    fn width(&self) -> usize {
+        match self {
+            Self::Borrowed(value) => text_width(value),
+            Self::Complete(value) => text_width(value),
+            Self::Active { pct, suffix, .. } => 1 + 10 + 2 + decimal_len(*pct) + 1 + suffix.width(),
+        }
+    }
+
+    fn render(
+        &self,
+        frame: &mut ratatui::Frame,
+        x: &mut u16,
+        y: u16,
+        max_width: usize,
+        style: Style,
+    ) {
+        match self {
+            Self::Borrowed(value) => render_truncated_text(frame, x, y, value, max_width, style),
+            Self::Complete(value) => render_truncated_text(frame, x, y, value, max_width, style),
+            Self::Active {
+                downloaded,
+                size,
+                pct,
+                suffix,
+            } => render_active_file_detail(
+                frame,
+                x,
+                y,
+                max_width,
+                *downloaded,
+                *size,
+                *pct,
+                suffix,
+                style,
+            ),
+        }
+    }
+}
+
+impl ActiveDetailSuffix {
+    fn width(&self) -> usize {
+        match self {
+            Self::Active => 8,
+            Self::Verify => 8,
+            Self::Speed(speed) => 2 + text_width(speed) + 2,
+        }
+    }
+
+    fn render(
+        &self,
+        frame: &mut ratatui::Frame,
+        x: &mut u16,
+        y: u16,
+        remaining: &mut usize,
+        style: Style,
+    ) {
+        match self {
+            Self::Active => render_clipped_text(frame, x, y, remaining, "  active", style),
+            Self::Verify => render_clipped_text(frame, x, y, remaining, "  verify", style),
+            Self::Speed(speed) => {
+                render_clipped_text(frame, x, y, remaining, "  ", style);
+                render_clipped_text(frame, x, y, remaining, speed, style);
+                render_clipped_text(frame, x, y, remaining, "/s", style);
+            }
+        }
+    }
+}
+
+fn render_active_file_detail(
+    frame: &mut ratatui::Frame,
+    x: &mut u16,
+    y: u16,
+    max_width: usize,
+    downloaded: u64,
+    size: u64,
+    pct: u64,
+    suffix: &ActiveDetailSuffix,
+    style: Style,
+) {
+    let mut remaining = max_width;
+    render_clipped_text(frame, x, y, &mut remaining, "[", style);
+    render_progress_bar_clipped(frame, x, y, &mut remaining, downloaded, size, 10, style);
+    render_clipped_text(frame, x, y, &mut remaining, "] ", style);
+    let mut pct_buf = [0_u8; 20];
+    let pct_text = decimal_str(pct, &mut pct_buf);
+    render_clipped_text(frame, x, y, &mut remaining, pct_text, style);
+    render_clipped_text(frame, x, y, &mut remaining, "%", style);
+    suffix.render(frame, x, y, &mut remaining, style);
+}
+
+fn render_progress_bar_clipped(
+    frame: &mut ratatui::Frame,
+    x: &mut u16,
+    y: u16,
+    remaining: &mut usize,
+    downloaded: u64,
+    total: u64,
+    width: usize,
+    style: Style,
+) {
+    if *remaining == 0 {
+        return;
+    }
+    let filled = if total == 0 {
+        0
+    } else {
         #[allow(
             clippy::cast_precision_loss,
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss
         )]
-        let pct = if file.size > 0 {
-            ((file.downloaded as f64 / file.size as f64 * 100.0) as u64).min(100)
-        } else {
-            0
-        };
-        let file_speed = app.file_speed(&file.id);
-        let formatted_speed = if !app.verifying_files.contains(&file.id) && file_speed > 0 {
-            Some(format_bytes(file_speed))
-        } else {
-            None
-        };
-        let speed_extra = formatted_speed.as_ref().map_or(8, |speed| speed.len() + 4);
-        let mut detail = String::with_capacity(10 * "\u{2588}".len() + speed_extra + 8);
-        detail.push('[');
-        push_progress_bar_app(&mut detail, file.downloaded, file.size, 10);
-        let _ = write!(detail, "] {pct}%");
-        if app.verifying_files.contains(&file.id) {
-            detail.push_str("  verify");
-        } else if let Some(speed) = formatted_speed {
-            detail.push_str("  ");
-            detail.push_str(&speed);
-            detail.push_str("/s");
-        } else {
-            detail.push_str("  active");
+        { ((downloaded as f64 / total as f64) * width as f64) as usize }.min(width)
+    };
+    for index in 0..width {
+        if *remaining == 0 {
+            return;
         }
-        return Cow::Owned(detail);
-    }
-    match status {
-        FileStatus::Queued => Cow::Borrowed("queued"),
-        FileStatus::Complete => {
-            let formatted_size = format_bytes(file.size);
-            let mut detail = String::with_capacity(formatted_size.len() + 6);
-            detail.push_str(&formatted_size);
-            detail.push_str("  done");
-            Cow::Owned(detail)
-        }
-        FileStatus::Error(message) => Cow::Borrowed(message),
-        FileStatus::Downloading => unreachable!("downloading handled above"),
+        let text = if index < filled {
+            "\u{2588}"
+        } else {
+            "\u{2591}"
+        };
+        render_clipped_text(frame, x, y, remaining, text, style);
     }
 }
 
-fn push_progress_bar_app(out: &mut String, downloaded: u64, total: u64, width: usize) {
-    if total == 0 {
-        for _ in 0..width {
-            out.push('\u{2591}');
+fn decimal_len(value: u64) -> usize {
+    if value == 0 {
+        return 1;
+    }
+    value.ilog10() as usize + 1
+}
+
+fn decimal_str(value: u64, buf: &mut [u8; 20]) -> &str {
+    let mut value = value;
+    let mut index = buf.len();
+    loop {
+        index -= 1;
+        buf[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
         }
-        return;
     }
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    let filled = ((downloaded as f64 / total as f64) * width as f64) as usize;
-    let filled = filled.min(width);
-    let empty = width - filled;
-    for _ in 0..filled {
-        out.push('\u{2588}');
-    }
-    for _ in 0..empty {
-        out.push('\u{2591}');
-    }
+    std::str::from_utf8(&buf[index..]).expect("decimal digits are valid UTF-8")
 }
 
 fn package_detail_app(
@@ -1021,6 +1232,34 @@ mod tests {
             .draw(|frame| draw(frame, app))
             .expect("draw should succeed");
         terminal.backend().buffer().clone()
+    }
+
+    fn buffer_contains_text_with_color(
+        buffer: &ratatui::buffer::Buffer,
+        needle: &str,
+        color: Color,
+    ) -> bool {
+        let needle = needle.chars().collect::<Vec<_>>();
+        let area = buffer.area;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let mut matched = true;
+                for (offset, expected) in needle.iter().enumerate() {
+                    let Some(cell) = buffer.cell((x + offset as u16, y)) else {
+                        matched = false;
+                        break;
+                    };
+                    if cell.symbol().chars().next() != Some(*expected) || cell.fg != color {
+                        matched = false;
+                        break;
+                    }
+                }
+                if matched {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     #[test]
@@ -1461,6 +1700,67 @@ mod tests {
         assert!(
             saw_blue_progress,
             "verification progress should render in blue"
+        );
+    }
+
+    #[test]
+    fn draw_main_colors_package_yellow_while_downloading() {
+        let mut app = test_app();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
+                display_name: "Mega Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "active.bin".to_string().into(),
+                    path: "active.bin".to_string(),
+                    size: 20,
+                }],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: "active.bin".to_string().into(),
+            size: 20,
+        });
+
+        let buffer = render_buffer(&mut app, 100, 24);
+
+        assert!(
+            buffer_contains_text_with_color(&buffer, "Mega Package", Color::Yellow),
+            "downloading package row should render in yellow"
+        );
+    }
+
+    #[test]
+    fn draw_main_colors_package_yellow_while_verifying() {
+        let mut app = test_app();
+        let file_id: crate::core::FileId = "verify.bin".to_string().into();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
+                display_name: "Mega Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.clone(),
+                    path: "verify.bin".to_string(),
+                    size: 20,
+                }],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileCompleted {
+            file_id: file_id.clone(),
+        });
+        app.verifying_files.insert(file_id);
+
+        let buffer = render_buffer(&mut app, 100, 24);
+
+        assert!(
+            buffer_contains_text_with_color(&buffer, "Mega Package", Color::Yellow),
+            "verifying package row should render in yellow"
         );
     }
 

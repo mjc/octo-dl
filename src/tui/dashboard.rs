@@ -398,9 +398,13 @@ impl App {
                     let mut source_url = None;
                     let mut common_folder = None;
                     let mut folder_conflict = false;
+                    let mut package_downloading = false;
+                    let mut package_verifying = false;
 
                     for file in package_files {
                         source_url = source_url.or_else(|| Some(file.source_url.clone()));
+                        package_downloading |= matches!(file.lifecycle, FileLifecycle::Downloading);
+                        package_verifying |= self.verifying_files.contains(&file.id);
                         let folder = file.path.split('/').next().filter(|part| !part.is_empty());
                         match (common_folder, folder) {
                             (None, Some(folder)) => common_folder = Some(folder),
@@ -425,7 +429,11 @@ impl App {
                         id: package.id.to_string(),
                         source_url: source_url.unwrap_or_default(),
                         display_name: package.display_name.clone(),
-                        status: package.status,
+                        status: if package_downloading || package_verifying {
+                            PackageStatus::Downloading
+                        } else {
+                            package.status
+                        },
                         file_ids,
                         present_files: present,
                         completed_files: complete,
