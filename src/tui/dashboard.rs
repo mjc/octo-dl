@@ -511,10 +511,8 @@ pub fn aggregate_transfer_label(state: &DownloadDashboardState) -> String {
         return aggregate_activity_label(state);
     }
 
-    let formatted_speed = format_bytes(state.totals.current_speed);
-    let mut speed = String::with_capacity(formatted_speed.len() + 2);
-    speed.push_str(&formatted_speed);
-    speed.push_str("/s");
+    let mut speed = String::with_capacity(16);
+    let _ = write!(speed, "{}/s", format_bytes(state.totals.current_speed));
     let remaining = state
         .totals
         .total_size
@@ -570,11 +568,8 @@ pub fn file_detail(file: &DashboardFileRow) -> String {
             let speed = if matches!(file.status, DashboardFileStatus::Verifying) {
                 "  verify".to_string()
             } else if file.speed > 0 {
-                let formatted_speed = format_bytes(file.speed);
-                let mut speed = String::with_capacity(formatted_speed.len() + 4);
-                speed.push_str("  ");
-                speed.push_str(&formatted_speed);
-                speed.push_str("/s");
+                let mut speed = String::with_capacity(18);
+                let _ = write!(speed, "  {}/s", format_bytes(file.speed));
                 speed
             } else {
                 "  active".to_string()
@@ -585,9 +580,8 @@ pub fn file_detail(file: &DashboardFileRow) -> String {
         }
         DashboardFileStatus::Queued => "queued".to_string(),
         DashboardFileStatus::Complete => {
-            let formatted_size = format_bytes(file.size);
-            let mut detail = String::with_capacity(formatted_size.len() + 6);
-            detail.push_str(&formatted_size);
+            let mut detail = String::with_capacity(24);
+            let _ = write!(detail, "{}", format_bytes(file.size));
             detail.push_str("  done");
             detail
         }

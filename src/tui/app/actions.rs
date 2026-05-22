@@ -1,7 +1,8 @@
+use std::fmt::Write as _;
 use std::time::Instant;
 
 use crate::{
-    core::{CoreCommand, CoreEvent, FileId, PackageId},
+    core::{CoreCommand, CoreEvent, FileId, FileLifecycle, PackageId},
     format_bytes,
 };
 
@@ -388,16 +389,30 @@ impl App {
             log::info!("Ignoring completed-file verification for untracked file: {id}");
             return;
         }
+        let was_complete = self
+            .core_state
+            .files
+            .get(&id)
+            .is_some_and(|file| matches!(file.lifecycle, FileLifecycle::Complete));
         self.apply_core_event(CoreEvent::FileResumeReverified {
             file_id: id.clone(),
             verified_bytes: bytes,
             verified_chunks: 0,
         });
-        self.apply_core_event(CoreEvent::FileCompleted {
-            file_id: id.clone(),
-        });
+        if was_complete {
+            self.apply_core_event(CoreEvent::FileVerificationCompleted {
+                file_id: id.clone(),
+            });
+        } else {
+            self.apply_core_event(CoreEvent::FileCompleted {
+                file_id: id.clone(),
+            });
+        }
         self.refresh_visible_core_file(&id);
-        self.status = format!("Verified {id}: {}", format_bytes(bytes));
+        let mut status = String::with_capacity(id.as_str().len().saturating_add(24));
+        let _ = write!(status, "Verified {id}: ");
+        crate::format::push_formatted_bytes(&mut status, bytes);
+        self.status = status;
     }
 
     pub(crate) fn handle_file_complete_event(&mut self, id: FileId, attempt_id: u64) {
