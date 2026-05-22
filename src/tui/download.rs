@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use indexmap::{IndexMap, IndexSet};
@@ -26,6 +26,7 @@ use super::event::{
 };
 
 const PACKAGE_REVERIFY_CONCURRENCY: usize = 4;
+const VERIFICATION_PROGRESS_EVENT_BYTES: u64 = 8 * 1024 * 1024;
 
 pub(crate) fn schedule_resume_artifact_delete(path: String) {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -417,14 +418,56 @@ impl DownloadProgress for FileProgress {
 struct VerificationProgress {
     tx: mpsc::UnboundedSender<DownloadEvent>,
     id: FileId,
+    pending_bytes: Arc<Mutex<u64>>,
+}
+
+impl VerificationProgress {
+    fn new(tx: mpsc::UnboundedSender<DownloadEvent>, id: FileId) -> Self {
+        Self {
+            tx,
+            id,
+            pending_bytes: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    fn flush_pending(&self) {
+        let bytes_delta = {
+            let Ok(mut pending_bytes) = self.pending_bytes.lock() else {
+                return;
+            };
+            let bytes_delta = *pending_bytes;
+            *pending_bytes = 0;
+            bytes_delta
+        };
+        self.send_progress(bytes_delta);
+    }
+
+    fn send_progress(&self, bytes_delta: u64) {
+        if bytes_delta == 0 {
+            return;
+        }
+        let _ = self.tx.send(DownloadEvent::VerificationProgress {
+            id: self.id.clone(),
+            bytes_delta,
+        });
+    }
 }
 
 impl DownloadProgress for VerificationProgress {
     fn on_progress(&self, _name: &str, delta: ProgressDelta) {
-        let _ = self.tx.send(DownloadEvent::VerificationProgress {
-            id: self.id.clone(),
-            bytes_delta: delta.total_bytes_delta,
-        });
+        let bytes_delta = {
+            let Ok(mut pending_bytes) = self.pending_bytes.lock() else {
+                return;
+            };
+            *pending_bytes = pending_bytes.saturating_add(delta.total_bytes_delta);
+            if *pending_bytes < VERIFICATION_PROGRESS_EVENT_BYTES {
+                return;
+            }
+            let bytes_delta = *pending_bytes;
+            *pending_bytes = 0;
+            bytes_delta
+        };
+        self.send_progress(bytes_delta);
     }
 }
 
@@ -802,15 +845,13 @@ async fn verify_completed_files(
         let tx = tx_for_items.clone();
         async move {
             let id = FileId::from(item.path.as_str());
-            let progress = VerificationProgress {
-                tx: tx.clone(),
-                id: id.clone(),
-            };
+            let progress = VerificationProgress::new(tx.clone(), id.clone());
             match downloader
                 .verify_completed_file_with_progress(&item.node, &item.path, Some(&progress))
                 .await
             {
                 Ok(result) => {
+                    progress.flush_pending();
                     let _ = tx.send(DownloadEvent::CompletedFileVerified {
                         id,
                         bytes: result.bytes,
@@ -822,6 +863,7 @@ async fn verify_completed_files(
                     )));
                 }
                 Err(error) => {
+                    progress.flush_pending();
                     let _ = tx.send(DownloadEvent::ScopeError {
                         scope: item.path,
                         error: format!("Final verification failed: {error}"),
@@ -890,15 +932,13 @@ async fn reverify_resume_files(
         let reverified = Arc::clone(&reverified_for_items);
         async move {
             let id = FileId::from(item.path.as_str());
-            let progress = VerificationProgress {
-                tx: tx.clone(),
-                id: id.clone(),
-            };
+            let progress = VerificationProgress::new(tx.clone(), id.clone());
             match downloader
                 .reverify_resume_file_with_progress(&item.node, &item.path, Some(&progress))
                 .await
             {
                 Ok(result) if result.sidecar_loaded => {
+                    progress.flush_pending();
                     let _ = tx.send(DownloadEvent::ResumeReverified {
                         id: id.clone(),
                         chunks: result.chunks,
@@ -913,6 +953,7 @@ async fn reverify_resume_files(
                     )));
                 }
                 Ok(result) => {
+                    progress.flush_pending();
                     let _ = tx.send(DownloadEvent::ResumeReverified {
                         id: id.clone(),
                         chunks: 0,
@@ -925,6 +966,7 @@ async fn reverify_resume_files(
                     )));
                 }
                 Err(error) => {
+                    progress.flush_pending();
                     let _ = tx.send(DownloadEvent::ScopeError {
                         scope: item.path,
                         error: format!("Reverify failed: {error}"),

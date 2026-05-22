@@ -41,6 +41,58 @@ fn test_app() -> App {
 }
 
 #[test]
+fn verification_progress_buffers_small_updates() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let progress = VerificationProgress::new(tx, "file.bin".into());
+
+    progress.on_progress(
+        "file.bin",
+        ProgressDelta {
+            total_bytes_delta: VERIFICATION_PROGRESS_EVENT_BYTES - 1,
+            network_bytes_delta: 0,
+        },
+    );
+
+    assert!(rx.try_recv().is_err());
+
+    progress.flush_pending();
+
+    let DownloadEvent::VerificationProgress { id, bytes_delta } =
+        rx.try_recv().expect("flush should emit pending progress")
+    else {
+        panic!("expected verification progress event");
+    };
+    assert_eq!(id, FileId::from("file.bin"));
+    assert_eq!(bytes_delta, VERIFICATION_PROGRESS_EVENT_BYTES - 1);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn verification_progress_emits_at_batch_threshold() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let progress = VerificationProgress::new(tx, "file.bin".into());
+
+    progress.on_progress(
+        "file.bin",
+        ProgressDelta {
+            total_bytes_delta: VERIFICATION_PROGRESS_EVENT_BYTES,
+            network_bytes_delta: 0,
+        },
+    );
+
+    let DownloadEvent::VerificationProgress { id, bytes_delta } =
+        rx.try_recv().expect("threshold should emit progress")
+    else {
+        panic!("expected verification progress event");
+    };
+    assert_eq!(id, FileId::from("file.bin"));
+    assert_eq!(bytes_delta, VERIFICATION_PROGRESS_EVENT_BYTES);
+
+    progress.flush_pending();
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn describe_panic_handles_known_and_unknown_payloads() {
     let static_msg: &(dyn std::any::Any + Send) = &"static boom";
     let string_msg: &(dyn std::any::Any + Send) = &String::from("owned boom");
