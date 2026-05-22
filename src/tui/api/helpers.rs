@@ -49,7 +49,9 @@ pub(super) fn extract_urls_from_parse_payload(page: &str, fallback: &str) -> Vec
     let mut urls = Vec::new();
     let mut seen = HashSet::new();
     append_unique_urls(&mut urls, &mut seen, extract_urls(page));
-    append_unique_urls(&mut urls, &mut seen, extract_urls(&html_to_text(page)));
+    if urls.is_empty() {
+        append_unique_urls(&mut urls, &mut seen, extract_urls(&html_to_text(page)));
+    }
     if !fallback.is_empty() {
         append_unique_urls(&mut urls, &mut seen, extract_urls(fallback));
     }

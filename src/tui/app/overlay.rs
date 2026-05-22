@@ -25,12 +25,13 @@ impl App {
     }
 
     pub(crate) fn upsert_overlay_file(&mut self, file: FileEntry, source_url: Option<String>) {
+        let selected_row_identity = self.selected_row();
         let row = match source_url {
             Some(source_url) => TransientRow::PendingUrl { file, source_url },
             None => TransientRow::UiError { file },
         };
         self.overlay_files.insert(row.file().id.clone(), row);
-        self.sync_visible_files();
+        self.sync_visible_files_preserving(selected_row_identity);
     }
 
     pub(crate) fn overlay_file_mut(&mut self, id: &FileId) -> Option<&mut FileEntry> {

@@ -329,32 +329,38 @@ fn file_status_from_core(file: &crate::core::FileState) -> FileStatus {
 }
 
 fn natural_cmp(left: &str, right: &str) -> Ordering {
-    let mut left = left.chars().peekable();
-    let mut right = right.chars().peekable();
+    let mut left_index = 0;
+    let mut right_index = 0;
 
     loop {
-        match (left.peek(), right.peek()) {
+        match (
+            left[left_index..].chars().next(),
+            right[right_index..].chars().next(),
+        ) {
             (None, None) => return Ordering::Equal,
             (None, Some(_)) => return Ordering::Less,
             (Some(_), None) => return Ordering::Greater,
             (Some(left_char), Some(right_char))
                 if left_char.is_ascii_digit() && right_char.is_ascii_digit() =>
             {
-                let left_number = take_digits(&mut left);
-                let right_number = take_digits(&mut right);
-                let number_order = compare_digit_runs(&left_number, &right_number);
+                let left_number = digit_run(left, left_index);
+                let right_number = digit_run(right, right_index);
+                let number_order = compare_digit_runs(left_number, right_number);
                 if number_order != Ordering::Equal {
                     return number_order;
                 }
+                left_index += left_number.len();
+                right_index += right_number.len();
             }
-            (Some(_), Some(_)) => {
-                let left_char = left.next().expect("peeked char should exist");
-                let right_char = right.next().expect("peeked char should exist");
+            (Some(left_char), Some(right_char)) => {
                 match left_char
                     .to_ascii_lowercase()
                     .cmp(&right_char.to_ascii_lowercase())
                 {
-                    Ordering::Equal => {}
+                    Ordering::Equal => {
+                        left_index += left_char.len_utf8();
+                        right_index += right_char.len_utf8();
+                    }
                     other => return other,
                 }
             }
@@ -362,15 +368,15 @@ fn natural_cmp(left: &str, right: &str) -> Ordering {
     }
 }
 
-fn take_digits<I>(chars: &mut std::iter::Peekable<I>) -> String
-where
-    I: Iterator<Item = char>,
-{
-    let mut digits = String::new();
-    while chars.peek().is_some_and(char::is_ascii_digit) {
-        digits.push(chars.next().expect("peeked digit should exist"));
+fn digit_run(value: &str, start: usize) -> &str {
+    let mut end = start;
+    for ch in value[start..].chars() {
+        if !ch.is_ascii_digit() {
+            break;
+        }
+        end += ch.len_utf8();
     }
-    digits
+    &value[start..end]
 }
 
 fn compare_digit_runs(left: &str, right: &str) -> Ordering {
@@ -392,4 +398,16 @@ fn compare_digit_runs(left: &str, right: &str) -> Ordering {
         .cmp(&right_normalized.len())
         .then_with(|| left_normalized.cmp(right_normalized))
         .then_with(|| left.len().cmp(&right.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn natural_cmp_orders_digit_runs_without_lexical_surprises() {
+        assert_eq!(natural_cmp("file-2.mkv", "file-10.mkv"), Ordering::Less);
+        assert_eq!(natural_cmp("file-02.mkv", "file-2.mkv"), Ordering::Greater);
+        assert_eq!(natural_cmp("File-2.mkv", "file-2.mkv"), Ordering::Equal);
+    }
 }
