@@ -130,6 +130,8 @@ pub struct App {
     pub reverify_pending_files: HashSet<FileId>,
     // Files currently running an explicit verification pass.
     pub verifying_files: HashSet<FileId>,
+    // Files allowed to accept verification progress callbacks.
+    pub(crate) verification_inflight_files: HashSet<FileId>,
     // Session
     pub session: Option<SessionSnapshot>,
     pub(crate) session_persistence: SessionPersistence,

@@ -875,6 +875,10 @@ fn handle_main_input_alt_r_reverifies_selected_file() {
             size: 100,
         }],
     );
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: "active.bin".to_string().into(),
+        size: 100,
+    });
     app.expanded_packages.insert(package_id(
         "https://mega.nz/file/reverify",
         "https://mega.nz/file/reverify",
@@ -893,6 +897,35 @@ fn handle_main_input_alt_r_reverifies_selected_file() {
             file_ids: vec!["active.bin".to_string().into()],
         }
     );
+}
+
+#[test]
+fn handle_main_input_alt_r_skips_never_started_file() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    resolve_test_package(
+        &mut app,
+        "https://mega.nz/file/reverify",
+        vec![ResolvedFile {
+            file_id: "queued.bin".to_string().into(),
+            path: "queued.bin".to_string(),
+            size: 100,
+        }],
+    );
+    app.expanded_packages.insert(package_id(
+        "https://mega.nz/file/reverify",
+        "https://mega.nz/file/reverify",
+    ));
+    app.sync_visible_files();
+    app.file_list_state.select(Some(1));
+
+    handle_input(&mut app, alt_key(KeyCode::Char('r')));
+
+    assert!(!app.verifying_files.contains("queued.bin"));
+    assert!(!app.verification_inflight_files.contains("queued.bin"));
+    assert_eq!(app.status, "Reverify unavailable for selected file");
+    assert!(url_rx.try_recv().is_err());
 }
 
 #[test]
@@ -932,6 +965,7 @@ fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
 
     assert!(token.is_cancelled());
     assert!(app.verifying_files.contains("active.bin"));
+    assert!(app.verification_inflight_files.contains("active.bin"));
     assert_eq!(app.files[0].status, FileStatus::Queued);
     assert_eq!(
         app.files[0].downloaded, 0,
@@ -951,6 +985,7 @@ fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
         bytes_delta: 40,
     });
     assert!(app.verifying_files.contains("active.bin"));
+    assert!(app.verification_inflight_files.contains("active.bin"));
     assert_eq!(
         app.files[0].downloaded, 40,
         "blue verification progress should advance as bytes are checked"
@@ -962,6 +997,7 @@ fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
         bytes: 70,
     });
     assert!(app.verifying_files.contains("active.bin"));
+    assert!(!app.verification_inflight_files.contains("active.bin"));
     assert_eq!(
         app.files[0].downloaded, 70,
         "Alt-R should publish the newly verified percent before resuming the progress bar"
@@ -973,6 +1009,7 @@ fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
         attempt_id: 0,
     });
     assert!(!app.verifying_files.contains("active.bin"));
+    assert!(!app.verification_inflight_files.contains("active.bin"));
     assert_eq!(
         app.files[0].downloaded, 70,
         "Alt-R resume start should preserve the newly verified percent"
@@ -1006,6 +1043,7 @@ fn handle_main_input_alt_r_verifies_completed_file_instead_of_resume_sidecar() {
     handle_input(&mut app, alt_key(KeyCode::Char('r')));
 
     assert!(app.verifying_files.contains("complete.bin"));
+    assert!(app.verification_inflight_files.contains("complete.bin"));
     assert_eq!(
         app.files[0].downloaded, 0,
         "completed-file verification should show verification progress from zero"
@@ -1029,6 +1067,7 @@ fn handle_main_input_alt_r_verifies_completed_file_instead_of_resume_sidecar() {
         bytes: 100,
     });
     assert!(!app.verifying_files.contains("complete.bin"));
+    assert!(!app.verification_inflight_files.contains("complete.bin"));
     assert_eq!(app.files[0].status, FileStatus::Complete);
 }
 
@@ -1052,21 +1091,40 @@ fn handle_main_input_alt_r_on_package_verifies_all_files_by_kind() {
     app.apply_core_event(CoreEvent::FileCompleted {
         file_id: "file-4.bin".to_string().into(),
     });
-    app.sync_visible_files();
-    app.file_list_state.select(Some(0));
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: "file-0.bin".to_string().into(),
+        size: 100,
+    });
+    app.apply_core_event(CoreEvent::FileReuseDetected {
+        file_id: "file-1.bin".to_string().into(),
+        reused_bytes: 25,
+        reused_chunks: 1,
+    });
+    app.handle_ui_action(UiAction::ReverifyPackage(package_id(
+        source_url, source_url,
+    )));
 
-    handle_input(&mut app, alt_key(KeyCode::Char('r')));
-
-    for index in 0..5 {
+    for index in [0, 1, 4] {
         let file_id = crate::core::FileId::from(format!("file-{index}.bin").as_str());
-        assert!(app.verifying_files.contains(&file_id));
+        assert!(
+            app.verifying_files.contains(&file_id),
+            "expected {file_id} to be verifying"
+        );
+        assert!(
+            app.verification_inflight_files.contains(&file_id),
+            "expected {file_id} to accept verification progress"
+        );
     }
-    assert!(app.files.iter().all(|file| file.downloaded == 0));
+    for index in [2, 3] {
+        let file_id = crate::core::FileId::from(format!("file-{index}.bin").as_str());
+        assert!(!app.verifying_files.contains(&file_id));
+        assert!(!app.verification_inflight_files.contains(&file_id));
+    }
     assert_eq!(
         url_rx.try_recv().unwrap(),
         DownloadRequest::ReverifyFileIds {
             source_url: source_url.to_string(),
-            file_ids: (0..4)
+            file_ids: (0..2)
                 .map(|index| crate::core::FileId::from(format!("file-{index}.bin").as_str()))
                 .collect(),
         }

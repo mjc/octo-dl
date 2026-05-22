@@ -108,6 +108,7 @@ impl App {
             reset_pending_files: HashSet::new(),
             reverify_pending_files: HashSet::new(),
             verifying_files: HashSet::new(),
+            verification_inflight_files: HashSet::new(),
             session: None,
             session_persistence: super::SessionPersistence::new(),
             core_state: DownloadState::new(SessionMeta {

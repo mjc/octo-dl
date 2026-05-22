@@ -20,6 +20,42 @@ fn test_app() -> App {
     App::new(9723, tx, true)
 }
 
+fn resolve_package(
+    app: &mut App,
+    source_url: &str,
+    files: &[(&str, u64)],
+) -> crate::core::PackageId {
+    let package_id = package_id(source_url, source_url);
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id,
+            source_url: source_url.to_string(),
+            key: crate::core::PackageKey::new(source_url.to_string()),
+            display_name: source_url.to_string(),
+            files: files
+                .iter()
+                .map(|(path, size)| ResolvedFile {
+                    file_id: (*path).to_string().into(),
+                    path: (*path).to_string(),
+                    size: *size,
+                })
+                .collect(),
+            collision: None,
+        },
+    });
+    package_id
+}
+
+fn mark_verification_inflight(app: &mut App, id: &str) -> crate::core::FileId {
+    let file_id = crate::core::FileId::from(id);
+    app.verifying_files.insert(file_id.clone());
+    app.verification_inflight_files.insert(file_id.clone());
+    app.apply_core_event(CoreEvent::FileVerificationStarted {
+        file_id: file_id.clone(),
+    });
+    file_id
+}
+
 #[test]
 fn login_state_field_cycling() {
     let mut login = LoginState::new();
@@ -335,6 +371,8 @@ fn verification_progress_updates_visible_file_without_network_rate() {
         file_id: "file.bin".to_string().into(),
     });
     app.verifying_files.insert("file.bin".to_string().into());
+    app.verification_inflight_files
+        .insert("file.bin".to_string().into());
     app.apply_core_event(CoreEvent::FileVerificationStarted {
         file_id: "file.bin".to_string().into(),
     });
@@ -380,6 +418,7 @@ fn completed_file_verified_preserves_existing_complete_lifecycle() {
         file_id: file_id.clone(),
     });
     app.verifying_files.insert(file_id.clone());
+    app.verification_inflight_files.insert(file_id.clone());
     app.apply_core_event(CoreEvent::FileVerificationStarted {
         file_id: file_id.clone(),
     });
@@ -401,6 +440,341 @@ fn completed_file_verified_preserves_existing_complete_lifecycle() {
         FileStatus::Complete
     );
     assert_eq!(app.status, "Verified file.bin: 100 B");
+}
+
+#[test]
+fn verification_progress_is_ignored_for_skipped_file() {
+    let mut app = test_app();
+    let file_id: crate::core::FileId = "file.bin".to_string().into();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id("pkg", "https://mega.nz/file/root"),
+            source_url: "https://mega.nz/file/root".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+            display_name: "Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: file_id.clone(),
+                path: "file.bin".to_string(),
+                size: 100,
+            }],
+            collision: None,
+        },
+    });
+    app.verifying_files.insert(file_id.clone());
+    app.apply_core_event(CoreEvent::FileVerificationStarted {
+        file_id: file_id.clone(),
+    });
+
+    app.handle_verification_progress_event(file_id.clone(), 45);
+
+    assert_eq!(
+        app.core_state.files[&file_id]
+            .progress
+            .visible_completed_bytes,
+        0
+    );
+    assert_eq!(app.visible_file(&file_id).unwrap().downloaded, 0);
+}
+
+#[test]
+fn verification_skipped_clears_resume_verification_state() {
+    let mut app = test_app();
+    let file_id: crate::core::FileId = "file.bin".to_string().into();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id("pkg", "https://mega.nz/file/root"),
+            source_url: "https://mega.nz/file/root".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+            display_name: "Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: file_id.clone(),
+                path: "file.bin".to_string(),
+                size: 100,
+            }],
+            collision: None,
+        },
+    });
+    app.verifying_files.insert(file_id.clone());
+    app.verification_inflight_files.insert(file_id.clone());
+    app.apply_core_event(CoreEvent::FileVerificationStarted {
+        file_id: file_id.clone(),
+    });
+
+    app.handle_verification_skipped_event(file_id.clone(), false);
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert_eq!(
+        app.core_state.files[&file_id]
+            .progress
+            .visible_completed_bytes,
+        0
+    );
+    assert_eq!(app.visible_file(&file_id).unwrap().downloaded, 0);
+}
+
+#[test]
+fn verification_skipped_restores_completed_file_lifecycle() {
+    let mut app = test_app();
+    let file_id: crate::core::FileId = "file.bin".to_string().into();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id("pkg", "https://mega.nz/file/root"),
+            source_url: "https://mega.nz/file/root".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+            display_name: "Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: file_id.clone(),
+                path: "file.bin".to_string(),
+                size: 100,
+            }],
+            collision: None,
+        },
+    });
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: file_id.clone(),
+    });
+    app.verifying_files.insert(file_id.clone());
+    app.verification_inflight_files.insert(file_id.clone());
+    app.apply_core_event(CoreEvent::FileVerificationStarted {
+        file_id: file_id.clone(),
+    });
+
+    app.handle_verification_skipped_event(file_id.clone(), true);
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert!(matches!(
+        app.core_state.files[&file_id].lifecycle,
+        FileLifecycle::Complete
+    ));
+    assert_eq!(
+        app.visible_file(&file_id).unwrap().status,
+        FileStatus::Complete
+    );
+}
+
+#[test]
+fn verification_skipped_ignores_late_progress() {
+    let mut app = test_app();
+    resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
+    let file_id = mark_verification_inflight(&mut app, "file.bin");
+
+    app.handle_verification_skipped_event(file_id.clone(), false);
+    app.handle_verification_progress_event(file_id.clone(), 90);
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert_eq!(
+        app.core_state.files[&file_id]
+            .progress
+            .visible_completed_bytes,
+        0
+    );
+    assert_eq!(app.visible_file(&file_id).unwrap().downloaded, 0);
+}
+
+#[test]
+fn file_error_clears_verification_state() {
+    let mut app = test_app();
+    resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
+    let file_id = mark_verification_inflight(&mut app, "file.bin");
+
+    app.handle_file_error_event(file_id.clone(), "network failed".to_string(), 0);
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert!(matches!(
+        app.core_state.files[&file_id].lifecycle,
+        FileLifecycle::Failed { .. }
+    ));
+}
+
+#[test]
+fn file_cancelled_clears_verification_state() {
+    let mut app = test_app();
+    resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
+    let file_id = mark_verification_inflight(&mut app, "file.bin");
+
+    app.handle_file_cancelled_event(file_id.clone(), 0);
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert!(matches!(
+        app.core_state.files[&file_id].lifecycle,
+        FileLifecycle::Queued
+    ));
+}
+
+#[test]
+fn file_complete_clears_verification_state() {
+    let mut app = test_app();
+    resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
+    let file_id = mark_verification_inflight(&mut app, "file.bin");
+
+    app.handle_file_complete_event(file_id.clone(), 0);
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert!(matches!(
+        app.core_state.files[&file_id].lifecycle,
+        FileLifecycle::Complete
+    ));
+}
+
+#[test]
+fn file_start_clears_verification_state_and_pending_reverify() {
+    let mut app = test_app();
+    resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
+    let file_id = mark_verification_inflight(&mut app, "file.bin");
+    app.reverify_pending_files.insert(file_id.clone());
+
+    app.handle_file_start_event(file_id.clone(), 100, 0);
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert!(!app.reverify_pending_files.contains(&file_id));
+    assert!(matches!(
+        app.core_state.files[&file_id].lifecycle,
+        FileLifecycle::Downloading
+    ));
+}
+
+#[test]
+fn resume_reverified_without_pending_resume_finishes_verification_state() {
+    let mut app = test_app();
+    resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
+    let file_id = mark_verification_inflight(&mut app, "file.bin");
+
+    app.handle_resume_reverified_event(file_id.clone(), 1, 64);
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert_eq!(
+        app.core_state.files[&file_id]
+            .progress
+            .verified_existing_bytes,
+        64
+    );
+}
+
+#[test]
+fn retry_file_clears_verification_state() {
+    let mut app = test_app();
+    resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
+    let file_id = mark_verification_inflight(&mut app, "file.bin");
+    app.reverify_pending_files.insert(file_id.clone());
+
+    app.perform_retry_file_action(&file_id);
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert!(!app.reverify_pending_files.contains(&file_id));
+}
+
+#[test]
+fn reset_file_clears_verification_state() {
+    let mut app = test_app();
+    resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
+    let file_id = mark_verification_inflight(&mut app, "file.bin");
+    app.reverify_pending_files.insert(file_id.clone());
+
+    app.perform_reset_file_action(&file_id);
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert!(!app.reverify_pending_files.contains(&file_id));
+    assert!(app.reset_pending_files.contains(&file_id));
+}
+
+#[test]
+fn delete_file_clears_verification_state() {
+    let mut app = test_app();
+    resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
+    let file_id = mark_verification_inflight(&mut app, "file.bin");
+    app.reverify_pending_files.insert(file_id.clone());
+
+    app.perform_delete_file_action(&file_id);
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert!(!app.reverify_pending_files.contains(&file_id));
+}
+
+#[test]
+fn delete_package_clears_verification_state_for_all_files() {
+    let mut app = test_app();
+    let package_id = resolve_package(
+        &mut app,
+        "https://mega.nz/folder/root",
+        &[("one.bin", 100), ("two.bin", 100)],
+    );
+    let one = mark_verification_inflight(&mut app, "one.bin");
+    let two = mark_verification_inflight(&mut app, "two.bin");
+    app.reverify_pending_files.insert(one.clone());
+    app.reverify_pending_files.insert(two.clone());
+
+    app.perform_delete_package_action(package_id);
+
+    for file_id in [one, two] {
+        assert!(!app.verifying_files.contains(&file_id));
+        assert!(!app.verification_inflight_files.contains(&file_id));
+        assert!(!app.reverify_pending_files.contains(&file_id));
+    }
+}
+
+#[test]
+fn reverify_package_with_only_never_started_files_is_noop() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    let package_id = resolve_package(
+        &mut app,
+        "https://mega.nz/folder/root",
+        &[("one.bin", 100), ("two.bin", 100)],
+    );
+
+    app.perform_reverify_package_action(package_id);
+
+    assert!(app.verifying_files.is_empty());
+    assert!(app.verification_inflight_files.is_empty());
+    assert!(url_rx.try_recv().is_err());
+    assert_eq!(app.status, "No package file(s) have resume data to verify");
+}
+
+#[test]
+fn reverify_package_includes_failed_file_with_partial_progress() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    let source_url = "https://mega.nz/folder/root";
+    let package_id = resolve_package(&mut app, source_url, &[("failed.bin", 100)]);
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: "failed.bin".to_string().into(),
+        size: 100,
+    });
+    app.apply_core_event(CoreEvent::FileProgress {
+        file_id: "failed.bin".to_string().into(),
+        total_bytes_delta: 25,
+        network_bytes_delta: 25,
+    });
+    app.apply_core_event(CoreEvent::FileFailed {
+        file_id: "failed.bin".to_string().into(),
+        message: "boom".to_string(),
+    });
+
+    app.perform_reverify_package_action(package_id);
+
+    assert!(app.verifying_files.contains("failed.bin"));
+    assert!(app.verification_inflight_files.contains("failed.bin"));
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        crate::tui::event::DownloadRequest::ReverifyFileIds {
+            source_url: source_url.to_string(),
+            file_ids: vec!["failed.bin".to_string().into()],
+        }
+    );
+    assert!(url_rx.try_recv().is_err());
 }
 
 #[test]
