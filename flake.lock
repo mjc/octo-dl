@@ -36,11 +36,11 @@
     "mega-rs": {
       "flake": false,
       "locked": {
-        "lastModified": 1779468098,
-        "narHash": "sha256-YX4G9ce4snZKuhmOwmsMSpvBe9cbR0Prp5Nstrd/rfo=",
+        "lastModified": 1779469007,
+        "narHash": "sha256-+DF9kbN5NBOLp6WfGetTEF+C5/2t9uPVTOoXqTN23AQ=",
         "owner": "mjc",
         "repo": "mega-rs",
-        "rev": "f387cb1b10a340df0a46ff00c93fcb4acf5b327b",
+        "rev": "959d66eef7b896275c1eaccebec04c9ebb9bd7d2",
         "type": "github"
       },
       "original": {

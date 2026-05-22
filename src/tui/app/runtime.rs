@@ -48,7 +48,12 @@ impl App {
             }
             self.start_download_task();
         } else {
+            let status = error.as_deref().map_or_else(
+                || "Login failed".to_string(),
+                |error| format!("Login failed: {error}"),
+            );
             self.login.error = error;
+            self.status = status;
             self.popup = super::Popup::Login;
         }
     }

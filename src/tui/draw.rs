@@ -1187,6 +1187,20 @@ mod tests {
     }
 
     #[test]
+    fn draw_login_popup_wraps_long_login_error() {
+        let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
+        let mut app = App::new(9723, tx, true);
+        app.popup = Popup::Login;
+        app.login.error = Some("invalid RSA private key format".to_string());
+
+        let rendered = render_text_with_size(&mut app, 54, 18);
+
+        assert!(rendered.contains("Login failed"));
+        assert!(rendered.contains("invalid RSA private key format"));
+        assert!(!rendered.contains("Login failed: Login failed"));
+    }
+
+    #[test]
     fn draw_main_narrow_url_mode_keeps_escape_visible() {
         let (tx, _rx) = mpsc::unbounded_channel::<DownloadEvent>();
         let mut app = App::new(9723, tx, true);

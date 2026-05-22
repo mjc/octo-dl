@@ -1,14 +1,14 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table, Wrap};
 
 use crate::tui::app::{App, ConfigField, ConfirmAction, SortKey};
 
 use super::truncate_end;
 
 pub(super) fn draw_login_popup(frame: &mut ratatui::Frame, app: &App) {
-    let area = centered_rect(42, 12, frame.area());
+    let area = centered_rect(64, 14, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -63,7 +63,9 @@ pub(super) fn draw_login_popup(frame: &mut ratatui::Frame, app: &App) {
         let spinner = Paragraph::new(" Logging in...").style(Style::default().fg(Color::Yellow));
         frame.render_widget(spinner, chunks[3]);
     } else if let Some(ref err) = app.login.error {
-        let error = Paragraph::new(format!(" {err}")).style(Style::default().fg(Color::Red));
+        let error = Paragraph::new(format!(" Login failed: {err}"))
+            .style(Style::default().fg(Color::Red))
+            .wrap(Wrap { trim: true });
         frame.render_widget(error, chunks[3]);
     } else {
         let help = Paragraph::new(" Tab: next | Enter: login | Esc: quit")
