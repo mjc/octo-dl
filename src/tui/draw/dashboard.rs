@@ -475,7 +475,7 @@ fn is_processing_status(status: &str) -> bool {
     status.starts_with("Processing ")
 }
 
-fn package_status_style(status: PackageStatus, percent: u64) -> (&'static str, Color) {
+pub(super) fn package_status_style(status: PackageStatus, percent: u64) -> (&'static str, Color) {
     match status {
         PackageStatus::Downloading => (package_progress_icon(percent), Color::Yellow),
         PackageStatus::Failed => ("\u{2717}", Color::Red),
@@ -495,7 +495,7 @@ fn package_progress_icon(percent: u64) -> &'static str {
     }
 }
 
-fn mega_url_label(value: &str) -> Option<String> {
+pub(super) fn mega_url_label(value: &str) -> Option<String> {
     let marker = "mega.nz/";
     let start = value.find(marker)? + marker.len();
     let path = &value[start..];
@@ -517,7 +517,7 @@ fn mega_url_label(value: &str) -> Option<String> {
     }
 }
 
-fn compact_label(value: &str) -> String {
+pub(super) fn compact_label(value: &str) -> String {
     value
         .rsplit(['/', '\\'])
         .find(|part| !part.is_empty())
@@ -554,7 +554,7 @@ pub(super) fn truncate_end(value: &str, max_chars: usize) -> String {
     truncated
 }
 
-fn text_width(value: &str) -> usize {
+pub(super) fn text_width(value: &str) -> usize {
     if value.is_ascii() {
         value.len()
     } else {

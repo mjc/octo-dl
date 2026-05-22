@@ -183,6 +183,24 @@ impl App {
         self.current_visible_rows()
     }
 
+    pub(crate) fn cached_visible_rows(&self) -> &[visible::TuiRow] {
+        &self.cached_visible_rows
+    }
+
+    pub(crate) fn ensure_visible_rows_cache(&mut self) {
+        if self.cached_visible_rows_key != self.visible_rows_cache_key() {
+            let visible_rows = visible::visible_rows(self);
+            self.visible_file_positions = self
+                .files
+                .iter()
+                .enumerate()
+                .map(|(index, file)| (file.id.clone(), index))
+                .collect();
+            self.cached_visible_rows_key = self.visible_rows_cache_key();
+            self.cached_visible_rows = visible_rows;
+        }
+    }
+
     pub fn selected_row(&self) -> Option<visible::TuiRow> {
         let selected = self.file_list_state.selected()?;
         self.current_visible_rows().get(selected).cloned()
