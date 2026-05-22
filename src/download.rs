@@ -9,7 +9,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tokio_util::sync::CancellationToken;
@@ -936,16 +936,21 @@ impl<F: FileSystem> Downloader<F> {
         let mut mac = mega::MegaChunkMac::new(input.aes_key, input.aes_iv);
         let mut offset = boundary.offset;
         let end = boundary.offset.saturating_add(boundary.length);
+        let Ok(mut file) = tokio::fs::File::open(input.part_path).await else {
+            return false;
+        };
+        if file
+            .seek(std::io::SeekFrom::Start(boundary.offset))
+            .await
+            .is_err()
+        {
+            return false;
+        }
 
         while offset < end {
             let read_len = revalidation_buffer_len(end - offset);
             buffer.resize(read_len, 0);
-            if self
-                .fs
-                .read_exact_at(input.part_path, offset, buffer)
-                .await
-                .is_err()
-            {
+            if file.read_exact(buffer).await.is_err() {
                 return false;
             }
             mac.update(buffer);
@@ -1276,17 +1281,17 @@ impl<F: FileSystem> Downloader<F> {
 
         let processor = mega::ParallelMacProcessor::new(node.size(), node.aes_key(), &aes_iv);
         let boundaries = mega::mega_chunk_boundaries(node.size());
+        let mut file = tokio::fs::File::open(final_path).await?;
         let mut buffer = Vec::new();
         for boundary in boundaries {
             let mut mac = mega::MegaChunkMac::new(node.aes_key(), &aes_iv);
             let mut offset = boundary.offset;
             let end = boundary.offset.saturating_add(boundary.length);
+            file.seek(std::io::SeekFrom::Start(boundary.offset)).await?;
             while offset < end {
                 let read_len = revalidation_buffer_len(end - offset);
                 buffer.resize(read_len, 0);
-                self.fs
-                    .read_exact_at(final_path, offset, &mut buffer)
-                    .await?;
+                file.read_exact(&mut buffer).await?;
                 mac.update(&buffer);
                 if let Some((name, progress)) = progress {
                     progress.on_progress(
