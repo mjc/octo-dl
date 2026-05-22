@@ -645,6 +645,97 @@ struct DownloadFinishContext<'a> {
     name: &'a str,
 }
 
+struct ProgressCallbackState {
+    name: String,
+    stats: DownloadStatsTracker,
+    cumulative: CumulativeProgress,
+    progress: Arc<dyn DownloadProgress>,
+}
+
+impl ProgressCallbackState {
+    fn new(
+        name: String,
+        expected_network_bytes: u64,
+        trusted_bytes: u64,
+        progress: Arc<dyn DownloadProgress>,
+    ) -> Self {
+        Self {
+            name,
+            stats: DownloadStatsTracker::new(expected_network_bytes),
+            cumulative: CumulativeProgress::with_high_water(trusted_bytes),
+            progress,
+        }
+    }
+
+    fn record_cumulative(&self, cumulative_bytes: u64) {
+        let delta = self.cumulative.delta(cumulative_bytes);
+        if delta == 0 {
+            return;
+        }
+        let _ = self.stats.record_bytes(delta);
+        self.progress.on_progress(
+            &self.name,
+            ProgressDelta {
+                total_bytes_delta: delta,
+                network_bytes_delta: delta,
+            },
+        );
+    }
+}
+
+struct ChunkVerifiedState {
+    tracker: Mutex<ResumeTracker>,
+    sidecar_writer: LazySidecarWriter,
+}
+
+impl ChunkVerifiedState {
+    const fn new(tracker: ResumeTracker, sidecar_writer: LazySidecarWriter) -> Self {
+        Self {
+            tracker: Mutex::new(tracker),
+            sidecar_writer,
+        }
+    }
+
+    fn mark_verified(&self, index: u32, mac: [u8; 16]) {
+        let snapshot = {
+            let mut guard = self.tracker.lock().unwrap();
+            guard.mark_verified(index, mac);
+            guard.checkpoint_snapshot()
+        };
+        if let Some(snapshot) = snapshot {
+            self.sidecar_writer.send(snapshot);
+        }
+    }
+
+    async fn finish_sidecar_writer(&self, shutdown: SidecarWriterShutdown) {
+        self.sidecar_writer.finish(shutdown).await;
+    }
+}
+
+struct DownloadCallbackState {
+    progress: ProgressCallbackState,
+    chunk_verified: ChunkVerifiedState,
+}
+
+impl DownloadCallbackState {
+    const fn new(progress: ProgressCallbackState, chunk_verified: ChunkVerifiedState) -> Self {
+        Self {
+            progress,
+            chunk_verified,
+        }
+    }
+}
+
+impl mega::ParallelDownloadCallbacks for DownloadCallbackState {
+    fn progress(&self, cumulative_bytes: u64) {
+        self.progress.record_cumulative(cumulative_bytes);
+    }
+
+    fn chunk_verified(&self, index: u32, mac: [u8; 16]) {
+        self.chunk_verified.mark_verified(index, mac);
+    }
+}
+
 /// Core downloader that handles MEGA file downloads.
 pub struct Downloader<F: FileSystem = TokioFileSystem> {
     client: mega::Client,
@@ -1253,8 +1344,7 @@ impl<F: FileSystem> Downloader<F> {
         }
 
         self.ensure_parent_dir(path).await?;
-        let name = path.to_string();
-        progress.on_file_start(&name, node.size());
+        progress.on_file_start(path, node.size());
 
         let pp = part_path(path);
         let sp = sidecar_path(path);
@@ -1301,12 +1391,8 @@ impl<F: FileSystem> Downloader<F> {
         }
         let trusted_bytes = resume_validation.trusted_bytes;
 
-        let stats = Arc::new(DownloadStatsTracker::new(
-            node.size().saturating_sub(trusted_bytes),
-        ));
-
         if trusted_bytes > 0 {
-            progress.on_resume_reused(&name, resume_validation.trusted_count, trusted_bytes);
+            progress.on_resume_reused(path, resume_validation.trusted_count, trusted_bytes);
         }
 
         // Open the plaintext .part file, preserving only locally revalidated chunks.
@@ -1315,58 +1401,36 @@ impl<F: FileSystem> Downloader<F> {
             .open_part_file(&pp, node.size(), preserve_existing)
             .await?;
 
-        let trusted_for_download = resume_validation.trusted_chunks.clone();
-        let tracker = Arc::new(Mutex::new(ResumeTracker::new(
-            node.size(),
-            expected_condensed_mac,
-            resume_validation.trusted_chunks,
-        )));
-        let sidecar_writer = Arc::new(LazySidecarWriter::new(sp.clone(), pp.clone()));
-        // The mega library calls the progress callback with the *cumulative*
-        // total bytes downloaded so far, NOT a delta.  We use fetch_max (not
-        // swap) so that out-of-order callbacks from parallel workers never
-        // regress the high-water mark.
-        let cumulative = Arc::new(CumulativeProgress::with_high_water(trusted_bytes));
-        let stats_clone = Arc::clone(&stats);
-        let progress_clone = Arc::clone(progress);
-        let name_for_cb = name.clone();
-        let progress_cb = move |cumulative_bytes: u64| {
-            let delta = cumulative.delta(cumulative_bytes);
-            if delta > 0 {
-                let _ = stats_clone.record_bytes(delta);
-                progress_clone.on_progress(
-                    &name_for_cb,
-                    ProgressDelta {
-                        total_bytes_delta: delta,
-                        network_bytes_delta: delta,
-                    },
-                );
-            }
-        };
-        let verify_tracker = Arc::clone(&tracker);
-        let sidecar_writer_for_cb = Arc::clone(&sidecar_writer);
-        let chunk_verified_cb = move |index: u32, mac: [u8; 16]| {
-            let snapshot = {
-                let mut guard = verify_tracker.lock().unwrap();
-                guard.mark_verified(index, mac);
-                guard.checkpoint_snapshot()
-            };
-            if let Some(snapshot) = snapshot {
-                sidecar_writer_for_cb.send(snapshot);
-            }
-        };
+        let trusted_for_download: Arc<[Option<[u8; 16]>]> =
+            resume_validation.trusted_chunks.clone().into();
+        let callback_state = Arc::new(DownloadCallbackState::new(
+            ProgressCallbackState::new(
+                path.to_string(),
+                node.size().saturating_sub(trusted_bytes),
+                trusted_bytes,
+                Arc::clone(progress),
+            ),
+            ChunkVerifiedState::new(
+                ResumeTracker::new(
+                    node.size(),
+                    expected_condensed_mac,
+                    resume_validation.trusted_chunks,
+                ),
+                LazySidecarWriter::new(sp.clone(), pp.clone()),
+            ),
+        ));
+        let callbacks: Arc<dyn mega::ParallelDownloadCallbacks> = callback_state.clone();
 
         // Download with progress callback, optionally with cancellation support
         let download_result = if let Some(token) = cancellation_token {
             let download_fut = self
                 .client
-                .download_node_parallel_resumable_to_file_with_progress(
+                .download_node_parallel_resumable_to_file_with_callbacks(
                     node,
                     file,
                     self.config.chunks_per_file,
-                    &trusted_for_download,
-                    Some(progress_cb),
-                    Some(chunk_verified_cb),
+                    Arc::clone(&trusted_for_download),
+                    Some(callbacks),
                 );
             tokio::select! {
                 res = download_fut => res.map_err(Error::Mega),
@@ -1376,13 +1440,12 @@ impl<F: FileSystem> Downloader<F> {
             }
         } else {
             self.client
-                .download_node_parallel_resumable_to_file_with_progress(
+                .download_node_parallel_resumable_to_file_with_callbacks(
                     node,
                     file,
                     self.config.chunks_per_file,
-                    &trusted_for_download,
-                    Some(progress_cb),
-                    Some(chunk_verified_cb),
+                    trusted_for_download,
+                    Some(callbacks),
                 )
                 .await
                 .map_err(Error::Mega)
@@ -1392,7 +1455,10 @@ impl<F: FileSystem> Downloader<F> {
         } else {
             SidecarWriterShutdown::Flush
         };
-        sidecar_writer.finish(sidecar_shutdown).await;
+        callback_state
+            .chunk_verified
+            .finish_sidecar_writer(sidecar_shutdown)
+            .await;
         self.finish_download_result(
             DownloadFinishContext {
                 node,
@@ -1400,10 +1466,10 @@ impl<F: FileSystem> Downloader<F> {
                 part_path: &pp,
                 sidecar_path: &sp,
                 reused_bytes: trusted_bytes,
-                stats: &stats,
-                tracker: &tracker,
+                stats: &callback_state.progress.stats,
+                tracker: &callback_state.chunk_verified.tracker,
                 progress,
-                name: &name,
+                name: path,
             },
             download_result,
         )
