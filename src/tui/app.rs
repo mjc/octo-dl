@@ -203,7 +203,10 @@ impl App {
 
     pub fn selected_row(&self) -> Option<visible::TuiRow> {
         let selected = self.file_list_state.selected()?;
-        self.current_visible_rows().get(selected).cloned()
+        if self.cached_visible_rows_key == self.visible_rows_cache_key() {
+            return self.cached_visible_rows.get(selected).cloned();
+        }
+        visible::visible_rows(self).get(selected).cloned()
     }
 
     pub(crate) fn sync_visible_files(&mut self) {
