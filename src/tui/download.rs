@@ -1,6 +1,7 @@
 //! Download task management and transport-side event emission.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write as _;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -856,11 +857,11 @@ async fn verify_completed_files(
                         id,
                         bytes: result.bytes,
                     });
-                    let _ = tx.send(DownloadEvent::StatusMessage(format!(
-                        "Verified {}: {} final file OK",
-                        item.path,
-                        format_bytes(result.bytes)
-                    )));
+                    let mut message = String::with_capacity(item.path.len().saturating_add(40));
+                    let _ = write!(message, "Verified {}: ", item.path);
+                    crate::format::push_formatted_bytes(&mut message, result.bytes);
+                    message.push_str(" final file OK");
+                    let _ = tx.send(DownloadEvent::StatusMessage(message));
                 }
                 Err(error) => {
                     progress.flush_pending();

@@ -90,10 +90,7 @@ fn session_persistence_worker(
     while let Ok(request) = request_rx.recv() {
         match request {
             SessionPersistenceRequest::Save { session, path } => {
-                let id = session.id.clone();
-                if let Err(error) = session.save_to_path(&path) {
-                    let _ = error_tx.send(SessionPersistenceError::Save { id, error });
-                }
+                persist_latest_save(session, path, &request_rx, &error_tx);
             }
             SessionPersistenceRequest::Remove(path) => {
                 if let Err(error) = std::fs::remove_file(&path)
@@ -106,6 +103,61 @@ fn session_persistence_worker(
                 let _ = done_tx.send(());
             }
         }
+    }
+}
+
+fn persist_latest_save(
+    mut session: SessionSnapshot,
+    mut path: PathBuf,
+    request_rx: &mpsc::Receiver<SessionPersistenceRequest>,
+    error_tx: &mpsc::Sender<SessionPersistenceError>,
+) {
+    let mut pending_after_save = None;
+    while let Ok(request) = request_rx.try_recv() {
+        match request {
+            SessionPersistenceRequest::Save {
+                session: next_session,
+                path: next_path,
+            } if next_path == path => {
+                session = next_session;
+                path = next_path;
+            }
+            request => {
+                pending_after_save = Some(request);
+                break;
+            }
+        }
+    }
+
+    save_snapshot(session, path, error_tx);
+
+    if let Some(request) = pending_after_save {
+        match request {
+            SessionPersistenceRequest::Save { session, path } => {
+                persist_latest_save(session, path, request_rx, error_tx);
+            }
+            SessionPersistenceRequest::Remove(path) => {
+                if let Err(error) = std::fs::remove_file(&path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    let _ = error_tx.send(SessionPersistenceError::Remove { path, error });
+                }
+            }
+            SessionPersistenceRequest::Flush(done_tx) => {
+                let _ = done_tx.send(());
+            }
+        }
+    }
+}
+
+fn save_snapshot(
+    session: SessionSnapshot,
+    path: PathBuf,
+    error_tx: &mpsc::Sender<SessionPersistenceError>,
+) {
+    let id = session.id.clone();
+    if let Err(error) = session.save_to_path(&path) {
+        let _ = error_tx.send(SessionPersistenceError::Save { id, error });
     }
 }
 
@@ -160,6 +212,42 @@ mod tests {
         persistence.flush();
 
         assert!(!path.exists());
+        assert!(persistence.drain_errors().is_empty());
+    }
+
+    #[test]
+    fn save_burst_persists_latest_snapshot_before_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        let persistence = SessionPersistence::new();
+        let mut first = session_snapshot(vec![(
+            "https://mega.nz/file/root",
+            UrlFixtureStatus::Fetched,
+        )]);
+        push_file(
+            &mut first,
+            0,
+            "episode-1.mkv",
+            128,
+            FileFixtureStatus::Pending,
+        );
+        let mut latest = first.clone();
+        let file = latest.find_file_mut("episode-1.mkv").unwrap();
+        file.path = "episode-2.mkv".to_string();
+        file.id = "episode-2.mkv".into();
+
+        persistence.save(first, path.clone());
+        persistence.save(latest, path.clone());
+        persistence.flush();
+
+        let loaded = SessionSnapshot::load(&path).unwrap();
+        assert_eq!(
+            loaded
+                .iter_files()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["episode-2.mkv"]
+        );
         assert!(persistence.drain_errors().is_empty());
     }
 }

@@ -10,17 +10,15 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, List, Paragraph};
 
-use crate::core::{FileLifecycle, PackageStatus};
-use crate::format_bytes;
-
 use self::dashboard::{
     compact_label, controls_label_from_snapshot, dashboard_aggregate_progress_label,
-    dashboard_row_items, dashboard_status_line, focused_url_input_view, mega_url_label,
-    package_status_style, text_width, truncate_end, truncate_end_cow,
+    dashboard_row_items, dashboard_status_line, focused_url_input_view, package_status_style,
+    text_width, truncate_end,
 };
 use super::app::{App, FileEntry, FileStatus, Popup};
 use super::dashboard::{DashboardChrome, DashboardUiMode, DownloadDashboardState, clamp_selection};
 use super::visible::TuiRow;
+use crate::core::{FileLifecycle, PackageStatus};
 
 pub fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     draw_interactive_dashboard(frame, app);
@@ -36,14 +34,10 @@ pub fn draw(frame: &mut ratatui::Frame, app: &mut App) {
 fn draw_interactive_dashboard(frame: &mut ratatui::Frame, app: &mut App) {
     app.ensure_visible_rows_cache();
     let area = frame.area();
-    let ram = format_bytes(app.memory_rss);
-    let mut title_right = String::with_capacity(32 + ram.len());
-    let _ = write!(
-        title_right,
-        " {}% CPU | {ram} RAM | API: {}",
-        (app.cpu_usage as u16).min(999),
-        app.api_port,
-    );
+    let mut title_right = String::with_capacity(48);
+    let _ = write!(title_right, " {}% CPU | ", (app.cpu_usage as u16).min(999),);
+    push_byte_label(&mut title_right, app.memory_rss);
+    let _ = write!(title_right, " RAM | API: {}", app.api_port);
     if app.paused {
         title_right.push_str(" | PAUSED");
     }
@@ -143,14 +137,14 @@ pub fn draw_dashboard(
         DashboardUiMode::Attached => " octo-dl attached ",
     };
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let ram = format_bytes(state.metrics.memory_rss);
-    let mut title_right = String::with_capacity(32 + ram.len());
+    let mut title_right = String::with_capacity(64);
     let _ = write!(
         title_right,
-        " {}% CPU | {ram} RAM | API: {}",
+        " {}% CPU | ",
         (state.metrics.cpu_usage as u16).min(999),
-        state.metrics.api_port,
     );
+    push_byte_label(&mut title_right, state.metrics.memory_rss);
+    let _ = write!(title_right, " RAM | API: {}", state.metrics.api_port);
     if state.paused {
         title_right.push_str(" | PAUSED");
     }
@@ -404,10 +398,6 @@ fn render_file_row_app(
     let detail = FileDetail::new(app, file, &status);
     let prefix_width = 5;
     let detail_width = detail.width().min(content_width / 2);
-    let name_width = content_width
-        .saturating_sub(prefix_width)
-        .saturating_sub(detail_width)
-        .saturating_sub(1);
     let owned_display_name;
     let display_name = if let Some(prefix_label) = prefix_label {
         owned_display_name = prefixed_file_label(&prefix_label, &file.name);
@@ -415,11 +405,12 @@ fn render_file_row_app(
     } else {
         file.name.as_str()
     };
-    let name_width = truncated_text_width(display_name, name_width);
-    let filler_width = content_width
-        .saturating_sub(prefix_width)
-        .saturating_sub(name_width)
-        .saturating_sub(detail_width);
+    let slots = RowSlots::new(
+        content_width,
+        prefix_width,
+        detail_width,
+        text_width(display_name),
+    );
     let mut row_style = Style::default().fg(if app.verifying_files.contains(file_id) {
         Color::Blue
     } else {
@@ -434,9 +425,16 @@ fn render_file_row_app(
     render_text(frame, &mut cursor, y, "   ", row_style);
     render_text(frame, &mut cursor, y, icon, row_style);
     render_text(frame, &mut cursor, y, " ", row_style);
-    render_truncated_text(frame, &mut cursor, y, display_name, name_width, row_style);
-    cursor = cursor.saturating_add(u16::try_from(filler_width).unwrap_or(u16::MAX));
-    detail.render(frame, &mut cursor, y, detail_width, detail_style);
+    render_truncated_text(
+        frame,
+        &mut cursor,
+        y,
+        display_name,
+        slots.name_width,
+        row_style,
+    );
+    cursor = cursor.saturating_add(u16::try_from(slots.filler_width).unwrap_or(u16::MAX));
+    detail.render(frame, &mut cursor, y, slots.detail_width, detail_style);
 }
 
 fn prefixed_file_label(prefix_label: &str, file_name: &str) -> String {
@@ -461,123 +459,150 @@ fn render_package_row_app(
     let Some(package) = app.core_state.packages.get(&package_id) else {
         return;
     };
-    let mut present = 0_usize;
-    let mut complete = 0_usize;
-    let mut downloaded = 0_u64;
-    let mut size = 0_u64;
-    let mut common_folder = None;
-    let mut folder_conflict = false;
-    let mut package_downloading = false;
-    let mut package_verifying = false;
-    for file in app.core_state.files.values() {
-        if file.package_id != package_id {
-            continue;
-        }
-        package_downloading |= matches!(file.lifecycle, FileLifecycle::Downloading);
-        package_verifying |= app.verifying_files.contains(&file.id);
-        let folder = file.path.split('/').next().filter(|part| !part.is_empty());
-        match (common_folder, folder) {
-            (None, Some(folder)) => common_folder = Some(folder),
-            (Some(existing), Some(folder)) if existing == folder => {}
-            (Some(_), Some(_)) => folder_conflict = true,
-            _ => {}
-        }
-        let file_complete = matches!(file.lifecycle, FileLifecycle::Complete);
-        let visible = if file_complete {
-            file.size
-        } else {
-            crate::core::visible_completed_bytes_for_display(file)
-        };
-        present += 1;
-        complete += usize::from(file_complete);
-        downloaded = downloaded.saturating_add(visible);
-        size = size.saturating_add(file.size);
-    }
-    let percent = percent(downloaded, size);
+    let stats = PackageRowStats::new(app, package_id);
+    let percent = percent(stats.downloaded, stats.size);
     let expanded = app.expanded_packages.contains(&package_id)
         || matches!(package.status, PackageStatus::Failed);
     let (icon, mut color) = package_status_style(package.status, percent);
-    if package_downloading || package_verifying {
+    if stats.active() {
         color = Color::Yellow;
     }
-    let marker = if present > 1 {
+    let marker = if stats.present > 1 {
         if expanded { "-" } else { "+" }
     } else {
         " "
     };
-    let speed_label = if package_verifying {
-        "verify"
-    } else if package_downloading || matches!(package.status, PackageStatus::Downloading) {
-        "active"
-    } else {
-        ""
-    };
-    let detail = package_detail_app(
-        complete,
-        present,
-        downloaded,
-        size,
+    let detail = PackageDetail {
+        completed: stats.complete,
+        present: stats.present,
+        downloaded: stats.downloaded,
+        total_bytes: stats.size,
         percent,
-        speed_label,
-        content_width,
-    );
+        speed_label: stats.activity_label(package.status),
+    };
     let prefix_width = 5;
-    let detail_width = text_width(&detail).min(content_width / 2);
-    let detail = truncate_end_cow(&detail, detail_width);
-    let detail_width = text_width(&detail);
-    let name_source = package_display_name_app(
-        &package.display_name,
-        (!folder_conflict).then_some(common_folder).flatten(),
-    );
-    let name = truncate_end_cow(
-        &name_source,
-        content_width
-            .saturating_sub(prefix_width)
-            .saturating_sub(detail_width)
-            .saturating_sub(1),
-    );
-    let name_width = text_width(&name);
-    let filler_width = content_width
-        .saturating_sub(prefix_width)
-        .saturating_sub(name_width)
-        .saturating_sub(detail_width);
+    let detail_width = detail.width(content_width / 2);
+    let name = PackageName::new(&package.display_name, stats.folder_label());
+    let slots = RowSlots::new(content_width, prefix_width, detail_width, name.width());
     let mut row_style = Style::default().fg(color);
     if selected {
         row_style = row_style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
     }
-    render_segments(
-        frame,
-        x,
-        y,
-        [
-            (" ", row_style),
-            (marker, row_style),
-            (" ", row_style),
-            (icon, row_style),
-            (" ", row_style),
-            (&name, row_style),
-            ("", row_style),
-            (&detail, Style::default().fg(Color::DarkGray)),
-        ],
-        filler_width,
-        selected,
-    );
+    let row_style = selected_style(row_style, selected);
+    let detail_style = selected_style(Style::default().fg(Color::DarkGray), selected);
+    let mut cursor = x;
+    render_text(frame, &mut cursor, y, " ", row_style);
+    render_text(frame, &mut cursor, y, marker, row_style);
+    render_text(frame, &mut cursor, y, " ", row_style);
+    render_text(frame, &mut cursor, y, icon, row_style);
+    render_text(frame, &mut cursor, y, " ", row_style);
+    name.render(frame, &mut cursor, y, slots.name_width, row_style);
+    cursor = cursor.saturating_add(u16::try_from(slots.filler_width).unwrap_or(u16::MAX));
+    detail.render(frame, &mut cursor, y, slots.detail_width, detail_style);
 }
 
-fn render_segments<const N: usize>(
-    frame: &mut ratatui::Frame,
-    mut x: u16,
-    y: u16,
-    segments: [(&str, Style); N],
+struct RowSlots {
+    name_width: usize,
+    detail_width: usize,
     filler_width: usize,
-    selected: bool,
-) {
-    for (text, style) in segments {
-        if text.is_empty() {
-            x = x.saturating_add(u16::try_from(filler_width).unwrap_or(u16::MAX));
-            continue;
+}
+
+impl RowSlots {
+    fn new(
+        content_width: usize,
+        prefix_width: usize,
+        detail_width: usize,
+        natural_name_width: usize,
+    ) -> Self {
+        let name_limit = content_width
+            .saturating_sub(prefix_width)
+            .saturating_sub(detail_width)
+            .saturating_sub(1);
+        let name_width = natural_name_width.min(name_limit);
+        let filler_width = content_width
+            .saturating_sub(prefix_width)
+            .saturating_sub(name_width)
+            .saturating_sub(detail_width);
+        Self {
+            name_width,
+            detail_width,
+            filler_width,
         }
-        render_text(frame, &mut x, y, text, selected_style(style, selected));
+    }
+}
+
+struct PackageRowStats<'a> {
+    present: usize,
+    complete: usize,
+    downloaded: u64,
+    size: u64,
+    common_folder: Option<&'a str>,
+    folder_conflict: bool,
+    downloading: bool,
+    verifying: bool,
+}
+
+impl<'a> PackageRowStats<'a> {
+    fn new(app: &'a App, package_id: crate::core::PackageId) -> Self {
+        let mut stats = Self {
+            present: 0,
+            complete: 0,
+            downloaded: 0,
+            size: 0,
+            common_folder: None,
+            folder_conflict: false,
+            downloading: false,
+            verifying: false,
+        };
+        for file in app.core_state.files.values() {
+            if file.package_id != package_id {
+                continue;
+            }
+            stats.downloading |= matches!(file.lifecycle, FileLifecycle::Downloading);
+            stats.verifying |= app.verifying_files.contains(&file.id);
+            stats.record_folder(file.path.split('/').next().filter(|part| !part.is_empty()));
+
+            let file_complete = matches!(file.lifecycle, FileLifecycle::Complete);
+            let visible = if file_complete {
+                file.size
+            } else {
+                crate::core::visible_completed_bytes_for_display(file)
+            };
+            stats.present += 1;
+            stats.complete += usize::from(file_complete);
+            stats.downloaded = stats.downloaded.saturating_add(visible);
+            stats.size = stats.size.saturating_add(file.size);
+        }
+        stats
+    }
+
+    fn record_folder(&mut self, folder: Option<&'a str>) {
+        match (self.common_folder, folder) {
+            (None, Some(folder)) => self.common_folder = Some(folder),
+            (Some(existing), Some(folder)) if existing == folder => {}
+            (Some(_), Some(_)) => self.folder_conflict = true,
+            _ => {}
+        }
+    }
+
+    fn active(&self) -> bool {
+        self.downloading || self.verifying
+    }
+
+    fn activity_label(&self, status: PackageStatus) -> &'static str {
+        if self.verifying {
+            "verify"
+        } else if self.downloading || matches!(status, PackageStatus::Downloading) {
+            "active"
+        } else {
+            ""
+        }
+    }
+
+    fn folder_label(&self) -> Option<&'a str> {
+        (!self.folder_conflict)
+            .then_some(self.common_folder)
+            .flatten()
     }
 }
 
@@ -592,13 +617,6 @@ fn selected_style(style: Style, selected: bool) -> Style {
 fn render_text(frame: &mut ratatui::Frame, x: &mut u16, y: u16, text: &str, style: Style) {
     frame.buffer_mut().set_string(*x, y, text, style);
     *x = x.saturating_add(u16::try_from(text_width(text)).unwrap_or(u16::MAX));
-}
-
-fn truncated_text_width(value: &str, max_width: usize) -> usize {
-    if max_width == 0 {
-        return 0;
-    }
-    text_width(value).min(max_width)
 }
 
 fn render_truncated_text(
@@ -673,7 +691,9 @@ fn file_status_for_draw(app: &App, file: &FileEntry) -> FileStatus {
 
 enum FileDetail<'a> {
     Borrowed(&'a str),
-    Complete(String),
+    Complete {
+        size: u64,
+    },
     Active {
         downloaded: u64,
         size: u64,
@@ -685,7 +705,7 @@ enum FileDetail<'a> {
 enum ActiveDetailSuffix {
     Active,
     Verify,
-    Speed(String),
+    Speed { bytes_per_sec: u64 },
 }
 
 impl<'a> FileDetail<'a> {
@@ -706,7 +726,9 @@ impl<'a> FileDetail<'a> {
             let suffix = if verifying {
                 ActiveDetailSuffix::Verify
             } else if file_speed > 0 {
-                ActiveDetailSuffix::Speed(format_bytes(file_speed))
+                ActiveDetailSuffix::Speed {
+                    bytes_per_sec: file_speed,
+                }
             } else {
                 ActiveDetailSuffix::Active
             };
@@ -719,13 +741,7 @@ impl<'a> FileDetail<'a> {
         }
         match status {
             FileStatus::Queued => Self::Borrowed("queued"),
-            FileStatus::Complete => {
-                let formatted_size = format_bytes(file.size);
-                let mut detail = String::with_capacity(formatted_size.len() + 6);
-                detail.push_str(&formatted_size);
-                detail.push_str("  done");
-                Self::Complete(detail)
-            }
+            FileStatus::Complete => Self::Complete { size: file.size },
             FileStatus::Error(message) => Self::Borrowed(message),
             FileStatus::Downloading => unreachable!("downloading handled above"),
         }
@@ -734,7 +750,7 @@ impl<'a> FileDetail<'a> {
     fn width(&self) -> usize {
         match self {
             Self::Borrowed(value) => text_width(value),
-            Self::Complete(value) => text_width(value),
+            Self::Complete { size } => byte_label_width(*size) + "  done".len(),
             Self::Active { pct, suffix, .. } => 1 + 10 + 2 + decimal_len(*pct) + 1 + suffix.width(),
         }
     }
@@ -749,7 +765,11 @@ impl<'a> FileDetail<'a> {
     ) {
         match self {
             Self::Borrowed(value) => render_truncated_text(frame, x, y, value, max_width, style),
-            Self::Complete(value) => render_truncated_text(frame, x, y, value, max_width, style),
+            Self::Complete { size } => {
+                let mut remaining = max_width;
+                render_byte_label(frame, x, y, &mut remaining, *size, style);
+                render_clipped_text(frame, x, y, &mut remaining, "  done", style);
+            }
             Self::Active {
                 downloaded,
                 size,
@@ -775,7 +795,7 @@ impl ActiveDetailSuffix {
         match self {
             Self::Active => 8,
             Self::Verify => 8,
-            Self::Speed(speed) => 2 + text_width(speed) + 2,
+            Self::Speed { bytes_per_sec } => 2 + byte_label_width(*bytes_per_sec) + 2,
         }
     }
 
@@ -790,9 +810,9 @@ impl ActiveDetailSuffix {
         match self {
             Self::Active => render_clipped_text(frame, x, y, remaining, "  active", style),
             Self::Verify => render_clipped_text(frame, x, y, remaining, "  verify", style),
-            Self::Speed(speed) => {
+            Self::Speed { bytes_per_sec } => {
                 render_clipped_text(frame, x, y, remaining, "  ", style);
-                render_clipped_text(frame, x, y, remaining, speed, style);
+                render_byte_label(frame, x, y, remaining, *bytes_per_sec, style);
                 render_clipped_text(frame, x, y, remaining, "/s", style);
             }
         }
@@ -878,53 +898,311 @@ fn decimal_str(value: u64, buf: &mut [u8; 20]) -> &str {
     std::str::from_utf8(&buf[index..]).expect("decimal digits are valid UTF-8")
 }
 
-fn package_detail_app(
+struct PackageDetail<'a> {
     completed: usize,
     present: usize,
     downloaded: u64,
     total_bytes: u64,
     percent: u64,
-    speed_label: &str,
-    content_width: usize,
-) -> String {
-    let downloaded = format_bytes(downloaded);
-    let total = format_bytes(total_bytes);
-    let mut full = String::with_capacity(40 + downloaded.len() + total.len() + speed_label.len());
-    let _ = write!(
-        full,
-        "{completed}/{present} files  {downloaded} / {total}  {percent:>3}%  {speed_label}"
-    );
-    if text_width(&full) <= content_width / 2 {
-        return full;
-    }
-    let mut compact = String::with_capacity(24 + total.len() + speed_label.len());
-    let _ = write!(
-        compact,
-        "{completed}/{present}  {total}  {percent:>3}%  {speed_label}"
-    );
-    truncate_end(&compact, content_width / 2)
+    speed_label: &'a str,
 }
 
-fn package_display_name_app(display_name: &str, folder_label: Option<&str>) -> String {
-    if !display_name.starts_with("http://") && !display_name.starts_with("https://") {
-        return compact_label(display_name);
+impl PackageDetail<'_> {
+    fn width(&self, max_width: usize) -> usize {
+        if self.full_width() <= max_width {
+            self.full_width()
+        } else {
+            self.compact_width().min(max_width)
+        }
     }
-    if let Some(label) = folder_label {
-        return label.to_string();
+
+    fn full_width(&self) -> usize {
+        decimal_len(self.completed as u64)
+            + 1
+            + decimal_len(self.present as u64)
+            + " files  ".len()
+            + byte_label_width(self.downloaded)
+            + " / ".len()
+            + byte_label_width(self.total_bytes)
+            + "  ".len()
+            + 3
+            + "%  ".len()
+            + text_width(self.speed_label)
     }
-    if let Some(label) = mega_url_label(display_name) {
-        return label;
+
+    fn compact_width(&self) -> usize {
+        decimal_len(self.completed as u64)
+            + 1
+            + decimal_len(self.present as u64)
+            + "  ".len()
+            + byte_label_width(self.total_bytes)
+            + "  ".len()
+            + 3
+            + "%  ".len()
+            + text_width(self.speed_label)
     }
-    compact_label(display_name.split('#').next().unwrap_or(display_name))
+
+    fn render(
+        &self,
+        frame: &mut ratatui::Frame,
+        x: &mut u16,
+        y: u16,
+        max_width: usize,
+        style: Style,
+    ) {
+        let mut remaining = max_width;
+        if self.full_width() <= max_width {
+            self.render_count(frame, x, y, &mut remaining, style);
+            render_clipped_text(frame, x, y, &mut remaining, " files  ", style);
+            render_byte_label(frame, x, y, &mut remaining, self.downloaded, style);
+            render_clipped_text(frame, x, y, &mut remaining, " / ", style);
+            render_byte_label(frame, x, y, &mut remaining, self.total_bytes, style);
+        } else {
+            self.render_count(frame, x, y, &mut remaining, style);
+            render_clipped_text(frame, x, y, &mut remaining, "  ", style);
+            render_byte_label(frame, x, y, &mut remaining, self.total_bytes, style);
+        }
+        render_clipped_text(frame, x, y, &mut remaining, "  ", style);
+        render_padded_percent(frame, x, y, &mut remaining, self.percent, style);
+        render_clipped_text(frame, x, y, &mut remaining, "%  ", style);
+        render_clipped_text(frame, x, y, &mut remaining, self.speed_label, style);
+    }
+
+    fn render_count(
+        &self,
+        frame: &mut ratatui::Frame,
+        x: &mut u16,
+        y: u16,
+        remaining: &mut usize,
+        style: Style,
+    ) {
+        let mut completed = [0_u8; 20];
+        let mut present = [0_u8; 20];
+        render_clipped_text(
+            frame,
+            x,
+            y,
+            remaining,
+            decimal_str(self.completed as u64, &mut completed),
+            style,
+        );
+        render_clipped_text(frame, x, y, remaining, "/", style);
+        render_clipped_text(
+            frame,
+            x,
+            y,
+            remaining,
+            decimal_str(self.present as u64, &mut present),
+            style,
+        );
+    }
+}
+
+enum PackageName<'a> {
+    Borrowed(&'a str),
+    Prefixed {
+        prefix: &'static str,
+        value: &'a str,
+    },
+}
+
+impl<'a> PackageName<'a> {
+    fn new(display_name: &'a str, folder_label: Option<&'a str>) -> Self {
+        if !display_name.starts_with("http://") && !display_name.starts_with("https://") {
+            return Self::Borrowed(compact_label_ref(display_name));
+        }
+        if let Some(label) = folder_label {
+            return Self::Borrowed(label);
+        }
+        if let Some(name) = mega_url_name(display_name) {
+            return name;
+        }
+        Self::Borrowed(compact_label_ref(
+            display_name.split('#').next().unwrap_or(display_name),
+        ))
+    }
+
+    fn width(&self) -> usize {
+        match self {
+            Self::Borrowed(value) => text_width(value),
+            Self::Prefixed { prefix, value } => text_width(prefix) + text_width(value),
+        }
+    }
+
+    fn render(
+        &self,
+        frame: &mut ratatui::Frame,
+        x: &mut u16,
+        y: u16,
+        max_width: usize,
+        style: Style,
+    ) {
+        match self {
+            Self::Borrowed(value) => render_truncated_text(frame, x, y, value, max_width, style),
+            Self::Prefixed { prefix, value } => {
+                let mut remaining = max_width;
+                render_clipped_text(frame, x, y, &mut remaining, prefix, style);
+                render_clipped_text(frame, x, y, &mut remaining, value, style);
+            }
+        }
+    }
+}
+
+fn compact_label_ref(value: &str) -> &str {
+    value
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(value)
+}
+
+fn mega_url_name(value: &str) -> Option<PackageName<'_>> {
+    let marker = "mega.nz/";
+    let start = value.find(marker)? + marker.len();
+    let path = &value[start..];
+    let mut parts = path.split(['/', '#']);
+    match (parts.next(), parts.next()) {
+        (Some("folder"), Some(id)) if !id.is_empty() => Some(PackageName::Prefixed {
+            prefix: "Folder ",
+            value: id,
+        }),
+        (Some("file"), Some(id)) if !id.is_empty() => Some(PackageName::Prefixed {
+            prefix: "File ",
+            value: id,
+        }),
+        _ => None,
+    }
+}
+
+fn byte_label_width(bytes: u64) -> usize {
+    let label = ByteLabel::new(bytes);
+    label.width()
+}
+
+struct ByteLabel {
+    whole: u64,
+    frac: u64,
+    unit: &'static str,
+    fractional: bool,
+}
+
+impl ByteLabel {
+    fn new(bytes: u64) -> Self {
+        const KB: u64 = 1024;
+        const MB: u64 = KB * 1024;
+        const GB: u64 = MB * 1024;
+        if bytes >= GB {
+            return Self::scaled(bytes, GB, "GB");
+        }
+        if bytes >= MB {
+            return Self::scaled(bytes, MB, "MB");
+        }
+        if bytes >= KB {
+            return Self::scaled(bytes, KB, "KB");
+        }
+        Self {
+            whole: bytes,
+            frac: 0,
+            unit: "B",
+            fractional: false,
+        }
+    }
+
+    fn scaled(bytes: u64, unit_bytes: u64, unit: &'static str) -> Self {
+        let scaled =
+            ((u128::from(bytes) * 100) + (u128::from(unit_bytes) / 2)) / u128::from(unit_bytes);
+        Self {
+            whole: (scaled / 100) as u64,
+            frac: (scaled % 100) as u64,
+            unit,
+            fractional: true,
+        }
+    }
+
+    fn width(&self) -> usize {
+        decimal_len(self.whole) + if self.fractional { 3 } else { 0 } + 1 + self.unit.len()
+    }
+
+    fn push_to(&self, out: &mut String) {
+        push_decimal(out, self.whole);
+        if self.fractional {
+            out.push('.');
+            out.push(char::from(b'0' + (self.frac / 10) as u8));
+            out.push(char::from(b'0' + (self.frac % 10) as u8));
+        }
+        out.push(' ');
+        out.push_str(self.unit);
+    }
+}
+
+fn push_decimal(out: &mut String, value: u64) {
+    let mut buf = [0_u8; 20];
+    out.push_str(decimal_str(value, &mut buf));
+}
+
+fn push_byte_label(out: &mut String, bytes: u64) {
+    ByteLabel::new(bytes).push_to(out);
+}
+
+fn render_byte_label(
+    frame: &mut ratatui::Frame,
+    x: &mut u16,
+    y: u16,
+    remaining: &mut usize,
+    bytes: u64,
+    style: Style,
+) {
+    let label = ByteLabel::new(bytes);
+    let mut whole = [0_u8; 20];
+    render_clipped_text(
+        frame,
+        x,
+        y,
+        remaining,
+        decimal_str(label.whole, &mut whole),
+        style,
+    );
+    if label.fractional {
+        render_clipped_text(frame, x, y, remaining, ".", style);
+        let tens = (label.frac / 10) as u8;
+        let ones = (label.frac % 10) as u8;
+        let frac = [b'0' + tens, b'0' + ones];
+        let frac = std::str::from_utf8(&frac).expect("decimal digits are valid UTF-8");
+        render_clipped_text(frame, x, y, remaining, frac, style);
+    }
+    render_clipped_text(frame, x, y, remaining, " ", style);
+    render_clipped_text(frame, x, y, remaining, label.unit, style);
+}
+
+fn render_padded_percent(
+    frame: &mut ratatui::Frame,
+    x: &mut u16,
+    y: u16,
+    remaining: &mut usize,
+    percent: u64,
+    style: Style,
+) {
+    let percent_width = decimal_len(percent);
+    for _ in percent_width..3 {
+        render_clipped_text(frame, x, y, remaining, " ", style);
+    }
+    let mut pct = [0_u8; 20];
+    render_clipped_text(
+        frame,
+        x,
+        y,
+        remaining,
+        decimal_str(percent, &mut pct),
+        style,
+    );
 }
 
 fn aggregate_progress_label_app(app: &App, pct: u16, width: u16) -> String {
-    let downloaded = format_bytes(app.total_downloaded);
-    let total = format_bytes(app.total_size);
-    let mut bytes = String::with_capacity(downloaded.len() + total.len() + 3);
-    bytes.push_str(&downloaded);
+    let mut bytes = String::with_capacity(
+        byte_label_width(app.total_downloaded) + byte_label_width(app.total_size) + 3,
+    );
+    push_byte_label(&mut bytes, app.total_downloaded);
     bytes.push_str(" / ");
-    bytes.push_str(&total);
+    push_byte_label(&mut bytes, app.total_size);
     let transfer = aggregate_transfer_label_app(app);
     let mut full = String::with_capacity(32 + bytes.len() + transfer.len());
     let _ = write!(
@@ -953,9 +1231,8 @@ fn aggregate_transfer_label_app(app: &App) -> String {
     if app.current_speed == 0 {
         return aggregate_activity_label_app(app);
     }
-    let formatted_speed = format_bytes(app.current_speed);
-    let mut speed = String::with_capacity(formatted_speed.len() + 2);
-    speed.push_str(&formatted_speed);
+    let mut speed = String::with_capacity(byte_label_width(app.current_speed) + 2);
+    push_byte_label(&mut speed, app.current_speed);
     speed.push_str("/s");
     let remaining = app.total_size.saturating_sub(app.total_downloaded);
     if remaining == 0 {
@@ -1260,6 +1537,316 @@ mod tests {
             }
         }
         false
+    }
+
+    fn render_single_line(
+        width: u16,
+        draw_fn: impl FnOnce(&mut ratatui::Frame, &mut u16),
+    ) -> String {
+        let backend = TestBackend::new(width, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        terminal
+            .draw(|frame| {
+                let mut x = 0;
+                draw_fn(frame, &mut x);
+            })
+            .expect("draw should succeed");
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area;
+        let mut output = String::new();
+        for x in area.x..area.x + area.width {
+            let cell = buffer.cell((x, area.y)).expect("cell should exist");
+            output.push_str(cell.symbol());
+        }
+        output
+    }
+
+    fn render_byte_label_text(bytes: u64, width: usize) -> String {
+        render_single_line(width as u16, |frame, x| {
+            let mut remaining = width;
+            render_byte_label(frame, x, 0, &mut remaining, bytes, Style::default());
+        })
+    }
+
+    fn render_package_detail_text(detail: &PackageDetail<'_>, width: usize) -> String {
+        render_single_line(width as u16, |frame, x| {
+            detail.render(frame, x, 0, width, Style::default());
+        })
+    }
+
+    fn render_file_detail_text(detail: &FileDetail<'_>, width: usize) -> String {
+        render_single_line(width as u16, |frame, x| {
+            detail.render(frame, x, 0, width, Style::default());
+        })
+    }
+
+    fn render_package_name_text(name: &PackageName<'_>, width: usize) -> String {
+        render_single_line(width as u16, |frame, x| {
+            name.render(frame, x, 0, width, Style::default());
+        })
+    }
+
+    #[test]
+    fn byte_label_renders_without_allocated_format_bytes_path() {
+        let cases = [
+            (0, "0 B"),
+            (500, "500 B"),
+            (1024, "1.00 KB"),
+            (1536, "1.50 KB"),
+            (1_048_576, "1.00 MB"),
+            (1_073_741_824, "1.00 GB"),
+        ];
+
+        for (bytes, expected) in cases {
+            let rendered = render_byte_label_text(bytes, expected.len());
+            assert_eq!(rendered, expected);
+            assert_eq!(byte_label_width(bytes), expected.len());
+        }
+    }
+
+    #[test]
+    fn byte_label_rounds_scaled_units_like_format_bytes() {
+        let rendered = render_byte_label_text(1537, "1.50 KB".len());
+
+        assert_eq!(rendered, "1.50 KB");
+    }
+
+    #[test]
+    fn truncated_text_handles_ascii_and_tiny_widths() {
+        let wide = render_single_line(5, |frame, x| {
+            render_truncated_text(frame, x, 0, "download.bin", 5, Style::default());
+        });
+        let tiny = render_single_line(1, |frame, x| {
+            render_truncated_text(frame, x, 0, "download.bin", 1, Style::default());
+        });
+
+        assert_eq!(wide, "down\u{2026}");
+        assert_eq!(tiny, "\u{2026}");
+    }
+
+    #[test]
+    fn file_detail_renders_active_verify_speed_and_complete_states() {
+        let active = FileDetail::Active {
+            downloaded: 40,
+            size: 100,
+            pct: 40,
+            suffix: ActiveDetailSuffix::Active,
+        };
+        let verifying = FileDetail::Active {
+            downloaded: 40,
+            size: 100,
+            pct: 40,
+            suffix: ActiveDetailSuffix::Verify,
+        };
+        let speed = FileDetail::Active {
+            downloaded: 40,
+            size: 100,
+            pct: 40,
+            suffix: ActiveDetailSuffix::Speed {
+                bytes_per_sec: 1536,
+            },
+        };
+        let complete = FileDetail::Complete { size: 1536 };
+
+        assert_eq!(
+            render_file_detail_text(&active, active.width()),
+            "[████░░░░░░] 40%  active"
+        );
+        assert_eq!(
+            render_file_detail_text(&verifying, verifying.width()),
+            "[████░░░░░░] 40%  verify"
+        );
+        assert_eq!(
+            render_file_detail_text(&speed, speed.width()),
+            "[████░░░░░░] 40%  1.50 KB/s"
+        );
+        assert_eq!(
+            render_file_detail_text(&complete, complete.width()),
+            "1.50 KB  done"
+        );
+    }
+
+    #[test]
+    fn file_detail_clips_active_detail_to_available_width() {
+        let active = FileDetail::Active {
+            downloaded: 40,
+            size: 100,
+            pct: 40,
+            suffix: ActiveDetailSuffix::Active,
+        };
+
+        let rendered = render_file_detail_text(&active, 12);
+
+        assert_eq!(rendered, "[████░░░░░░\u{2026}");
+    }
+
+    #[test]
+    fn package_detail_renders_full_and_compact_forms() {
+        let detail = PackageDetail {
+            completed: 1,
+            present: 2,
+            downloaded: 1536,
+            total_bytes: 2048,
+            percent: 75,
+            speed_label: "active",
+        };
+
+        assert_eq!(
+            render_package_detail_text(&detail, detail.full_width()),
+            "1/2 files  1.50 KB / 2.00 KB   75%  active"
+        );
+        assert_eq!(
+            render_package_detail_text(&detail, detail.compact_width()),
+            "1/2  2.00 KB   75%  active"
+        );
+    }
+
+    #[test]
+    fn package_detail_clips_compact_form_when_width_is_tiny() {
+        let detail = PackageDetail {
+            completed: 12,
+            present: 345,
+            downloaded: 1536,
+            total_bytes: 2048,
+            percent: 99,
+            speed_label: "verify",
+        };
+
+        let rendered = render_package_detail_text(&detail, 10);
+
+        assert_eq!(rendered, "12/345  2.");
+    }
+
+    #[test]
+    fn package_name_borrows_folder_labels_and_mega_url_ids() {
+        let folder_label =
+            PackageName::new("https://mega.nz/folder/abc#secret", Some("Folder Name"));
+        let folder_url = PackageName::new("https://mega.nz/folder/abc#secret", None);
+        let file_url = PackageName::new("https://mega.nz/file/def#secret", None);
+        let plain_path = PackageName::new("/downloads/Series Name", None);
+
+        assert_eq!(
+            render_package_name_text(&folder_label, folder_label.width()),
+            "Folder Name"
+        );
+        assert_eq!(
+            render_package_name_text(&folder_url, folder_url.width()),
+            "Folder abc"
+        );
+        assert_eq!(
+            render_package_name_text(&file_url, file_url.width()),
+            "File def"
+        );
+        assert_eq!(
+            render_package_name_text(&plain_path, plain_path.width()),
+            "Series Name"
+        );
+    }
+
+    #[test]
+    fn package_name_truncates_prefixed_mega_labels_without_allocating_name_string() {
+        let name = PackageName::new("https://mega.nz/folder/abcdef#secret", None);
+
+        let rendered = render_package_name_text(&name, 8);
+
+        assert_eq!(rendered, "Folder \u{2026}");
+    }
+
+    #[test]
+    fn row_slots_allocate_name_detail_and_filler_widths() {
+        let slots = RowSlots::new(40, 5, 12, 80);
+
+        assert_eq!(slots.detail_width, 12);
+        assert_eq!(slots.name_width, 22);
+        assert_eq!(slots.filler_width, 1);
+    }
+
+    #[test]
+    fn row_slots_saturate_when_content_is_too_narrow() {
+        let slots = RowSlots::new(8, 5, 12, 80);
+
+        assert_eq!(slots.detail_width, 12);
+        assert_eq!(slots.name_width, 0);
+        assert_eq!(slots.filler_width, 0);
+    }
+
+    #[test]
+    fn package_row_stats_collects_totals_activity_and_common_folder() {
+        let mut app = test_app();
+        let package_id = package_id("pkg-1", "https://mega.nz/folder/pkg");
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id,
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string()),
+                display_name: "Mega Package".to_string(),
+                files: vec![
+                    ResolvedFile {
+                        file_id: "one.bin".to_string().into(),
+                        path: "Folder/one.bin".to_string(),
+                        size: 100,
+                    },
+                    ResolvedFile {
+                        file_id: "two.bin".to_string().into(),
+                        path: "Folder/two.bin".to_string(),
+                        size: 200,
+                    },
+                ],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: "one.bin".to_string().into(),
+            size: 100,
+        });
+        app.apply_core_event(CoreEvent::FileProgress {
+            file_id: "one.bin".to_string().into(),
+            total_bytes_delta: 40,
+            network_bytes_delta: 40,
+        });
+        app.verifying_files.insert("two.bin".to_string().into());
+
+        let stats = PackageRowStats::new(&app, package_id);
+
+        assert_eq!(stats.present, 2);
+        assert_eq!(stats.complete, 0);
+        assert_eq!(stats.downloaded, 40);
+        assert_eq!(stats.size, 300);
+        assert_eq!(stats.folder_label(), Some("Folder"));
+        assert!(stats.active());
+        assert_eq!(stats.activity_label(PackageStatus::Queued), "verify");
+    }
+
+    #[test]
+    fn package_row_stats_suppresses_conflicting_folder_label() {
+        let mut app = test_app();
+        let package_id = package_id("pkg-1", "https://mega.nz/folder/pkg");
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id,
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string()),
+                display_name: "Mega Package".to_string(),
+                files: vec![
+                    ResolvedFile {
+                        file_id: "one.bin".to_string().into(),
+                        path: "One/one.bin".to_string(),
+                        size: 100,
+                    },
+                    ResolvedFile {
+                        file_id: "two.bin".to_string().into(),
+                        path: "Two/two.bin".to_string(),
+                        size: 200,
+                    },
+                ],
+                collision: None,
+            },
+        });
+
+        let stats = PackageRowStats::new(&app, package_id);
+
+        assert_eq!(stats.folder_label(), None);
+        assert_eq!(stats.activity_label(PackageStatus::Downloading), "active");
     }
 
     #[test]
