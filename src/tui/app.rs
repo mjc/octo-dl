@@ -126,6 +126,10 @@ pub struct App {
     pub file_attempt_ids: HashMap<FileId, u64>,
     // Files reset from the UI — used to suppress stale terminal events from the old attempt
     pub reset_pending_files: HashSet<FileId>,
+    // Files paused for Alt-R reverify — their restart should preserve verified progress.
+    pub reverify_pending_files: HashSet<FileId>,
+    // Files currently running an explicit verification pass.
+    pub verifying_files: HashSet<FileId>,
     // Session
     pub session: Option<SessionSnapshot>,
     pub(crate) session_persistence: SessionPersistence,

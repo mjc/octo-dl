@@ -106,6 +106,8 @@ impl App {
             cancellation_tokens: HashMap::new(),
             file_attempt_ids: HashMap::new(),
             reset_pending_files: HashSet::new(),
+            reverify_pending_files: HashSet::new(),
+            verifying_files: HashSet::new(),
             session: None,
             session_persistence: super::SessionPersistence::new(),
             core_state: DownloadState::new(SessionMeta {

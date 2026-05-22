@@ -22,6 +22,18 @@ pub(super) fn retry_selected(app: &mut App) {
     }
 }
 
+pub(super) fn reverify_selected(app: &mut App) {
+    match app.selected_row() {
+        Some(TuiRow::Package(package_id)) => {
+            app.handle_ui_action(UiAction::ReverifyPackage(package_id));
+        }
+        Some(TuiRow::File { file_id, .. }) => {
+            app.handle_ui_action(UiAction::ReverifyFile(file_id));
+        }
+        None => {}
+    }
+}
+
 pub(super) fn select_previous_file(app: &mut App) {
     let len = app.visible_rows().len();
     if len > 0 {

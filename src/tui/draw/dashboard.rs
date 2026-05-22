@@ -66,12 +66,14 @@ fn dashboard_file_item(
 ) -> ListItem<'static> {
     let (icon, color) = match &file.status {
         DashboardFileStatus::Downloading => ("\u{25cf}", Color::Yellow),
+        DashboardFileStatus::Verifying => ("\u{25cf}", Color::Blue),
         DashboardFileStatus::Queued => ("\u{25cb}", Color::DarkGray),
         DashboardFileStatus::Complete => ("\u{2713}", Color::Green),
         DashboardFileStatus::Error { .. } => ("\u{2717}", Color::Red),
     };
     let detail_color = match &file.status {
         DashboardFileStatus::Downloading => Color::Yellow,
+        DashboardFileStatus::Verifying => Color::Blue,
         _ => Color::DarkGray,
     };
     let prefix_label = if include_package {
@@ -346,8 +348,10 @@ pub(super) fn controls_label_from_snapshot(
         }
     } else if state.popup != Popup::None {
         "esc:close"
+    } else if width >= 100 {
+        "a:add  up/down:select  enter:open  s:sort  d:del  r:retry  alt-r:verify  R:reset  c:cfg  q:quit"
     } else if width >= 86 {
-        "a:add  up/down:select  enter:open  s:sort  d:del  r:retry  R:reset  c:cfg  q:quit"
+        "a:add  up/down:select  enter:open  d:del  r:retry  alt-r:verify  R:reset  q:quit"
     } else if width >= 58 {
         "a:add  enter:open  s:sort  d:del  r:retry  q:quit"
     } else if width >= 40 {

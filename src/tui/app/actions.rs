@@ -182,6 +182,7 @@ impl App {
             return;
         }
 
+        self.verifying_files.remove(&id);
         self.apply_core_event(CoreEvent::FileFailed {
             file_id: id.clone(),
             message: error.clone(),
@@ -191,6 +192,7 @@ impl App {
 
     pub(crate) fn handle_scope_error_event(&mut self, scope: String, error: String) {
         log::error!("Download error: {scope}: {error}");
+        self.verifying_files.remove(&FileId::from(scope.as_str()));
         if self.is_session_url(&scope) {
             self.handle_session_url_error(&scope, &error);
         } else if self.is_tracked_error_scope(&scope) {
@@ -276,11 +278,19 @@ impl App {
             log::info!("Ignoring download start for untracked file: {id}");
             return;
         }
+        self.verifying_files.remove(&id);
         self.reset_pending_files.remove(&id);
-        self.apply_core_event(CoreEvent::FileStarted {
-            file_id: id.clone(),
-            size,
-        });
+        if self.reverify_pending_files.remove(&id) {
+            self.apply_core_event(CoreEvent::FileResumeStarted {
+                file_id: id.clone(),
+                size,
+            });
+        } else {
+            self.apply_core_event(CoreEvent::FileStarted {
+                file_id: id.clone(),
+                size,
+            });
+        }
         self.reset_file_ui_rate(&id);
         self.update_download_status_message();
     }
@@ -304,6 +314,22 @@ impl App {
             file_id: id.clone(),
             total_bytes_delta: delta.total_bytes_delta,
             network_bytes_delta: delta.network_bytes_delta,
+        });
+        let _ = self.refresh_visible_progress_file(&id, Instant::now());
+    }
+
+    pub(crate) fn handle_verification_progress_event(&mut self, id: FileId, bytes_delta: u64) {
+        if !self.verifying_files.contains(&id) {
+            log::info!("Ignoring verification progress for non-verifying file: {id}");
+            return;
+        }
+        if !self.core_state.files.contains_key(&id) {
+            log::info!("Ignoring verification progress for untracked file: {id}");
+            return;
+        }
+        self.apply_core_progress_event(CoreEvent::FileVerificationProgress {
+            file_id: id.clone(),
+            bytes_delta,
         });
         let _ = self.refresh_visible_progress_file(&id, Instant::now());
     }
@@ -337,6 +363,43 @@ impl App {
         self.set_resume_reuse_status(&id, chunks, bytes);
     }
 
+    pub(crate) fn handle_resume_reverified_event(&mut self, id: FileId, chunks: usize, bytes: u64) {
+        if !self.core_state.files.contains_key(&id) {
+            log::info!("Ignoring resume reverify for untracked file: {id}");
+            return;
+        }
+        self.reset_pending_files.remove(&id);
+        self.apply_core_event(CoreEvent::FileResumeReverified {
+            file_id: id.clone(),
+            verified_bytes: bytes,
+            verified_chunks: chunks,
+        });
+        self.refresh_visible_core_file(&id);
+        log::info!(
+            "Reverified {chunks} chunk(s) for {id} ({})",
+            format_bytes(bytes)
+        );
+        self.set_resume_reuse_status(&id, chunks, bytes);
+    }
+
+    pub(crate) fn handle_completed_file_verified_event(&mut self, id: FileId, bytes: u64) {
+        self.verifying_files.remove(&id);
+        if !self.core_state.files.contains_key(&id) {
+            log::info!("Ignoring completed-file verification for untracked file: {id}");
+            return;
+        }
+        self.apply_core_event(CoreEvent::FileResumeReverified {
+            file_id: id.clone(),
+            verified_bytes: bytes,
+            verified_chunks: 0,
+        });
+        self.apply_core_event(CoreEvent::FileCompleted {
+            file_id: id.clone(),
+        });
+        self.refresh_visible_core_file(&id);
+        self.status = format!("Verified {id}: {}", format_bytes(bytes));
+    }
+
     pub(crate) fn handle_file_complete_event(&mut self, id: FileId, attempt_id: u64) {
         log::info!("Download complete: {id}");
         if !self.event_matches_current_attempt(&id, attempt_id) {
@@ -351,6 +414,7 @@ impl App {
             log::info!("Ignoring download completion for untracked file: {id}");
             return;
         }
+        self.verifying_files.remove(&id);
         self.apply_core_event(CoreEvent::FileCompleted {
             file_id: id.clone(),
         });
@@ -373,6 +437,8 @@ impl App {
             return;
         }
         self.cancellation_tokens.remove(&id);
+        self.verifying_files.remove(&id);
+        self.reverify_pending_files.remove(&id);
         self.apply_core_event(CoreEvent::FileCancelled {
             file_id: id.clone(),
         });
@@ -385,6 +451,8 @@ impl App {
         self.cancel_file_token(id);
         self.file_attempt_ids.remove(id);
         self.reset_pending_files.remove(id);
+        self.reverify_pending_files.remove(id);
+        self.verifying_files.remove(id);
 
         if !is_core_backed && self.is_session_url(id.as_str()) {
             let _ = self.mutate_session_and_save(|session| {
@@ -427,6 +495,8 @@ impl App {
             self.cancel_file_token(file_id);
             self.file_attempt_ids.remove(file_id);
             self.reset_pending_files.remove(file_id);
+            self.reverify_pending_files.remove(file_id);
+            self.verifying_files.remove(file_id);
             self.urls.retain(|url| url != source_url);
         }
         self.apply_core_command(CoreCommand::DeletePackage { package_id });
@@ -453,6 +523,8 @@ impl App {
         }
         self.bump_file_attempt_id(id);
         self.reset_pending_files.remove(id);
+        self.reverify_pending_files.remove(id);
+        self.verifying_files.remove(id);
         self.apply_core_command(CoreCommand::RetryFile {
             file_id: id.clone(),
         });
@@ -522,6 +594,125 @@ impl App {
         }
     }
 
+    pub(crate) fn perform_reverify_file_action(&mut self, id: &FileId) {
+        let Some(context) = self.visible_file_context(id) else {
+            return;
+        };
+        let Some(source_url) = self.ensure_core_file_from_context(&context) else {
+            self.status = "Reverify unavailable for selected file".to_string();
+            if !self.core_state.files.contains_key(id) {
+                self.show_overlay_error(id, id.as_str(), "Reverify unavailable for this file");
+            }
+            self.recompute_totals();
+            return;
+        };
+
+        self.cancel_file_token(id);
+        self.verifying_files.insert(id.clone());
+        self.apply_core_event(CoreEvent::FileVerificationStarted {
+            file_id: id.clone(),
+        });
+        self.refresh_visible_core_file(id);
+        if matches!(context.status, super::FileStatus::Downloading) {
+            self.apply_core_event(CoreEvent::FileCancelled {
+                file_id: id.clone(),
+            });
+            self.reset_file_ui_rate(id);
+            self.reverify_pending_files.insert(id.clone());
+        }
+        self.reset_pending_files.remove(id);
+        let request = if matches!(context.status, super::FileStatus::Complete) {
+            crate::tui::event::DownloadRequest::VerifyCompletedFileIds {
+                source_url,
+                file_ids: vec![id.clone()],
+            }
+        } else {
+            crate::tui::event::DownloadRequest::ReverifyFileIds {
+                source_url,
+                file_ids: vec![id.clone()],
+            }
+        };
+        let _ = self.url_tx.send(request);
+        self.status = if matches!(context.status, super::FileStatus::Complete) {
+            format!("Verifying completed file {id}...")
+        } else {
+            format!("Reverifying resume data for {id}...")
+        };
+    }
+
+    pub(crate) fn perform_reverify_package_action(&mut self, package_id: PackageId) {
+        let mut grouped_resume: Vec<(String, Vec<FileId>)> = Vec::new();
+        let mut grouped_completed: Vec<(String, Vec<FileId>)> = Vec::new();
+        let files = self
+            .core_state
+            .package_files(&package_id)
+            .map(|file| {
+                (
+                    file.id.clone(),
+                    file.source_url.clone(),
+                    file.lifecycle.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (file_id, source_url, lifecycle) in files {
+            self.cancel_file_token(&file_id);
+            self.verifying_files.insert(file_id.clone());
+            self.apply_core_event(CoreEvent::FileVerificationStarted {
+                file_id: file_id.clone(),
+            });
+            self.refresh_visible_core_file(&file_id);
+            if matches!(lifecycle, crate::core::FileLifecycle::Downloading) {
+                self.apply_core_event(CoreEvent::FileCancelled {
+                    file_id: file_id.clone(),
+                });
+                self.reset_file_ui_rate(&file_id);
+                self.reverify_pending_files.insert(file_id.clone());
+            }
+            self.reset_pending_files.remove(&file_id);
+
+            let grouped = if matches!(lifecycle, crate::core::FileLifecycle::Complete) {
+                &mut grouped_completed
+            } else {
+                &mut grouped_resume
+            };
+            if let Some((_, file_ids)) = grouped
+                .iter_mut()
+                .find(|(group_source_url, _)| group_source_url == &source_url)
+            {
+                file_ids.push(file_id.clone());
+            } else {
+                grouped.push((source_url, vec![file_id.clone()]));
+            }
+        }
+
+        let file_count = grouped_resume
+            .iter()
+            .chain(grouped_completed.iter())
+            .map(|(_, file_ids)| file_ids.len())
+            .sum::<usize>();
+        if file_count == 0 {
+            return;
+        }
+        for (source_url, file_ids) in grouped_resume {
+            let _ = self
+                .url_tx
+                .send(crate::tui::event::DownloadRequest::ReverifyFileIds {
+                    source_url,
+                    file_ids,
+                });
+        }
+        for (source_url, file_ids) in grouped_completed {
+            let _ = self
+                .url_tx
+                .send(crate::tui::event::DownloadRequest::VerifyCompletedFileIds {
+                    source_url,
+                    file_ids,
+                });
+        }
+        self.status = format!("Verifying {file_count} package file(s), 4 at a time...");
+    }
+
     pub(crate) fn perform_reset_file_action(&mut self, id: &FileId) {
         let Some(context) = self.visible_file_context(id) else {
             return;
@@ -538,6 +729,8 @@ impl App {
         self.cancel_file_token(id);
         self.bump_file_attempt_id(id);
         self.reset_pending_files.insert(id.clone());
+        self.reverify_pending_files.remove(id);
+        self.verifying_files.remove(id);
 
         self.apply_core_command(CoreCommand::ResetFile {
             file_id: id.clone(),
@@ -614,6 +807,8 @@ impl App {
             UiAction::DeletePackage(id) => self.perform_delete_package_action(id),
             UiAction::RetryFile(id) => self.perform_retry_file_action(&id),
             UiAction::RetryPackage(id) => self.perform_retry_package_action(id),
+            UiAction::ReverifyFile(id) => self.perform_reverify_file_action(&id),
+            UiAction::ReverifyPackage(id) => self.perform_reverify_package_action(id),
             UiAction::ResetFile(id) => self.perform_reset_file_action(&id),
             UiAction::ResetPackage(id) => self.perform_reset_package_action(id),
             UiAction::MoveFile { file_id, delta } => self.perform_move_file_action(file_id, delta),

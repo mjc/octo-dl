@@ -297,6 +297,8 @@ pub enum UiAction {
     DeletePackage(PackageId),
     RetryFile(FileId),
     RetryPackage(PackageId),
+    ReverifyFile(FileId),
+    ReverifyPackage(PackageId),
     ResetFile(FileId),
     ResetPackage(PackageId),
     MoveFile {

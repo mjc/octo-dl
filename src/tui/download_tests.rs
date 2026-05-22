@@ -3,8 +3,37 @@ use super::super::event::{DownloadEvent, FileOrigin, QueuedFile};
 use super::*;
 use crate::core::{CoreEvent, ProgressDelta};
 use crate::test_support::{StateDirectoryGuard, UrlFixtureStatus, session_snapshot};
+use std::collections::{HashSet, VecDeque};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
+
+#[tokio::test]
+async fn verification_executor_limits_parallel_work_to_four() {
+    let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let max_active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let items = (0..12).collect::<Vec<_>>();
+
+    for_each_verification_item(items, PACKAGE_REVERIFY_CONCURRENCY, {
+        let active = std::sync::Arc::clone(&active);
+        let max_active = std::sync::Arc::clone(&max_active);
+        move |_| {
+            let active = std::sync::Arc::clone(&active);
+            let max_active = std::sync::Arc::clone(&max_active);
+            async move {
+                let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                max_active.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    })
+    .await;
+
+    assert_eq!(
+        max_active.load(std::sync::atomic::Ordering::SeqCst),
+        PACKAGE_REVERIFY_CONCURRENCY
+    );
+}
 
 fn test_app() -> App {
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -20,6 +49,37 @@ fn describe_panic_handles_known_and_unknown_payloads() {
     assert_eq!(describe_panic(static_msg), "static boom");
     assert_eq!(describe_panic(string_msg), "owned boom");
     assert_eq!(describe_panic(unknown_msg), "unknown panic payload");
+}
+
+#[test]
+fn exclusive_resume_target_blocks_other_pending_downloads() {
+    let target = FileId::from("target.bin");
+    let other = FileId::from("other.bin");
+    let pending_queue = VecDeque::from([other.clone(), target.clone()]);
+    let available = HashSet::from([other.clone(), target.clone()]);
+
+    let selected = select_startable_file_ids(
+        &pending_queue,
+        &available,
+        &HashSet::new(),
+        &Some(target.clone()),
+        2,
+    );
+
+    assert_eq!(selected, vec![target.clone()]);
+
+    let selected_while_target_active = select_startable_file_ids(
+        &pending_queue,
+        &available,
+        &HashSet::from([target.clone()]),
+        &Some(target),
+        2,
+    );
+
+    assert!(
+        selected_while_target_active.is_empty(),
+        "no other queued file should start while the Alt-R file is resuming"
+    );
 }
 
 #[test]

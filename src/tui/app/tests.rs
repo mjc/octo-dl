@@ -315,6 +315,85 @@ fn progress_event_updates_visible_file_without_full_visible_sync() {
 }
 
 #[test]
+fn verification_progress_updates_visible_file_without_network_rate() {
+    let mut app = test_app();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id("pkg", "https://mega.nz/file/root"),
+            source_url: "https://mega.nz/file/root".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+            display_name: "Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: "file.bin".to_string().into(),
+                path: "file.bin".to_string(),
+                size: 100,
+            }],
+            collision: None,
+        },
+    });
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: "file.bin".to_string().into(),
+    });
+    app.verifying_files.insert("file.bin".to_string().into());
+    app.apply_core_event(CoreEvent::FileVerificationStarted {
+        file_id: "file.bin".to_string().into(),
+    });
+    app.refresh_visible_core_file(&"file.bin".to_string().into());
+
+    app.handle_verification_progress_event("file.bin".into(), 45);
+
+    let file = app
+        .files
+        .iter()
+        .find(|file| file.id == "file.bin")
+        .expect("file should remain visible");
+    assert_eq!(file.downloaded, 45);
+    assert!(app.verifying_files.contains("file.bin"));
+    assert_eq!(
+        app.core_state.files["file.bin"]
+            .progress
+            .downloaded_network_bytes,
+        0
+    );
+    assert_eq!(app.file_speed(&"file.bin".into()), 0);
+}
+
+#[test]
+fn verification_progress_is_ignored_after_verification_finishes() {
+    let mut app = test_app();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id("pkg", "https://mega.nz/file/root"),
+            source_url: "https://mega.nz/file/root".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+            display_name: "Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: "file.bin".to_string().into(),
+                path: "file.bin".to_string(),
+                size: 100,
+            }],
+            collision: None,
+        },
+    });
+    app.sync_visible_files();
+
+    app.handle_verification_progress_event("file.bin".into(), 45);
+
+    assert_eq!(
+        app.core_state.files["file.bin"]
+            .progress
+            .visible_completed_bytes,
+        0
+    );
+    let file = app
+        .files
+        .iter()
+        .find(|file| file.id == "file.bin")
+        .expect("file should remain visible");
+    assert_eq!(file.downloaded, 0);
+}
+
+#[test]
 fn sync_visible_files_rebuilds_visible_file_positions_for_core_rows() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {

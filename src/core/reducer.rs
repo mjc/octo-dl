@@ -47,15 +47,31 @@ pub enum CoreEvent {
         file_id: FileId,
         size: u64,
     },
+    FileResumeStarted {
+        file_id: FileId,
+        size: u64,
+    },
     FileProgress {
         file_id: FileId,
         total_bytes_delta: u64,
         network_bytes_delta: u64,
     },
+    FileVerificationStarted {
+        file_id: FileId,
+    },
+    FileVerificationProgress {
+        file_id: FileId,
+        bytes_delta: u64,
+    },
     FileReuseDetected {
         file_id: FileId,
         reused_bytes: u64,
         reused_chunks: usize,
+    },
+    FileResumeReverified {
+        file_id: FileId,
+        verified_bytes: u64,
+        verified_chunks: usize,
     },
     FileCompleted {
         file_id: FileId,
@@ -113,7 +129,11 @@ fn should_persist_session(event: &CoreEvent) -> bool {
         event,
         CoreEvent::FileProgress { .. }
             | CoreEvent::FileStarted { .. }
+            | CoreEvent::FileResumeStarted { .. }
             | CoreEvent::FileReuseDetected { .. }
+            | CoreEvent::FileResumeReverified { .. }
+            | CoreEvent::FileVerificationStarted { .. }
+            | CoreEvent::FileVerificationProgress { .. }
             | CoreEvent::Tick { .. }
     )
 }
@@ -496,6 +516,20 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 apply_file_change(state, &file_id, before, after);
             }
         }
+        CoreEvent::FileResumeStarted { file_id, size } => {
+            let mut delta = None;
+            if let Some(file) = state.files.get_mut(&file_id) {
+                let before = FileDerivedState::from(&*file);
+                file.size = size;
+                file.lifecycle = FileLifecycle::Downloading;
+                file.accounting = FileAccounting::CurrentRun;
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
+            }
+        }
         CoreEvent::FileProgress {
             file_id,
             total_bytes_delta,
@@ -529,6 +563,40 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                 apply_file_change(state, &file_id, before, after);
             }
         }
+        CoreEvent::FileVerificationStarted { file_id } => {
+            let mut delta = None;
+            if let Some(file) = state.files.get_mut(&file_id) {
+                let before = FileDerivedState::from(&*file);
+                file.lifecycle = FileLifecycle::Queued;
+                file.progress.visible_completed_bytes = 0;
+                file.progress.verified_existing_bytes = 0;
+                file.progress.downloaded_network_bytes = 0;
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
+            }
+        }
+        CoreEvent::FileVerificationProgress {
+            file_id,
+            bytes_delta,
+        } => {
+            let mut delta = None;
+            if let Some(file) = state.files.get_mut(&file_id) {
+                let before = FileDerivedState::from(&*file);
+                file.progress.visible_completed_bytes = file
+                    .progress
+                    .visible_completed_bytes
+                    .saturating_add(bytes_delta)
+                    .min(file.size);
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
+            }
+        }
         CoreEvent::FileReuseDetected {
             file_id,
             reused_bytes,
@@ -547,6 +615,24 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
                     .visible_completed_bytes
                     .saturating_add(reused_bytes)
                     .min(file.size);
+                let after = FileDerivedState::from(&*file);
+                delta = Some((before, after));
+            }
+            if let Some((before, after)) = delta {
+                apply_file_change(state, &file_id, before, after);
+            }
+        }
+        CoreEvent::FileResumeReverified {
+            file_id,
+            verified_bytes,
+            verified_chunks: _,
+        } => {
+            let mut delta = None;
+            if let Some(file) = state.files.get_mut(&file_id) {
+                let before = FileDerivedState::from(&*file);
+                let verified = verified_bytes.min(file.size);
+                file.progress.verified_existing_bytes = verified;
+                file.progress.visible_completed_bytes = verified;
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
             }
@@ -1333,6 +1419,86 @@ mod tests {
         assert_eq!(file.progress.downloaded_network_bytes, 0);
         assert_eq!(state.totals.run_completed_bytes, 0);
         assert_eq!(state.totals.displayed_network_bytes, 0);
+    }
+
+    #[test]
+    fn verification_started_resets_visible_progress_without_persisting() {
+        let mut state = sample_state();
+        reduce(
+            &mut state,
+            CoreEvent::FileStarted {
+                file_id: "file.bin".to_string().into(),
+                size: 100,
+            },
+        );
+        reduce(
+            &mut state,
+            CoreEvent::FileReuseDetected {
+                file_id: "file.bin".to_string().into(),
+                reused_bytes: 60,
+                reused_chunks: 1,
+            },
+        );
+        reduce(
+            &mut state,
+            CoreEvent::FileProgress {
+                file_id: "file.bin".to_string().into(),
+                total_bytes_delta: 20,
+                network_bytes_delta: 20,
+            },
+        );
+
+        let effects = reduce(
+            &mut state,
+            CoreEvent::FileVerificationStarted {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+
+        let file = &state.files["file.bin"];
+        assert_eq!(file.lifecycle, FileLifecycle::Queued);
+        assert_eq!(file.progress.visible_completed_bytes, 0);
+        assert_eq!(file.progress.verified_existing_bytes, 0);
+        assert_eq!(file.progress.downloaded_network_bytes, 0);
+        assert_eq!(state.totals.run_completed_bytes, 0);
+        assert_eq!(state.totals.displayed_network_bytes, 0);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, CoreEffect::PersistSession(_)))
+        );
+    }
+
+    #[test]
+    fn verification_progress_advances_visible_bytes_without_network_or_lifecycle_change() {
+        let mut state = sample_state();
+        reduce(
+            &mut state,
+            CoreEvent::FileVerificationStarted {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+
+        let effects = reduce(
+            &mut state,
+            CoreEvent::FileVerificationProgress {
+                file_id: "file.bin".to_string().into(),
+                bytes_delta: 45,
+            },
+        );
+
+        let file = &state.files["file.bin"];
+        assert_eq!(file.lifecycle, FileLifecycle::Queued);
+        assert_eq!(file.progress.visible_completed_bytes, 45);
+        assert_eq!(file.progress.verified_existing_bytes, 0);
+        assert_eq!(file.progress.downloaded_network_bytes, 0);
+        assert_eq!(state.totals.run_completed_bytes, 45);
+        assert_eq!(state.totals.displayed_network_bytes, 0);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, CoreEffect::PersistSession(_)))
+        );
     }
 
     #[test]

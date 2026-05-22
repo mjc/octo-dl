@@ -190,6 +190,9 @@ impl App {
             } => {
                 self.handle_file_progress_event(id, delta, attempt_id);
             }
+            DownloadEvent::VerificationProgress { id, bytes_delta } => {
+                self.handle_verification_progress_event(id, bytes_delta);
+            }
             DownloadEvent::ResumeReused {
                 id,
                 chunks,
@@ -197,6 +200,12 @@ impl App {
                 attempt_id,
             } => {
                 self.handle_resume_reused_event(id, chunks, bytes, attempt_id);
+            }
+            DownloadEvent::ResumeReverified { id, chunks, bytes } => {
+                self.handle_resume_reverified_event(id, chunks, bytes);
+            }
+            DownloadEvent::CompletedFileVerified { id, bytes } => {
+                self.handle_completed_file_verified_event(id, bytes);
             }
             DownloadEvent::FileComplete { id, attempt_id } => {
                 self.handle_file_complete_event(id, attempt_id);
@@ -570,5 +579,48 @@ mod tests {
             .expect("file should exist");
         assert_eq!(file.progress.visible_completed_bytes, 30);
         assert_eq!(file.progress.downloaded_network_bytes, 30);
+    }
+
+    #[test]
+    fn drain_download_events_applies_verification_progress_without_attempt_id() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let (download_tx, mut download_rx) = mpsc::unbounded_channel();
+
+        app.apply_core_event(crate::core::CoreEvent::PackageResolved {
+            package: crate::core::ResolvedPackage {
+                id: crate::test_support::package_id("pkg", "https://mega.nz/file/root"),
+                source_url: "https://mega.nz/file/root".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+                display_name: "Package".to_string(),
+                files: vec![crate::core::ResolvedFile {
+                    file_id: "file.bin".to_string().into(),
+                    path: "file.bin".to_string(),
+                    size: 100,
+                }],
+                collision: None,
+            },
+        });
+        app.verifying_files.insert("file.bin".to_string().into());
+        app.apply_core_event(crate::core::CoreEvent::FileVerificationStarted {
+            file_id: "file.bin".to_string().into(),
+        });
+
+        download_tx
+            .send(DownloadEvent::VerificationProgress {
+                id: "file.bin".into(),
+                bytes_delta: 25,
+            })
+            .expect("verification progress event should send");
+
+        assert!(app.drain_download_events(&mut download_rx));
+
+        let file = app
+            .core_state
+            .files
+            .get("file.bin")
+            .expect("file should exist");
+        assert_eq!(file.progress.visible_completed_bytes, 25);
+        assert_eq!(file.progress.downloaded_network_bytes, 0);
     }
 }

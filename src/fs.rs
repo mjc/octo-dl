@@ -11,6 +11,8 @@ pub struct FileFingerprint {
     pub len: u64,
     pub modified_ns: u128,
     #[serde(default)]
+    pub allocated_bytes: Option<u64>,
+    #[serde(default)]
     pub dev: Option<u64>,
     #[serde(default)]
     pub ino: Option<u64>,
@@ -31,6 +33,7 @@ impl FileFingerprint {
             Self {
                 len: metadata.len(),
                 modified_ns,
+                allocated_bytes: Some(metadata.blocks().saturating_mul(512)),
                 dev: Some(metadata.dev()),
                 ino: Some(metadata.ino()),
             }
@@ -41,6 +44,7 @@ impl FileFingerprint {
             Self {
                 len: metadata.len(),
                 modified_ns,
+                allocated_bytes: None,
                 dev: None,
                 ino: None,
             }
@@ -221,6 +225,22 @@ mod tests {
         // File should exist with pre-allocated size
         let metadata = std::fs::metadata(&path).unwrap();
         assert_eq!(metadata.len(), 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tokio_fs_fingerprint_reports_sparse_allocation() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sparse.bin");
+        let file = tokio::fs::File::create(&path).await.unwrap();
+        file.set_len(1024 * 1024).await.unwrap();
+        drop(file);
+
+        let fs = TokioFileSystem::new();
+        let fingerprint = fs.file_fingerprint(&path).await.unwrap();
+
+        assert_eq!(fingerprint.len, 1024 * 1024);
+        assert!(fingerprint.allocated_bytes.unwrap() < fingerprint.len);
     }
 
     #[tokio::test]

@@ -53,9 +53,9 @@ pub use config::{ApiConfig, DownloadConfig, ServiceConfig, ServiceCredentials};
 pub use core::{FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshot};
 pub use dlc::{DlcKeyCache, parse_dlc_data, parse_dlc_file};
 pub use download::{
-    CollectedFiles, DownloadItem, DownloadProgress, Downloader, FileStatus, NoProgress,
-    OwnedDownloadItem, ResumeReuse, ResumeReuseSource, delete_download_artifacts,
-    delete_resume_artifacts, fetch_public_nodes,
+    CollectedFiles, CompletedFileVerify, DownloadItem, DownloadProgress, Downloader, FileStatus,
+    NoProgress, OwnedDownloadItem, ResumeReuse, ResumeReuseSource, ResumeReverify,
+    delete_download_artifacts, delete_resume_artifacts, fetch_public_nodes,
 };
 pub use error::{Error, Result};
 pub use format::{format_bytes, format_duration};

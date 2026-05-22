@@ -15,8 +15,8 @@ use crate::extract_urls;
 use self::popup::handle_popup_input;
 use self::selection::{
     delete_selected, delete_selected_immediately, move_file_selection, move_selected_queue_item,
-    reset_selected, retry_selected, select_first_file, select_last_file, select_next_file,
-    select_previous_file, toggle_selected_package,
+    reset_selected, retry_selected, reverify_selected, select_first_file, select_last_file,
+    select_next_file, select_previous_file, toggle_selected_package,
 };
 use super::app::{App, Popup, UiAction};
 
@@ -53,6 +53,9 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('p') => {
             app.handle_ui_action(UiAction::TogglePause);
+        }
+        KeyCode::Char('r' | 'R') if key.modifiers.contains(KeyModifiers::ALT) => {
+            reverify_selected(app);
         }
         KeyCode::Char('D') => delete_selected_immediately(app),
         KeyCode::Char('d') | KeyCode::Delete => delete_selected(app),
