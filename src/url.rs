@@ -68,6 +68,9 @@ fn try_decode_base64(
     seen: &mut HashSet<String>,
     result: &mut Vec<String>,
 ) {
+    if !looks_like_base64_token(token) {
+        return;
+    }
     let mut decoded = token.to_string();
     for _ in 0..max_rounds {
         let bytes = base64::engine::general_purpose::STANDARD
@@ -90,6 +93,16 @@ fn try_decode_base64(
             result.push(decoded.clone());
         }
     }
+}
+
+fn looks_like_base64_token(token: &str) -> bool {
+    let token = token.trim();
+    if token.len() < 8 || token.len() % 4 == 1 {
+        return false;
+    }
+    token.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'-' | b'_' | b'=')
+    })
 }
 
 #[must_use]
@@ -308,6 +321,16 @@ mod tests {
     fn extract_invalid_base64_ignored() {
         let urls = extract_urls("!!!not-base64!!!");
         assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn base64_probe_skips_plain_markup_tokens() {
+        assert!(!looks_like_base64_token("<span>"));
+        assert!(!looks_like_base64_token("class=\"link\""));
+        assert!(!looks_like_base64_token("word"));
+        assert!(looks_like_base64_token(
+            &STANDARD.encode("https://mega.nz/file/abc#key")
+        ));
     }
 
     // --- extract_urls: new tests ---

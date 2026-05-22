@@ -131,6 +131,7 @@ fn should_persist_session(event: &CoreEvent) -> bool {
     !matches!(
         event,
         CoreEvent::FileProgress { .. }
+            | CoreEvent::FileQueued { .. }
             | CoreEvent::FileStarted { .. }
             | CoreEvent::FileResumeStarted { .. }
             | CoreEvent::FileReuseDetected { .. }
@@ -1772,6 +1773,29 @@ mod tests {
             !effects
                 .iter()
                 .any(|effect| matches!(effect, CoreEffect::PersistSession(..)))
+        );
+    }
+
+    #[test]
+    fn file_queued_events_do_not_emit_session_persist_effect() {
+        let mut state = sample_state();
+        let effects = reduce(
+            &mut state,
+            CoreEvent::FileQueued {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+
+        assert_eq!(state.files["file.bin"].lifecycle, FileLifecycle::Queued);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, CoreEffect::PersistSession(..)))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, CoreEffect::PublishViewSnapshot))
         );
     }
 
