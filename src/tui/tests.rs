@@ -6,7 +6,7 @@ use crate::{
     },
     test_support::{
         FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id, push_file,
-        session_snapshot,
+        session_snapshot, write_dummy_legacy_resume_sidecar_for_path,
     },
     tui::{
         draw::draw,
@@ -706,10 +706,9 @@ fn ui_delete_file_keeps_completed_artifact_on_disk() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("completed.bin");
     let part_path = dir.path().join("completed.bin.part");
-    let sidecar_path = dir.path().join("completed.bin.part.meta.json");
     std::fs::write(&file_path, b"done").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    std::fs::write(&sidecar_path, b"{}").unwrap();
+    let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
@@ -739,10 +738,9 @@ fn ui_delete_core_backed_completed_file_leaves_filesystem_artifacts() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("core-backed.bin");
     let part_path = dir.path().join("core-backed.bin.part");
-    let sidecar_path = dir.path().join("core-backed.bin.part.meta.json");
     std::fs::write(&file_path, b"done").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    std::fs::write(&sidecar_path, b"{}").unwrap();
+    let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
@@ -782,10 +780,9 @@ fn ui_delete_completed_package_leaves_filesystem_artifacts() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("pkg-complete.bin");
     let part_path = dir.path().join("pkg-complete.bin.part");
-    let sidecar_path = dir.path().join("pkg-complete.bin.part.meta.json");
     std::fs::write(&file_path, b"done").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    std::fs::write(&sidecar_path, b"{}").unwrap();
+    let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
@@ -829,10 +826,9 @@ fn deleted_file_completion_event_is_ignored_and_leaves_artifacts() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("late-complete.bin");
     let part_path = dir.path().join("late-complete.bin.part");
-    let sidecar_path = dir.path().join("late-complete.bin.part.meta.json");
     std::fs::write(&file_path, b"done").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    std::fs::write(&sidecar_path, b"{}").unwrap();
+    let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
@@ -865,7 +861,7 @@ fn deleted_file_completion_event_is_ignored_and_leaves_artifacts() {
 
     std::fs::write(&file_path, b"done").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    std::fs::write(&sidecar_path, b"{}").unwrap();
+    let _ = write_dummy_legacy_resume_sidecar_for_path(&file_path);
     app.handle_download_event(DownloadEvent::FileComplete {
         id: file_id.into(),
         attempt_id: 0,
@@ -883,10 +879,9 @@ fn deleted_file_stays_deleted_after_cancel_then_completion_events() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("late-cancel-complete.bin");
     let part_path = dir.path().join("late-cancel-complete.bin.part");
-    let sidecar_path = dir.path().join("late-cancel-complete.bin.part.meta.json");
     std::fs::write(&file_path, b"done").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    std::fs::write(&sidecar_path, b"{}").unwrap();
+    let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
@@ -925,7 +920,7 @@ fn deleted_file_stays_deleted_after_cancel_then_completion_events() {
 
     std::fs::write(&file_path, b"done").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    std::fs::write(&sidecar_path, b"{}").unwrap();
+    let _ = write_dummy_legacy_resume_sidecar_for_path(&file_path);
     app.handle_download_event(DownloadEvent::FileComplete {
         id: file_id.clone().into(),
         attempt_id: 0,
@@ -943,10 +938,9 @@ fn deleted_file_error_event_is_ignored_and_leaves_artifacts() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("late-error.bin");
     let part_path = dir.path().join("late-error.bin.part");
-    let sidecar_path = dir.path().join("late-error.bin.part.meta.json");
     std::fs::write(&file_path, b"done").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    std::fs::write(&sidecar_path, b"{}").unwrap();
+    let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
@@ -979,7 +973,7 @@ fn deleted_file_error_event_is_ignored_and_leaves_artifacts() {
 
     std::fs::write(&file_path, b"done").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    std::fs::write(&sidecar_path, b"{}").unwrap();
+    let _ = write_dummy_legacy_resume_sidecar_for_path(&file_path);
     app.handle_download_event(DownloadEvent::FileError {
         id: file_id.into(),
         error: "boom".to_string(),
@@ -998,10 +992,9 @@ fn ui_reset_file_resets_progress_and_requeues_url() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("active.bin");
     let part_path = dir.path().join("active.bin.part");
-    let sidecar_path = dir.path().join("active.bin.part.meta.json");
     std::fs::write(&file_path, b"complete").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    std::fs::write(&sidecar_path, b"{}").unwrap();
+    let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(0, event_tx, true);
@@ -1133,7 +1126,7 @@ struct ScenarioHarness {
     download_rx: mpsc::UnboundedReceiver<DownloadEvent>,
     _action_tx: mpsc::UnboundedSender<UiAction>,
     action_rx: mpsc::UnboundedReceiver<UiAction>,
-    _state_tx: watch::Sender<String>,
+    _state_tx: watch::Sender<bytes::Bytes>,
     sys: System,
     pid: Option<sysinfo::Pid>,
     tick_count: u32,
@@ -1156,7 +1149,7 @@ impl ScenarioHarness {
         let app = App::new(9723, event_tx, true);
         let (download_tx, download_rx) = mpsc::unbounded_channel();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
-        let (state_tx, _state_rx) = watch::channel(String::new());
+        let (state_tx, _state_rx) = watch::channel(bytes::Bytes::new());
 
         Self {
             app,

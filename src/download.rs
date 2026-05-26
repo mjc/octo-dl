@@ -272,6 +272,13 @@ pub(crate) fn part_path(path: &str) -> PathBuf {
 }
 
 pub(crate) fn sidecar_path(path: &str) -> PathBuf {
+    let mut sidecar = String::with_capacity(path.len() + ".part.meta.bin".len());
+    sidecar.push_str(path);
+    sidecar.push_str(".part.meta.bin");
+    PathBuf::from(sidecar)
+}
+
+pub(crate) fn legacy_json_sidecar_path(path: &str) -> PathBuf {
     let mut sidecar = String::with_capacity(path.len() + ".part.meta.json".len());
     sidecar.push_str(path);
     sidecar.push_str(".part.meta.json");
@@ -279,8 +286,7 @@ pub(crate) fn sidecar_path(path: &str) -> PathBuf {
 }
 
 pub(crate) fn resume_sidecar_verified_bytes(path: &str) -> Option<u64> {
-    let sidecar = std::fs::read(sidecar_path(path)).ok()?;
-    let sidecar: ResumeSidecar = serde_json::from_slice(&sidecar).ok()?;
+    let sidecar = load_sidecar_sync(&sidecar_path(path), &legacy_json_sidecar_path(path))?;
     if sidecar.version != CURRENT_RESUME_SIDECAR_VERSION {
         return Some(0);
     }
@@ -297,7 +303,7 @@ pub(crate) fn resume_sidecar_verified_bytes(path: &str) -> Option<u64> {
 /// Deletes resumable download artifacts for a final output path.
 pub async fn delete_resume_artifacts(path: &str) -> io::Result<()> {
     remove_file_if_exists(&part_path(path)).await?;
-    remove_file_if_exists(&sidecar_path(path)).await
+    delete_sidecar_pair(&sidecar_path(path), &legacy_json_sidecar_path(path)).await
 }
 
 /// Deletes the final output and resumable download artifacts for a path.
@@ -309,17 +315,63 @@ pub async fn delete_download_artifacts(path: &str) -> io::Result<()> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct VerifiedChunkRecord {
     index: u32,
-    mac_b64: String,
+    mac: [u8; 16],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ResumeSidecar {
     version: u32,
     file_size: u64,
-    expected_condensed_mac_b64: String,
+    expected_condensed_mac: [u8; 8],
     verified_chunks: Vec<VerifiedChunkRecord>,
     #[serde(default)]
     part_fingerprint: Option<FileFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LegacyJsonVerifiedChunkRecord {
+    index: u32,
+    mac_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyJsonResumeSidecar {
+    version: u32,
+    file_size: u64,
+    expected_condensed_mac_b64: String,
+    verified_chunks: Vec<LegacyJsonVerifiedChunkRecord>,
+    #[serde(default)]
+    part_fingerprint: Option<FileFingerprint>,
+}
+
+impl TryFrom<LegacyJsonResumeSidecar> for ResumeSidecar {
+    type Error = ();
+
+    fn try_from(legacy: LegacyJsonResumeSidecar) -> std::result::Result<Self, Self::Error> {
+        let expected_condensed_mac = decode_array::<8>(&legacy.expected_condensed_mac_b64)?;
+        let mut verified_chunks = Vec::with_capacity(legacy.verified_chunks.len());
+        for record in legacy.verified_chunks {
+            verified_chunks.push(VerifiedChunkRecord {
+                index: record.index,
+                mac: decode_array::<16>(&record.mac_b64)?,
+            });
+        }
+        Ok(Self {
+            version: legacy.version,
+            file_size: legacy.file_size,
+            expected_condensed_mac,
+            verified_chunks,
+            part_fingerprint: legacy.part_fingerprint,
+        })
+    }
+}
+
+fn decode_array<const N: usize>(encoded: &str) -> std::result::Result<[u8; N], ()> {
+    let mut output = [0_u8; N];
+    let written = STANDARD
+        .decode_slice(encoded.as_bytes(), &mut output)
+        .map_err(|_| ())?;
+    (written == N).then_some(output).ok_or(())
 }
 
 #[derive(Debug)]
@@ -360,7 +412,7 @@ impl ResumeTracker {
         ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size: self.file_size,
-            expected_condensed_mac_b64: STANDARD.encode(self.expected_condensed_mac),
+            expected_condensed_mac: self.expected_condensed_mac,
             verified_chunks: self
                 .chunk_macs
                 .iter()
@@ -369,7 +421,7 @@ impl ResumeTracker {
                     mac.and_then(|mac| {
                         Some(VerifiedChunkRecord {
                             index: u32::try_from(index).ok()?,
-                            mac_b64: STANDARD.encode(mac),
+                            mac,
                         })
                     })
                 })
@@ -409,7 +461,7 @@ struct SidecarValidationInput<'a> {
     part_path: &'a Path,
     sidecar: &'a ResumeSidecar,
     file_size: u64,
-    expected_condensed_mac_b64: &'a str,
+    expected_condensed_mac: [u8; 8],
     aes_key: &'a [u8; 16],
     aes_iv: &'a [u8; 8],
     progress: Option<(&'a str, &'a dyn DownloadProgress)>,
@@ -435,14 +487,45 @@ fn trust_resume_candidate(
     true
 }
 
+fn load_sidecar_sync(path: &Path, legacy_json_path: &Path) -> Option<ResumeSidecar> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|data| deserialize_binary_sidecar(&data))
+        .or_else(|| {
+            std::fs::read(legacy_json_path)
+                .ok()
+                .and_then(|data| deserialize_legacy_json_sidecar(&data))
+        })
+}
+
 async fn load_sidecar(path: &Path) -> Option<ResumeSidecar> {
-    let data = tokio::fs::read(path).await.ok()?;
-    serde_json::from_slice(&data).ok()
+    let legacy_json_path = legacy_json_path_for_sidecar(path);
+    match tokio::fs::read(path).await {
+        Ok(data) => deserialize_binary_sidecar(&data).or_else(|| {
+            (legacy_json_path == path)
+                .then(|| deserialize_legacy_json_sidecar(&data))
+                .flatten()
+        }),
+        Err(_) => {
+            let data = tokio::fs::read(&legacy_json_path).await.ok()?;
+            deserialize_legacy_json_sidecar(&data)
+        }
+    }
+}
+
+fn deserialize_binary_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
+    bincode::deserialize(data).ok()
+}
+
+fn deserialize_legacy_json_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
+    serde_json::from_slice::<LegacyJsonResumeSidecar>(data)
+        .ok()
+        .and_then(|sidecar| sidecar.try_into().ok())
 }
 
 async fn save_sidecar_atomic(path: &Path, sidecar: &ResumeSidecar) -> io::Result<()> {
     let tmp = sidecar_tmp_path(path);
-    let data = serde_json::to_vec(sidecar)?;
+    let data = bincode::serialize(sidecar).map_err(io::Error::other)?;
     let mut file = tokio::fs::File::create(&tmp).await?;
     file.write_all(&data).await?;
     file.flush().await?;
@@ -463,7 +546,18 @@ async fn save_sidecar_atomic(path: &Path, sidecar: &ResumeSidecar) -> io::Result
 }
 
 fn sidecar_tmp_path(path: &Path) -> PathBuf {
-    path.with_extension("json.tmp")
+    path.with_extension("bin.tmp")
+}
+
+fn legacy_json_path_for_sidecar(path: &Path) -> PathBuf {
+    let path = path.as_os_str().to_string_lossy();
+    if let Some(stem) = path.strip_suffix(".part.meta.bin") {
+        let mut json = String::with_capacity(stem.len() + ".part.meta.json".len());
+        json.push_str(stem);
+        json.push_str(".part.meta.json");
+        return PathBuf::from(json);
+    }
+    PathBuf::from(path.as_ref())
 }
 
 async fn remove_file_if_exists(path: &Path) -> io::Result<()> {
@@ -475,7 +569,16 @@ async fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 }
 
 async fn delete_sidecar(path: &Path) -> io::Result<()> {
-    remove_file_if_exists(path).await
+    let legacy_json_path = legacy_json_path_for_sidecar(path);
+    delete_sidecar_pair(path, &legacy_json_path).await
+}
+
+async fn delete_sidecar_pair(path: &Path, legacy_json_path: &Path) -> io::Result<()> {
+    remove_file_if_exists(path).await?;
+    if legacy_json_path != path {
+        remove_file_if_exists(legacy_json_path).await?;
+    }
+    Ok(())
 }
 
 async fn sync_and_fingerprint_part(path: &Path) -> Option<FileFingerprint> {
@@ -600,10 +703,6 @@ fn expected_mac(node: &mega::Node) -> Result<[u8; 8]> {
         .condensed_mac()
         .ok_or(mega::Error::MissingCondensedMac)?;
     Ok(*mac)
-}
-
-fn encode_expected_mac(node: &mega::Node) -> Result<String> {
-    Ok(STANDARD.encode(expected_mac(node)?))
 }
 
 const fn should_reuse_resume_state(force_overwrite: bool, trust_resume_state: bool) -> bool {
@@ -946,7 +1045,7 @@ impl<F: FileSystem> Downloader<F> {
         boundaries: &[mega::MegaChunk],
         part_path: &Path,
         sidecar_path: &Path,
-        expected_condensed_mac_b64: &str,
+        expected_condensed_mac: [u8; 8],
         progress: Option<(&str, &dyn DownloadProgress)>,
     ) -> Result<ResumeValidation> {
         let Some(sidecar) = load_sidecar(sidecar_path).await else {
@@ -960,7 +1059,7 @@ impl<F: FileSystem> Downloader<F> {
                 part_path,
                 sidecar: &sidecar,
                 file_size: node.size(),
-                expected_condensed_mac_b64,
+                expected_condensed_mac,
                 aes_key: node.aes_key(),
                 aes_iv,
                 progress,
@@ -1023,7 +1122,7 @@ impl<F: FileSystem> Downloader<F> {
 
         if input.sidecar.version != CURRENT_RESUME_SIDECAR_VERSION
             || input.sidecar.file_size != input.file_size
-            || input.sidecar.expected_condensed_mac_b64 != input.expected_condensed_mac_b64
+            || input.sidecar.expected_condensed_mac != input.expected_condensed_mac
         {
             log::debug!(
                 "Resume sidecar rejected for {}: metadata mismatch version={} file_size={} expected_file_size={}",
@@ -1048,17 +1147,10 @@ impl<F: FileSystem> Downloader<F> {
             if boundary.offset.saturating_add(boundary.length) > part_size {
                 continue;
             }
-            let Ok(decoded) = STANDARD.decode(record.mac_b64.as_bytes()) else {
-                continue;
-            };
-            let Ok(expected_mac) = <[u8; 16]>::try_from(decoded.as_slice()) else {
-                continue;
-            };
-
             candidates.push(TrustedResumeChunkCandidate {
                 index,
                 length: boundary.length,
-                expected_mac,
+                expected_mac: record.mac,
             });
         }
 
@@ -1230,7 +1322,7 @@ impl<F: FileSystem> Downloader<F> {
     ) -> Result<ResumeReverify> {
         let pp = part_path(path);
         let sp = sidecar_path(path);
-        let expected_condensed_mac_b64 = encode_expected_mac(node)?;
+        let expected_condensed_mac = expected_mac(node)?;
         let boundaries = mega::mega_chunk_boundaries(node.size());
         let validation = self
             .revalidate_resume_chunks(
@@ -1238,7 +1330,7 @@ impl<F: FileSystem> Downloader<F> {
                 &boundaries,
                 &pp,
                 &sp,
-                &expected_condensed_mac_b64,
+                expected_condensed_mac,
                 progress.map(|progress| (path, progress)),
             )
             .await?;
@@ -1368,16 +1460,8 @@ impl<F: FileSystem> Downloader<F> {
         let reuse_resume_state =
             should_reuse_resume_state(self.config.force_overwrite, trust_resume_state);
         let resume_validation = if reuse_resume_state {
-            let expected_condensed_mac_b64 = STANDARD.encode(expected_condensed_mac);
-            self.revalidate_resume_chunks(
-                node,
-                &boundaries,
-                &pp,
-                &sp,
-                &expected_condensed_mac_b64,
-                None,
-            )
-            .await?
+            self.revalidate_resume_chunks(node, &boundaries, &pp, &sp, expected_condensed_mac, None)
+                .await?
         } else {
             ResumeValidation::empty(boundaries.len())
         };
@@ -1942,20 +2026,43 @@ mod tests {
 
     fn sidecar_for_chunk(
         file_size: u64,
-        expected_condensed_mac_b64: &str,
+        expected_condensed_mac: [u8; 8],
         index: u32,
         mac: [u8; 16],
     ) -> ResumeSidecar {
         ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size,
-            expected_condensed_mac_b64: expected_condensed_mac_b64.to_string(),
-            verified_chunks: vec![VerifiedChunkRecord {
+            expected_condensed_mac,
+            verified_chunks: vec![VerifiedChunkRecord { index, mac }],
+            part_fingerprint: None,
+        }
+    }
+
+    fn legacy_json_sidecar_for_chunk(
+        file_size: u64,
+        expected_condensed_mac: [u8; 8],
+        index: u32,
+        mac: [u8; 16],
+    ) -> LegacyJsonResumeSidecar {
+        LegacyJsonResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size,
+            expected_condensed_mac_b64: STANDARD.encode(expected_condensed_mac),
+            verified_chunks: vec![LegacyJsonVerifiedChunkRecord {
                 index,
                 mac_b64: STANDARD.encode(mac),
             }],
             part_fingerprint: None,
         }
+    }
+
+    async fn write_legacy_json_sidecar(
+        path: &Path,
+        sidecar: &LegacyJsonResumeSidecar,
+    ) -> io::Result<()> {
+        let data = serde_json::to_vec(sidecar)?;
+        tokio::fs::write(path, data).await
     }
 
     #[derive(Default)]
@@ -2183,12 +2290,12 @@ mod tests {
         let data = test_incompressible_plaintext(usize_from_u64(file_size));
         tokio::fs::write(&part, &data).await.unwrap();
 
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
         let mac =
             mega::compute_mega_chunk_mac(chunk_data(&data, first), &TEST_AES_KEY, &TEST_AES_IV);
-        let sidecar = sidecar_for_chunk(file_size, &expected, first.index, mac);
+        let sidecar = sidecar_for_chunk(file_size, expected, first.index, mac);
 
         let validation = tokio_downloader()
             .revalidate_sidecar_chunks(SidecarValidationInput {
@@ -2196,7 +2303,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2215,10 +2322,10 @@ mod tests {
         let part = PathBuf::from("file.bin.part");
         let file_size = 300_000_u64;
 
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
-        let mut sidecar = sidecar_for_chunk(file_size, &expected, first.index, [4u8; 16]);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, [4u8; 16]);
         let fingerprint = fingerprint_with_allocated_bytes(file_size, Some(first.length));
         sidecar.part_fingerprint = Some(fingerprint);
         let fs = MockFileSystem::new();
@@ -2231,7 +2338,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2247,10 +2354,10 @@ mod tests {
     async fn revalidate_sidecar_rejects_matching_fingerprint_without_allocated_bytes() {
         let part = PathBuf::from("file.bin.part");
         let file_size = 300_000_u64;
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
-        let mut sidecar = sidecar_for_chunk(file_size, &expected, first.index, [4u8; 16]);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, [4u8; 16]);
         let fingerprint = fingerprint_with_allocated_bytes(file_size, None);
         sidecar.part_fingerprint = Some(fingerprint);
         let fs = MockFileSystem::new();
@@ -2263,7 +2370,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2283,12 +2390,12 @@ mod tests {
         let data = test_incompressible_plaintext(usize_from_u64(file_size));
         tokio::fs::write(&part, &data).await.unwrap();
 
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
         let mac =
             mega::compute_mega_chunk_mac(chunk_data(&data, first), &TEST_AES_KEY, &TEST_AES_IV);
-        let mut sidecar = sidecar_for_chunk(file_size, &expected, first.index, mac);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, mac);
         sidecar.part_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await;
         if let Some(fingerprint) = sidecar.part_fingerprint.as_mut() {
             fingerprint.allocated_bytes = None;
@@ -2300,7 +2407,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2325,12 +2432,12 @@ mod tests {
         data[..32].fill(0);
         tokio::fs::write(&part, &data).await.unwrap();
 
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let second = &boundaries[1];
         let mac =
             mega::compute_mega_chunk_mac(chunk_data(&data, second), &TEST_AES_KEY, &TEST_AES_IV);
-        let mut sidecar = sidecar_for_chunk(file_size, &expected, second.index, mac);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, second.index, mac);
         sidecar.part_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await;
         if let Some(fingerprint) = sidecar.part_fingerprint.as_mut() {
             fingerprint.allocated_bytes = None;
@@ -2342,7 +2449,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2362,22 +2469,22 @@ mod tests {
     async fn revalidate_sidecar_rejects_matching_fingerprint_with_insufficient_allocation() {
         let part = PathBuf::from("file.bin.part");
         let file_size = 300_000_u64;
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
         let second = &boundaries[1];
         let mut sidecar = ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size,
-            expected_condensed_mac_b64: expected.clone(),
+            expected_condensed_mac: expected.clone(),
             verified_chunks: vec![
                 VerifiedChunkRecord {
                     index: first.index,
-                    mac_b64: STANDARD.encode([4u8; 16]),
+                    mac: [4u8; 16],
                 },
                 VerifiedChunkRecord {
                     index: second.index,
-                    mac_b64: STANDARD.encode([5u8; 16]),
+                    mac: [5u8; 16],
                 },
             ],
             part_fingerprint: None,
@@ -2395,7 +2502,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2411,10 +2518,10 @@ mod tests {
     async fn revalidate_sidecar_trusts_matching_fingerprint_with_sufficient_allocation() {
         let part = PathBuf::from("file.bin.part");
         let file_size = 300_000_u64;
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
-        let mut sidecar = sidecar_for_chunk(file_size, &expected, first.index, [4u8; 16]);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, [4u8; 16]);
         let fingerprint = fingerprint_with_allocated_bytes(file_size, Some(first.length));
         sidecar.part_fingerprint = Some(fingerprint);
         let fs = MockFileSystem::new();
@@ -2427,7 +2534,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2443,10 +2550,10 @@ mod tests {
     async fn revalidate_sidecar_reports_progress_for_fast_trusted_bytes() {
         let part = PathBuf::from("file.bin.part");
         let file_size = 300_000_u64;
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
-        let mut sidecar = sidecar_for_chunk(file_size, &expected, first.index, [4u8; 16]);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, [4u8; 16]);
         let fingerprint = fingerprint_with_allocated_bytes(file_size, Some(first.length));
         sidecar.part_fingerprint = Some(fingerprint);
         let fs = MockFileSystem::new();
@@ -2460,7 +2567,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: Some(("file.bin", &progress)),
@@ -2488,12 +2595,12 @@ mod tests {
         let data = test_incompressible_plaintext(usize_from_u64(file_size));
         tokio::fs::write(&part, &data).await.unwrap();
 
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
         let mac =
             mega::compute_mega_chunk_mac(chunk_data(&data, first), &TEST_AES_KEY, &TEST_AES_IV);
-        let sidecar = sidecar_for_chunk(file_size, &expected, first.index, mac);
+        let sidecar = sidecar_for_chunk(file_size, expected, first.index, mac);
         let progress = RecordingProgress::default();
 
         let validation = tokio_downloader()
@@ -2502,7 +2609,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: Some(("file.bin", &progress)),
@@ -2541,10 +2648,10 @@ mod tests {
             .unwrap();
         drop(file);
 
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
-        let mut sidecar = sidecar_for_chunk(file_size, &expected, first.index, [4u8; 16]);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, [4u8; 16]);
         sidecar.part_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await;
         if let Some(fingerprint) = sidecar.part_fingerprint.as_mut() {
             fingerprint.allocated_bytes = None;
@@ -2556,7 +2663,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2586,12 +2693,12 @@ mod tests {
 
         let aes_key = [7u8; 16];
         let aes_iv = [3u8; 8];
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
         let first_data = chunk_data(&data, first);
         let mac = mega::compute_mega_chunk_mac(first_data, &aes_key, &aes_iv);
-        let mut sidecar = sidecar_for_chunk(file_size, &expected, first.index, mac);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, mac);
         sidecar.part_fingerprint = stale_fingerprint;
 
         let validation = tokio_downloader()
@@ -2600,7 +2707,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2621,13 +2728,13 @@ mod tests {
         tokio::fs::write(&part, &data).await.unwrap();
         let stale_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await;
 
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
         let second = &boundaries[1];
         let mac =
             mega::compute_mega_chunk_mac(chunk_data(&data, first), &TEST_AES_KEY, &TEST_AES_IV);
-        let mut sidecar = sidecar_for_chunk(file_size, &expected, first.index, mac);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, mac);
         sidecar.part_fingerprint = stale_fingerprint;
 
         let second_start = usize_from_u64(second.offset);
@@ -2640,7 +2747,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2660,7 +2767,7 @@ mod tests {
 
         let aes_key = [7u8; 16];
         let aes_iv = [3u8; 8];
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
         let first_data = chunk_data(&data, first);
@@ -2668,15 +2775,15 @@ mod tests {
         let mut sidecar = ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size,
-            expected_condensed_mac_b64: expected.clone(),
+            expected_condensed_mac: expected.clone(),
             verified_chunks: vec![
                 VerifiedChunkRecord {
                     index: first.index,
-                    mac_b64: STANDARD.encode([1u8; 16]),
+                    mac: [1u8; 16],
                 },
                 VerifiedChunkRecord {
                     index: first.index,
-                    mac_b64: STANDARD.encode(mac),
+                    mac: mac,
                 },
             ],
             part_fingerprint: None,
@@ -2693,7 +2800,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2713,9 +2820,9 @@ mod tests {
         let data = test_plaintext(usize_from_u64(file_size));
         tokio::fs::write(&part, &data).await.unwrap();
 
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
-        let sidecar = sidecar_for_chunk(file_size, &expected, 0, [1u8; 16]);
+        let sidecar = sidecar_for_chunk(file_size, expected, 0, [1u8; 16]);
 
         let validation = tokio_downloader()
             .revalidate_sidecar_chunks(SidecarValidationInput {
@@ -2723,7 +2830,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2745,12 +2852,12 @@ mod tests {
 
         let aes_key = [7u8; 16];
         let aes_iv = [3u8; 8];
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let second = &boundaries[1];
         let second_data = chunk_data(&data, second);
         let mac = mega::compute_mega_chunk_mac(second_data, &aes_key, &aes_iv);
-        let sidecar = sidecar_for_chunk(file_size, &expected, second.index, mac);
+        let sidecar = sidecar_for_chunk(file_size, expected, second.index, mac);
 
         tokio::fs::write(&part, &data[..usize_from_u64(second.offset)])
             .await
@@ -2762,7 +2869,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2782,9 +2889,9 @@ mod tests {
         let data = test_plaintext(usize_from_u64(file_size));
         tokio::fs::write(&part, &data).await.unwrap();
 
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
-        let sidecar = sidecar_for_chunk(file_size, "stale", 0, [1u8; 16]);
+        let sidecar = sidecar_for_chunk(file_size, [0u8; 8], 0, [1u8; 16]);
 
         let validation = tokio_downloader()
             .revalidate_sidecar_chunks(SidecarValidationInput {
@@ -2792,7 +2899,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2814,17 +2921,17 @@ mod tests {
         let data = test_plaintext(200_000);
         tokio::fs::write(&part, &data).await.unwrap();
 
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         save_sidecar_atomic(
             &sidecar,
             &ResumeSidecar {
                 version: CURRENT_RESUME_SIDECAR_VERSION,
                 file_size,
-                expected_condensed_mac_b64: "wrong".to_string(),
+                expected_condensed_mac: [0u8; 8],
                 verified_chunks: vec![VerifiedChunkRecord {
                     index: 0,
-                    mac_b64: STANDARD.encode([1u8; 16]),
+                    mac: [1u8; 16],
                 }],
                 part_fingerprint: None,
             },
@@ -2838,7 +2945,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &loaded_sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2860,7 +2967,7 @@ mod tests {
         let data = test_plaintext(usize_from_u64(file_size));
         tokio::fs::write(&part, &data).await.unwrap();
 
-        let expected = STANDARD.encode([9u8; 8]);
+        let expected = [9u8; 8];
         let aes_key = [7u8; 16];
         let aes_iv = [3u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
@@ -2872,10 +2979,10 @@ mod tests {
             &ResumeSidecar {
                 version: 1,
                 file_size,
-                expected_condensed_mac_b64: expected.clone(),
+                expected_condensed_mac: expected.clone(),
                 verified_chunks: vec![VerifiedChunkRecord {
                     index: first.index,
-                    mac_b64: STANDARD.encode(mac),
+                    mac: mac,
                 }],
                 part_fingerprint: None,
             },
@@ -2890,7 +2997,7 @@ mod tests {
                 part_path: &part,
                 sidecar: &loaded_sidecar,
                 file_size,
-                expected_condensed_mac_b64: &expected,
+                expected_condensed_mac: expected,
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
@@ -2906,14 +3013,14 @@ mod tests {
     #[tokio::test]
     async fn sidecar_save_and_delete_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let sidecar_path = dir.path().join("file.bin.part.meta.json");
+        let sidecar_path = dir.path().join("file.bin.part.meta.bin");
         let sidecar = ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size: 42,
-            expected_condensed_mac_b64: STANDARD.encode([9u8; 8]),
+            expected_condensed_mac: [9u8; 8],
             verified_chunks: vec![VerifiedChunkRecord {
                 index: 0,
-                mac_b64: STANDARD.encode([1u8; 16]),
+                mac: [1u8; 16],
             }],
             part_fingerprint: None,
         };
@@ -2925,6 +3032,167 @@ mod tests {
 
         delete_sidecar(&sidecar_path).await.unwrap();
         assert!(load_sidecar(&sidecar_path).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn sidecar_save_writes_binary_not_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar_path = dir.path().join("file.bin.part.meta.bin");
+        let sidecar = ResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size: 42,
+            expected_condensed_mac: [9u8; 8],
+            verified_chunks: vec![VerifiedChunkRecord {
+                index: 0,
+                mac: [1u8; 16],
+            }],
+            part_fingerprint: None,
+        };
+
+        save_sidecar_atomic(&sidecar_path, &sidecar).await.unwrap();
+        let data = tokio::fs::read(&sidecar_path).await.unwrap();
+
+        assert!(bincode::deserialize::<ResumeSidecar>(&data).is_ok());
+        assert!(serde_json::from_slice::<LegacyJsonResumeSidecar>(&data).is_err());
+    }
+
+    #[tokio::test]
+    async fn sidecar_path_uses_binary_extension_and_legacy_path_uses_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("file.bin").to_string_lossy().into_owned();
+
+        assert!(sidecar_path(&base).ends_with("file.bin.part.meta.bin"));
+        assert!(legacy_json_sidecar_path(&base).ends_with("file.bin.part.meta.json"));
+    }
+
+    #[tokio::test]
+    async fn load_sidecar_falls_back_to_legacy_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("file.bin").to_string_lossy().into_owned();
+        let binary_path = sidecar_path(&base);
+        let json_path = legacy_json_sidecar_path(&base);
+        let legacy = legacy_json_sidecar_for_chunk(42, [9u8; 8], 7, [1u8; 16]);
+
+        write_legacy_json_sidecar(&json_path, &legacy)
+            .await
+            .unwrap();
+        let loaded = load_sidecar(&binary_path).await.unwrap();
+
+        assert_eq!(loaded.expected_condensed_mac, [9u8; 8]);
+        assert_eq!(loaded.verified_chunks[0].index, 7);
+        assert_eq!(loaded.verified_chunks[0].mac, [1u8; 16]);
+    }
+
+    #[tokio::test]
+    async fn load_sidecar_prefers_binary_over_legacy_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("file.bin").to_string_lossy().into_owned();
+        let binary_path = sidecar_path(&base);
+        let json_path = legacy_json_sidecar_path(&base);
+        let legacy = legacy_json_sidecar_for_chunk(42, [1u8; 8], 0, [1u8; 16]);
+        let binary = ResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size: 42,
+            expected_condensed_mac: [2u8; 8],
+            verified_chunks: vec![VerifiedChunkRecord {
+                index: 1,
+                mac: [2u8; 16],
+            }],
+            part_fingerprint: None,
+        };
+
+        write_legacy_json_sidecar(&json_path, &legacy)
+            .await
+            .unwrap();
+        save_sidecar_atomic(&binary_path, &binary).await.unwrap();
+        let loaded = load_sidecar(&binary_path).await.unwrap();
+
+        assert_eq!(loaded.expected_condensed_mac, [2u8; 8]);
+        assert_eq!(loaded.verified_chunks[0].index, 1);
+        assert_eq!(loaded.verified_chunks[0].mac, [2u8; 16]);
+    }
+
+    #[tokio::test]
+    async fn load_sidecar_rejects_bad_legacy_json_base64_without_allocating_vec_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("file.bin").to_string_lossy().into_owned();
+        let binary_path = sidecar_path(&base);
+        let json_path = legacy_json_sidecar_path(&base);
+        let legacy = LegacyJsonResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size: 42,
+            expected_condensed_mac_b64: STANDARD.encode([9u8; 8]),
+            verified_chunks: vec![LegacyJsonVerifiedChunkRecord {
+                index: 0,
+                mac_b64: "not-base64".to_string(),
+            }],
+            part_fingerprint: None,
+        };
+
+        write_legacy_json_sidecar(&json_path, &legacy)
+            .await
+            .unwrap();
+
+        assert!(load_sidecar(&binary_path).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_sidecar_removes_binary_and_legacy_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("file.bin").to_string_lossy().into_owned();
+        let binary_path = sidecar_path(&base);
+        let json_path = legacy_json_sidecar_path(&base);
+        let binary = ResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size: 42,
+            expected_condensed_mac: [2u8; 8],
+            verified_chunks: vec![VerifiedChunkRecord {
+                index: 1,
+                mac: [2u8; 16],
+            }],
+            part_fingerprint: None,
+        };
+        let legacy = legacy_json_sidecar_for_chunk(42, [1u8; 8], 0, [1u8; 16]);
+
+        save_sidecar_atomic(&binary_path, &binary).await.unwrap();
+        write_legacy_json_sidecar(&json_path, &legacy)
+            .await
+            .unwrap();
+        delete_sidecar(&binary_path).await.unwrap();
+
+        assert!(!binary_path.exists());
+        assert!(!json_path.exists());
+    }
+
+    #[tokio::test]
+    async fn resume_sidecar_verified_bytes_reads_legacy_json_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_path = dir.path().join("file.bin");
+        let file_path = base_path.to_string_lossy().into_owned();
+        let file_size = 300_000_u64;
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let legacy = LegacyJsonResumeSidecar {
+            verified_chunks: vec![
+                LegacyJsonVerifiedChunkRecord {
+                    index: boundaries[0].index,
+                    mac_b64: STANDARD.encode([1u8; 16]),
+                },
+                LegacyJsonVerifiedChunkRecord {
+                    index: boundaries[1].index,
+                    mac_b64: STANDARD.encode([2u8; 16]),
+                },
+            ],
+            ..legacy_json_sidecar_for_chunk(file_size, [9u8; 8], boundaries[0].index, [1u8; 16])
+        };
+
+        write_legacy_json_sidecar(&legacy_json_sidecar_path(&file_path), &legacy)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resume_sidecar_verified_bytes(&file_path),
+            Some(boundaries[0].length + boundaries[1].length)
+        );
     }
 
     #[tokio::test]
@@ -2941,15 +3209,15 @@ mod tests {
             &ResumeSidecar {
                 version: CURRENT_RESUME_SIDECAR_VERSION,
                 file_size,
-                expected_condensed_mac_b64: STANDARD.encode([9u8; 8]),
+                expected_condensed_mac: [9u8; 8],
                 verified_chunks: vec![
                     VerifiedChunkRecord {
                         index: boundaries[0].index,
-                        mac_b64: STANDARD.encode([1u8; 16]),
+                        mac: [1u8; 16],
                     },
                     VerifiedChunkRecord {
                         index: boundaries[1].index,
-                        mac_b64: STANDARD.encode([2u8; 16]),
+                        mac: [2u8; 16],
                     },
                 ],
                 part_fingerprint: None,
@@ -2976,10 +3244,10 @@ mod tests {
             &ResumeSidecar {
                 version: 1,
                 file_size: 300_000,
-                expected_condensed_mac_b64: STANDARD.encode([9u8; 8]),
+                expected_condensed_mac: [9u8; 8],
                 verified_chunks: vec![VerifiedChunkRecord {
                     index: 0,
-                    mac_b64: STANDARD.encode([1u8; 16]),
+                    mac: [1u8; 16],
                 }],
                 part_fingerprint: None,
             },
@@ -2999,10 +3267,10 @@ mod tests {
         let first = ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size: 42,
-            expected_condensed_mac_b64: STANDARD.encode([9u8; 8]),
+            expected_condensed_mac: [9u8; 8],
             verified_chunks: vec![VerifiedChunkRecord {
                 index: 0,
-                mac_b64: STANDARD.encode([1u8; 16]),
+                mac: [1u8; 16],
             }],
             part_fingerprint: None,
         };
@@ -3010,11 +3278,11 @@ mod tests {
             verified_chunks: vec![
                 VerifiedChunkRecord {
                     index: 0,
-                    mac_b64: STANDARD.encode([1u8; 16]),
+                    mac: [1u8; 16],
                 },
                 VerifiedChunkRecord {
                     index: 1,
-                    mac_b64: STANDARD.encode([2u8; 16]),
+                    mac: [2u8; 16],
                 },
             ],
             ..first.clone()
@@ -3042,10 +3310,10 @@ mod tests {
         let snapshot = ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size: 42,
-            expected_condensed_mac_b64: STANDARD.encode([9u8; 8]),
+            expected_condensed_mac: [9u8; 8],
             verified_chunks: vec![VerifiedChunkRecord {
                 index: 0,
-                mac_b64: STANDARD.encode([1u8; 16]),
+                mac: [1u8; 16],
             }],
             part_fingerprint: Some(FileFingerprint {
                 len: 999,

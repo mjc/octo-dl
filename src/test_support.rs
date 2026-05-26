@@ -67,6 +67,20 @@ pub fn package_id(raw: &str, source_url: &str) -> PackageId {
     PackageId::parse_or_key(raw, &PackageKey::new(source_url))
 }
 
+pub fn legacy_resume_sidecar_path(path: &str) -> PathBuf {
+    crate::download::legacy_json_sidecar_path(path)
+}
+
+pub fn write_dummy_legacy_resume_sidecar(path: &str) -> PathBuf {
+    let sidecar_path = legacy_resume_sidecar_path(path);
+    std::fs::write(&sidecar_path, b"metadata").expect("dummy legacy sidecar should write");
+    sidecar_path
+}
+
+pub fn write_dummy_legacy_resume_sidecar_for_path(path: &Path) -> PathBuf {
+    write_dummy_legacy_resume_sidecar(path.to_string_lossy().as_ref())
+}
+
 pub fn session_snapshot(urls: Vec<(&str, UrlFixtureStatus)>) -> SessionSnapshot {
     let mut session = SessionSnapshot::new(DownloadConfig::default(), test_credentials());
     session.urls = urls
