@@ -17,7 +17,7 @@ path = "src/bin/octo.rs"
 [features]
 default = ["cli", "tui"]
 cli = ["dep:indicatif", "dep:console"]
-tui = ["dep:ratatui", "dep:crossterm", "dep:sysinfo", "dep:axum", "dep:tower-http", "dep:tokio-stream", "dep:tui-input"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:sysinfo", "dep:axum", "dep:bytes", "dep:tower-http", "dep:tokio-stream", "dep:tui-input"]
 
 [dependencies]
 async-trait = "0.1"
@@ -36,6 +36,7 @@ aes = "0.8"
 aes-gcm = "0.10"
 cbc = "0.1"
 serde = { version = "1", features = ["derive"] }
+bincode = "1"
 toml = "0.8"
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
@@ -47,6 +48,7 @@ uuid = { version = "1", features = ["serde", "v4", "v5"] }
 hostname = "0.4"
 whoami = "1"
 axum = { version = "0.8", features = ["ws", "http1"], optional = true }
+bytes = { version = "1", optional = true }
 sysinfo = { version = "0.38", optional = true }
 regex = "1"
 serde_json = "1"
