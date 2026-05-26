@@ -93,7 +93,7 @@ where
             snapshot.partial_files.push(PartialFileSnapshot {
                 file_id: file_id.clone().into(),
                 bytes: metadata.len(),
-                has_sidecar: crate::download::sidecar_path(&file_id).exists(),
+                has_sidecar: crate::download::has_resume_sidecar(&file_id),
                 verified_bytes: crate::download::resume_sidecar_verified_bytes(&file_id)
                     .unwrap_or(0),
             });
@@ -274,6 +274,8 @@ mod tests {
     use crate::core::session::{
         FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
     };
+    use crate::test_support::write_dummy_legacy_resume_sidecar_for_path;
+    use tempfile::tempdir;
 
     fn package_id(raw: &str, source_url: &str) -> PackageId {
         PackageId::parse_or_key(raw, &crate::core::PackageKey::new(source_url))
@@ -332,6 +334,25 @@ mod tests {
             restart.state.files["a.bin"].lifecycle,
             FileLifecycle::Queued
         );
+    }
+
+    #[test]
+    fn scan_filesystem_detects_legacy_resume_sidecars() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("episode.mkv");
+        let file_id = file_path.to_string_lossy().into_owned();
+        std::fs::write(crate::download::part_path(&file_id), b"partial").unwrap();
+        let legacy_sidecar = write_dummy_legacy_resume_sidecar_for_path(&file_path);
+
+        let snapshot = scan_filesystem([file_id.as_str()]);
+
+        assert!(snapshot.complete_files.is_empty());
+        assert_eq!(snapshot.partial_files.len(), 1);
+        assert_eq!(snapshot.partial_files[0].file_id, file_id);
+        assert_eq!(snapshot.partial_files[0].bytes, 7);
+        assert!(snapshot.partial_files[0].has_sidecar);
+        assert_eq!(snapshot.partial_files[0].verified_bytes, 0);
+        assert!(legacy_sidecar.exists());
     }
 
     #[test]
