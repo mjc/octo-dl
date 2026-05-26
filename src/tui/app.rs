@@ -26,6 +26,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::Instant;
 
+use bytes::Bytes;
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 use tokio::sync::{mpsc, watch};
@@ -86,8 +87,8 @@ pub struct App {
     cached_visible_rows: Vec<visible::TuiRow>,
     cached_visible_rows_key: VisibleRowsCacheKey,
     dashboard_revision: u64,
-    dashboard_cache_key: Option<DashboardCacheKey>,
-    dashboard_json_cache: String,
+    dashboard_binary_cache_key: Option<DashboardCacheKey>,
+    dashboard_binary_cache: Bytes,
     pub(crate) visible_file_positions: HashMap<FileId, usize>,
     pub(crate) overlay_files: IndexMap<FileId, TransientRow>,
     pub(crate) file_ui: HashMap<FileId, FileUiState>,
@@ -254,6 +255,7 @@ impl App {
         self.cached_visible_rows = visible_rows;
     }
 
+    #[cfg(test)]
     pub fn dashboard_json(&self, ui_mode: DashboardUiMode, read_only: bool) -> String {
         self.borrowed_dashboard_json(ui_mode, read_only)
     }
@@ -262,24 +264,22 @@ impl App {
         self.dashboard_revision = self.dashboard_revision.wrapping_add(1);
     }
 
-    pub(crate) fn cached_dashboard_json(
+    pub(crate) fn cached_dashboard_binary(
         &mut self,
         ui_mode: DashboardUiMode,
         read_only: bool,
-    ) -> String {
+    ) -> Bytes {
         let key = DashboardCacheKey {
             revision: self.dashboard_revision,
             ui_mode,
             read_only,
         };
-        if self.dashboard_cache_key != Some(key) {
-            let mut cache = std::mem::take(&mut self.dashboard_json_cache);
-            cache.clear();
-            self.write_borrowed_dashboard_json(ui_mode, read_only, &mut cache);
-            self.dashboard_json_cache = cache;
-            self.dashboard_cache_key = Some(key);
+        if self.dashboard_binary_cache_key != Some(key) {
+            self.dashboard_binary_cache =
+                Bytes::from(self.borrowed_dashboard_bincode(ui_mode, read_only));
+            self.dashboard_binary_cache_key = Some(key);
         }
-        self.dashboard_json_cache.clone()
+        self.dashboard_binary_cache.clone()
     }
 
     pub(crate) fn is_verification_active(&self, id: &FileId) -> bool {

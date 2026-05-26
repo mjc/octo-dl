@@ -192,7 +192,7 @@ fn dashboard_state_from_message(message: Message) -> io::Result<Option<DownloadD
         Message::Text(text) => serde_json::from_str(text.as_str())
             .map(Some)
             .map_err(|error| io::Error::other(error.to_string())),
-        Message::Binary(bytes) => serde_json::from_slice(&bytes)
+        Message::Binary(bytes) => super::dashboard::dashboard_state_from_bincode(&bytes)
             .map(Some)
             .map_err(|error| io::Error::other(error.to_string())),
         Message::Close(_) => Err(io::Error::new(
@@ -281,5 +281,23 @@ mod tests {
 
         assert_eq!(parsed.status, "ready");
         assert!(parsed.read_only);
+    }
+
+    #[test]
+    fn dashboard_state_from_binary_message_parses_bincode_snapshot() {
+        let state =
+            DownloadDashboardState::empty(DashboardUiMode::Attached, false, "binary ready", 9723);
+        let message = Message::Binary(
+            crate::tui::dashboard::dashboard_state_to_bincode(state)
+                .unwrap()
+                .into(),
+        );
+
+        let parsed = dashboard_state_from_message(message)
+            .expect("message should parse")
+            .expect("binary message should produce state");
+
+        assert_eq!(parsed.status, "binary ready");
+        assert!(!parsed.read_only);
     }
 }

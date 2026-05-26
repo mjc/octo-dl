@@ -1,10 +1,9 @@
 use std::fmt::Write as _;
-use std::io;
 use std::time::Duration;
 
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
-use serde::ser::{SerializeSeq, SerializeStruct};
+use serde::ser::{SerializeSeq, SerializeStruct, SerializeStructVariant};
 use serde::{Deserialize, Serialize};
 
 use crate::core::{FileId, FileLifecycle, FileState, PackageId, PackageStatus};
@@ -73,9 +72,9 @@ pub struct DashboardPackageRow {
     pub total_bytes: u64,
     pub percent: u64,
     pub expanded: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub folder_label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub error: Option<String>,
 }
 
@@ -88,7 +87,7 @@ pub struct DashboardFileRow {
     pub downloaded: u64,
     pub speed: u64,
     pub status: DashboardFileStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub package_label: Option<String>,
 }
 
@@ -145,7 +144,7 @@ pub struct DownloadDashboardState {
     pub authenticated: bool,
     pub paused: bool,
     pub logging_in: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub login_error: Option<String>,
     pub popup: Popup,
     pub ui_mode: DashboardUiMode,
@@ -184,6 +183,190 @@ impl DownloadDashboardState {
             config: DownloadConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BinaryDownloadDashboardState {
+    authenticated: bool,
+    paused: bool,
+    logging_in: bool,
+    login_error: Option<String>,
+    popup: Popup,
+    ui_mode: DashboardUiMode,
+    read_only: bool,
+    status: String,
+    packages: Vec<DashboardPackageRow>,
+    files: Vec<BinaryDashboardFileRow>,
+    rows: Vec<BinaryDashboardRow>,
+    totals: DashboardTotals,
+    metrics: DashboardMetrics,
+    config: DownloadConfig,
+}
+
+impl From<BinaryDownloadDashboardState> for DownloadDashboardState {
+    fn from(state: BinaryDownloadDashboardState) -> Self {
+        Self {
+            authenticated: state.authenticated,
+            paused: state.paused,
+            logging_in: state.logging_in,
+            login_error: state.login_error,
+            popup: state.popup,
+            ui_mode: state.ui_mode,
+            read_only: state.read_only,
+            status: state.status,
+            packages: state.packages,
+            files: state.files.into_iter().map(Into::into).collect(),
+            rows: state.rows.into_iter().map(Into::into).collect(),
+            totals: state.totals,
+            metrics: state.metrics,
+            config: state.config,
+        }
+    }
+}
+
+impl From<DownloadDashboardState> for BinaryDownloadDashboardState {
+    fn from(state: DownloadDashboardState) -> Self {
+        Self {
+            authenticated: state.authenticated,
+            paused: state.paused,
+            logging_in: state.logging_in,
+            login_error: state.login_error,
+            popup: state.popup,
+            ui_mode: state.ui_mode,
+            read_only: state.read_only,
+            status: state.status,
+            packages: state.packages,
+            files: state.files.into_iter().map(Into::into).collect(),
+            rows: state.rows.into_iter().map(Into::into).collect(),
+            totals: state.totals,
+            metrics: state.metrics,
+            config: state.config,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum BinaryDashboardRow {
+    Package { package_id: String },
+    File { package_id: String, file_id: String },
+}
+
+impl From<BinaryDashboardRow> for DashboardRow {
+    fn from(row: BinaryDashboardRow) -> Self {
+        match row {
+            BinaryDashboardRow::Package { package_id } => Self::Package { package_id },
+            BinaryDashboardRow::File {
+                package_id,
+                file_id,
+            } => Self::File {
+                package_id,
+                file_id,
+            },
+        }
+    }
+}
+
+impl From<DashboardRow> for BinaryDashboardRow {
+    fn from(row: DashboardRow) -> Self {
+        match row {
+            DashboardRow::Package { package_id } => Self::Package { package_id },
+            DashboardRow::File {
+                package_id,
+                file_id,
+            } => Self::File {
+                package_id,
+                file_id,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum BinaryDashboardFileStatus {
+    Queued,
+    Downloading,
+    Verifying,
+    Complete,
+    Error { message: String },
+}
+
+impl From<BinaryDashboardFileStatus> for DashboardFileStatus {
+    fn from(status: BinaryDashboardFileStatus) -> Self {
+        match status {
+            BinaryDashboardFileStatus::Queued => Self::Queued,
+            BinaryDashboardFileStatus::Downloading => Self::Downloading,
+            BinaryDashboardFileStatus::Verifying => Self::Verifying,
+            BinaryDashboardFileStatus::Complete => Self::Complete,
+            BinaryDashboardFileStatus::Error { message } => Self::Error { message },
+        }
+    }
+}
+
+impl From<DashboardFileStatus> for BinaryDashboardFileStatus {
+    fn from(status: DashboardFileStatus) -> Self {
+        match status {
+            DashboardFileStatus::Queued => Self::Queued,
+            DashboardFileStatus::Downloading => Self::Downloading,
+            DashboardFileStatus::Verifying => Self::Verifying,
+            DashboardFileStatus::Complete => Self::Complete,
+            DashboardFileStatus::Error { message } => Self::Error { message },
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BinaryDashboardFileRow {
+    id: String,
+    package_id: String,
+    name: String,
+    size: u64,
+    downloaded: u64,
+    speed: u64,
+    status: BinaryDashboardFileStatus,
+    package_label: Option<String>,
+}
+
+impl From<BinaryDashboardFileRow> for DashboardFileRow {
+    fn from(row: BinaryDashboardFileRow) -> Self {
+        Self {
+            id: row.id,
+            package_id: row.package_id,
+            name: row.name,
+            size: row.size,
+            downloaded: row.downloaded,
+            speed: row.speed,
+            status: row.status.into(),
+            package_label: row.package_label,
+        }
+    }
+}
+
+impl From<DashboardFileRow> for BinaryDashboardFileRow {
+    fn from(row: DashboardFileRow) -> Self {
+        Self {
+            id: row.id,
+            package_id: row.package_id,
+            name: row.name,
+            size: row.size,
+            downloaded: row.downloaded,
+            speed: row.speed,
+            status: row.status.into(),
+            package_label: row.package_label,
+        }
+    }
+}
+
+pub(crate) fn dashboard_state_from_bincode(
+    bytes: &[u8],
+) -> bincode::Result<DownloadDashboardState> {
+    bincode::deserialize::<BinaryDownloadDashboardState>(bytes).map(Into::into)
+}
+
+#[cfg(test)]
+pub(crate) fn dashboard_state_to_bincode(
+    state: DownloadDashboardState,
+) -> bincode::Result<Vec<u8>> {
+    bincode::serialize(&BinaryDownloadDashboardState::from(state))
 }
 
 pub struct DashboardChrome<'a> {
@@ -259,11 +442,12 @@ impl From<&FileStatus> for DashboardFileStatus {
 }
 
 #[derive(Serialize)]
+#[cfg(test)]
 struct DashboardStateRef<'a> {
     authenticated: bool,
     paused: bool,
     logging_in: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     login_error: Option<&'a str>,
     popup: Popup,
     ui_mode: DashboardUiMode,
@@ -279,11 +463,52 @@ struct DashboardStateRef<'a> {
 
 struct DashboardPackagesRef<'a>(&'a App);
 
+#[cfg(test)]
 struct DashboardFilesRef<'a>(&'a App);
 
+#[cfg(test)]
 struct DashboardRowsRef<'a> {
     rows: super::app::VisibleRowsSnapshot<'a>,
 }
+
+#[derive(Serialize)]
+struct BinaryDashboardStateRef<'a> {
+    authenticated: bool,
+    paused: bool,
+    logging_in: bool,
+    login_error: Option<&'a str>,
+    popup: Popup,
+    ui_mode: DashboardUiMode,
+    read_only: bool,
+    status: &'a str,
+    packages: DashboardPackagesRef<'a>,
+    files: BinaryDashboardFilesRef<'a>,
+    rows: BinaryDashboardRowsRef<'a>,
+    totals: DashboardTotals,
+    metrics: DashboardMetrics,
+    config: &'a DownloadConfig,
+}
+
+struct BinaryDashboardFilesRef<'a>(&'a App);
+
+struct BinaryDashboardRowsRef<'a> {
+    rows: super::app::VisibleRowsSnapshot<'a>,
+}
+
+struct BinaryDashboardFileRowRef<'a> {
+    app: &'a App,
+    file: &'a super::app::FileEntry,
+}
+
+enum BinaryDashboardFileStatusRef<'a> {
+    Queued,
+    Downloading,
+    Verifying,
+    Complete,
+    Error { message: &'a str },
+}
+
+struct BinaryDashboardRowRef<'a>(&'a TuiRow);
 
 struct CorePackageRowRef<'a> {
     app: &'a App,
@@ -296,6 +521,7 @@ struct LegacyPackageRowRef<'a> {
     file: &'a super::app::FileEntry,
 }
 
+#[cfg(test)]
 struct DashboardFileRowRef<'a> {
     app: &'a App,
     file: &'a super::app::FileEntry,
@@ -323,6 +549,7 @@ struct CorePackageStats<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
+#[cfg(test)]
 enum DashboardFileStatusRef<'a> {
     Queued,
     Downloading,
@@ -331,6 +558,7 @@ enum DashboardFileStatusRef<'a> {
     Error { message: &'a str },
 }
 
+#[cfg(test)]
 impl<'a> DashboardStateRef<'a> {
     fn new(app: &'a App, ui_mode: DashboardUiMode, read_only: bool) -> Self {
         Self {
@@ -358,14 +586,47 @@ impl<'a> DashboardStateRef<'a> {
     }
 }
 
+impl<'a> BinaryDashboardStateRef<'a> {
+    fn new(app: &'a App, ui_mode: DashboardUiMode, read_only: bool) -> Self {
+        Self {
+            authenticated: app.authenticated,
+            paused: app.paused,
+            logging_in: app.login.logging_in,
+            login_error: app.login.error.as_deref(),
+            popup: app.popup,
+            ui_mode,
+            read_only,
+            status: &app.status,
+            packages: DashboardPackagesRef(app),
+            files: BinaryDashboardFilesRef(app),
+            rows: BinaryDashboardRowsRef {
+                rows: app.visible_rows_snapshot(),
+            },
+            totals: app.dashboard_totals(),
+            metrics: DashboardMetrics {
+                cpu_usage: app.cpu_usage,
+                memory_rss: app.memory_rss,
+                api_port: app.api_port,
+            },
+            config: &app.config.config,
+        }
+    }
+}
+
 impl Serialize for DashboardPackagesRef<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         let app = self.0;
-        let mut seq = serializer.serialize_seq(None)?;
         if !app.core_state.packages.is_empty() {
+            let len = app
+                .core_state
+                .packages
+                .values()
+                .filter(|package| CorePackageStats::new(app, package.id).present_files > 0)
+                .count();
+            let mut seq = serializer.serialize_seq(Some(len))?;
             for package in app.core_state.packages.values() {
                 let stats = CorePackageStats::new(app, package.id);
                 if stats.present_files == 0 {
@@ -377,15 +638,18 @@ impl Serialize for DashboardPackagesRef<'_> {
                     stats,
                 })?;
             }
+            seq.end()
         } else {
+            let mut seq = serializer.serialize_seq(Some(app.files.len()))?;
             for file in &app.files {
                 seq.serialize_element(&LegacyPackageRowRef { app, file })?;
             }
+            seq.end()
         }
-        seq.end()
     }
 }
 
+#[cfg(test)]
 impl Serialize for DashboardFilesRef<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -399,6 +663,20 @@ impl Serialize for DashboardFilesRef<'_> {
     }
 }
 
+impl Serialize for BinaryDashboardFilesRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.files.len()))?;
+        for file in &self.0.files {
+            seq.serialize_element(&BinaryDashboardFileRowRef { app: self.0, file })?;
+        }
+        seq.end()
+    }
+}
+
+#[cfg(test)]
 impl Serialize for DashboardRowsRef<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -408,6 +686,20 @@ impl Serialize for DashboardRowsRef<'_> {
         let mut seq = serializer.serialize_seq(Some(rows.len()))?;
         for row in rows {
             seq.serialize_element(&DashboardRowRef(row))?;
+        }
+        seq.end()
+    }
+}
+
+impl Serialize for BinaryDashboardRowsRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let rows = self.rows.as_slice();
+        let mut seq = serializer.serialize_seq(Some(rows.len()))?;
+        for row in rows {
+            seq.serialize_element(&BinaryDashboardRowRef(row))?;
         }
         seq.end()
     }
@@ -449,12 +741,8 @@ impl Serialize for CorePackageRowRef<'_> {
             &percent(self.stats.downloaded_bytes, self.stats.total_bytes),
         )?;
         row.serialize_field("expanded", &expanded)?;
-        if let Some(folder_label) = folder_label {
-            row.serialize_field("folder_label", folder_label)?;
-        }
-        if let Some(error) = self.package.error.as_deref() {
-            row.serialize_field("error", error)?;
-        }
+        row.serialize_field("folder_label", &folder_label)?;
+        row.serialize_field("error", &self.package.error.as_deref())?;
         row.end()
     }
 }
@@ -501,13 +789,17 @@ impl Serialize for LegacyPackageRowRef<'_> {
         row.serialize_field("total_bytes", &self.file.size)?;
         row.serialize_field("percent", &percent(downloaded, self.file.size))?;
         row.serialize_field("expanded", &false)?;
-        if let FileStatus::Error(message) = &self.file.status {
-            row.serialize_field("error", message)?;
-        }
+        row.serialize_field("folder_label", &Option::<&str>::None)?;
+        let error = match &self.file.status {
+            FileStatus::Error(message) => Some(message.as_str()),
+            _ => None,
+        };
+        row.serialize_field("error", &error)?;
         row.end()
     }
 }
 
+#[cfg(test)]
 impl Serialize for DashboardFileRowRef<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -536,10 +828,73 @@ impl Serialize for DashboardFileRowRef<'_> {
         row.serialize_field("downloaded", &self.file.downloaded)?;
         row.serialize_field("speed", &self.app.file_speed(&self.file.id))?;
         row.serialize_field("status", &status)?;
-        if let Some(package_label) = package_label {
-            row.serialize_field("package_label", &package_label)?;
-        }
+        row.serialize_field("package_label", &package_label)?;
         row.end()
+    }
+}
+
+impl Serialize for BinaryDashboardFileRowRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let package_id = self
+            .app
+            .core_state
+            .files
+            .get(&self.file.id)
+            .map(|core_file| PackageIdRef::Core(core_file.package_id))
+            .or_else(|| {
+                self.app
+                    .overlay_files
+                    .get(&self.file.id)
+                    .and_then(|overlay| overlay.source_url().map(PackageIdRef::Overlay))
+            })
+            .unwrap_or(PackageIdRef::Empty);
+        let status = binary_file_status_ref(self.app, self.file);
+        let package_label = package_label_for_file_ref(self.app, &self.file.id);
+        let mut row = serializer.serialize_struct("BinaryDashboardFileRow", 8)?;
+        row.serialize_field("id", self.file.id.as_str())?;
+        row.serialize_field("package_id", &package_id)?;
+        row.serialize_field("name", &self.file.name)?;
+        row.serialize_field("size", &self.file.size)?;
+        row.serialize_field("downloaded", &self.file.downloaded)?;
+        row.serialize_field("speed", &self.app.file_speed(&self.file.id))?;
+        row.serialize_field("status", &status)?;
+        row.serialize_field("package_label", &package_label)?;
+        row.end()
+    }
+}
+
+impl Serialize for BinaryDashboardFileStatusRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Queued => {
+                serializer.serialize_unit_variant("BinaryDashboardFileStatus", 0, "Queued")
+            }
+            Self::Downloading => {
+                serializer.serialize_unit_variant("BinaryDashboardFileStatus", 1, "Downloading")
+            }
+            Self::Verifying => {
+                serializer.serialize_unit_variant("BinaryDashboardFileStatus", 2, "Verifying")
+            }
+            Self::Complete => {
+                serializer.serialize_unit_variant("BinaryDashboardFileStatus", 3, "Complete")
+            }
+            Self::Error { message } => {
+                let mut row = serializer.serialize_struct_variant(
+                    "BinaryDashboardFileStatus",
+                    4,
+                    "Error",
+                    1,
+                )?;
+                row.serialize_field("message", message)?;
+                row.end()
+            }
+        }
     }
 }
 
@@ -580,8 +935,10 @@ impl Serialize for SingleFileIdRef<'_> {
     }
 }
 
+#[cfg(test)]
 struct DashboardRowRef<'a>(&'a TuiRow);
 
+#[cfg(test)]
 impl Serialize for DashboardRowRef<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -600,6 +957,32 @@ impl Serialize for DashboardRowRef<'_> {
             } => {
                 let mut row = serializer.serialize_struct("DashboardRow", 3)?;
                 row.serialize_field("kind", "file")?;
+                row.serialize_field("package_id", &OptionalPackageIdRef(*package_id))?;
+                row.serialize_field("file_id", file_id.as_str())?;
+                row.end()
+            }
+        }
+    }
+}
+
+impl Serialize for BinaryDashboardRowRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            TuiRow::Package(package_id) => {
+                let mut row =
+                    serializer.serialize_struct_variant("BinaryDashboardRow", 0, "Package", 1)?;
+                row.serialize_field("package_id", &DisplayRef(*package_id))?;
+                row.end()
+            }
+            TuiRow::File {
+                package_id,
+                file_id,
+            } => {
+                let mut row =
+                    serializer.serialize_struct_variant("BinaryDashboardRow", 1, "File", 2)?;
                 row.serialize_field("package_id", &OptionalPackageIdRef(*package_id))?;
                 row.serialize_field("file_id", file_id.as_str())?;
                 row.end()
@@ -723,6 +1106,7 @@ impl<'a> CorePackageStats<'a> {
     }
 }
 
+#[cfg(test)]
 fn file_status_ref<'a>(app: &App, file: &'a super::app::FileEntry) -> DashboardFileStatusRef<'a> {
     if app.is_verification_active(&file.id) {
         return DashboardFileStatusRef::Verifying;
@@ -732,6 +1116,21 @@ fn file_status_ref<'a>(app: &App, file: &'a super::app::FileEntry) -> DashboardF
         FileStatus::Downloading => DashboardFileStatusRef::Downloading,
         FileStatus::Complete => DashboardFileStatusRef::Complete,
         FileStatus::Error(message) => DashboardFileStatusRef::Error { message },
+    }
+}
+
+fn binary_file_status_ref<'a>(
+    app: &App,
+    file: &'a super::app::FileEntry,
+) -> BinaryDashboardFileStatusRef<'a> {
+    if app.is_verification_active(&file.id) {
+        return BinaryDashboardFileStatusRef::Verifying;
+    }
+    match &file.status {
+        FileStatus::Queued => BinaryDashboardFileStatusRef::Queued,
+        FileStatus::Downloading => BinaryDashboardFileStatusRef::Downloading,
+        FileStatus::Complete => BinaryDashboardFileStatusRef::Complete,
+        FileStatus::Error(message) => BinaryDashboardFileStatusRef::Error { message },
     }
 }
 
@@ -847,6 +1246,7 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn borrowed_dashboard_json(
         &self,
         ui_mode: DashboardUiMode,
@@ -856,17 +1256,13 @@ impl App {
             .expect("dashboard state should serialize")
     }
 
-    pub(crate) fn write_borrowed_dashboard_json(
+    pub(crate) fn borrowed_dashboard_bincode(
         &self,
         ui_mode: DashboardUiMode,
         read_only: bool,
-        output: &mut String,
-    ) {
-        serde_json::to_writer(
-            StringJsonWriter(output),
-            &DashboardStateRef::new(self, ui_mode, read_only),
-        )
-        .expect("dashboard state should serialize")
+    ) -> Vec<u8> {
+        bincode::serialize(&BinaryDashboardStateRef::new(self, ui_mode, read_only))
+            .expect("dashboard state should serialize")
     }
 
     fn dashboard_totals(&self) -> DashboardTotals {
@@ -1033,22 +1429,6 @@ impl App {
     }
 }
 
-struct StringJsonWriter<'a>(&'a mut String);
-
-impl io::Write for StringJsonWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let text = std::str::from_utf8(buf).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "serde_json wrote non-utf8 data")
-        })?;
-        self.0.push_str(text);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 fn percent(downloaded: u64, size: u64) -> u64 {
     if size == 0 {
         0
@@ -1185,6 +1565,18 @@ mod tests {
         assert_eq!(borrowed, owned);
     }
 
+    fn assert_borrowed_bincode_matches_owned_state(
+        app: &App,
+        ui_mode: DashboardUiMode,
+        read_only: bool,
+    ) {
+        let borrowed: DownloadDashboardState =
+            dashboard_state_from_bincode(&app.borrowed_dashboard_bincode(ui_mode, read_only))
+                .unwrap();
+        let owned = app.dashboard_state(ui_mode, read_only);
+        assert_eq!(borrowed, owned);
+    }
+
     fn resolve_test_package(app: &mut App, display_name: &str, files: Vec<(&str, &str, u64)>) {
         app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
@@ -1231,6 +1623,7 @@ mod tests {
         });
 
         assert_borrowed_json_matches_owned_state(&app, DashboardUiMode::Headless, true);
+        assert_borrowed_bincode_matches_owned_state(&app, DashboardUiMode::Headless, true);
     }
 
     #[test]
@@ -1241,6 +1634,7 @@ mod tests {
         app.status = "failed".to_string();
 
         assert_borrowed_json_matches_owned_state(&app, DashboardUiMode::Tui, false);
+        assert_borrowed_bincode_matches_owned_state(&app, DashboardUiMode::Tui, false);
     }
 
     #[test]
@@ -1259,6 +1653,7 @@ mod tests {
             .insert(file_id, crate::tui::app::VerificationTarget::Resume);
 
         assert_borrowed_json_matches_owned_state(&app, DashboardUiMode::Attached, true);
+        assert_borrowed_bincode_matches_owned_state(&app, DashboardUiMode::Attached, true);
     }
 
     #[test]
@@ -1275,6 +1670,7 @@ mod tests {
         app.sync_visible_files();
 
         assert_borrowed_json_matches_owned_state(&app, DashboardUiMode::Tui, false);
+        assert_borrowed_bincode_matches_owned_state(&app, DashboardUiMode::Tui, false);
     }
 
     #[test]
@@ -1290,6 +1686,7 @@ mod tests {
         });
 
         assert_borrowed_json_matches_owned_state(&app, DashboardUiMode::Tui, false);
+        assert_borrowed_bincode_matches_owned_state(&app, DashboardUiMode::Tui, false);
     }
 
     #[test]

@@ -43,7 +43,7 @@ pub async fn run_interactive_tui(
     app: &mut App,
     download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
     action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
-    state_tx: &watch::Sender<String>,
+    state_tx: &watch::Sender<bytes::Bytes>,
     state_sync_enabled: bool,
 ) -> io::Result<()> {
     let panic_hook_guard = TerminalPanicHookGuard::install();
@@ -57,7 +57,7 @@ async fn run_interactive_tui_loop(
     app: &mut App,
     download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
     action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
-    state_tx: &watch::Sender<String>,
+    state_tx: &watch::Sender<bytes::Bytes>,
     state_sync_enabled: bool,
 ) -> io::Result<()> {
     let _terminal_guard = TerminalGuard::new()?;

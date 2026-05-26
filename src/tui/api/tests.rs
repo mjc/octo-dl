@@ -1,12 +1,40 @@
 use super::super::app::{SharedAppState, UiAction};
+use super::super::dashboard::{
+    DashboardFileRow, DashboardFileStatus, DashboardPackageRow, DashboardUiMode,
+    DownloadDashboardState,
+};
 use super::super::event::DownloadEvent;
 use super::helpers::{self, infer_host, require_api_key};
 use super::selection;
 use super::*;
 use crate::test_support::package_id;
 use axum::http::{HeaderValue, StatusCode};
+use serde::Deserialize;
 use tempfile::tempdir;
 use tokio::sync::watch;
+
+#[derive(Deserialize)]
+struct TestSnapshotFile {
+    id: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct TestSnapshotPackage {
+    id: String,
+    #[serde(default)]
+    source_url: String,
+    #[serde(default)]
+    display_name: String,
+}
+
+#[derive(Deserialize)]
+struct TestSnapshotState {
+    #[serde(default)]
+    files: Vec<TestSnapshotFile>,
+    #[serde(default)]
+    packages: Vec<TestSnapshotPackage>,
+}
 
 fn state_without_shared() -> (ApiState, mpsc::UnboundedReceiver<DownloadEvent>) {
     let (tx, rx) = mpsc::unbounded_channel();
@@ -34,7 +62,8 @@ fn state_with_snapshot_options(
 ) -> (ApiState, mpsc::UnboundedReceiver<UiAction>) {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let (action_tx, action_rx) = mpsc::unbounded_channel();
-    let (_state_tx, state_rx) = watch::channel(snapshot.to_string());
+    let snapshot_bytes = snapshot_bytes_from_json(snapshot);
+    let (_state_tx, state_rx) = watch::channel(snapshot_bytes);
     (
         ApiState {
             tx: event_tx,
@@ -48,6 +77,50 @@ fn state_with_snapshot_options(
             api_key,
         },
         action_rx,
+    )
+}
+
+fn snapshot_bytes_from_json(snapshot: &str) -> bytes::Bytes {
+    let Ok(snapshot) = serde_json::from_str::<TestSnapshotState>(snapshot) else {
+        return bytes::Bytes::from_static(b"not bincode");
+    };
+    let mut state = DownloadDashboardState::empty(DashboardUiMode::Tui, false, "", 9723);
+    state.files = snapshot
+        .files
+        .into_iter()
+        .map(|file| DashboardFileRow {
+            id: file.id,
+            package_id: String::new(),
+            name: file.name,
+            size: 0,
+            downloaded: 0,
+            speed: 0,
+            status: DashboardFileStatus::Queued,
+            package_label: None,
+        })
+        .collect();
+    state.packages = snapshot
+        .packages
+        .into_iter()
+        .map(|package| DashboardPackageRow {
+            id: package.id,
+            source_url: package.source_url,
+            display_name: package.display_name,
+            status: crate::core::PackageStatus::Pending,
+            file_ids: Vec::new(),
+            present_files: 0,
+            completed_files: 0,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            percent: 0,
+            expanded: false,
+            folder_label: None,
+            error: None,
+        })
+        .collect();
+    bytes::Bytes::from(
+        super::super::dashboard::dashboard_state_to_bincode(state)
+            .expect("test snapshot should serialize"),
     )
 }
 

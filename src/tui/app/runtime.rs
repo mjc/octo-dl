@@ -339,14 +339,14 @@ impl App {
 
     pub(crate) fn publish_snapshot_if_observed(
         &mut self,
-        state_tx: &watch::Sender<String>,
+        state_tx: &watch::Sender<bytes::Bytes>,
     ) -> bool {
         self.publish_dashboard_snapshot_if_observed(state_tx, DashboardUiMode::Tui, false)
     }
 
     pub(crate) fn publish_dashboard_snapshot_if_observed(
         &mut self,
-        state_tx: &watch::Sender<String>,
+        state_tx: &watch::Sender<bytes::Bytes>,
         ui_mode: DashboardUiMode,
         read_only: bool,
     ) -> bool {
@@ -355,7 +355,7 @@ impl App {
             DashboardUiMode::Headless | DashboardUiMode::Attached => state_tx.receiver_count() > 0,
         };
         if observed {
-            state_tx.send_replace(self.cached_dashboard_json(ui_mode, read_only));
+            state_tx.send_replace(self.cached_dashboard_binary(ui_mode, read_only));
             return true;
         }
         false
@@ -401,7 +401,7 @@ impl App {
         &mut self,
         download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
         action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
-        state_tx: Option<&watch::Sender<String>>,
+        state_tx: Option<&watch::Sender<bytes::Bytes>>,
         shutdown: F,
     ) where
         F: Future<Output = ()>,
@@ -467,7 +467,13 @@ impl App {
 mod tests {
     use super::*;
     use crate::test_support::StateDirectoryGuard;
+    use crate::tui::dashboard::DownloadDashboardState;
     use tempfile::tempdir;
+
+    fn shared_snapshot(shared_state: &crate::tui::app::SharedAppState) -> DownloadDashboardState {
+        crate::tui::dashboard::dashboard_state_from_bincode(shared_state.state_rx.borrow().as_ref())
+            .expect("shared state should contain valid bincode")
+    }
 
     #[test]
     fn ensure_download_session_refreshes_existing_session_credentials_without_mfa() {
@@ -541,10 +547,8 @@ mod tests {
             false,
         ));
 
-        let snapshot: serde_json::Value =
-            serde_json::from_str(shared_state.state_rx.borrow().as_str())
-                .expect("shared state should contain valid JSON");
-        assert_eq!(snapshot["status"], "updated from runtime");
+        let snapshot = shared_snapshot(&shared_state);
+        assert_eq!(snapshot.status, "updated from runtime");
     }
 
     #[test]
@@ -566,19 +570,14 @@ mod tests {
             DashboardUiMode::Tui,
             false,
         ));
-        assert_eq!(shared_state.state_rx.borrow().as_str(), initial);
+        assert_eq!(shared_state.state_rx.borrow().as_ref(), initial.as_ref());
 
         let _remote_rx = shared_state.state_rx.clone();
 
         assert!(
             app.publish_dashboard_snapshot_if_observed(&state_tx, DashboardUiMode::Tui, false,)
         );
-        assert!(
-            shared_state
-                .state_rx
-                .borrow()
-                .contains("should not publish")
-        );
+        assert_eq!(shared_snapshot(&shared_state).status, "should not publish");
     }
 
     #[test]
@@ -599,7 +598,7 @@ mod tests {
             DashboardUiMode::Headless,
             false,
         ));
-        assert!(shared_state.state_rx.borrow().contains("first"));
+        assert_eq!(shared_snapshot(&shared_state).status, "first");
 
         app.status = "second".to_string();
         assert!(app.publish_dashboard_snapshot_if_observed(
@@ -607,7 +606,7 @@ mod tests {
             DashboardUiMode::Headless,
             false,
         ));
-        assert!(shared_state.state_rx.borrow().contains("first"));
+        assert_eq!(shared_snapshot(&shared_state).status, "first");
 
         app.mark_dashboard_dirty();
         assert!(app.publish_dashboard_snapshot_if_observed(
@@ -615,11 +614,11 @@ mod tests {
             DashboardUiMode::Headless,
             false,
         ));
-        assert!(shared_state.state_rx.borrow().contains("second"));
+        assert_eq!(shared_snapshot(&shared_state).status, "second");
     }
 
     #[test]
-    fn dashboard_snapshot_reuses_json_buffer_capacity() {
+    fn dashboard_snapshot_reuses_binary_cache_until_revision_changes() {
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let mut app = App::new(9723, event_tx, true);
         let crate::tui::app::SharedStateChannels {
@@ -627,29 +626,34 @@ mod tests {
             shared_state,
             ..
         } = app.shared_state_channels(true, DashboardUiMode::Headless);
-        let _shared_state = shared_state.expect("shared state should be enabled");
+        let shared_state = shared_state.expect("shared state should be enabled");
 
-        app.status = "x".repeat(16 * 1024);
+        app.status = "first".to_string();
         app.mark_dashboard_dirty();
         assert!(app.publish_dashboard_snapshot_if_observed(
             &state_tx,
             DashboardUiMode::Headless,
             false,
         ));
-        let capacity = app.dashboard_json_cache.capacity();
-        let ptr = app.dashboard_json_cache.as_ptr();
+        let first = shared_state.state_rx.borrow().clone();
+        let first_ptr = first.as_ptr();
 
-        app.status = "short".to_string();
+        app.status = "second".to_string();
+        assert!(app.publish_dashboard_snapshot_if_observed(
+            &state_tx,
+            DashboardUiMode::Headless,
+            false,
+        ));
+        assert_eq!(shared_state.state_rx.borrow().as_ptr(), first_ptr);
+        assert_eq!(shared_snapshot(&shared_state).status, "first");
+
         app.mark_dashboard_dirty();
         assert!(app.publish_dashboard_snapshot_if_observed(
             &state_tx,
             DashboardUiMode::Headless,
             false,
         ));
-
-        assert_eq!(app.dashboard_json_cache.capacity(), capacity);
-        assert_eq!(app.dashboard_json_cache.as_ptr(), ptr);
-        assert!(app.dashboard_json_cache.contains("short"));
+        assert_eq!(shared_snapshot(&shared_state).status, "second");
     }
 
     #[test]

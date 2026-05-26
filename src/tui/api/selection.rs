@@ -1,33 +1,14 @@
 use axum::response::IntoResponse;
-use serde::Deserialize;
 use std::str::FromStr;
 
 use crate::core::{FileId, PackageId};
+use crate::tui::dashboard::DownloadDashboardState;
 
 use super::ApiState;
 
-#[derive(Deserialize)]
-struct SnapshotFile {
-    id: String,
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct SnapshotPackage {
-    id: String,
-    #[serde(default)]
-    display_name: String,
-}
-
-#[derive(Deserialize)]
-struct SnapshotState {
-    #[serde(default)]
-    files: Vec<SnapshotFile>,
-    #[serde(default)]
-    packages: Vec<SnapshotPackage>,
-}
-
-fn snapshot_state(state: &ApiState) -> Result<SnapshotState, Box<axum::response::Response>> {
+fn snapshot_state(
+    state: &ApiState,
+) -> Result<DownloadDashboardState, Box<axum::response::Response>> {
     let Some(shared) = state.shared.as_ref() else {
         return Err(Box::new(
             (
@@ -38,15 +19,17 @@ fn snapshot_state(state: &ApiState) -> Result<SnapshotState, Box<axum::response:
         ));
     };
 
-    serde_json::from_str(shared.state_rx.borrow().as_str()).map_err(|_| {
-        Box::new(
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({"error": "invalid app state"})),
+    crate::tui::dashboard::dashboard_state_from_bincode(shared.state_rx.borrow().as_ref()).map_err(
+        |_| {
+            Box::new(
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({"error": "invalid app state"})),
+                )
+                    .into_response(),
             )
-                .into_response(),
-        )
-    })
+        },
+    )
 }
 
 pub(super) fn resolve_package_id(
