@@ -285,6 +285,10 @@ pub(crate) fn legacy_json_sidecar_path(path: &str) -> PathBuf {
     PathBuf::from(sidecar)
 }
 
+pub(crate) fn has_resume_sidecar(path: &str) -> bool {
+    sidecar_path(path).exists() || legacy_json_sidecar_path(path).exists()
+}
+
 pub(crate) fn resume_sidecar_verified_bytes(path: &str) -> Option<u64> {
     let sidecar = load_sidecar_sync(&sidecar_path(path), &legacy_json_sidecar_path(path))?;
     if sidecar.version != CURRENT_RESUME_SIDECAR_VERSION {
@@ -925,10 +929,13 @@ impl<F: FileSystem> Downloader<F> {
     /// Classifies a file's current status on disk.
     async fn inspect_local_file(&self, path: &str, expected_size: u64) -> InspectedLocalFile {
         let part_path = part_path(path);
+        let binary_sidecar_path = sidecar_path(path);
+        let legacy_sidecar_path = legacy_json_sidecar_path(path);
         let observed = ObservedLocalFile {
             final_size: self.fs.file_size(Path::new(path)).await,
             part_size: self.fs.file_size(&part_path).await,
-            has_sidecar: self.fs.file_exists(&sidecar_path(path)).await,
+            has_sidecar: self.fs.file_exists(&binary_sidecar_path).await
+                || self.fs.file_exists(&legacy_sidecar_path).await,
             verified_resume_bytes: resume_sidecar_verified_bytes(path).unwrap_or(0),
         };
         classify_observed_local_file(observed, expected_size, self.config.force_overwrite)
@@ -3343,7 +3350,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_resume_artifacts_removes_part_and_sidecar() {
+    async fn delete_resume_artifacts_removes_part_and_both_sidecars() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file.bin");
         let path_str = path.to_string_lossy().to_string();
@@ -3353,11 +3360,15 @@ mod tests {
         tokio::fs::write(sidecar_path(&path_str), b"{}")
             .await
             .unwrap();
+        tokio::fs::write(legacy_json_sidecar_path(&path_str), b"{}")
+            .await
+            .unwrap();
 
         delete_resume_artifacts(&path_str).await.unwrap();
 
         assert!(!part_path(&path_str).exists());
         assert!(!sidecar_path(&path_str).exists());
+        assert!(!legacy_json_sidecar_path(&path_str).exists());
     }
 
     #[tokio::test]
@@ -3393,6 +3404,18 @@ mod tests {
             dl.inspect_local_file("movie.mkv", 1_000_000).await.status,
             FileStatus::Partial
         );
+    }
+
+    #[tokio::test]
+    async fn classify_file_partial_detects_legacy_resume_sidecar() {
+        let fs = MockFileSystem::new();
+        fs.add_file("movie.mkv.part", 500_000);
+        fs.add_file("movie.mkv.part.meta.json", 128);
+        let dl = mock_downloader(fs);
+        let local = dl.inspect_local_file("movie.mkv", 1_000_000).await;
+
+        assert_eq!(local.status, FileStatus::Partial);
+        assert!(local.has_resume_sidecar);
     }
 
     #[tokio::test]
