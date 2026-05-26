@@ -3,7 +3,7 @@ use super::*;
 use crate::core::{CoreEvent, PackageCollision, ResolvedFile, ResolvedPackage};
 use crate::test_support::{
     FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id, push_file,
-    session_snapshot,
+    session_snapshot, write_dummy_legacy_resume_sidecar,
 };
 use crate::tui::event::DownloadRequest;
 use crate::tui::visible::TuiRow;
@@ -740,10 +740,9 @@ fn handle_main_input_shift_d_keeps_completed_file_artifact() {
     let final_path = dir.path().join("shift-delete-complete.bin");
     let final_path_string = final_path.to_string_lossy();
     let part_path = std::path::PathBuf::from(format!("{final_path_string}.part"));
-    let sidecar_path = std::path::PathBuf::from(format!("{final_path_string}.part.meta.json"));
     std::fs::write(&final_path, b"complete").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    std::fs::write(&sidecar_path, b"metadata").unwrap();
+    let sidecar_path = write_dummy_legacy_resume_sidecar(&final_path_string);
 
     let mut app = test_app();
     app.upsert_overlay_file(
@@ -800,10 +799,9 @@ fn handle_main_input_shift_r_resets_selected_file_from_scratch() {
     let final_path = dir.path().join("active.bin");
     let final_path_string = final_path.to_string_lossy();
     let part_path = std::path::PathBuf::from(format!("{final_path_string}.part"));
-    let sidecar_path = std::path::PathBuf::from(format!("{final_path_string}.part.meta.json"));
     std::fs::write(&final_path, b"complete").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    std::fs::write(&sidecar_path, b"metadata").unwrap();
+    let sidecar_path = write_dummy_legacy_resume_sidecar(&final_path_string);
 
     let mut app = test_app();
     let (url_tx, mut url_rx) = mpsc::unbounded_channel();
@@ -1180,10 +1178,9 @@ fn handle_main_input_delete_keeps_completed_file_artifact() {
     let final_path = dir.path().join("complete.bin");
     let final_path_string = final_path.to_string_lossy();
     let part_path = std::path::PathBuf::from(format!("{final_path_string}.part"));
-    let sidecar_path = std::path::PathBuf::from(format!("{final_path_string}.part.meta.json"));
     std::fs::write(&final_path, b"complete").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    std::fs::write(&sidecar_path, b"metadata").unwrap();
+    let sidecar_path = write_dummy_legacy_resume_sidecar(&final_path_string);
 
     let mut app = test_app();
     app.upsert_overlay_file(
