@@ -73,8 +73,8 @@ impl App {
             cached_visible_rows: Vec::new(),
             cached_visible_rows_key: Default::default(),
             dashboard_revision: 0,
-            dashboard_cache_key: None,
-            dashboard_json_cache: String::new(),
+            dashboard_binary_cache_key: None,
+            dashboard_binary_cache: bytes::Bytes::new(),
             visible_file_positions: HashMap::new(),
             overlay_files: IndexMap::new(),
             file_ui: HashMap::new(),
@@ -219,7 +219,7 @@ impl App {
     ) -> SharedStateChannels {
         let (action_tx, action_rx) = mpsc::unbounded_channel::<UiAction>();
         let initial_state = enabled
-            .then(|| self.dashboard_json(ui_mode, false))
+            .then(|| bytes::Bytes::from(self.borrowed_dashboard_bincode(ui_mode, false)))
             .unwrap_or_default();
         let (state_tx, state_rx) = watch::channel(initial_state);
         let shared_state = enabled.then_some(SharedAppState {

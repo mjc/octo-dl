@@ -320,11 +320,11 @@ pub enum UiAction {
 #[derive(Clone)]
 pub struct SharedAppState {
     pub action_tx: mpsc::UnboundedSender<UiAction>,
-    pub state_rx: watch::Receiver<String>,
+    pub state_rx: watch::Receiver<bytes::Bytes>,
 }
 
 pub(crate) struct SharedStateChannels {
     pub action_rx: mpsc::UnboundedReceiver<UiAction>,
-    pub state_tx: watch::Sender<String>,
+    pub state_tx: watch::Sender<bytes::Bytes>,
     pub shared_state: Option<SharedAppState>,
 }

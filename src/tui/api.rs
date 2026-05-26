@@ -186,10 +186,13 @@ async fn api_dashboard_ws(
     }
 }
 
-async fn dashboard_socket(mut socket: WebSocket, mut rx: tokio::sync::watch::Receiver<String>) {
+async fn dashboard_socket(
+    mut socket: WebSocket,
+    mut rx: tokio::sync::watch::Receiver<bytes::Bytes>,
+) {
     loop {
-        let json = rx.borrow().clone();
-        if socket.send(WsMessage::Text(json.into())).await.is_err() {
+        let snapshot = rx.borrow().clone();
+        if socket.send(WsMessage::Binary(snapshot)).await.is_err() {
             break;
         }
         if rx.changed().await.is_err() {
