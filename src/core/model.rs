@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+#[cfg(test)]
+use std::cell::Cell;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -11,6 +13,21 @@ use crate::core::session::SavedCredentials;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PackageKey(String);
+
+#[cfg(test)]
+thread_local! {
+    static PENDING_FILE_IDS_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_pending_file_ids_call_count() {
+    PENDING_FILE_IDS_CALLS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn pending_file_ids_call_count() -> usize {
+    PENDING_FILE_IDS_CALLS.with(Cell::get)
+}
 
 impl PackageKey {
     #[must_use]
@@ -421,6 +438,8 @@ impl DownloadState {
 
     #[must_use]
     pub fn pending_file_ids(&self) -> Vec<FileId> {
+        #[cfg(test)]
+        PENDING_FILE_IDS_CALLS.with(|count| count.set(count.get().saturating_add(1)));
         self.packages
             .values()
             .flat_map(|package| package.file_ids.iter())

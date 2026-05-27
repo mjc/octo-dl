@@ -84,6 +84,10 @@ struct SessionPersistenceDeferralGuard {
     app: NonNull<App>,
 }
 
+struct SchedulerPendingSyncDeferralGuard {
+    app: NonNull<App>,
+}
+
 impl VisibleSyncDeferralGuard {
     fn new(app: &mut App) -> Self {
         if app.visible_sync_defer_depth == 0 {
@@ -99,6 +103,15 @@ impl VisibleSyncDeferralGuard {
 impl SessionPersistenceDeferralGuard {
     fn new(app: &mut App) -> Self {
         app.session_persist_defer_depth += 1;
+        Self {
+            app: NonNull::from(app),
+        }
+    }
+}
+
+impl SchedulerPendingSyncDeferralGuard {
+    fn new(app: &mut App) -> Self {
+        app.scheduler_pending_sync_defer_depth += 1;
         Self {
             app: NonNull::from(app),
         }
@@ -152,6 +165,29 @@ impl Drop for SessionPersistenceDeferralGuard {
 
         if let Some(pending) = app.pending_session_persistence.take() {
             app.flush_deferred_session_persistence(pending);
+        }
+    }
+}
+
+impl Drop for SchedulerPendingSyncDeferralGuard {
+    fn drop(&mut self) {
+        let app = unsafe { self.app.as_mut() };
+        debug_assert!(app.scheduler_pending_sync_defer_depth > 0);
+        app.scheduler_pending_sync_defer_depth =
+            app.scheduler_pending_sync_defer_depth.saturating_sub(1);
+
+        if app.scheduler_pending_sync_defer_depth != 0 {
+            return;
+        }
+
+        if std::thread::panicking() {
+            app.pending_scheduler_pending_order_sync = false;
+            return;
+        }
+
+        if app.pending_scheduler_pending_order_sync {
+            app.pending_scheduler_pending_order_sync = false;
+            app.flush_scheduler_pending_order();
         }
     }
 }
@@ -254,7 +290,9 @@ pub struct App {
     pub(crate) visible_sync_pending: bool,
     pending_visible_selection: Option<Option<visible::TuiRow>>,
     session_persist_defer_depth: usize,
+    scheduler_pending_sync_defer_depth: usize,
     pending_core_state_session_persistence: bool,
+    pending_scheduler_pending_order_sync: bool,
     pending_session_persistence: Option<PendingSessionPersistence>,
     #[cfg(test)]
     pub(crate) visible_sync_count: usize,
@@ -360,6 +398,16 @@ impl App {
         result
     }
 
+    pub(crate) fn with_deferred_scheduler_pending_sync<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let guard = SchedulerPendingSyncDeferralGuard::new(self);
+        let result = f(self);
+        drop(guard);
+        result
+    }
+
     pub(crate) fn with_deferred_session_persistence<R>(
         &mut self,
         f: impl FnOnce(&mut Self) -> R,
@@ -371,7 +419,9 @@ impl App {
     }
 
     pub(crate) fn with_deferred_batch_updates<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        self.with_deferred_session_persistence(|app| app.with_deferred_visible_sync(f))
+        self.with_deferred_session_persistence(|app| {
+            app.with_deferred_scheduler_pending_sync(|app| app.with_deferred_visible_sync(f))
+        })
     }
 
     fn sync_visible_files_preserving_now(

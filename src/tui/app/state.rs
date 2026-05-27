@@ -244,7 +244,18 @@ impl App {
     }
 
     fn sync_scheduler_pending_order(&mut self, should_sync_pending: bool) {
-        if self.download_task_running && should_sync_pending {
+        if !should_sync_pending {
+            return;
+        }
+        if self.scheduler_pending_sync_defer_depth > 0 {
+            self.pending_scheduler_pending_order_sync = true;
+            return;
+        }
+        self.flush_scheduler_pending_order();
+    }
+
+    pub(super) fn flush_scheduler_pending_order(&mut self) {
+        if self.download_task_running {
             let _ = self.url_tx.send(DownloadRequest::SyncPendingOrder {
                 file_ids: self.core_state.pending_file_ids(),
             });
