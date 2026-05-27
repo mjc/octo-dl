@@ -233,7 +233,7 @@ fn file_queued_after_package_delete_is_ignored_when_source_is_untracked() {
     app.handle_ui_action(UiAction::DeletePackage(package_id));
     assert!(app.core_state.files.is_empty());
     assert!(app.core_state.packages.is_empty());
-    assert!(!app.urls.iter().any(|url| url == &source_url));
+    assert!(!app.tracked_urls().iter().any(|url| url == &source_url));
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "late.bin".to_string().into(),

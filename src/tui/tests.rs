@@ -69,7 +69,7 @@ fn resume_session_requeues_urls() {
         "https://mega.nz/file/first".to_string(),
         "https://mega.nz/file/second".to_string(),
     ];
-    assert_eq!(app.urls, expected_urls);
+    assert_eq!(app.tracked_urls(), expected_urls.as_slice());
     assert_eq!(
         app.visible_rows(),
         vec![
@@ -121,8 +121,8 @@ fn resume_session_clears_empty_failed_package_errors_and_requeues_urls() {
     app.resume_latest_session();
 
     assert_eq!(
-        app.urls,
-        vec!["https://mega.nz/file/stale-error".to_string()]
+        app.tracked_urls(),
+        ["https://mega.nz/file/stale-error".to_string()].as_slice()
     );
     assert_eq!(
         app.visible_rows(),
@@ -247,7 +247,10 @@ fn resume_session_restores_files_and_only_requeues_remaining_urls() {
 
     app.resume_latest_session();
 
-    assert_eq!(app.urls, vec!["https://mega.nz/file/pending".to_string()]);
+    assert_eq!(
+        app.tracked_urls(),
+        ["https://mega.nz/file/pending".to_string()].as_slice()
+    );
     assert_eq!(app.files.len(), 2);
 
     let completed = app
@@ -314,7 +317,10 @@ fn resume_session_requeues_package_url_once_for_multiple_pending_files() {
 
     app.resume_latest_session();
 
-    assert_eq!(app.urls, vec!["https://mega.nz/folder/pending".to_string()]);
+    assert_eq!(
+        app.tracked_urls(),
+        ["https://mega.nz/folder/pending".to_string()].as_slice()
+    );
 
     let mut url_rx = app.url_rx.take().expect("url_rx should exist");
     if let DownloadRequest::ResumeFileIds {
@@ -381,7 +387,10 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
 
     app.resume_latest_session();
 
-    assert_eq!(app.urls, vec![source_a.to_string(), source_b.to_string()]);
+    assert_eq!(
+        app.tracked_urls(),
+        [source_a.to_string(), source_b.to_string()].as_slice()
+    );
     assert_eq!(app.visible_rows(), vec![TuiRow::Package(package_id)]);
 
     let mut url_rx = app.url_rx.take().expect("url_rx should exist");
@@ -450,7 +459,10 @@ fn resume_session_restores_retryable_errors_as_queued() {
     assert_eq!(restored.status, FileStatus::Queued);
     assert_eq!(restored.downloaded, 0);
 
-    assert_eq!(app.urls, vec!["https://mega.nz/file/retry".to_string()]);
+    assert_eq!(
+        app.tracked_urls(),
+        ["https://mega.nz/file/retry".to_string()].as_slice()
+    );
 }
 
 #[test]
@@ -525,11 +537,12 @@ fn ui_add_urls_enqueues_each_unique_url_once() {
     ]));
 
     assert_eq!(
-        app.urls,
-        vec![
+        app.tracked_urls(),
+        [
             "https://mega.nz/file/one".to_string(),
             "https://mega.nz/file/two".to_string()
         ]
+        .as_slice()
     );
     assert_eq!(
         url_rx.try_recv().unwrap(),
@@ -661,7 +674,7 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
             files: Vec::new(),
             error: Some("boom".to_string()),
         });
-    app.urls.push(source_url.clone());
+    app.core_state.url_order.push(source_url.clone());
     app.core_state.packages.insert(
         package_id.clone(),
         PackageState {

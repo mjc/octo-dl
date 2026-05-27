@@ -135,7 +135,7 @@ impl App {
             });
             return;
         }
-        if self.urls.is_empty()
+        if self.core_state.url_order.is_empty()
             && self.files.is_empty()
             && self.overlay_files.is_empty()
             && self.core_state.files.is_empty()
@@ -145,7 +145,8 @@ impl App {
 
         let mut session = SessionSnapshot::new(config.clone(), credentials);
         session.urls = self
-            .urls
+            .core_state
+            .url_order
             .iter()
             .map(|url| SessionUrlSnapshot {
                 url: url.clone(),

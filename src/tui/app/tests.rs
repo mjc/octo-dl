@@ -1155,7 +1155,7 @@ fn file_queued_retires_submitted_url_alias_after_resolution() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
-    app.urls.push("bundle.dlc".to_string());
+    app.core_state.url_order.push("bundle.dlc".to_string());
     app.session = Some(session_snapshot(vec![(
         "bundle.dlc",
         UrlFixtureStatus::Pending,
@@ -1181,8 +1181,8 @@ fn file_queued_retires_submitted_url_alias_after_resolution() {
     }));
 
     assert_eq!(
-        app.urls,
-        vec!["https://mega.nz/folder/resolved".to_string()]
+        app.tracked_urls(),
+        ["https://mega.nz/folder/resolved".to_string()].as_slice()
     );
     assert_eq!(
         app.core_state.url_order,
@@ -1257,7 +1257,7 @@ fn deleting_pending_url_removes_it_from_core_state_and_session() {
     app.sync_session_for_shutdown();
     app.flush_session_persistence();
 
-    assert!(app.urls.is_empty());
+    assert!(app.tracked_urls().is_empty());
     assert!(app.core_state.url_order.is_empty());
     assert!(
         app.session
@@ -1284,7 +1284,7 @@ fn deleting_url_level_error_stays_deleted_after_shutdown_sync() {
     app.flush_session_persistence();
 
     assert!(app.visible_rows().is_empty());
-    assert!(app.urls.is_empty());
+    assert!(app.tracked_urls().is_empty());
     assert!(app.core_state.url_order.is_empty());
     assert!(
         app.session
@@ -1308,7 +1308,7 @@ fn deleting_one_pending_url_preserves_other_pending_urls_across_shutdown() {
     app.sync_session_for_shutdown();
     app.flush_session_persistence();
 
-    assert_eq!(app.urls, vec![kept.clone()]);
+    assert_eq!(app.tracked_urls(), [kept.clone()].as_slice());
     assert_eq!(app.core_state.url_order, vec![kept.clone()]);
     let session = app.session.as_ref().expect("session should remain");
     assert_eq!(session.urls.len(), 1);
@@ -1372,7 +1372,7 @@ fn add_urls_collapses_placeholder_visible_syncs() {
     assert_eq!(app.visible_sync_count, 1);
     assert_eq!(app.session_persist_count, 1);
     assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
-    assert_eq!(app.urls.len(), 3);
+    assert_eq!(app.tracked_urls().len(), 3);
     assert_eq!(app.overlay_files.len(), 3);
 }
 
@@ -1968,7 +1968,7 @@ fn deleting_url_level_error_removes_session_url_and_ignores_late_events() {
     app.handle_ui_action(UiAction::DeleteFile(url.clone().into()));
 
     assert!(app.visible_rows().is_empty());
-    assert!(!app.urls.contains(&url));
+    assert!(!app.tracked_urls().contains(&url));
     let session = app.session.as_ref().expect("session should remain");
     assert!(
         session
@@ -2665,7 +2665,6 @@ fn drain_download_events_collapses_visible_syncs_for_batched_files() {
     let (url_tx, mut url_rx) = mpsc::unbounded_channel();
     app.url_tx = url_tx;
     app.download_task_running = true;
-    app.urls.push("https://mega.nz/folder/resolved".to_string());
     app.core_state
         .url_order
         .push("https://mega.nz/folder/resolved".to_string());
