@@ -394,6 +394,20 @@ impl DownloadProgress for FileProgress {
         });
     }
 
+    fn on_resume_validation_start(&self, _name: &str) {
+        let _ = self.tx.send(DownloadEvent::ResumeValidationStarted {
+            id: self.id.clone(),
+            attempt_id: self.attempt_id,
+        });
+    }
+
+    fn on_resume_validation_chunk(&self, _name: &str, bytes_delta: u64) {
+        let _ = self.tx.send(DownloadEvent::VerificationProgress {
+            id: self.id.clone(),
+            bytes_delta,
+        });
+    }
+
     fn on_progress(&self, _name: &str, delta: ProgressDelta) {
         let _ = self.tx.send(DownloadEvent::Progress {
             id: self.id.clone(),

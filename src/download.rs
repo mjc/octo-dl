@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -98,7 +99,10 @@ pub(crate) fn classify_observed_local_file(
             status: FileStatus::Partial,
             existing_partial_bytes: part_size,
             has_resume_sidecar: observed.has_sidecar,
-            verified_resume_bytes: observed.verified_resume_bytes.min(expected_size),
+            verified_resume_bytes: observed
+                .verified_resume_bytes
+                .min(part_size)
+                .min(expected_size),
         };
     }
 
@@ -115,6 +119,23 @@ pub(crate) fn classify_observed_local_file(
 pub trait DownloadProgress: Send + Sync {
     /// Called when a file download starts.
     fn on_file_start(&self, _name: &str, _size: u64) {}
+
+    /// Called when resume validation starts for a local partial download.
+    fn on_resume_validation_start(&self, _name: &str) {}
+
+    /// Called periodically while disk resume validation scans local partial data.
+    fn on_resume_validation_progress(&self, _name: &str, _checked_bytes: u64, _total_bytes: u64) {}
+
+    /// Called as local partial data is read during resume validation.
+    fn on_resume_validation_chunk(&self, name: &str, bytes_delta: u64) {
+        self.on_progress(
+            name,
+            ProgressDelta {
+                total_bytes_delta: bytes_delta,
+                network_bytes_delta: 0,
+            },
+        );
+    }
 
     /// Called periodically with the number of bytes advanced since the last call.
     ///
@@ -141,6 +162,27 @@ pub trait DownloadProgress: Send + Sync {
 pub struct NoProgress;
 
 impl DownloadProgress for NoProgress {}
+
+struct ResumeValidationStatusProgress<'a> {
+    inner: &'a dyn DownloadProgress,
+}
+
+impl<'a> ResumeValidationStatusProgress<'a> {
+    const fn new(inner: &'a dyn DownloadProgress) -> Self {
+        Self { inner }
+    }
+}
+
+impl DownloadProgress for ResumeValidationStatusProgress<'_> {
+    fn on_resume_validation_progress(&self, name: &str, checked_bytes: u64, total_bytes: u64) {
+        self.inner
+            .on_resume_validation_progress(name, checked_bytes, total_bytes);
+    }
+
+    fn on_resume_validation_chunk(&self, name: &str, bytes_delta: u64) {
+        self.inner.on_resume_validation_chunk(name, bytes_delta);
+    }
+}
 
 /// A file to be downloaded with its destination path.
 pub struct DownloadItem<'a> {
@@ -295,11 +337,21 @@ pub(crate) fn resume_sidecar_verified_bytes(path: &str) -> Option<u64> {
         return Some(0);
     }
     let boundaries = mega::mega_chunk_boundaries(sidecar.file_size);
+    let mut seen = vec![false; boundaries.len()];
     Some(
         sidecar
             .verified_chunks
             .iter()
-            .filter_map(|record| boundaries.get(record.index as usize))
+            .filter_map(|record| {
+                let index = usize::try_from(record.index).ok()?;
+                let boundary = boundaries.get(index)?;
+                let seen_slot = seen.get_mut(index)?;
+                if *seen_slot {
+                    return None;
+                }
+                *seen_slot = true;
+                Some(boundary)
+            })
             .fold(0u64, |sum, chunk| sum.saturating_add(chunk.length)),
     )
 }
@@ -505,11 +557,16 @@ fn load_sidecar_sync(path: &Path, legacy_json_path: &Path) -> Option<ResumeSidec
 async fn load_sidecar(path: &Path) -> Option<ResumeSidecar> {
     let legacy_json_path = legacy_json_path_for_sidecar(path);
     match tokio::fs::read(path).await {
-        Ok(data) => deserialize_binary_sidecar(&data).or_else(|| {
-            (legacy_json_path == path)
-                .then(|| deserialize_legacy_json_sidecar(&data))
-                .flatten()
-        }),
+        Ok(data) => {
+            if let Some(sidecar) = deserialize_binary_sidecar(&data) {
+                return Some(sidecar);
+            }
+            if legacy_json_path == path {
+                return deserialize_legacy_json_sidecar(&data);
+            }
+            let legacy_data = tokio::fs::read(&legacy_json_path).await.ok()?;
+            deserialize_legacy_json_sidecar(&legacy_data)
+        }
         Err(_) => {
             let data = tokio::fs::read(&legacy_json_path).await.ok()?;
             deserialize_legacy_json_sidecar(&data)
@@ -723,6 +780,19 @@ const fn should_delete_resume_state_on_error(config: &DownloadConfig, error: &Er
 }
 
 const REVALIDATION_BUFFER_BYTES: usize = 128 * 1024;
+const REVALIDATION_STATUS_INTERVAL: Duration = Duration::from_secs(30);
+
+fn should_emit_resume_validation_progress(last_report_at: Instant, now: Instant) -> bool {
+    now.duration_since(last_report_at) >= REVALIDATION_STATUS_INTERVAL
+}
+
+#[must_use]
+pub(crate) fn resume_validation_percent(checked_bytes: u64, total_bytes: u64) -> u64 {
+    if total_bytes == 0 {
+        return 0;
+    }
+    ((u128::from(checked_bytes.min(total_bytes)) * 100) / u128::from(total_bytes)) as u64
+}
 
 fn revalidation_buffer_len(remaining: u64) -> usize {
     usize::try_from(remaining.min(REVALIDATION_BUFFER_BYTES as u64))
@@ -772,12 +842,8 @@ async fn compute_completed_file_mac_from_file(
 
 fn resume_fingerprint_matches(expected: FileFingerprint, actual: FileFingerprint) -> bool {
     expected.len == actual.len
-        && expected.modified_ns == actual.modified_ns
-        && expected.dev == actual.dev
-        && expected.ino == actual.ino
-        && expected
-            .allocated_bytes
-            .is_none_or(|allocated| actual.allocated_bytes == Some(allocated))
+        && expected.dev.is_none_or(|dev| actual.dev == Some(dev))
+        && expected.ino.is_none_or(|ino| actual.ino == Some(ino))
 }
 
 struct DownloadFinishContext<'a> {
@@ -880,6 +946,10 @@ impl mega::ParallelDownloadCallbacks for DownloadCallbackState {
 
     fn chunk_verified(&self, index: u32, mac: [u8; 16]) {
         self.chunk_verified.mark_verified(index, mac);
+    }
+
+    fn tracks_chunk_verification(&self) -> bool {
+        false
     }
 }
 
@@ -1054,14 +1124,18 @@ impl<F: FileSystem> Downloader<F> {
         sidecar_path: &Path,
         expected_condensed_mac: [u8; 8],
         progress: Option<(&str, &dyn DownloadProgress)>,
+        cancellation_token: Option<&CancellationToken>,
     ) -> Result<ResumeValidation> {
+        if cancellation_token.is_some_and(|token| token.is_cancelled()) {
+            return Err(Error::Cancelled);
+        }
         let Some(sidecar) = load_sidecar(sidecar_path).await else {
             return Ok(ResumeValidation::empty(boundaries.len()));
         };
         let aes_iv = node.aes_iv().ok_or(mega::Error::MissingNodeAesIv)?;
 
-        Ok(self
-            .revalidate_sidecar_chunks(SidecarValidationInput {
+        self.revalidate_sidecar_chunks(
+            SidecarValidationInput {
                 boundaries,
                 part_path,
                 sidecar: &sidecar,
@@ -1070,8 +1144,10 @@ impl<F: FileSystem> Downloader<F> {
                 aes_key: node.aes_key(),
                 aes_iv,
                 progress,
-            })
-            .await)
+            },
+            cancellation_token,
+        )
+        .await
     }
 
     async fn revalidate_candidate_from_part(
@@ -1079,49 +1155,52 @@ impl<F: FileSystem> Downloader<F> {
         input: &SidecarValidationInput<'_>,
         candidate: TrustedResumeChunkCandidate,
         buffer: &mut [u8; REVALIDATION_BUFFER_BYTES],
-    ) -> bool {
+        cancellation_token: Option<&CancellationToken>,
+    ) -> Result<bool> {
+        if cancellation_token.is_some_and(|token| token.is_cancelled()) {
+            return Err(Error::Cancelled);
+        }
         let Some(boundary) = input.boundaries.get(candidate.index) else {
-            return false;
+            return Ok(false);
         };
         let mut mac = mega::MegaChunkMac::new(input.aes_key, input.aes_iv);
         let mut offset = boundary.offset;
         let end = boundary.offset.saturating_add(boundary.length);
         let Ok(mut file) = std::fs::File::open(input.part_path) else {
-            return false;
+            return Ok(false);
         };
         if file
             .seek(std::io::SeekFrom::Start(boundary.offset))
             .is_err()
         {
-            return false;
+            return Ok(false);
         }
 
         while offset < end {
+            if cancellation_token.is_some_and(|token| token.is_cancelled()) {
+                return Err(Error::Cancelled);
+            }
             let read_len = revalidation_buffer_len(end - offset);
             let read_buffer = &mut buffer[..read_len];
             if file.read_exact(read_buffer).is_err() {
-                return false;
+                return Ok(false);
             }
             mac.update(read_buffer);
             if let Some((name, progress)) = input.progress {
-                progress.on_progress(
-                    name,
-                    ProgressDelta {
-                        total_bytes_delta: u64::try_from(read_len).unwrap_or(0),
-                        network_bytes_delta: 0,
-                    },
-                );
+                progress.on_resume_validation_chunk(name, u64::try_from(read_len).unwrap_or(0));
             }
             offset = offset.saturating_add(u64::try_from(read_len).unwrap_or(0));
+            tokio::task::yield_now().await;
         }
 
-        mac.finalize() == candidate.expected_mac
+        Ok(mac.finalize() == candidate.expected_mac)
     }
 
     async fn revalidate_sidecar_chunks(
         &self,
         input: SidecarValidationInput<'_>,
-    ) -> ResumeValidation {
+        cancellation_token: Option<&CancellationToken>,
+    ) -> Result<ResumeValidation> {
         let mut validation = ResumeValidation {
             sidecar_loaded: true,
             ..ResumeValidation::empty(input.boundaries.len())
@@ -1138,7 +1217,7 @@ impl<F: FileSystem> Downloader<F> {
                 input.sidecar.file_size,
                 input.file_size
             );
-            return validation;
+            return Ok(validation);
         }
 
         let part_size = self.fs.file_size(input.part_path).await.unwrap_or(0);
@@ -1190,7 +1269,13 @@ impl<F: FileSystem> Downloader<F> {
                 input.part_path.display()
             );
             return self
-                .revalidate_candidates_from_part(input, candidates, trusted_candidate_bytes, None)
+                .revalidate_candidates_from_part(
+                    input,
+                    candidates,
+                    trusted_candidate_bytes,
+                    None,
+                    cancellation_token,
+                )
                 .await;
         };
         let Some(actual_fingerprint) = self.fs.file_fingerprint(input.part_path).await else {
@@ -1204,6 +1289,7 @@ impl<F: FileSystem> Downloader<F> {
                     candidates,
                     trusted_candidate_bytes,
                     expected_fingerprint.allocated_bytes,
+                    cancellation_token,
                 )
                 .await;
         };
@@ -1216,11 +1302,7 @@ impl<F: FileSystem> Downloader<F> {
             );
         }
 
-        let allocation_covers_candidates = expected_fingerprint
-            .allocated_bytes
-            .is_some_and(|allocated| allocated >= trusted_candidate_bytes);
-
-        if fingerprint_matches && allocation_covers_candidates {
+        if fingerprint_matches {
             for candidate in candidates {
                 trust_resume_candidate(&mut validation, candidate);
             }
@@ -1248,15 +1330,16 @@ impl<F: FileSystem> Downloader<F> {
                     candidates,
                     trusted_candidate_bytes,
                     expected_fingerprint.allocated_bytes,
+                    cancellation_token,
                 )
-                .await;
+                .await?;
         }
 
         if validation.trusted_count > 0 {
             validation.source = Some(ResumeReuseSource::Sidecar);
         }
 
-        validation
+        Ok(validation)
     }
 
     async fn revalidate_candidates_from_part(
@@ -1265,11 +1348,15 @@ impl<F: FileSystem> Downloader<F> {
         candidates: Vec<TrustedResumeChunkCandidate>,
         trusted_candidate_bytes: u64,
         allocated_bytes: Option<u64>,
-    ) -> ResumeValidation {
+        cancellation_token: Option<&CancellationToken>,
+    ) -> Result<ResumeValidation> {
         let mut validation = ResumeValidation {
             sidecar_loaded: true,
             ..ResumeValidation::empty(input.boundaries.len())
         };
+        if cancellation_token.is_some_and(|token| token.is_cancelled()) {
+            return Err(Error::Cancelled);
+        }
         log::debug!(
             "Resume sidecar for {} needs disk revalidation: candidate_bytes={} allocated_bytes={allocated_bytes:?}",
             input.part_path.display(),
@@ -1278,18 +1365,36 @@ impl<F: FileSystem> Downloader<F> {
         let mut buffer = [0; REVALIDATION_BUFFER_BYTES];
         let mut revalidated = 0usize;
         let mut rejected = 0usize;
+        let mut checked_bytes = 0_u64;
+        let mut last_progress_report = Instant::now();
         for candidate in candidates {
+            if cancellation_token.is_some_and(|token| token.is_cancelled()) {
+                return Err(Error::Cancelled);
+            }
             if validation.trusted_chunks[candidate.index].is_some() {
                 continue;
             }
             if self
-                .revalidate_candidate_from_part(&input, candidate, &mut buffer)
+                .revalidate_candidate_from_part(&input, candidate, &mut buffer, cancellation_token)
                 .await
-            {
+            ? {
                 revalidated = revalidated.saturating_add(1);
                 trust_resume_candidate(&mut validation, candidate);
             } else {
                 rejected = rejected.saturating_add(1);
+            }
+            checked_bytes = checked_bytes.saturating_add(candidate.length);
+            let now = Instant::now();
+            if let Some((name, progress)) = input.progress
+                && trusted_candidate_bytes > 0
+                && should_emit_resume_validation_progress(last_progress_report, now)
+            {
+                progress.on_resume_validation_progress(
+                    name,
+                    checked_bytes.min(trusted_candidate_bytes),
+                    trusted_candidate_bytes,
+                );
+                last_progress_report = now;
             }
         }
         log::debug!(
@@ -1304,7 +1409,7 @@ impl<F: FileSystem> Downloader<F> {
             validation.source = Some(ResumeReuseSource::Sidecar);
         }
 
-        validation
+        Ok(validation)
     }
 
     /// Revalidates resumable chunk state for a file without downloading new data.
@@ -1339,6 +1444,7 @@ impl<F: FileSystem> Downloader<F> {
                 &sp,
                 expected_condensed_mac,
                 progress.map(|progress| (path, progress)),
+                None,
             )
             .await?;
         Ok(ResumeReverify {
@@ -1467,8 +1573,18 @@ impl<F: FileSystem> Downloader<F> {
         let reuse_resume_state =
             should_reuse_resume_state(self.config.force_overwrite, trust_resume_state);
         let resume_validation = if reuse_resume_state {
-            self.revalidate_resume_chunks(node, &boundaries, &pp, &sp, expected_condensed_mac, None)
-                .await?
+            progress.on_resume_validation_start(path);
+            let resume_status_progress = ResumeValidationStatusProgress::new(progress.as_ref());
+            self.revalidate_resume_chunks(
+                node,
+                &boundaries,
+                &pp,
+                &sp,
+                expected_condensed_mac,
+                Some((path, &resume_status_progress)),
+                cancellation_token.as_ref(),
+            )
+            .await?
         } else {
             ResumeValidation::empty(boundaries.len())
         };
@@ -1526,6 +1642,7 @@ impl<F: FileSystem> Downloader<F> {
                     node,
                     file,
                     self.config.chunks_per_file,
+                    Some(self.config.mega_chunks_per_request),
                     Arc::clone(&trusted_for_download),
                     Some(callbacks),
                 );
@@ -1541,6 +1658,7 @@ impl<F: FileSystem> Downloader<F> {
                     node,
                     file,
                     self.config.chunks_per_file,
+                    Some(self.config.mega_chunks_per_request),
                     trusted_for_download,
                     Some(callbacks),
                 )
@@ -1882,6 +2000,21 @@ mod tests {
         assert_ne!(FileStatus::Complete, FileStatus::Missing);
     }
 
+    #[test]
+    fn download_callbacks_do_not_request_durable_chunk_syncs() {
+        let callbacks = DownloadCallbackState::new(
+            ProgressCallbackState::new("file.bin".to_string(), 1024, 0, Arc::new(NoProgress)),
+            ChunkVerifiedState::new(
+                ResumeTracker::new(1024, [0; 8], vec![None; 1]),
+                LazySidecarWriter::new("file.bin.part.meta.bin".into(), "file.bin.part".into()),
+            ),
+        );
+
+        assert!(!mega::ParallelDownloadCallbacks::tracks_chunk_verification(
+            &callbacks
+        ));
+    }
+
     // =========================================================================
     // Mock-based classify_file tests
     // =========================================================================
@@ -2078,9 +2211,21 @@ mod tests {
         network: std::sync::atomic::AtomicU64,
         max_delta: std::sync::atomic::AtomicU64,
         calls: std::sync::atomic::AtomicUsize,
+        validation_calls: std::sync::atomic::AtomicUsize,
+        validation_checked: std::sync::atomic::AtomicU64,
+        validation_total: std::sync::atomic::AtomicU64,
     }
 
     impl DownloadProgress for RecordingProgress {
+        fn on_resume_validation_progress(&self, _name: &str, checked_bytes: u64, total_bytes: u64) {
+            self.validation_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.validation_checked
+                .store(checked_bytes, std::sync::atomic::Ordering::SeqCst);
+            self.validation_total
+                .store(total_bytes, std::sync::atomic::Ordering::SeqCst);
+        }
+
         fn on_progress(&self, _name: &str, delta: ProgressDelta) {
             self.total
                 .fetch_add(delta.total_bytes_delta, std::sync::atomic::Ordering::SeqCst);
@@ -2092,6 +2237,146 @@ mod tests {
                 .fetch_max(delta.total_bytes_delta, std::sync::atomic::Ordering::SeqCst);
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+    }
+
+    struct CancelOnProgress {
+        token: CancellationToken,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl DownloadProgress for CancelOnProgress {
+        fn on_progress(&self, _name: &str, _delta: ProgressDelta) {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.token.cancel();
+        }
+    }
+
+    #[test]
+    fn resume_validation_progress_waits_for_thirty_seconds() {
+        let start = Instant::now();
+        assert!(!should_emit_resume_validation_progress(
+            start,
+            start + Duration::from_secs(29)
+        ));
+        assert!(should_emit_resume_validation_progress(
+            start,
+            start + Duration::from_secs(30)
+        ));
+    }
+
+    #[test]
+    fn resume_validation_percent_reports_checked_ratio() {
+        assert_eq!(resume_validation_percent(0, 100), 0);
+        assert_eq!(resume_validation_percent(25, 100), 25);
+        assert_eq!(resume_validation_percent(150, 100), 100);
+    }
+
+    #[test]
+    fn resume_validation_status_progress_suppresses_regular_progress() {
+        let progress = RecordingProgress::default();
+        let wrapper = ResumeValidationStatusProgress::new(&progress);
+
+        wrapper.on_progress(
+            "file.bin",
+            ProgressDelta {
+                total_bytes_delta: 64,
+                network_bytes_delta: 0,
+            },
+        );
+        wrapper.on_resume_validation_progress("file.bin", 25, 100);
+
+        assert_eq!(progress.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            progress
+                .validation_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            progress
+                .validation_checked
+                .load(std::sync::atomic::Ordering::SeqCst),
+            25
+        );
+    }
+
+    #[test]
+    fn resume_fingerprint_matches_ignores_allocation_when_expected_missing() {
+        let expected = fingerprint_with_allocated_bytes(1_024, None);
+        let actual = fingerprint_with_allocated_bytes(1_024, Some(512));
+
+        assert!(resume_fingerprint_matches(expected, actual));
+    }
+
+    #[test]
+    fn resume_fingerprint_matches_ignores_modified_time_mismatch() {
+        let expected = fingerprint_with_allocated_bytes(1_024, Some(512));
+        let mut actual = expected;
+        actual.modified_ns = actual.modified_ns.saturating_add(1);
+
+        assert!(resume_fingerprint_matches(expected, actual));
+    }
+
+    #[test]
+    fn resume_fingerprint_matches_ignores_allocated_bytes_mismatch_when_expected_present() {
+        let expected = fingerprint_with_allocated_bytes(1_024, Some(512));
+        let actual = fingerprint_with_allocated_bytes(1_024, Some(1_024));
+
+        assert!(resume_fingerprint_matches(expected, actual));
+    }
+
+    #[test]
+    fn resume_fingerprint_matches_ignores_modified_time_and_allocated_bytes_mismatch() {
+        let expected = fingerprint_with_allocated_bytes(1_024, Some(512));
+        let mut actual = fingerprint_with_allocated_bytes(1_024, Some(1_024));
+        actual.modified_ns = actual.modified_ns.saturating_add(1);
+
+        assert!(resume_fingerprint_matches(expected, actual));
+    }
+
+    #[test]
+    fn resume_fingerprint_matches_ignores_device_mismatch_when_expected_missing() {
+        let mut expected = fingerprint_with_allocated_bytes(1_024, Some(512));
+        expected.dev = None;
+        let actual = fingerprint_with_allocated_bytes(1_024, Some(512));
+
+        assert!(resume_fingerprint_matches(expected, actual));
+    }
+
+    #[test]
+    fn resume_fingerprint_matches_ignores_inode_mismatch_when_expected_missing() {
+        let mut expected = fingerprint_with_allocated_bytes(1_024, Some(512));
+        expected.ino = None;
+        let actual = fingerprint_with_allocated_bytes(1_024, Some(512));
+
+        assert!(resume_fingerprint_matches(expected, actual));
+    }
+
+    #[test]
+    fn resume_fingerprint_matches_rejects_length_mismatch() {
+        let expected = fingerprint_with_allocated_bytes(1_024, Some(512));
+        let mut actual = expected;
+        actual.len = actual.len.saturating_add(1);
+
+        assert!(!resume_fingerprint_matches(expected, actual));
+    }
+
+    #[test]
+    fn resume_fingerprint_matches_rejects_device_mismatch() {
+        let expected = fingerprint_with_allocated_bytes(1_024, Some(512));
+        let mut actual = expected;
+        actual.dev = Some(actual.dev.unwrap_or(0).saturating_add(1));
+
+        assert!(!resume_fingerprint_matches(expected, actual));
+    }
+
+    #[test]
+    fn resume_fingerprint_matches_rejects_inode_mismatch() {
+        let expected = fingerprint_with_allocated_bytes(1_024, Some(512));
+        let mut actual = expected;
+        actual.ino = Some(actual.ino.unwrap_or(0).saturating_add(1));
+
+        assert!(!resume_fingerprint_matches(expected, actual));
     }
 
     async fn expected_condensed_mac(data: &[u8]) -> [u8; 8] {
@@ -2314,8 +2599,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert!(validation.sidecar_loaded);
         assert_eq!(validation.trusted_count, 1);
@@ -2349,8 +2635,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert_eq!(validation.trusted_count, 1);
         assert_eq!(validation.trusted_bytes, first.length);
@@ -2358,7 +2645,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revalidate_sidecar_rejects_matching_fingerprint_without_allocated_bytes() {
+    async fn revalidate_sidecar_trusts_matching_fingerprint_without_allocated_bytes() {
         let part = PathBuf::from("file.bin.part");
         let file_size = 300_000_u64;
         let expected = [9u8; 8];
@@ -2381,12 +2668,13 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
-        assert_eq!(validation.trusted_count, 0);
-        assert_eq!(validation.trusted_bytes, 0);
-        assert!(validation.trusted_chunks.iter().all(Option::is_none));
+        assert_eq!(validation.trusted_count, 1);
+        assert_eq!(validation.trusted_bytes, first.length);
+        assert_eq!(validation.trusted_chunks[0], Some([4u8; 16]));
     }
 
     #[tokio::test]
@@ -2418,8 +2706,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert_eq!(validation.trusted_count, 1);
         assert_eq!(validation.trusted_bytes, first.length);
@@ -2460,8 +2749,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert_eq!(validation.trusted_count, 1);
         assert_eq!(validation.trusted_bytes, second.length);
@@ -2473,7 +2763,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revalidate_sidecar_rejects_matching_fingerprint_with_insufficient_allocation() {
+    async fn revalidate_sidecar_trusts_matching_fingerprint_even_with_low_allocation_hint() {
         let part = PathBuf::from("file.bin.part");
         let file_size = 300_000_u64;
         let expected = [9u8; 8];
@@ -2513,8 +2803,95 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
+
+        assert_eq!(validation.trusted_count, 2);
+        assert_eq!(validation.trusted_bytes, first.length + second.length);
+        assert_eq!(validation.trusted_chunks[0], Some([4u8; 16]));
+        assert_eq!(validation.trusted_chunks[1], Some([5u8; 16]));
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_trusts_multiple_chunks_without_allocated_bytes() {
+        let part = PathBuf::from("file.bin.part");
+        let file_size = 300_000_u64;
+        let expected = [9u8; 8];
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let first = &boundaries[0];
+        let second = &boundaries[1];
+        let sidecar = ResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size,
+            expected_condensed_mac: expected,
+            verified_chunks: vec![
+                VerifiedChunkRecord {
+                    index: first.index,
+                    mac: [4u8; 16],
+                },
+                VerifiedChunkRecord {
+                    index: second.index,
+                    mac: [5u8; 16],
+                },
+            ],
+            part_fingerprint: Some(fingerprint_with_allocated_bytes(file_size, None)),
+        };
+        let fs = MockFileSystem::new();
+        fs.add_file(&part, file_size);
+        fs.add_fingerprint(&part, fingerprint_with_allocated_bytes(file_size, Some(1)));
+
+        let validation = mock_downloader(fs)
+            .revalidate_sidecar_chunks(SidecarValidationInput {
+                boundaries: &boundaries,
+                part_path: &part,
+                sidecar: &sidecar,
+                file_size,
+                expected_condensed_mac: expected,
+                aes_key: &TEST_AES_KEY,
+                aes_iv: &TEST_AES_IV,
+                progress: None,
+            }, None)
+            .await
+            .unwrap();
+
+        assert_eq!(validation.trusted_count, 2);
+        assert_eq!(validation.trusted_bytes, first.length + second.length);
+        assert_eq!(validation.trusted_chunks[0], Some([4u8; 16]));
+        assert_eq!(validation.trusted_chunks[1], Some([5u8; 16]));
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_rejects_matching_allocation_when_device_changes() {
+        let part = PathBuf::from("file.bin.part");
+        let file_size = 300_000_u64;
+        let expected = [9u8; 8];
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let first = &boundaries[0];
+        let mut actual = fingerprint_with_allocated_bytes(file_size, Some(first.length));
+        actual.dev = Some(actual.dev.unwrap_or(0).saturating_add(1));
+        let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, [4u8; 16]);
+        sidecar.part_fingerprint = Some(fingerprint_with_allocated_bytes(
+            file_size,
+            Some(first.length),
+        ));
+        let fs = MockFileSystem::new();
+        fs.add_file(&part, file_size);
+        fs.add_fingerprint(&part, actual);
+
+        let validation = mock_downloader(fs)
+            .revalidate_sidecar_chunks(SidecarValidationInput {
+                boundaries: &boundaries,
+                part_path: &part,
+                sidecar: &sidecar,
+                file_size,
+                expected_condensed_mac: expected,
+                aes_key: &TEST_AES_KEY,
+                aes_iv: &TEST_AES_IV,
+                progress: None,
+            }, None)
+            .await
+            .unwrap();
 
         assert_eq!(validation.trusted_count, 0);
         assert_eq!(validation.trusted_bytes, 0);
@@ -2545,8 +2922,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert_eq!(validation.trusted_count, 1);
         assert_eq!(validation.trusted_bytes, first.length);
@@ -2578,8 +2956,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: Some(("file.bin", &progress)),
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert_eq!(validation.trusted_count, 1);
         assert_eq!(validation.trusted_bytes, first.length);
@@ -2592,6 +2971,12 @@ mod tests {
             0
         );
         assert_eq!(progress.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            progress
+                .validation_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 
     #[tokio::test]
@@ -2620,8 +3005,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: Some(("file.bin", &progress)),
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert_eq!(validation.trusted_count, 1);
         assert_eq!(validation.trusted_bytes, first.length);
@@ -2634,53 +3020,53 @@ mod tests {
             0
         );
         assert!(progress.calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert_eq!(
+            progress
+                .validation_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 
     #[tokio::test]
-    async fn revalidate_sidecar_rejects_full_length_sparse_part_without_allocation_fingerprint() {
+    async fn revalidate_sidecar_disk_revalidation_honors_cancellation() {
         let dir = tempfile::tempdir().unwrap();
         let part = dir.path().join("file.bin.part");
         let file_size = 300_000_u64;
-        let data = test_plaintext(usize_from_u64(file_size));
-        let file = tokio::fs::File::create(&part).await.unwrap();
-        file.set_len(file_size).await.unwrap();
-        drop(file);
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(&part)
-            .await
-            .unwrap();
-        tokio::io::AsyncWriteExt::write_all(&mut file, &data[..1024])
-            .await
-            .unwrap();
-        drop(file);
+        let data = test_incompressible_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
 
         let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
-        let first = &boundaries[0];
-        let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, [4u8; 16]);
-        sidecar.part_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await;
-        if let Some(fingerprint) = sidecar.part_fingerprint.as_mut() {
-            fingerprint.allocated_bytes = None;
-        }
+        let second = &boundaries[1];
+        let mac =
+            mega::compute_mega_chunk_mac(chunk_data(&data, second), &TEST_AES_KEY, &TEST_AES_IV);
+        let sidecar = sidecar_for_chunk(file_size, expected, second.index, mac);
+        let token = CancellationToken::new();
+        let progress = CancelOnProgress {
+            token: token.clone(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
 
-        let validation = tokio_downloader()
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            })
-            .await;
+        let err = tokio_downloader()
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: Some(("file.bin", &progress)),
+                },
+                Some(&token),
+            )
+            .await
+            .unwrap_err();
 
-        assert!(validation.sidecar_loaded);
-        assert_eq!(validation.trusted_count, 0);
-        assert_eq!(validation.trusted_bytes, 0);
-        assert!(validation.trusted_chunks.iter().all(Option::is_none));
+        assert!(matches!(err, Error::Cancelled));
+        assert!(progress.calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
     }
 
     #[tokio::test]
@@ -2718,8 +3104,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert_eq!(validation.trusted_count, 0);
         assert_eq!(validation.trusted_bytes, 0);
@@ -2758,12 +3145,294 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert_eq!(validation.trusted_count, 1);
         assert_eq!(validation.trusted_bytes, first.length);
         assert_eq!(validation.trusted_chunks[0], Some(mac));
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_trusts_when_only_modified_time_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let expected = [9u8; 8];
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let first = &boundaries[0];
+        let mac = mega::compute_mega_chunk_mac(chunk_data(&data, first), &TEST_AES_KEY, &TEST_AES_IV);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, mac);
+        let mut stale_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        stale_fingerprint.modified_ns = stale_fingerprint.modified_ns.saturating_add(1);
+        sidecar.part_fingerprint = Some(stale_fingerprint);
+
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(validation.trusted_count, 1);
+        assert_eq!(validation.trusted_bytes, first.length);
+        assert_eq!(validation.trusted_chunks[0], Some(mac));
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_trusts_when_only_allocated_bytes_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let expected = [9u8; 8];
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let first = &boundaries[0];
+        let mac = mega::compute_mega_chunk_mac(chunk_data(&data, first), &TEST_AES_KEY, &TEST_AES_IV);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, mac);
+        let mut stale_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        stale_fingerprint.allocated_bytes = stale_fingerprint
+            .allocated_bytes
+            .map(|allocated| allocated.saturating_add(512))
+            .or(Some(512));
+        sidecar.part_fingerprint = Some(stale_fingerprint);
+
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(validation.trusted_count, 1);
+        assert_eq!(validation.trusted_bytes, first.length);
+        assert_eq!(validation.trusted_chunks[0], Some(mac));
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_fast_trusts_when_only_modified_time_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let expected = [9u8; 8];
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let second = &boundaries[1];
+        let mac =
+            mega::compute_mega_chunk_mac(chunk_data(&data, second), &TEST_AES_KEY, &TEST_AES_IV);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, second.index, mac);
+        let mut fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        fingerprint.modified_ns = fingerprint.modified_ns.saturating_add(1);
+        sidecar.part_fingerprint = Some(fingerprint);
+        let progress = RecordingProgress::default();
+
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: Some(("file.bin", &progress)),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(validation.trusted_count, 1);
+        assert_eq!(validation.trusted_bytes, second.length);
+        assert_eq!(validation.trusted_chunks[usize_from_u32(second.index)], Some(mac));
+        assert_eq!(progress.total.load(std::sync::atomic::Ordering::SeqCst), second.length);
+        assert_eq!(progress.network.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(progress.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            progress.max_delta.load(std::sync::atomic::Ordering::SeqCst),
+            second.length
+        );
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_fast_trusts_when_only_allocated_bytes_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let expected = [9u8; 8];
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let second = &boundaries[1];
+        let mac =
+            mega::compute_mega_chunk_mac(chunk_data(&data, second), &TEST_AES_KEY, &TEST_AES_IV);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, second.index, mac);
+        let mut fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        fingerprint.allocated_bytes = fingerprint
+            .allocated_bytes
+            .map(|allocated| allocated.saturating_add(512))
+            .or(Some(512));
+        sidecar.part_fingerprint = Some(fingerprint);
+        let progress = RecordingProgress::default();
+
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: Some(("file.bin", &progress)),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(validation.trusted_count, 1);
+        assert_eq!(validation.trusted_bytes, second.length);
+        assert_eq!(validation.trusted_chunks[usize_from_u32(second.index)], Some(mac));
+        assert_eq!(progress.total.load(std::sync::atomic::Ordering::SeqCst), second.length);
+        assert_eq!(progress.network.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(progress.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            progress.max_delta.load(std::sync::atomic::Ordering::SeqCst),
+            second.length
+        );
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_fast_trusts_when_modified_time_and_allocated_bytes_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let expected = [9u8; 8];
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let second = &boundaries[1];
+        let mac =
+            mega::compute_mega_chunk_mac(chunk_data(&data, second), &TEST_AES_KEY, &TEST_AES_IV);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, second.index, mac);
+        let mut fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        fingerprint.modified_ns = fingerprint.modified_ns.saturating_add(1);
+        fingerprint.allocated_bytes = fingerprint
+            .allocated_bytes
+            .map(|allocated| allocated.saturating_add(512))
+            .or(Some(512));
+        sidecar.part_fingerprint = Some(fingerprint);
+        let progress = RecordingProgress::default();
+
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: Some(("file.bin", &progress)),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(validation.trusted_count, 1);
+        assert_eq!(validation.trusted_bytes, second.length);
+        assert_eq!(validation.trusted_chunks[usize_from_u32(second.index)], Some(mac));
+        assert_eq!(progress.total.load(std::sync::atomic::Ordering::SeqCst), second.length);
+        assert_eq!(progress.network.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(progress.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            progress.max_delta.load(std::sync::atomic::Ordering::SeqCst),
+            second.length
+        );
+    }
+
+    #[tokio::test]
+    async fn revalidate_sidecar_fast_trusts_when_saved_fingerprint_lacks_device_and_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("file.bin.part");
+        let file_size = 300_000_u64;
+        let data = test_plaintext(usize_from_u64(file_size));
+        tokio::fs::write(&part, &data).await.unwrap();
+
+        let expected = [9u8; 8];
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let second = &boundaries[1];
+        let mac =
+            mega::compute_mega_chunk_mac(chunk_data(&data, second), &TEST_AES_KEY, &TEST_AES_IV);
+        let mut sidecar = sidecar_for_chunk(file_size, expected, second.index, mac);
+        let mut fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        fingerprint.dev = None;
+        fingerprint.ino = None;
+        sidecar.part_fingerprint = Some(fingerprint);
+        let progress = RecordingProgress::default();
+
+        let validation = tokio_downloader()
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: Some(("file.bin", &progress)),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(validation.trusted_count, 1);
+        assert_eq!(validation.trusted_bytes, second.length);
+        assert_eq!(validation.trusted_chunks[usize_from_u32(second.index)], Some(mac));
+        assert_eq!(progress.total.load(std::sync::atomic::Ordering::SeqCst), second.length);
+        assert_eq!(progress.network.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(progress.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            progress.max_delta.load(std::sync::atomic::Ordering::SeqCst),
+            second.length
+        );
     }
 
     #[tokio::test]
@@ -2811,8 +3480,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert_eq!(validation.trusted_count, 1);
         assert_eq!(validation.trusted_bytes, first.length);
@@ -2841,8 +3511,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert!(validation.sidecar_loaded);
         assert_eq!(validation.trusted_count, 0);
@@ -2880,8 +3551,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert_eq!(validation.trusted_count, 0);
         assert_eq!(validation.trusted_bytes, 0);
@@ -2910,8 +3582,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert!(validation.sidecar_loaded);
         assert_eq!(validation.trusted_count, 0);
@@ -2956,8 +3629,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert!(validation.sidecar_loaded);
         assert_eq!(validation.trusted_count, 0);
@@ -3008,8 +3682,9 @@ mod tests {
                 aes_key: &TEST_AES_KEY,
                 aes_iv: &TEST_AES_IV,
                 progress: None,
-            })
-            .await;
+            }, None)
+            .await
+            .unwrap();
 
         assert!(validation.sidecar_loaded);
         assert_eq!(validation.trusted_count, 0);
@@ -3120,6 +3795,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_sidecar_falls_back_to_legacy_json_when_binary_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("file.bin").to_string_lossy().into_owned();
+        let binary_path = sidecar_path(&base);
+        let json_path = legacy_json_sidecar_path(&base);
+        let legacy = legacy_json_sidecar_for_chunk(42, [9u8; 8], 7, [1u8; 16]);
+
+        tokio::fs::write(&binary_path, b"not-bincode").await.unwrap();
+        write_legacy_json_sidecar(&json_path, &legacy)
+            .await
+            .unwrap();
+
+        let loaded = load_sidecar(&binary_path).await.unwrap();
+        assert_eq!(loaded.expected_condensed_mac, [9u8; 8]);
+        assert_eq!(loaded.verified_chunks[0].index, 7);
+        assert_eq!(loaded.verified_chunks[0].mac, [1u8; 16]);
+    }
+
+    #[tokio::test]
     async fn load_sidecar_rejects_bad_legacy_json_base64_without_allocating_vec_decode() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("file.bin").to_string_lossy().into_owned();
@@ -3187,6 +3881,82 @@ mod tests {
                 LegacyJsonVerifiedChunkRecord {
                     index: boundaries[1].index,
                     mac_b64: STANDARD.encode([2u8; 16]),
+                },
+            ],
+            ..legacy_json_sidecar_for_chunk(file_size, [9u8; 8], boundaries[0].index, [1u8; 16])
+        };
+
+        write_legacy_json_sidecar(&legacy_json_sidecar_path(&file_path), &legacy)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resume_sidecar_verified_bytes(&file_path),
+            Some(boundaries[0].length + boundaries[1].length)
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_sidecar_verified_bytes_dedupes_duplicate_binary_chunk_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_path = dir.path().join("file.bin");
+        let file_path = base_path.to_string_lossy().into_owned();
+        let sidecar_path = sidecar_path(&file_path);
+        let file_size = 300_000_u64;
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+
+        save_sidecar_atomic(
+            &sidecar_path,
+            &ResumeSidecar {
+                version: CURRENT_RESUME_SIDECAR_VERSION,
+                file_size,
+                expected_condensed_mac: [9u8; 8],
+                verified_chunks: vec![
+                    VerifiedChunkRecord {
+                        index: boundaries[0].index,
+                        mac: [1u8; 16],
+                    },
+                    VerifiedChunkRecord {
+                        index: boundaries[0].index,
+                        mac: [2u8; 16],
+                    },
+                    VerifiedChunkRecord {
+                        index: boundaries[1].index,
+                        mac: [3u8; 16],
+                    },
+                ],
+                part_fingerprint: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            resume_sidecar_verified_bytes(&file_path),
+            Some(boundaries[0].length + boundaries[1].length)
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_sidecar_verified_bytes_dedupes_duplicate_legacy_chunk_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_path = dir.path().join("file.bin");
+        let file_path = base_path.to_string_lossy().into_owned();
+        let file_size = 300_000_u64;
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        let legacy = LegacyJsonResumeSidecar {
+            verified_chunks: vec![
+                LegacyJsonVerifiedChunkRecord {
+                    index: boundaries[0].index,
+                    mac_b64: STANDARD.encode([1u8; 16]),
+                },
+                LegacyJsonVerifiedChunkRecord {
+                    index: boundaries[0].index,
+                    mac_b64: STANDARD.encode([2u8; 16]),
+                },
+                LegacyJsonVerifiedChunkRecord {
+                    index: boundaries[1].index,
+                    mac_b64: STANDARD.encode([3u8; 16]),
                 },
             ],
             ..legacy_json_sidecar_for_chunk(file_size, [9u8; 8], boundaries[0].index, [1u8; 16])
@@ -3438,6 +4208,95 @@ mod tests {
             dl.inspect_local_file("movie.mkv", 1_000_000).await.status,
             FileStatus::Missing
         );
+    }
+
+    #[test]
+    fn classify_partial_clamps_verified_resume_bytes_to_part_size() {
+        let local = classify_observed_local_file(
+            ObservedLocalFile {
+                final_size: None,
+                part_size: Some(128),
+                has_sidecar: true,
+                verified_resume_bytes: 256,
+            },
+            512,
+            false,
+        );
+
+        assert_eq!(local.status, FileStatus::Partial);
+        assert_eq!(local.existing_partial_bytes, 128);
+        assert_eq!(local.verified_resume_bytes, 128);
+    }
+
+    #[tokio::test]
+    async fn inspect_local_file_clamps_binary_sidecar_verified_bytes_to_part_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_str = dir.path().join("movie.mkv").to_string_lossy().to_string();
+        let file_size = 300_000_u64;
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        tokio::fs::write(part_path(&path_str), vec![0u8; usize_from_u64(boundaries[0].length)])
+            .await
+            .unwrap();
+        save_sidecar_atomic(
+            &sidecar_path(&path_str),
+            &ResumeSidecar {
+                version: CURRENT_RESUME_SIDECAR_VERSION,
+                file_size,
+                expected_condensed_mac: [9u8; 8],
+                verified_chunks: vec![
+                    VerifiedChunkRecord {
+                        index: boundaries[0].index,
+                        mac: [1u8; 16],
+                    },
+                    VerifiedChunkRecord {
+                        index: boundaries[1].index,
+                        mac: [2u8; 16],
+                    },
+                ],
+                part_fingerprint: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let local = tokio_downloader().inspect_local_file(&path_str, file_size).await;
+
+        assert_eq!(local.status, FileStatus::Partial);
+        assert_eq!(local.existing_partial_bytes, boundaries[0].length);
+        assert_eq!(local.verified_resume_bytes, boundaries[0].length);
+    }
+
+    #[tokio::test]
+    async fn inspect_local_file_clamps_legacy_sidecar_verified_bytes_to_part_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_str = dir.path().join("movie.mkv").to_string_lossy().to_string();
+        let file_size = 300_000_u64;
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        tokio::fs::write(part_path(&path_str), vec![0u8; usize_from_u64(boundaries[0].length)])
+            .await
+            .unwrap();
+        let legacy = LegacyJsonResumeSidecar {
+            verified_chunks: vec![
+                LegacyJsonVerifiedChunkRecord {
+                    index: boundaries[0].index,
+                    mac_b64: STANDARD.encode([1u8; 16]),
+                },
+                LegacyJsonVerifiedChunkRecord {
+                    index: boundaries[1].index,
+                    mac_b64: STANDARD.encode([2u8; 16]),
+                },
+            ],
+            ..legacy_json_sidecar_for_chunk(file_size, [9u8; 8], boundaries[0].index, [1u8; 16])
+        };
+        write_legacy_json_sidecar(&legacy_json_sidecar_path(&path_str), &legacy)
+            .await
+            .unwrap();
+
+        let local = tokio_downloader().inspect_local_file(&path_str, file_size).await;
+
+        assert_eq!(local.status, FileStatus::Partial);
+        assert_eq!(local.existing_partial_bytes, boundaries[0].length);
+        assert_eq!(local.verified_resume_bytes, boundaries[0].length);
     }
 
     #[test]

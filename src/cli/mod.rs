@@ -148,6 +148,19 @@ impl DownloadProgress for CliDownloadProgress {
         self.bars.lock().unwrap().insert(name.to_string(), bar);
     }
 
+    fn on_resume_validation_start(&self, name: &str) {
+        let _ = self
+            .progress
+            .println(format!("  checking local partial: {name}"));
+    }
+
+    fn on_resume_validation_progress(&self, name: &str, checked_bytes: u64, total_bytes: u64) {
+        let pct = crate::download::resume_validation_percent(checked_bytes, total_bytes);
+        let _ = self
+            .progress
+            .println(format!("  checking local partial: {name} ({pct}%)"));
+    }
+
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn on_progress(&self, name: &str, delta: ProgressDelta) {
         self.total_bar.inc(delta.total_bytes_delta);

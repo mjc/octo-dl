@@ -105,6 +105,9 @@ pub(super) fn draw_config_popup(frame: &mut ratatui::Frame, app: &App) {
 
             let value = match field {
                 ConfigField::ChunksPerFile => app.config.config.chunks_per_file.to_string(),
+                ConfigField::MegaChunksPerRequest => {
+                    app.config.config.mega_chunks_per_request.to_string()
+                }
                 ConfigField::ConcurrentFiles => app.config.config.concurrent_files.to_string(),
                 ConfigField::ForceOverwrite => {
                     if app.config.config.force_overwrite {

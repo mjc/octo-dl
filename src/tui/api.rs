@@ -95,6 +95,7 @@ struct RetryRequest {
 #[derive(Deserialize)]
 struct ConfigUpdateRequest {
     chunks_per_file: Option<usize>,
+    mega_chunks_per_request: Option<usize>,
     concurrent_files: Option<usize>,
     force_overwrite: Option<bool>,
     cleanup_on_error: Option<bool>,
@@ -262,6 +263,7 @@ async fn api_config(
         &state,
         UiAction::UpdateConfig {
             chunks_per_file: payload.chunks_per_file,
+            mega_chunks_per_request: payload.mega_chunks_per_request,
             concurrent_files: payload.concurrent_files,
             force_overwrite: payload.force_overwrite,
             cleanup_on_error: payload.cleanup_on_error,
