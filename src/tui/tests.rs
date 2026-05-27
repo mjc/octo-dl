@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
     core::{
-        CoreEvent, FileLifecycle, PackageSnapshot, PackageState, PackageStatus, ResolvedFile,
-        ResolvedPackage, SessionRunStatus, SessionSnapshot,
+        CoreEvent, FileLifecycle, PackageSnapshot, PackageState, ResolvedFile, ResolvedPackage,
+        SessionRunStatus, SessionSnapshot,
     },
     test_support::{
         FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id, push_file,
@@ -669,7 +669,7 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
             key: crate::core::PackageKey::new(source_url.clone().clone()),
             display_name: "Retry Folder".to_string(),
             file_ids: Vec::new(),
-            status: PackageStatus::Failed,
+            progress: crate::core::model::PackageProgressState::default(),
             error: Some("boom".to_string()),
         },
     );

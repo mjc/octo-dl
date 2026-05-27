@@ -61,10 +61,10 @@ impl Serialize for BinaryCorePackageRowRef<'_> {
         let status = if self.stats.downloading || self.stats.verifying {
             PackageStatus::Downloading
         } else {
-            self.package.status
+            self.package.status()
         };
         let expanded = self.app.expanded_packages.contains(&self.package.id)
-            || matches!(self.package.status, PackageStatus::Failed);
+            || matches!(self.package.status(), PackageStatus::Failed);
         let folder_label = (!self.stats.folder_conflict)
             .then_some(self.stats.folder_label)
             .flatten();
@@ -966,10 +966,10 @@ impl Serialize for CorePackageRowRef<'_> {
         let status = if self.stats.downloading || self.stats.verifying {
             PackageStatus::Downloading
         } else {
-            self.package.status
+            self.package.status()
         };
         let expanded = self.app.expanded_packages.contains(&self.package.id)
-            || matches!(self.package.status, PackageStatus::Failed);
+            || matches!(self.package.status(), PackageStatus::Failed);
         let folder_label = (!self.stats.folder_conflict)
             .then_some(self.stats.folder_label)
             .flatten();
@@ -1723,7 +1723,7 @@ impl App {
                         status: if package_downloading || package_verifying {
                             PackageStatus::Downloading
                         } else {
-                            package.status
+                            package.status()
                         },
                         file_ids,
                         present_files: present,
@@ -1732,7 +1732,7 @@ impl App {
                         total_bytes: size,
                         percent: percent(downloaded, size),
                         expanded: self.expanded_packages.contains(&package.id)
-                            || matches!(package.status, PackageStatus::Failed),
+                            || matches!(package.status(), PackageStatus::Failed),
                         folder_label: (!folder_conflict)
                             .then(|| common_folder.map(str::to_string))
                             .flatten(),
@@ -2301,7 +2301,7 @@ mod tests {
                 ),
                 display_name: "Failed".to_string(),
                 file_ids: Vec::new(),
-                status: PackageStatus::Failed,
+                progress: crate::core::model::PackageProgressState::default(),
                 error: Some("boom".to_string()),
             },
         );

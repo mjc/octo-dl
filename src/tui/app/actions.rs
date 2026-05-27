@@ -637,8 +637,8 @@ impl App {
             return;
         };
         let package_key = package.key.clone();
-        let package_failed =
-            package.error.is_some() || matches!(package.status, crate::core::PackageStatus::Failed);
+        let package_failed = package.error.is_some()
+            || matches!(package.status(), crate::core::PackageStatus::Failed);
         let package_files: Vec<_> = self
             .core_state
             .package_files(&package_id)

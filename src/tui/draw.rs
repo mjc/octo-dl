@@ -461,9 +461,10 @@ fn render_package_row_app(
     };
     let stats = PackageRowStats::new(app, package_id);
     let percent = percent(stats.downloaded, stats.size);
+    let package_status = package.status();
     let expanded = app.expanded_packages.contains(&package_id)
-        || matches!(package.status, PackageStatus::Failed);
-    let (icon, mut color) = package_status_style(package.status, percent);
+        || matches!(package_status, PackageStatus::Failed);
+    let (icon, mut color) = package_status_style(package_status, percent);
     if stats.active() {
         color = Color::Yellow;
     }
@@ -478,7 +479,7 @@ fn render_package_row_app(
         downloaded: stats.downloaded,
         total_bytes: stats.size,
         percent,
-        speed_label: stats.activity_label(package.status),
+        speed_label: stats.activity_label(package_status),
     };
     let prefix_width = 5;
     let detail_width = detail.width(content_width / 2);

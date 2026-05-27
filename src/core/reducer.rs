@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use crate::core::model::{
     DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
-    PackageKey, PackageState, PackageStatus, SessionRunStatus, UrlId,
+    PackageKey, PackageProgressState, PackageState, PackageStatus, SessionRunStatus, UrlId,
 };
 use crate::core::restart::RestartSnapshot;
 use crate::core::session::{FileSnapshot, PackageSnapshot, SessionSnapshot};
@@ -182,18 +182,55 @@ fn counts_in_run_totals(file: &FileState) -> bool {
 #[derive(Debug, Clone, Copy)]
 struct FileDerivedState {
     package_id: PackageId,
-    is_complete: bool,
+    lifecycle_bucket: PackageProgressBucket,
     size: u64,
     visible_completed_bytes: u64,
     downloaded_network_bytes: u64,
     counts_in_run_totals: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageProgressBucket {
+    Queued,
+    Downloading,
+    Complete,
+    Failed,
+}
+
+impl PackageProgressBucket {
+    const fn from_lifecycle(lifecycle: &FileLifecycle) -> Self {
+        match lifecycle {
+            FileLifecycle::Planned | FileLifecycle::Queued => Self::Queued,
+            FileLifecycle::Downloading => Self::Downloading,
+            FileLifecycle::Complete => Self::Complete,
+            FileLifecycle::Failed { .. } => Self::Failed,
+        }
+    }
+
+    fn add_to(self, progress: &mut PackageProgressState) {
+        match self {
+            Self::Queued => progress.queued = progress.queued.saturating_add(1),
+            Self::Downloading => progress.downloading = progress.downloading.saturating_add(1),
+            Self::Complete => progress.complete = progress.complete.saturating_add(1),
+            Self::Failed => progress.failed = progress.failed.saturating_add(1),
+        }
+    }
+
+    fn remove_from(self, progress: &mut PackageProgressState) {
+        match self {
+            Self::Queued => progress.queued = progress.queued.saturating_sub(1),
+            Self::Downloading => progress.downloading = progress.downloading.saturating_sub(1),
+            Self::Complete => progress.complete = progress.complete.saturating_sub(1),
+            Self::Failed => progress.failed = progress.failed.saturating_sub(1),
+        }
+    }
+}
+
 impl From<&FileState> for FileDerivedState {
     fn from(file: &FileState) -> Self {
         Self {
             package_id: file.package_id,
-            is_complete: matches!(file.lifecycle, FileLifecycle::Complete),
+            lifecycle_bucket: PackageProgressBucket::from_lifecycle(&file.lifecycle),
             size: file.size,
             visible_completed_bytes: file.progress.visible_completed_bytes.min(file.size),
             downloaded_network_bytes: file.progress.downloaded_network_bytes.min(file.size),
@@ -216,7 +253,7 @@ fn add_totals_contribution(state: &mut DownloadState, file: FileDerivedState) {
         .displayed_network_bytes
         .saturating_add(file.downloaded_network_bytes);
     state.totals.run_file_total = state.totals.run_file_total.saturating_add(1);
-    if file.is_complete {
+    if matches!(file.lifecycle_bucket, PackageProgressBucket::Complete) {
         state.totals.run_file_completed = state.totals.run_file_completed.saturating_add(1);
     }
 }
@@ -235,8 +272,28 @@ fn remove_totals_contribution(state: &mut DownloadState, file: FileDerivedState)
         .displayed_network_bytes
         .saturating_sub(file.downloaded_network_bytes);
     state.totals.run_file_total = state.totals.run_file_total.saturating_sub(1);
-    if file.is_complete {
+    if matches!(file.lifecycle_bucket, PackageProgressBucket::Complete) {
         state.totals.run_file_completed = state.totals.run_file_completed.saturating_sub(1);
+    }
+}
+
+fn add_package_progress(
+    state: &mut DownloadState,
+    package_id: PackageId,
+    lifecycle_bucket: PackageProgressBucket,
+) {
+    if let Some(package) = state.packages.get_mut(&package_id) {
+        lifecycle_bucket.add_to(&mut package.progress);
+    }
+}
+
+fn remove_package_progress(
+    state: &mut DownloadState,
+    package_id: PackageId,
+    lifecycle_bucket: PackageProgressBucket,
+) {
+    if let Some(package) = state.packages.get_mut(&package_id) {
+        lifecycle_bucket.remove_from(&mut package.progress);
     }
 }
 
@@ -275,6 +332,7 @@ fn remove_unreferenced_source_url(state: &mut DownloadState, source_url: &UrlId)
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 fn package_status_from_files(state: &DownloadState, package_id: PackageId) -> PackageStatus {
     let Some(package) = state.packages.get(&package_id) else {
         return PackageStatus::Pending;
@@ -313,19 +371,12 @@ fn package_status_from_files(state: &DownloadState, package_id: PackageId) -> Pa
     }
 }
 
-fn recompute_package_status(state: &mut DownloadState, package_id: PackageId) {
-    let status = package_status_from_files(state, package_id);
-    if let Some(package) = state.packages.get_mut(&package_id) {
-        package.status = status;
-    }
-}
-
 fn recompute_session_status(state: &mut DownloadState) {
     state.session_meta.status = if !state.files.is_empty()
         && state
             .packages
             .values()
-            .all(|package| matches!(package.status, PackageStatus::Complete))
+            .all(|package| matches!(package.status(), PackageStatus::Complete))
     {
         SessionRunStatus::Completed
     } else {
@@ -344,12 +395,17 @@ fn apply_file_change(
         remove_file_from_package_index(state, file_id, before.package_id);
         insert_file_into_package_index(state, file_id, after.package_id);
     }
-    add_totals_contribution(state, after);
-    recompute_package_status(state, before.package_id);
     if before.package_id != after.package_id {
-        recompute_package_status(state, after.package_id);
+        remove_package_progress(state, before.package_id, before.lifecycle_bucket);
+        add_package_progress(state, after.package_id, after.lifecycle_bucket);
+    } else if before.lifecycle_bucket != after.lifecycle_bucket {
+        remove_package_progress(state, before.package_id, before.lifecycle_bucket);
+        add_package_progress(state, after.package_id, after.lifecycle_bucket);
     }
-    recompute_session_status(state);
+    add_totals_contribution(state, after);
+    if before.package_id != after.package_id || before.lifecycle_bucket != after.lifecycle_bucket {
+        recompute_session_status(state);
+    }
 }
 
 fn complete_file(state: &mut DownloadState, file_id: &FileId) {
@@ -369,10 +425,9 @@ fn complete_file(state: &mut DownloadState, file_id: &FileId) {
 fn insert_file_state(state: &mut DownloadState, file: FileState) {
     let derived = FileDerivedState::from(&file);
     insert_file_into_package_index(state, &file.id, file.package_id);
+    add_package_progress(state, file.package_id, derived.lifecycle_bucket);
     add_totals_contribution(state, derived);
-    let package_id = file.package_id;
     state.files.insert(file.id.clone(), file);
-    recompute_package_status(state, package_id);
     recompute_session_status(state);
 }
 
@@ -428,6 +483,7 @@ fn reduce_impl(
             }
             let incoming_package_id = package.id.clone();
             let mut reassigned_file_ids = Vec::new();
+            let mut reassigned_progress = Vec::new();
             let previous_package = state
                 .packages
                 .iter()
@@ -441,6 +497,8 @@ fn reduce_impl(
                     reassigned_file_ids = previous_state.file_ids;
                     for file_id in &reassigned_file_ids {
                         if let Some(file) = state.files.get_mut(file_id) {
+                            reassigned_progress
+                                .push(PackageProgressBucket::from_lifecycle(&file.lifecycle));
                             file.package_id = incoming_package_id;
                         }
                     }
@@ -476,7 +534,7 @@ fn reduce_impl(
                         key: package.key.clone(),
                         display_name: package_display_name.clone(),
                         file_ids: Vec::new(),
-                        status: PackageStatus::Pending,
+                        progress: PackageProgressState::default(),
                         error: None,
                     });
                 package_entry.key = package.key.clone();
@@ -488,6 +546,9 @@ fn reduce_impl(
                         package_entry.file_ids.push(file_id.clone());
                     }
                 }
+            }
+            for lifecycle_bucket in reassigned_progress {
+                add_package_progress(state, incoming_package_id, lifecycle_bucket);
             }
 
             if let Some(collision) = package.collision {
@@ -541,7 +602,6 @@ fn reduce_impl(
             if let Some(package_entry) = state.packages.get_mut(&incoming_package_id) {
                 package_entry.error = package_error;
             }
-            recompute_package_status(state, incoming_package_id);
             recompute_session_status(state);
         }
         CoreEvent::FileQueued { file_id } => {
@@ -735,7 +795,7 @@ fn reduce_impl(
                 let source_url = file.source_url.clone();
                 remove_totals_contribution(state, before);
                 remove_file_from_package_index(state, &file_id, before.package_id);
-                recompute_package_status(state, before.package_id);
+                remove_package_progress(state, before.package_id, before.lifecycle_bucket);
                 if state
                     .packages
                     .get(&before.package_id)
@@ -850,6 +910,10 @@ pub(crate) fn reduce_without_session_persist(
     reduce_impl(state, event, false)
 }
 
+pub(crate) fn rebuild_derived_state(state: &mut DownloadState) {
+    recompute_derived(state);
+}
+
 pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
     #[cfg(test)]
     SNAPSHOT_FROM_STATE_CALLS.with(|count| count.set(count.get().saturating_add(1)));
@@ -929,16 +993,21 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
 }
 
 fn recompute_derived(state: &mut DownloadState) {
-    let package_statuses: Vec<_> = state
-        .packages
-        .keys()
-        .copied()
-        .map(|package_id| (package_id, package_status_from_files(state, package_id)))
+    for package in state.packages.values_mut() {
+        package.progress = PackageProgressState::default();
+    }
+    let package_lifecycles: Vec<_> = state
+        .files
+        .values()
+        .map(|file| {
+            (
+                file.package_id,
+                PackageProgressBucket::from_lifecycle(&file.lifecycle),
+            )
+        })
         .collect();
-    for (package_id, status) in package_statuses {
-        if let Some(package) = state.packages.get_mut(&package_id) {
-            package.status = status;
-        }
+    for (package_id, lifecycle_bucket) in package_lifecycles {
+        add_package_progress(state, package_id, lifecycle_bucket);
     }
 
     let mut totals = crate::core::model::TotalsState::default();
@@ -977,6 +1046,11 @@ fn debug_assert_invariants(state: &DownloadState) {
         debug_assert!(
             !package.file_ids.is_empty(),
             "packages without files are invalid in canonical state"
+        );
+        debug_assert_eq!(
+            package.status(),
+            package_status_from_files(state, package.id),
+            "package progress cache must match fresh file scan"
         );
         for file_id in &package.file_ids {
             debug_assert!(
@@ -1023,7 +1097,10 @@ mod tests {
                 key: crate::core::PackageKey::new("pkg".to_string().clone()),
                 display_name: "pkg".to_string(),
                 file_ids: vec!["file.bin".to_string().into()],
-                status: PackageStatus::Pending,
+                progress: PackageProgressState {
+                    queued: 1,
+                    ..PackageProgressState::default()
+                },
                 error: None,
             },
         );
@@ -1155,6 +1232,64 @@ mod tests {
             state.url_order,
             vec!["https://mega.nz/folder/persist".to_string()]
         );
+    }
+
+    #[test]
+    fn rebuild_derived_state_restores_package_progress_cache() {
+        let pkg_id = package_id("pkg", "pkg");
+        let mut state = DownloadState::new(crate::core::SessionMeta::default());
+        state.packages.insert(
+            pkg_id,
+            PackageState {
+                id: pkg_id,
+                key: crate::core::PackageKey::new("pkg"),
+                display_name: "pkg".to_string(),
+                file_ids: vec!["a.bin".into(), "b.bin".into()],
+                progress: PackageProgressState::default(),
+                error: None,
+            },
+        );
+        state.files.insert(
+            "a.bin".into(),
+            FileState {
+                id: "a.bin".into(),
+                package_id: pkg_id,
+                source_url: "pkg".to_string(),
+                path: "a.bin".to_string(),
+                size: 10,
+                lifecycle: FileLifecycle::Complete,
+                progress: FileProgressState {
+                    visible_completed_bytes: 10,
+                    ..FileProgressState::default()
+                },
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+        state.files.insert(
+            "b.bin".into(),
+            FileState {
+                id: "b.bin".into(),
+                package_id: pkg_id,
+                source_url: "pkg".to_string(),
+                path: "b.bin".to_string(),
+                size: 20,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState::default(),
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+
+        rebuild_derived_state(&mut state);
+
+        assert_eq!(
+            state.packages[&pkg_id].progress,
+            PackageProgressState {
+                queued: 1,
+                complete: 1,
+                ..PackageProgressState::default()
+            }
+        );
+        assert_eq!(state.packages[&pkg_id].status(), PackageStatus::Partial);
     }
 
     #[test]
@@ -1314,7 +1449,10 @@ mod tests {
                 ),
                 display_name: "Folder".to_string(),
                 file_ids: vec!["a.bin".to_string().into()],
-                status: PackageStatus::Queued,
+                progress: PackageProgressState {
+                    queued: 1,
+                    ..PackageProgressState::default()
+                },
                 error: None,
             },
         );
@@ -1378,7 +1516,10 @@ mod tests {
                 ),
                 display_name: "Package A".to_string(),
                 file_ids: vec!["a.bin".to_string().into()],
-                status: PackageStatus::Queued,
+                progress: PackageProgressState {
+                    queued: 1,
+                    ..PackageProgressState::default()
+                },
                 error: None,
             },
         );
@@ -1448,7 +1589,10 @@ mod tests {
                 ),
                 display_name: "https://mega.nz/folder/test".to_string(),
                 file_ids: vec!["a.bin".to_string().into()],
-                status: PackageStatus::Queued,
+                progress: PackageProgressState {
+                    queued: 1,
+                    ..PackageProgressState::default()
+                },
                 error: None,
             },
         );
@@ -1539,7 +1683,11 @@ mod tests {
         let pkg_b = package_id("pkg-b", "url-b");
         let pkg_c = package_id("pkg-c", "url-c");
         let mut state = DownloadState::new(crate::core::SessionMeta::default());
-        state.url_order = vec!["url-a".to_string(), "url-b".to_string(), "url-c".to_string()];
+        state.url_order = vec![
+            "url-a".to_string(),
+            "url-b".to_string(),
+            "url-c".to_string(),
+        ];
         for (pkg_id, url, file_id) in [
             (pkg_a, "url-a", "a.bin"),
             (pkg_b, "url-b", "b.bin"),
@@ -1552,7 +1700,10 @@ mod tests {
                     key: crate::core::PackageKey::new(url.to_string()),
                     display_name: url.to_string(),
                     file_ids: vec![file_id.to_string().into()],
-                    status: PackageStatus::Pending,
+                    progress: PackageProgressState {
+                        queued: 1,
+                        ..PackageProgressState::default()
+                    },
                     error: None,
                 },
             );
@@ -1608,7 +1759,10 @@ mod tests {
                 key: crate::core::PackageKey::new("pkg"),
                 display_name: "pkg".to_string(),
                 file_ids: vec!["b.bin".into(), "a.bin".into()],
-                status: PackageStatus::Pending,
+                progress: PackageProgressState {
+                    queued: 2,
+                    ..PackageProgressState::default()
+                },
                 error: None,
             },
         );
@@ -1663,7 +1817,10 @@ mod tests {
                 key: crate::core::PackageKey::new("pkg"),
                 display_name: "pkg".to_string(),
                 file_ids: vec![package_file_id],
-                status: PackageStatus::Pending,
+                progress: PackageProgressState {
+                    queued: 1,
+                    ..PackageProgressState::default()
+                },
                 error: None,
             },
         );
@@ -1998,7 +2155,7 @@ mod tests {
             },
         );
         assert_eq!(
-            state.packages[&package_id("pkg", "pkg")].status,
+            state.packages[&package_id("pkg", "pkg")].status(),
             PackageStatus::Partial
         );
     }
