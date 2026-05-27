@@ -522,6 +522,7 @@ impl DownloadState {
         }
         self.packages.swap_indices(index, target);
         self.reorder_files_by_package_order();
+        self.reorder_urls_by_package_order();
         true
     }
 
@@ -645,5 +646,35 @@ impl DownloadState {
             }
         }
         self.files = reordered;
+    }
+
+    fn reorder_urls_by_package_order(&mut self) {
+        let mut grouped =
+            HashMap::<PackageId, Vec<UrlId>, FxBuildHasher>::with_hasher(FxBuildHasher::default());
+        let mut unresolved = Vec::new();
+        for url in std::mem::take(&mut self.url_order) {
+            let Some(package_id) = self
+                .files
+                .values()
+                .find(|file| file.source_url == url)
+                .map(|file| file.package_id)
+            else {
+                unresolved.push(url);
+                continue;
+            };
+            grouped.entry(package_id).or_default().push(url);
+        }
+
+        let mut reordered = Vec::with_capacity(grouped.len() + unresolved.len());
+        for package_id in self.packages.keys().copied() {
+            if let Some(urls) = grouped.remove(&package_id) {
+                reordered.extend(urls);
+            }
+        }
+        for urls in grouped.into_values() {
+            reordered.extend(urls);
+        }
+        reordered.extend(unresolved);
+        self.url_order = reordered;
     }
 }

@@ -1050,6 +1050,42 @@ mod tests {
         PackageId::parse_or_key(raw, &crate::core::PackageKey::new(source_url))
     }
 
+    fn insert_package(
+        state: &mut DownloadState,
+        package_id: PackageId,
+        source_url: &str,
+        files: &[(&str, u64)],
+    ) {
+        state.packages.insert(
+            package_id,
+            PackageState {
+                id: package_id,
+                key: crate::core::PackageKey::new(source_url.to_string()),
+                display_name: source_url.to_string(),
+                progress: PackageProgressState {
+                    queued: files.len(),
+                    ..PackageProgressState::default()
+                },
+                error: None,
+            },
+        );
+        for (file_id, size) in files {
+            state.files.insert(
+                (*file_id).to_string().into(),
+                FileState {
+                    id: (*file_id).to_string().into(),
+                    package_id,
+                    source_url: source_url.to_string(),
+                    path: (*file_id).to_string(),
+                    size: *size,
+                    lifecycle: FileLifecycle::Queued,
+                    progress: FileProgressState::default(),
+                    accounting: FileAccounting::CurrentRun,
+                },
+            );
+        }
+    }
+
     fn sample_state() -> DownloadState {
         let pkg_id = package_id("pkg", "pkg");
         let mut state = DownloadState::new(crate::core::SessionMeta::default());
@@ -1757,6 +1793,177 @@ mod tests {
                 .map(|file| file.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["b.bin", "a.bin"]
+        );
+    }
+
+    #[test]
+    fn package_move_round_trip_updates_url_order_to_match_package_order() {
+        let pkg_a = package_id("pkg-a", "url-a");
+        let pkg_b = package_id("pkg-b", "url-b");
+        let mut state = DownloadState::new(crate::core::SessionMeta::default());
+        state.url_order = vec!["url-a".to_string(), "url-b".to_string()];
+        insert_package(&mut state, pkg_a, "url-a", &[("a.bin", 10)]);
+        insert_package(&mut state, pkg_b, "url-b", &[("b.bin", 20)]);
+
+        reduce(
+            &mut state,
+            CoreEvent::PackageMoveRequested {
+                package_id: pkg_b,
+                delta: -1,
+            },
+        );
+
+        assert_eq!(
+            state
+                .packages
+                .values()
+                .map(|package| package.display_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["url-b", "url-a"]
+        );
+        let snapshot = snapshot_from_state(&state);
+        assert_eq!(
+            snapshot
+                .urls
+                .iter()
+                .map(|entry| entry.url.as_str())
+                .collect::<Vec<_>>(),
+            vec!["url-b", "url-a"]
+        );
+        let restart = crate::core::build_restart_snapshot(&snapshot);
+        assert_eq!(
+            restart.state.url_order,
+            vec!["url-b".to_string(), "url-a".to_string()]
+        );
+        assert_eq!(
+            restart
+                .state
+                .packages
+                .values()
+                .map(|package| package.display_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["url-b", "url-a"]
+        );
+        assert_eq!(
+            restart.state.package_file_ids(&pkg_b),
+            vec!["b.bin".to_string()]
+        );
+        assert_eq!(
+            restart.state.package_file_ids(&pkg_a),
+            vec!["a.bin".to_string()]
+        );
+    }
+
+    #[test]
+    fn file_move_round_trip_preserves_package_file_order() {
+        let pkg_id = package_id("pkg", "url");
+        let mut state = DownloadState::new(crate::core::SessionMeta::default());
+        state.url_order = vec!["url".to_string()];
+        insert_package(
+            &mut state,
+            pkg_id,
+            "url",
+            &[("a.bin", 10), ("b.bin", 20), ("c.bin", 30)],
+        );
+
+        reduce(
+            &mut state,
+            CoreEvent::FileMoveRequested {
+                file_id: "c.bin".to_string().into(),
+                delta: -2,
+            },
+        );
+
+        assert_eq!(
+            state.package_file_ids(&pkg_id),
+            vec![
+                "c.bin".to_string(),
+                "a.bin".to_string(),
+                "b.bin".to_string()
+            ]
+        );
+        let snapshot = snapshot_from_state(&state);
+        assert_eq!(
+            snapshot.packages[0]
+                .files
+                .iter()
+                .map(|file| file.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c.bin", "a.bin", "b.bin"]
+        );
+        let restart = crate::core::build_restart_snapshot(&snapshot);
+        assert_eq!(
+            restart.state.package_file_ids(&pkg_id),
+            vec![
+                "c.bin".to_string(),
+                "a.bin".to_string(),
+                "b.bin".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn deleting_reordered_package_preserves_remaining_url_order() {
+        let pkg_a = package_id("pkg-a", "url-a");
+        let pkg_b = package_id("pkg-b", "url-b");
+        let pkg_c = package_id("pkg-c", "url-c");
+        let mut state = DownloadState::new(crate::core::SessionMeta::default());
+        state.url_order = vec![
+            "url-a".to_string(),
+            "url-b".to_string(),
+            "url-c".to_string(),
+        ];
+        insert_package(
+            &mut state,
+            pkg_a,
+            "url-a",
+            &[("a-1.bin", 10), ("a-2.bin", 11)],
+        );
+        insert_package(&mut state, pkg_b, "url-b", &[("b.bin", 20)]);
+        insert_package(&mut state, pkg_c, "url-c", &[("c.bin", 30)]);
+
+        reduce(
+            &mut state,
+            CoreEvent::PackageMoveRequested {
+                package_id: pkg_c,
+                delta: -2,
+            },
+        );
+
+        let effects = reduce(&mut state, CoreEvent::PackageDeleted { package_id: pkg_a });
+
+        assert_eq!(
+            state
+                .packages
+                .values()
+                .map(|package| package.display_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["url-c", "url-b"]
+        );
+        assert_eq!(
+            state
+                .files
+                .keys()
+                .map(|file_id| file_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c.bin", "b.bin"]
+        );
+        assert_eq!(
+            state.url_order,
+            vec!["url-c".to_string(), "url-b".to_string()]
+        );
+        let saved = effects.iter().find_map(|effect| match effect {
+            CoreEffect::PersistSession(snapshot) => Some(snapshot),
+            _ => None,
+        });
+        assert_eq!(
+            saved
+                .expect("delete should persist session")
+                .urls
+                .iter()
+                .map(|url| url.url.as_str())
+                .collect::<Vec<_>>(),
+            vec!["url-c", "url-b"]
         );
     }
 

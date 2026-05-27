@@ -1490,6 +1490,37 @@ fn deferred_core_persistence_materializes_before_session_mutation() {
 }
 
 #[test]
+fn url_level_error_survives_later_core_persist() {
+    let mut app = test_app();
+    let errored_url = "https://mega.nz/folder/error".to_string();
+    let other_url = "https://mega.nz/folder/other".to_string();
+
+    app.submit_url(errored_url.clone());
+    app.handle_download_event(crate::tui::event::DownloadEvent::ScopeError {
+        scope: errored_url.clone(),
+        error: "bad folder".to_string(),
+    });
+
+    assert_eq!(
+        app.session
+            .as_ref()
+            .and_then(|session| session.urls.iter().find(|entry| entry.url == errored_url))
+            .and_then(|entry| entry.error.as_deref()),
+        Some("bad folder")
+    );
+
+    app.submit_url(other_url);
+
+    assert_eq!(
+        app.session
+            .as_ref()
+            .and_then(|session| session.urls.iter().find(|entry| entry.url == errored_url))
+            .and_then(|entry| entry.error.as_deref()),
+        Some("bad folder")
+    );
+}
+
+#[test]
 fn deferred_core_persistence_materializes_once_for_nested_batches() {
     let mut app = test_app();
     crate::core::reducer::reset_snapshot_from_state_call_count();
@@ -1593,6 +1624,24 @@ fn sync_visible_files_reuses_overlay_sort_keys_for_unchanged_rows() {
     );
     crate::tui::visible::reset_build_file_sort_key_call_count();
 
+    app.sync_visible_files();
+
+    assert_eq!(crate::tui::visible::build_file_sort_key_call_count(), 0);
+}
+
+#[test]
+fn sync_visible_files_reuses_core_sort_keys_for_unchanged_rows() {
+    let mut app = test_app();
+    resolve_package(
+        &mut app,
+        "https://mega.nz/folder/root",
+        &[("episode-1.mkv", 128)],
+    );
+    crate::tui::visible::reset_build_file_sort_key_call_count();
+
+    let _ = app.mutate_session_and_save(|session| {
+        session.status = SessionRunStatus::Paused;
+    });
     app.sync_visible_files();
 
     assert_eq!(crate::tui::visible::build_file_sort_key_call_count(), 0);
