@@ -142,13 +142,13 @@ async fn run_interactive_tui_loop(
             dashboard_dirty = false;
         }
 
-        if download_state_dirty {
-            continue;
-        }
-
         if app.should_quit {
             app.sync_session_for_shutdown();
             break;
+        }
+
+        if download_state_dirty {
+            continue;
         }
     }
 
