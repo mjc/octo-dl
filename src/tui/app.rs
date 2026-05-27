@@ -84,6 +84,9 @@ struct SessionPersistenceDeferralGuard {
 
 impl VisibleSyncDeferralGuard {
     fn new(app: &mut App) -> Self {
+        if app.visible_sync_defer_depth == 0 {
+            app.pending_visible_selection = Some(app.selected_row());
+        }
         app.visible_sync_defer_depth += 1;
         Self {
             app: NonNull::from(app),
@@ -113,8 +116,10 @@ impl Drop for VisibleSyncDeferralGuard {
         let should_flush = app.visible_sync_pending;
         app.visible_sync_pending = false;
         if should_flush && !std::thread::panicking() {
-            let selected_row_identity = app.selected_row();
+            let selected_row_identity = app.pending_visible_selection.take().flatten();
             app.sync_visible_files_preserving_now(selected_row_identity);
+        } else {
+            app.pending_visible_selection = None;
         }
     }
 }
@@ -227,6 +232,7 @@ pub struct App {
     pub last_tick: Instant,
     pub(crate) visible_sync_defer_depth: usize,
     pub(crate) visible_sync_pending: bool,
+    pending_visible_selection: Option<Option<visible::TuiRow>>,
     session_persist_defer_depth: usize,
     pending_session_persistence: Option<PendingSessionPersistence>,
     #[cfg(test)]

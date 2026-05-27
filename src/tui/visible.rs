@@ -10,6 +10,8 @@ use super::app::App;
 use crate::core::{DownloadState, FileId, PackageId};
 use crate::tui::app::{FileEntry, FileUiState, SortState, TransientRow};
 
+pub(crate) use rows::CachedFileSortKey;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TuiRow {
     Package(PackageId),
@@ -22,6 +24,7 @@ pub(crate) enum TuiRow {
 pub(super) fn visible_rows(app: &App) -> Vec<TuiRow> {
     rows::visible_rows_for(
         &app.files,
+        &app.file_ui,
         &app.core_state,
         &app.overlay_files,
         &app.expanded_packages,
