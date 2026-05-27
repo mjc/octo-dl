@@ -160,7 +160,7 @@ impl FileSystem for TokioFileSystem {
 
     async fn sync_file(&self, path: &Path) -> std::io::Result<()> {
         let file = tokio::fs::OpenOptions::new().read(true).open(path).await?;
-        file.sync_all().await
+        file.sync_data().await
     }
 
     async fn remove_file(&self, path: &Path) -> std::io::Result<()> {

@@ -646,7 +646,7 @@ async fn sync_and_fingerprint_part(path: &Path) -> Option<FileFingerprint> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let file = std::fs::OpenOptions::new().read(true).open(&path).ok()?;
-        file.sync_all().ok()?;
+        file.sync_data().ok()?;
         let metadata = file.metadata().ok()?;
         Some(FileFingerprint::from_metadata(&metadata))
     })
