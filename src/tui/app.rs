@@ -33,7 +33,9 @@ use ratatui::widgets::ListState;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::{DownloadState, FileId, PackageId, ProgressDelta, SessionSnapshot};
+use crate::core::{
+    DownloadState, FileId, PackageId, ProgressDelta, SavedMegaSession, SessionSnapshot,
+};
 use crate::tui::dashboard::DashboardUiMode;
 
 use self::persistence::SessionPersistence;
@@ -148,6 +150,10 @@ pub struct App {
     // Auth
     pub login: LoginState,
     pub authenticated: bool,
+    pub(crate) saved_mega_session: Option<SavedMegaSession>,
+    pub(crate) deferred_login_fallback: Option<NoCredentialsFallback>,
+    pub(crate) deferred_login_deadline: Option<Instant>,
+    pub(crate) last_user_activity: Instant,
     // URL input (top bar)
     pub url_input: String,
     pub url_input_cursor: usize,

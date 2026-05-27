@@ -14,6 +14,10 @@ use super::event::DownloadEvent;
 use super::input::{handle_input, handle_paste, request_quit};
 use super::terminal_support::{TerminalGuard, TerminalPanicHookGuard, terminal_input_channel};
 
+fn should_draw_after_tick(app: &App, dashboard_dirty: bool) -> bool {
+    dashboard_dirty || app.has_active_dashboard_transfer()
+}
+
 pub async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
@@ -85,7 +89,7 @@ async fn run_interactive_tui_loop(
             needs_draw = false;
             if auto_login_after_first_draw {
                 auto_login_after_first_draw = false;
-                app.auto_login(NoCredentialsFallback::ShowPopup);
+                app.schedule_auto_login(NoCredentialsFallback::ShowPopup);
             }
         }
 
@@ -97,6 +101,7 @@ async fn run_interactive_tui_loop(
                 publish_dashboard_now = true;
             }
             Some(event) = input_rx.recv() => {
+                app.note_user_activity();
                 match event {
                     Event::Key(key) => handle_input(app, key),
                     Event::Paste(text) => handle_paste(app, &text),
@@ -113,6 +118,7 @@ async fn run_interactive_tui_loop(
                 dashboard_dirty = true;
             }
             Some(action) = action_rx.recv() => {
+                app.note_user_activity();
                 app.handle_ui_action(action);
                 let _ = app.drain_ui_actions(action_rx);
                 needs_draw = true;
@@ -130,9 +136,9 @@ async fn run_interactive_tui_loop(
                     pid,
                     publish_active_transfer_ticks,
                 );
-                needs_draw = true;
+                needs_draw |= should_draw_after_tick(app, dashboard_dirty);
                 download_state_dirty = false;
-                publish_dashboard_now = true;
+                publish_dashboard_now |= dashboard_dirty;
             }
         }
 
@@ -159,6 +165,7 @@ async fn run_interactive_tui_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::app::{FileEntry, FileStatus};
     use crate::tui::terminal_support::TerminalPanicHookGuard;
     use parking_lot::Mutex;
     use std::sync::Arc;
@@ -213,5 +220,26 @@ mod tests {
 
         let events = events.lock();
         assert_eq!(events.as_slice(), ["previous"]);
+    }
+
+    #[test]
+    fn tick_draw_stays_idle_without_dirty_state_or_active_transfer() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let app = App::new(9723, tx, true);
+        assert!(!should_draw_after_tick(&app, false));
+    }
+
+    #[test]
+    fn tick_draw_continues_for_active_transfer_without_dashboard_publish() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx, true);
+        app.files.push(FileEntry {
+            id: "file.bin".into(),
+            name: "file.bin".to_string(),
+            size: 100,
+            downloaded: 1,
+            status: FileStatus::Downloading,
+        });
+        assert!(should_draw_after_tick(&app, false));
     }
 }

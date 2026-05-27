@@ -1,7 +1,6 @@
 #[cfg(test)]
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
 use std::sync::OnceLock;
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -70,6 +69,12 @@ pub struct SavedCredentials {
     pub email: String,
     pub password: String,
     pub mfa: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedMegaSession {
+    pub email: String,
+    pub session: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -369,13 +374,7 @@ pub fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), String> {
     Ok(())
 }
 
-fn derive_machine_key() -> [u8; 16] {
-    let hostname = hostname::get().map_or_else(
-        |_| "unknown-host".to_string(),
-        |h| h.to_string_lossy().into_owned(),
-    );
-    let username = whoami::username();
-
+fn derive_machine_key_from_parts(hostname: &str, username: &str) -> [u8; 16] {
     let mut hasher = Sha256::new();
     hasher.update(hostname.as_bytes());
     hasher.update(b":");
@@ -386,6 +385,22 @@ fn derive_machine_key() -> [u8; 16] {
     let mut key = [0u8; 16];
     key.copy_from_slice(&hash[..16]);
     key
+}
+
+fn derive_machine_key() -> [u8; 16] {
+    static MACHINE_KEY: OnceLock<[u8; 16]> = OnceLock::new();
+    if let Some(key) = MACHINE_KEY.get() {
+        return *key;
+    }
+
+    match hostname::get() {
+        Ok(hostname) => {
+            let hostname = hostname.to_string_lossy().into_owned();
+            let username = whoami::username();
+            *MACHINE_KEY.get_or_init(|| derive_machine_key_from_parts(&hostname, &username))
+        }
+        Err(_) => derive_machine_key_from_parts("unknown-host", &whoami::username()),
+    }
 }
 
 #[must_use]
@@ -444,6 +459,24 @@ impl SavedCredentials {
     }
 }
 
+impl SavedMegaSession {
+    #[must_use]
+    pub fn encrypt(email: &str, session: &str) -> Self {
+        Self {
+            email: encrypt_credential(email),
+            session: encrypt_credential(session),
+        }
+    }
+
+    #[must_use]
+    pub fn decrypt(&self) -> Option<(String, String)> {
+        Some((
+            decrypt_credential(&self.email)?,
+            decrypt_credential(&self.session)?,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +489,14 @@ mod tests {
         assert_eq!(email, "test@example.com");
         assert_eq!(password, "hunter2");
         assert_eq!(mfa.as_deref(), Some("123456"));
+    }
+
+    #[test]
+    fn mega_session_round_trip() {
+        let saved = SavedMegaSession::encrypt("test@example.com", "serialized-session");
+        let (email, session) = saved.decrypt().unwrap();
+        assert_eq!(email, "test@example.com");
+        assert_eq!(session, "serialized-session");
     }
 
     #[test]

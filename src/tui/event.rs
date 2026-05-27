@@ -123,6 +123,8 @@ pub enum DownloadEvent {
     LoginResult {
         success: bool,
         error: Option<String>,
+        saved_session: Option<crate::core::SavedMegaSession>,
+        clear_saved_session: bool,
     },
     FilesCollected {
         total: usize,

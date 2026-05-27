@@ -1,8 +1,10 @@
 use super::*;
 use crate::ServiceConfig;
+use crate::core::SavedMegaSession;
 use crate::test_support::{CurrentDirGuard, StateDirectoryGuard};
 use std::fs;
 use std::io;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use tempfile::tempdir;
@@ -20,6 +22,7 @@ fn apply_service_config_reports_download_directory_path() {
             email: String::new(),
             password: String::new(),
             mfa: String::new(),
+            saved_session: None,
         },
         api: crate::ApiConfig::default(),
         download: crate::DownloadConfig {
@@ -76,6 +79,7 @@ fn persist_login_credentials_creates_default_config_file() {
     assert_eq!(email, "user@example.com");
     assert_eq!(password, "super-secret");
     assert!(mfa.is_empty());
+    assert!(saved.credentials.saved_session.is_none());
 }
 
 #[test]
@@ -90,6 +94,7 @@ fn new_without_explicit_config_loads_default_saved_credentials() {
         email: "saved@example.com".to_string(),
         password: "saved-secret".to_string(),
         mfa: "654321".to_string(),
+        saved_session: None,
     };
     config.download.path = Some(dir.path().join("downloads").to_string_lossy().into_owned());
     config.credentials.encrypt_in_place();
@@ -127,6 +132,99 @@ fn interactive_startup_defers_auto_login_until_terminal_draws() {
 }
 
 #[test]
+fn persist_login_credentials_preserves_existing_credentials_when_only_session_changes() {
+    let dir = tempdir().expect("temp dir should exist");
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let _cwd = CurrentDirGuard::set(dir.path());
+    let config_path = dir.path().join("config.toml");
+    let mut config = ServiceConfig::load_or_create(&config_path).expect("config should exist");
+    config.credentials = crate::ServiceCredentials {
+        encrypted: false,
+        email: "saved@example.com".to_string(),
+        password: "saved-secret".to_string(),
+        mfa: String::new(),
+        saved_session: None,
+    };
+    config.credentials.encrypt_in_place();
+    config.save(&config_path).expect("config should save");
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let (mut app, _host, _port) =
+        App::new_with_optional_service_config(tx, true, None, 9723).expect("app should initialize");
+    app.saved_mega_session = Some(SavedMegaSession::encrypt(
+        "saved@example.com",
+        "serialized-session",
+    ));
+
+    app.persist_login_credentials_to_config()
+        .expect("session should persist");
+
+    let saved = ServiceConfig::load(&config_path).expect("config should load");
+    let (email, password, _mfa) = saved
+        .credentials
+        .decrypt_if_needed()
+        .expect("saved credentials should decrypt");
+    assert_eq!(email, "saved@example.com");
+    assert_eq!(password, "saved-secret");
+    let (session_email, session) = saved
+        .credentials
+        .saved_session
+        .expect("saved session should exist")
+        .decrypt()
+        .expect("saved session should decrypt");
+    assert_eq!(session_email, "saved@example.com");
+    assert_eq!(session, "serialized-session");
+}
+
+#[test]
+fn new_without_explicit_config_loads_saved_mega_session() {
+    let dir = tempdir().expect("temp dir should exist");
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let _cwd = CurrentDirGuard::set(dir.path());
+    let config_path = dir.path().join("config.toml");
+    let mut config = ServiceConfig::load_or_create(&config_path).expect("config should exist");
+    config.credentials = crate::ServiceCredentials {
+        encrypted: false,
+        email: "saved@example.com".to_string(),
+        password: "saved-secret".to_string(),
+        mfa: String::new(),
+        saved_session: Some(SavedMegaSession::encrypt(
+            "saved@example.com",
+            "serialized-session",
+        )),
+    };
+    config.credentials.encrypt_in_place();
+    config.save(&config_path).expect("config should save");
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let (app, _host, _port) =
+        App::new_with_optional_service_config(tx, true, None, 9723).expect("app should initialize");
+
+    let (session_email, session) = app
+        .saved_mega_session
+        .expect("saved session should load")
+        .decrypt()
+        .expect("saved session should decrypt");
+    assert_eq!(session_email, "saved@example.com");
+    assert_eq!(session, "serialized-session");
+}
+
+#[test]
+fn deferred_auto_login_waits_for_idle_before_showing_popup() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut app = App::new(9723, tx, true);
+
+    app.schedule_auto_login(NoCredentialsFallback::ShowPopup);
+    assert_eq!(app.popup, Popup::None);
+    assert!(!app.poll_deferred_auto_login());
+
+    app.deferred_login_deadline = Some(Instant::now() - Duration::from_millis(1));
+
+    assert!(app.poll_deferred_auto_login());
+    assert_eq!(app.popup, Popup::Login);
+}
+
+#[test]
 fn disabled_shared_state_skips_initial_dashboard_snapshot() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let app = App::new(9723, tx, true);
@@ -156,6 +254,7 @@ fn implicit_cwd_template_falls_back_to_state_config_credentials() {
         email: "saved@example.com".to_string(),
         password: "saved-secret".to_string(),
         mfa: "654321".to_string(),
+        saved_session: None,
     };
     state_config.credentials.encrypt_in_place();
     state_config.api.api_key = Some("state-api-key".to_string());
