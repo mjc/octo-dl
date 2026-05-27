@@ -14,6 +14,11 @@ path = "src/lib.rs"
 name = "octo"
 path = "src/bin/octo.rs"
 
+[[bin]]
+name = "octo-fake-mega-bench"
+path = "src/bin/octo-fake-mega-bench.rs"
+required-features = ["tui"]
+
 [features]
 default = ["cli", "tui"]
 cli = ["dep:indicatif", "dep:console"]
@@ -35,6 +40,7 @@ base64 = "0.22"
 aes = "0.8"
 aes-gcm = "0.10"
 cbc = "0.1"
+ctr = "0.9"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 toml = "0.8"
