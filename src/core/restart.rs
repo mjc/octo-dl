@@ -3,7 +3,8 @@ use std::path::Path;
 
 use crate::core::model::{
     DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState,
-    FileStateIndex, PackageId, PackageProgressState, PackageState, SessionMeta, UrlId,
+    FileStateIndex, PackageId, PackageProgressState, PackageState, PackageStateIndex, SessionMeta,
+    UrlId,
 };
 use crate::core::session::SessionSnapshot;
 use chrono::Utc;
@@ -137,7 +138,7 @@ pub fn reconcile_restart(
         ),
     });
 
-    let mut packages = IndexMap::<PackageId, PackageState>::new();
+    let mut packages = PackageStateIndex::default();
     let mut files = FileStateIndex::default();
     let mut resume_file_ids = Vec::new();
     let mut preexisting_complete_file_ids = Vec::new();

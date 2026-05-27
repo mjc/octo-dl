@@ -1469,7 +1469,7 @@ fn binary_core_package_rows(app: &App) -> Vec<BinaryCorePackageRowRef<'_>> {
         .core_state
         .packages
         .values()
-        .map(|_| Vec::new())
+        .map(|package| Vec::with_capacity(package.progress.file_count()))
         .collect::<Vec<Vec<&FileState>>>();
     for file in app.core_state.files.values() {
         if let Some((index, _, _)) = app.core_state.packages.get_full(&file.package_id) {
@@ -1660,9 +1660,13 @@ impl App {
             let mut package_files = self
                 .core_state
                 .packages
-                .keys()
-                .copied()
-                .map(|package_id| (package_id, Vec::new()))
+                .values()
+                .map(|package| {
+                    (
+                        package.id,
+                        Vec::with_capacity(package.progress.file_count()),
+                    )
+                })
                 .collect::<IndexMap<_, Vec<&crate::core::FileState>>>();
             for file in self.core_state.files.values() {
                 if let Some(files) = package_files.get_mut(&file.package_id) {
