@@ -10,6 +10,10 @@ const fn default_download_path() -> Option<String> {
     None
 }
 
+const fn default_mega_chunks_per_request() -> usize {
+    2
+}
+
 /// Configuration for download operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DownloadConfig {
@@ -18,6 +22,9 @@ pub struct DownloadConfig {
     pub path: Option<String>,
     /// Number of parallel chunks per file download.
     pub chunks_per_file: usize,
+    /// Maximum adjacent MEGA chunks fetched per HTTP request.
+    #[serde(default = "default_mega_chunks_per_request")]
+    pub mega_chunks_per_request: usize,
     /// Number of concurrent file downloads.
     pub concurrent_files: usize,
     /// Whether to overwrite existing files.
@@ -31,6 +38,7 @@ impl Default for DownloadConfig {
         Self {
             path: None,
             chunks_per_file: 2,
+            mega_chunks_per_request: default_mega_chunks_per_request(),
             concurrent_files: 4,
             force_overwrite: false,
             cleanup_on_error: false,
@@ -49,6 +57,13 @@ impl DownloadConfig {
     #[must_use]
     pub const fn with_chunks_per_file(mut self, chunks: usize) -> Self {
         self.chunks_per_file = chunks;
+        self
+    }
+
+    /// Sets the maximum adjacent MEGA chunks fetched per request.
+    #[must_use]
+    pub const fn with_mega_chunks_per_request(mut self, chunks: usize) -> Self {
+        self.mega_chunks_per_request = chunks;
         self
     }
 
@@ -82,6 +97,7 @@ mod tests {
     fn default_config() {
         let config = DownloadConfig::default();
         assert_eq!(config.chunks_per_file, 2);
+        assert_eq!(config.mega_chunks_per_request, 2);
         assert_eq!(config.concurrent_files, 4);
         assert!(!config.force_overwrite);
         assert!(!config.cleanup_on_error);
@@ -91,11 +107,13 @@ mod tests {
     fn builder_pattern() {
         let config = DownloadConfig::new()
             .with_chunks_per_file(8)
+            .with_mega_chunks_per_request(3)
             .with_concurrent_files(2)
             .with_force_overwrite(true)
             .with_cleanup_on_error(true);
 
         assert_eq!(config.chunks_per_file, 8);
+        assert_eq!(config.mega_chunks_per_request, 3);
         assert_eq!(config.concurrent_files, 2);
         assert!(config.force_overwrite);
         assert!(config.cleanup_on_error);
@@ -107,6 +125,10 @@ mod tests {
         let toml_str = toml::to_string(&config).unwrap();
         let deserialized: DownloadConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(deserialized.chunks_per_file, config.chunks_per_file);
+        assert_eq!(
+            deserialized.mega_chunks_per_request,
+            config.mega_chunks_per_request
+        );
         assert_eq!(deserialized.concurrent_files, config.concurrent_files);
         assert_eq!(deserialized.force_overwrite, config.force_overwrite);
         assert_eq!(deserialized.cleanup_on_error, config.cleanup_on_error);
@@ -310,6 +332,7 @@ mod service_config_tests {
         let loaded: ServiceConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(loaded.credentials.email, "user@example.com");
         assert_eq!(loaded.api.port, 9723);
+        assert_eq!(loaded.download.mega_chunks_per_request, 2);
         assert_eq!(loaded.download.concurrent_files, 4);
     }
 
@@ -369,6 +392,7 @@ password = "pw"
         let config: ServiceConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.api.host, "127.0.0.1");
         assert_eq!(config.api.port, 9723);
+        assert_eq!(config.download.mega_chunks_per_request, 2);
         assert_eq!(config.download.concurrent_files, 4);
         assert!(!config.credentials.encrypted);
         assert!(config.credentials.mfa.is_empty());

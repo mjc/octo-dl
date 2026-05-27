@@ -71,6 +71,10 @@ pub enum DownloadEvent {
         size: u64,
         attempt_id: u64,
     },
+    ResumeValidationStarted {
+        id: FileId,
+        attempt_id: u64,
+    },
     Progress {
         id: FileId,
         delta: ProgressDelta,
@@ -165,12 +169,24 @@ impl TuiProgress {
 
 impl DownloadProgress for TuiProgress {
     fn on_file_start(&self, name: &str, size: u64) {
-        let _ = self.intern_id(name);
+        let id = self.intern_id(name);
         let _ = self.tx.send(DownloadEvent::FileStart {
-            id: FileId::from(name),
+            id,
             size,
             attempt_id: 0,
         });
+    }
+
+    fn on_resume_validation_start(&self, name: &str) {
+        let id = self.intern_id(name);
+        let _ = self.tx.send(DownloadEvent::ResumeValidationStarted { id, attempt_id: 0 });
+    }
+
+    fn on_resume_validation_chunk(&self, name: &str, bytes_delta: u64) {
+        let id = self.intern_id(name);
+        let _ = self
+            .tx
+            .send(DownloadEvent::VerificationProgress { id, bytes_delta });
     }
 
     fn on_progress(&self, name: &str, delta: ProgressDelta) {

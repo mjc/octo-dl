@@ -16,7 +16,26 @@ use super::{App, DownloadEvent, FileEntry, FileStatus, UiAction};
 const MAX_DOWNLOAD_EVENTS_PER_TICK: usize = 256;
 const MAX_TOKEN_MESSAGES_PER_TICK: usize = 256;
 
+fn progress_summary_pct(
+    files_total: usize,
+    total_downloaded: u64,
+    total_size: u64,
+    total_network_downloaded: u64,
+) -> Option<u64> {
+    if files_total == 0 || total_size == 0 || total_network_downloaded == 0 {
+        return None;
+    }
+    let pct = total_downloaded * 100 / total_size;
+    (pct > 0 && pct < 100).then_some(pct)
+}
+
 impl App {
+    fn begin_headless_shutdown(&mut self) -> bool {
+        self.drain_token_messages();
+        self.pause_downloads();
+        !self.cancellation_tokens.is_empty()
+    }
+
     fn flush_pending_progress_events(
         &mut self,
         pending_progress: &mut Vec<(FileId, crate::core::ProgressDelta, u64)>,
@@ -188,6 +207,9 @@ impl App {
             } => {
                 self.handle_file_start_event(id, size, attempt_id);
             }
+            DownloadEvent::ResumeValidationStarted { id, attempt_id } => {
+                self.handle_resume_validation_started_event(id, attempt_id);
+            }
             DownloadEvent::Progress {
                 id,
                 delta,
@@ -306,13 +328,13 @@ impl App {
 
     pub(crate) fn log_progress_summary(&mut self) {
         self.update_speeds();
-        if self.files_total == 0 {
+        let Some(pct) = progress_summary_pct(
+            self.files_total,
+            self.total_downloaded,
+            self.total_size,
+            self.total_network_downloaded,
+        ) else {
             return;
-        }
-        let pct = if self.total_size > 0 {
-            self.total_downloaded * 100 / self.total_size
-        } else {
-            0
         };
         if pct > 0 && pct < 100 {
             log::info!(
@@ -412,10 +434,17 @@ impl App {
         publish_interval.tick().await;
 
         tokio::pin!(shutdown);
+        let mut shutting_down = false;
 
         loop {
             tokio::select! {
-                () = &mut shutdown => break,
+                () = &mut shutdown, if !shutting_down => {
+                    shutting_down = true;
+                    log::info!("Shutdown requested; cancelling active downloads");
+                    if !self.begin_headless_shutdown() {
+                        break;
+                    }
+                },
                 event = download_rx.recv() => {
                     if let Some(evt) = event {
                         self.handle_download_event(evt);
@@ -450,6 +479,9 @@ impl App {
                 self.drain_download_events(download_rx) | self.drain_ui_actions(action_rx);
             self.drain_token_messages();
             self.poll_session_persistence();
+            if shutting_down && self.cancellation_tokens.is_empty() {
+                break;
+            }
             if dashboard_dirty && let Some(state_tx) = state_tx {
                 self.mark_dashboard_dirty();
                 let _ = self.publish_dashboard_snapshot_if_observed(
@@ -466,7 +498,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::StateDirectoryGuard;
+    use crate::{
+        core::{CoreEvent, PackageKey, ResolvedFile, ResolvedPackage},
+        test_support::{StateDirectoryGuard, package_id},
+    };
     use crate::tui::dashboard::DownloadDashboardState;
     use tempfile::tempdir;
 
@@ -508,6 +543,81 @@ mod tests {
         assert_eq!(email, "fresh@example.com");
         assert_eq!(password, "fresh-pass");
         assert!(mfa.is_none());
+    }
+
+    #[test]
+    fn progress_summary_pct_waits_for_network_bytes() {
+        assert_eq!(progress_summary_pct(2, 6_360, 54_790, 0), None);
+        assert_eq!(progress_summary_pct(2, 6_360, 54_790, 128), Some(11));
+    }
+
+    #[test]
+    fn begin_headless_shutdown_cancels_active_tokens() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let token = tokio_util::sync::CancellationToken::new();
+        app.cancellation_tokens
+            .insert("episode.bin".to_string().into(), token.clone());
+
+        let waiting = app.begin_headless_shutdown();
+
+        assert!(waiting);
+        assert!(app.paused);
+        assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn headless_shutdown_waits_for_file_cancellation_events() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let (event_tx, mut download_rx) = mpsc::unbounded_channel();
+        let (_action_tx, mut action_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx.clone(), true);
+        let file_id = crate::core::FileId::from("episode.bin");
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/root"),
+                source_url: "https://mega.nz/folder/root".to_string(),
+                key: PackageKey::new("https://mega.nz/folder/root".to_string()),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.clone(),
+                    path: "episode.bin".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: file_id.clone(),
+            size: 128,
+        });
+        let token = tokio_util::sync::CancellationToken::new();
+        app.cancellation_tokens.insert(file_id.clone(), token.clone());
+        let cancelled_id = file_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = event_tx.send(DownloadEvent::FileCancelled {
+                id: cancelled_id,
+                attempt_id: 0,
+            });
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            app.run_headless_until_shutdown(
+                &mut download_rx,
+                &mut action_rx,
+                None,
+                std::future::ready(()),
+            ),
+        )
+        .await
+        .expect("headless shutdown should complete after cancellation drains");
+
+        assert!(token.is_cancelled());
+        assert!(app.cancellation_tokens.is_empty());
+        assert!(app.paused);
     }
 
     #[test]
@@ -852,6 +962,50 @@ mod tests {
             .expect("file should exist");
         assert_eq!(file.progress.visible_completed_bytes, 25);
         assert_eq!(file.progress.downloaded_network_bytes, 0);
+    }
+
+    #[test]
+    fn drain_download_events_starts_resume_validation_from_download_event() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let (download_tx, mut download_rx) = mpsc::unbounded_channel();
+
+        app.apply_core_event(crate::core::CoreEvent::PackageResolved {
+            package: crate::core::ResolvedPackage {
+                id: crate::test_support::package_id("pkg", "https://mega.nz/file/root"),
+                source_url: "https://mega.nz/file/root".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+                display_name: "Package".to_string(),
+                files: vec![crate::core::ResolvedFile {
+                    file_id: "file.bin".to_string().into(),
+                    path: "file.bin".to_string(),
+                    size: 100,
+                }],
+                collision: None,
+            },
+        });
+
+        download_tx
+            .send(DownloadEvent::ResumeValidationStarted {
+                id: "file.bin".into(),
+                attempt_id: 0,
+            })
+            .expect("resume validation start should send");
+
+        assert!(app.drain_download_events(&mut download_rx));
+
+        assert!(app.verifying_files.contains("file.bin"));
+        assert!(app.verification_inflight_files.contains("file.bin"));
+        assert_eq!(
+            app.verification_targets.get("file.bin"),
+            Some(&crate::tui::app::VerificationTarget::Resume)
+        );
+        let file = app
+            .core_state
+            .files
+            .get("file.bin")
+            .expect("file should exist");
+        assert_eq!(file.progress.visible_completed_bytes, 0);
     }
 
     #[test]

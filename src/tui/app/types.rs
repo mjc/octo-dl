@@ -114,14 +114,16 @@ impl LoginState {
 #[derive(Debug, Clone, Copy)]
 pub enum ConfigField {
     ChunksPerFile,
+    MegaChunksPerRequest,
     ConcurrentFiles,
     ForceOverwrite,
     CleanupOnError,
 }
 
 impl ConfigField {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::ChunksPerFile,
+        Self::MegaChunksPerRequest,
         Self::ConcurrentFiles,
         Self::ForceOverwrite,
         Self::CleanupOnError,
@@ -130,6 +132,7 @@ impl ConfigField {
     pub const fn label(self) -> &'static str {
         match self {
             Self::ChunksPerFile => "Chunks per file",
+            Self::MegaChunksPerRequest => "MEGA chunks/request",
             Self::ConcurrentFiles => "Concurrent files",
             Self::ForceOverwrite => "Force overwrite",
             Self::CleanupOnError => "Cleanup on error",
@@ -311,6 +314,7 @@ pub enum UiAction {
     },
     UpdateConfig {
         chunks_per_file: Option<usize>,
+        mega_chunks_per_request: Option<usize>,
         concurrent_files: Option<usize>,
         force_overwrite: Option<bool>,
         cleanup_on_error: Option<bool>,

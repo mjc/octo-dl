@@ -161,6 +161,10 @@ fn mfa_option_returns_none_when_empty() {
 #[test]
 fn config_field_labels() {
     assert_eq!(ConfigField::ChunksPerFile.label(), "Chunks per file");
+    assert_eq!(
+        ConfigField::MegaChunksPerRequest.label(),
+        "MEGA chunks/request"
+    );
     assert_eq!(ConfigField::ConcurrentFiles.label(), "Concurrent files");
     assert_eq!(ConfigField::ForceOverwrite.label(), "Force overwrite");
     assert_eq!(ConfigField::CleanupOnError.label(), "Cleanup on error");
@@ -1675,6 +1679,59 @@ fn resume_reuse_then_progress_keeps_file_bandwidth_on_fresh_bytes_only() {
     assert_eq!(core_file.progress.downloaded_network_bytes, 25);
     assert_eq!(app.total_downloaded, 85);
     assert_eq!(app.total_network_downloaded, 25);
+}
+
+#[test]
+fn resume_validation_progress_transitions_to_download_progress_on_network_bytes() {
+    let mut app = test_app();
+    let url = "https://mega.nz/file/root";
+    let file_id = crate::core::FileId::from("file-id");
+    app.ensure_core_file(
+        &file_id,
+        url,
+        "file-id",
+        100,
+        crate::core::FileAccounting::CurrentRun,
+    );
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
+        id: file_id.clone(),
+        size: 100,
+        attempt_id: 0,
+    });
+    app.handle_download_event(crate::tui::event::DownloadEvent::ResumeValidationStarted {
+        id: file_id.clone(),
+        attempt_id: 0,
+    });
+    app.handle_download_event(crate::tui::event::DownloadEvent::VerificationProgress {
+        id: file_id.clone(),
+        bytes_delta: 40,
+    });
+
+    let file = app
+        .visible_file(&file_id)
+        .expect("file should be visible during repair");
+    assert_eq!(file.downloaded, 40);
+    assert!(app.verifying_files.contains(&file_id));
+    assert!(app.verification_targets.contains_key(&file_id));
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::Progress {
+        id: file_id.clone(),
+        delta: crate::core::ProgressDelta {
+            total_bytes_delta: 15,
+            network_bytes_delta: 15,
+        },
+        attempt_id: 0,
+    });
+
+    let file = app
+        .visible_file(&file_id)
+        .expect("file should remain visible");
+    assert_eq!(file.downloaded, 55);
+    assert_eq!(file.status, FileStatus::Downloading);
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert!(!app.verification_targets.contains_key(&file_id));
 }
 
 #[test]

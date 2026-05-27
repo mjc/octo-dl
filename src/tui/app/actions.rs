@@ -323,6 +323,25 @@ impl App {
         self.update_download_status_message();
     }
 
+    pub(crate) fn handle_resume_validation_started_event(&mut self, id: FileId, attempt_id: u64) {
+        if !self.event_matches_current_attempt(&id, attempt_id) {
+            log::info!("Ignoring stale resume validation start after retry/reset: {id}");
+            return;
+        }
+        if !self.core_state.files.contains_key(&id) {
+            log::info!("Ignoring resume validation start for untracked file: {id}");
+            return;
+        }
+        self.verifying_files.insert(id.clone());
+        self.verification_inflight_files.insert(id.clone());
+        self.verification_targets
+            .insert(id.clone(), VerificationTarget::Resume);
+        self.apply_core_event(CoreEvent::FileVerificationStarted {
+            file_id: id.clone(),
+        });
+        self.refresh_visible_core_file(&id);
+    }
+
     pub(crate) fn handle_file_progress_event(
         &mut self,
         id: FileId,
@@ -338,6 +357,11 @@ impl App {
             return;
         }
         self.reset_pending_files.remove(&id);
+        if delta.network_bytes_delta > 0 {
+            self.verifying_files.remove(&id);
+            self.verification_inflight_files.remove(&id);
+            self.verification_targets.remove(&id);
+        }
         self.apply_core_progress_event(CoreEvent::FileProgress {
             file_id: id.clone(),
             total_bytes_delta: delta.total_bytes_delta,
@@ -860,12 +884,16 @@ impl App {
     pub(crate) fn apply_config_update(
         &mut self,
         chunks_per_file: Option<usize>,
+        mega_chunks_per_request: Option<usize>,
         concurrent_files: Option<usize>,
         force_overwrite: Option<bool>,
         cleanup_on_error: Option<bool>,
     ) {
         if let Some(value) = chunks_per_file {
             self.config.config.chunks_per_file = value.max(1);
+        }
+        if let Some(value) = mega_chunks_per_request {
+            self.config.config.mega_chunks_per_request = value.max(1);
         }
         if let Some(value) = concurrent_files {
             self.config.config.concurrent_files = value.max(1);
@@ -917,11 +945,13 @@ impl App {
             }
             UiAction::UpdateConfig {
                 chunks_per_file,
+                mega_chunks_per_request,
                 concurrent_files,
                 force_overwrite,
                 cleanup_on_error,
             } => self.apply_config_update(
                 chunks_per_file,
+                mega_chunks_per_request,
                 concurrent_files,
                 force_overwrite,
                 cleanup_on_error,
