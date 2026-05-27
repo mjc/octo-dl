@@ -57,6 +57,43 @@ Attach a read-only terminal UI to a running service:
 octo --tui --tui-attach 127.0.0.1:9723
 ```
 
+## Fake MEGA benchmark harness
+
+`octo-fake-mega-bench` benchmarks the MEGA download/decrypt/MAC path against a
+local fake `mega.nz` public link. The current harness:
+
+- serves pre-encrypted ciphertext from memory
+- runs the fake server on its own Tokio runtime
+- lets you control client workers with `--chunks-per-file`
+- lets you control fake-server workers with `--server-worker-threads`
+- lets you control adjacent MEGA chunks per request with
+  `--mega-chunks-per-request`
+
+Example:
+
+```sh
+cargo run --release --bin octo-fake-mega-bench -- \
+  --size-mib 1024 \
+  --chunks-per-file 4 \
+  --server-worker-threads 4 \
+  --mega-chunks-per-request 8
+```
+
+The table below records 10x averages for the fixed memory-backed harness with
+`server_worker_threads == chunks_per_file` on this machine:
+
+- CPU: AMD Ryzen 9 5950X 16-Core Processor
+- RAM: 64 GiB class system (`MemTotal: 65764688 kB`, about 62.7 GiB visible)
+
+| config (`chunks_per_file` / `mega_chunks_per_request`) | avg throughput |
+| --- | ---: |
+| `1/1` | `786.19 MB/s` |
+| `2/2` | `1259.52 MB/s` |
+| `2/4` | `1230.85 MB/s` |
+| `4/4` | `1697.79 MB/s` |
+| `4/8` | `1740.80 MB/s` |
+| `8/8` | `2258.94 MB/s` |
+
 ## NixOS module
 
 The flake exports `nixosModules.default`.
