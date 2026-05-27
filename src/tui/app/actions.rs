@@ -53,8 +53,6 @@ impl App {
         self.urls.push(url.clone());
         self.ensure_session_for_pending_urls();
         self.queue_url_placeholder(url.clone());
-        let _ =
-            self.mutate_session_and_save(|session| SessionAdapter::mark_url_pending(session, &url));
         self.apply_core_command(CoreCommand::SubmitUrl { url });
     }
 
@@ -67,8 +65,6 @@ impl App {
         self.apply_core_command(CoreCommand::SubmitUrl {
             url: url.to_string(),
         });
-        let _ =
-            self.mutate_session_and_save(|session| SessionAdapter::mark_url_pending(session, url));
     }
 
     pub(crate) fn drain_ui_actions(

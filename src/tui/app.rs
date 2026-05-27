@@ -132,7 +132,21 @@ impl Drop for SessionPersistenceDeferralGuard {
         debug_assert!(app.session_persist_defer_depth > 0);
         app.session_persist_defer_depth = app.session_persist_defer_depth.saturating_sub(1);
 
-        if app.session_persist_defer_depth != 0 || std::thread::panicking() {
+        if app.session_persist_defer_depth != 0 {
+            return;
+        }
+
+        if std::thread::panicking() {
+            app.pending_core_state_session_persistence = false;
+            app.pending_session_persistence = None;
+            return;
+        }
+
+        if app.pending_core_state_session_persistence {
+            app.pending_core_state_session_persistence = false;
+            app.pending_session_persistence = None;
+            let snapshot = crate::core::snapshot_from_state(&app.core_state);
+            let _ = app.persist_session(snapshot);
             return;
         }
 
@@ -240,6 +254,7 @@ pub struct App {
     pub(crate) visible_sync_pending: bool,
     pending_visible_selection: Option<Option<visible::TuiRow>>,
     session_persist_defer_depth: usize,
+    pending_core_state_session_persistence: bool,
     pending_session_persistence: Option<PendingSessionPersistence>,
     #[cfg(test)]
     pub(crate) visible_sync_count: usize,

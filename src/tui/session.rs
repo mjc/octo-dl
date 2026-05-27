@@ -17,10 +17,6 @@ impl SessionAdapter {
         *session = next;
     }
 
-    pub(super) fn mark_url_pending(session: &mut SessionSnapshot, url: &str) {
-        Self::ensure_url(session, url).error = None;
-    }
-
     pub(super) fn mark_url_fetched(session: &mut SessionSnapshot, url: &str) {
         if let Some(tracked_url) = session.urls.iter_mut().find(|entry| entry.url == url) {
             tracked_url.error = None;

@@ -135,6 +135,7 @@ impl App {
             visible_sync_pending: false,
             pending_visible_selection: None,
             session_persist_defer_depth: 0,
+            pending_core_state_session_persistence: false,
             pending_session_persistence: None,
             #[cfg(test)]
             visible_sync_count: 0,

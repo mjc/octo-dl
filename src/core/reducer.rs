@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -142,7 +144,12 @@ fn file_id_ptr_key(file_id: &FileId) -> FileIdPtrKey {
     }
 }
 
-fn should_persist_session(event: &CoreEvent) -> bool {
+#[cfg(test)]
+thread_local! {
+    static SNAPSHOT_FROM_STATE_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+pub(crate) fn should_persist_session(event: &CoreEvent) -> bool {
     !matches!(
         event,
         CoreEvent::FileProgress { .. }
@@ -156,6 +163,16 @@ fn should_persist_session(event: &CoreEvent) -> bool {
             | CoreEvent::FileVerificationCompleted { .. }
             | CoreEvent::Tick { .. }
     )
+}
+
+#[cfg(test)]
+pub(crate) fn reset_snapshot_from_state_call_count() {
+    SNAPSHOT_FROM_STATE_CALLS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn snapshot_from_state_call_count() -> usize {
+    SNAPSHOT_FROM_STATE_CALLS.with(Cell::get)
 }
 
 fn counts_in_run_totals(file: &FileState) -> bool {
@@ -367,9 +384,13 @@ fn maybe_debug_assert_invariants(state: &DownloadState) {
 #[cfg(not(debug_assertions))]
 fn maybe_debug_assert_invariants(_state: &DownloadState) {}
 
-pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
+fn reduce_impl(
+    state: &mut DownloadState,
+    event: CoreEvent,
+    emit_persist_session: bool,
+) -> CoreEffects {
     let mut effects = CoreEffects::new();
-    let persist_session = should_persist_session(&event);
+    let persist_session = emit_persist_session && should_persist_session(&event);
     let mut full_refresh = false;
     match event {
         CoreEvent::UrlSubmitted { url } => {
@@ -818,7 +839,20 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
     effects
 }
 
+pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
+    reduce_impl(state, event, true)
+}
+
+pub(crate) fn reduce_without_session_persist(
+    state: &mut DownloadState,
+    event: CoreEvent,
+) -> CoreEffects {
+    reduce_impl(state, event, false)
+}
+
 pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
+    #[cfg(test)]
+    SNAPSHOT_FROM_STATE_CALLS.with(|count| count.set(count.get().saturating_add(1)));
     let files_by_ptr: HashMap<_, _> = state
         .files
         .values()
@@ -1154,6 +1188,112 @@ mod tests {
 
         assert!(state.packages.is_empty());
         assert!(state.files.is_empty());
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            CoreEffect::PublishStatusMessage(message)
+                if message.contains("duplicate.bin")
+        )));
+    }
+
+    #[test]
+    fn package_resolved_emits_persist_effect_by_default() {
+        let mut state = DownloadState::default();
+        let effects = reduce(
+            &mut state,
+            CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: package_id("pkg", "https://mega.nz/folder/persist"),
+                    source_url: "https://mega.nz/folder/persist".to_string(),
+                    key: crate::core::PackageKey::new(
+                        "https://mega.nz/folder/persist".to_string().clone(),
+                    ),
+                    display_name: "Persist".to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: "episode-1.mkv".to_string().into(),
+                        path: "episode-1.mkv".to_string(),
+                        size: 128,
+                    }],
+                    collision: None,
+                },
+            },
+        );
+
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, CoreEffect::PersistSession(_)))
+        );
+    }
+
+    #[test]
+    fn package_resolved_can_suppress_persist_effect() {
+        let mut state = DownloadState::default();
+        let effects = reduce_without_session_persist(
+            &mut state,
+            CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: package_id("pkg", "https://mega.nz/folder/persist"),
+                    source_url: "https://mega.nz/folder/persist".to_string(),
+                    key: crate::core::PackageKey::new(
+                        "https://mega.nz/folder/persist".to_string().clone(),
+                    ),
+                    display_name: "Persist".to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: "episode-1.mkv".to_string().into(),
+                        path: "episode-1.mkv".to_string(),
+                        size: 128,
+                    }],
+                    collision: None,
+                },
+            },
+        );
+
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, CoreEffect::PersistSession(_)))
+        );
+        assert_eq!(
+            state.url_order,
+            vec!["https://mega.nz/folder/persist".to_string()]
+        );
+        assert_eq!(state.files.len(), 1);
+    }
+
+    #[test]
+    fn empty_package_resolution_can_suppress_early_persist_effect() {
+        let mut state = DownloadState::default();
+        let effects = reduce_without_session_persist(
+            &mut state,
+            CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: package_id("failed-pkg", "https://mega.nz/folder/failed"),
+                    source_url: "https://mega.nz/folder/failed".to_string(),
+                    key: crate::core::PackageKey::new(
+                        "https://mega.nz/folder/failed".to_string().clone(),
+                    ),
+                    display_name: "Failed package".to_string(),
+                    files: Vec::new(),
+                    collision: Some(PackageCollision {
+                        file_id: "duplicate.bin".to_string().into(),
+                        existing_package_id: package_id(
+                            "existing",
+                            "https://mega.nz/folder/failed",
+                        ),
+                        incoming_package_id: package_id(
+                            "failed-pkg",
+                            "https://mega.nz/folder/failed",
+                        ),
+                    }),
+                },
+            },
+        );
+
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, CoreEffect::PersistSession(_)))
+        );
         assert!(effects.iter().any(|effect| matches!(
             effect,
             CoreEffect::PublishStatusMessage(message)
