@@ -3,11 +3,6 @@ use std::env;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::net::TcpStream;
-#[cfg(unix)]
-use std::os::unix::io::{FromRawFd, RawFd};
-#[cfg(windows)]
-use std::os::windows::io::{FromRawHandle, RawHandle};
 use std::path::PathBuf;
 
 /// Flags that consume the next argument as a value (not a positional arg).
@@ -116,6 +111,14 @@ fn help_requested(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "-h" || arg == "--help")
 }
 
+fn startup_log_mode(options: &RuntimeOptions) -> Option<&'static str> {
+    match options.ui {
+        Some(UiMode::Tui) => None,
+        Some(UiMode::Headless) => Some("headless"),
+        None => Some("cli"),
+    }
+}
+
 #[cfg(feature = "tui")]
 fn parse_tui_listen(value: &str) -> std::net::SocketAddr {
     octo_dl::tui::parse_loopback_addr(value).unwrap_or_else(|error| {
@@ -130,21 +133,27 @@ fn parse_tui_listen(_value: &str) -> std::net::SocketAddr {
     std::process::exit(1);
 }
 
-fn init_logger(args: &[String]) {
+fn init_logger(options: &RuntimeOptions) {
     let mut builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("octo_dl=info"));
-    if let Some(writer) = log_writer(args) {
+    if let Some(writer) = log_writer(options) {
         builder.target(Target::Pipe(writer));
     }
     builder.init();
 }
 
-fn log_writer(args: &[String]) -> Option<Box<dyn Write + Send>> {
-    let primary_writer = log_pipe_writer()
-        .or_else(|| native_tui_log_detachment_required(args).then(native_tui_log_writer));
-    let debug_file_writer = debug_logging_enabled()
-        .then(debug_log_file_writer)
-        .flatten();
+fn log_writer(options: &RuntimeOptions) -> Option<Box<dyn Write + Send>> {
+    let primary_writer = match options.ui {
+        Some(UiMode::Headless) => Some(headless_log_writer()),
+        Some(UiMode::Tui) if native_tui_log_detachment_required(options) => {
+            Some(native_tui_log_writer())
+        }
+        _ => None,
+    };
+    let debug_file_writer = (debug_logging_enabled()
+        && native_tui_log_detachment_required(options))
+    .then(debug_log_file_writer)
+    .flatten();
 
     match (primary_writer, debug_file_writer) {
         (None, None) => None,
@@ -169,21 +178,8 @@ fn debug_log_file_writer() -> Option<Box<dyn Write + Send>> {
         .map(|file| Box::new(file) as Box<dyn Write + Send>)
 }
 
-fn log_pipe_writer() -> Option<Box<dyn Write + Send>> {
-    if let Ok(addr) = env::var("OCTO_TUI_LOG_ADDR")
-        && let Some(writer) = log_pipe_writer_from_addr(&addr)
-    {
-        return Some(writer);
-    }
-    let raw_fd = env::var_os("OCTO_TUI_LOG_FD")?;
-    let fd = raw_fd.to_string_lossy().parse::<usize>().ok()?;
-    log_pipe_writer_from_raw(fd)
-}
-
-fn log_pipe_writer_from_addr(addr: &str) -> Option<Box<dyn Write + Send>> {
-    TcpStream::connect(addr)
-        .ok()
-        .map(|stream| Box::new(stream) as Box<dyn Write + Send>)
+fn headless_log_writer() -> Box<dyn Write + Send> {
+    Box::new(io::LineWriter::new(io::stdout()))
 }
 
 struct TeeWriter {
@@ -210,13 +206,8 @@ impl Write for TeeWriter {
     }
 }
 
-fn native_tui_log_detachment_required(args: &[String]) -> bool {
-    (args.iter().any(|arg| arg == "--tui")
-        || args
-            .windows(2)
-            .any(|pair| pair[0] == "--ui" && pair[1] == "tui"))
-        && env::var_os("OCTO_TUI_LOG_ADDR").is_none()
-        && env::var_os("OCTO_TUI_LOG_FD").is_none()
+fn native_tui_log_detachment_required(options: &RuntimeOptions) -> bool {
+    options.ui == Some(UiMode::Tui) && options.tui_attach.is_none()
 }
 
 fn set_ui_mode(options: &mut RuntimeOptions, mode: UiMode, flag: &str) -> Result<(), String> {
@@ -333,35 +324,15 @@ fn native_tui_log_path() -> PathBuf {
     path
 }
 
-#[cfg(unix)]
-fn log_pipe_writer_from_raw(fd: usize) -> Option<Box<dyn Write + Send>> {
-    if fd > i32::MAX as usize {
-        return None;
-    }
-    unsafe {
-        let file = File::from_raw_fd(fd as RawFd);
-        Some(Box::new(file))
-    }
-}
-
-#[cfg(windows)]
-fn log_pipe_writer_from_raw(fd: usize) -> Option<Box<dyn Write + Send>> {
-    unsafe {
-        let file = File::from_raw_handle(fd as RawHandle);
-        Some(Box::new(file))
-    }
-}
-
 #[tokio::main]
 async fn main() -> octo_dl::Result<()> {
     // Scan for global flags without consuming — sub-modules re-parse for their own flags
     let args: Vec<String> = env::args().skip(1).collect();
-    init_logger(&args);
-
     let options = parse_runtime_options(&args).unwrap_or_else(|error| {
         eprintln!("Error: {error}");
         std::process::exit(1);
     });
+    init_logger(&options);
 
     if help_requested(&args) {
         match options.ui {
@@ -380,6 +351,10 @@ async fn main() -> octo_dl::Result<()> {
                 }
             }
         }
+    }
+
+    if let Some(mode) = startup_log_mode(&options) {
+        log::info!("Starting octo in {mode} mode");
     }
 
     if options.ui == Some(UiMode::Tui)
@@ -461,27 +436,6 @@ async fn main() -> octo_dl::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    fn log_env_guard() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("log env test mutex should not be poisoned")
-    }
-
-    #[test]
-    fn log_pipe_writer_handles_missing_and_invalid_values() {
-        let _guard = log_env_guard();
-        unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
-        assert!(log_pipe_writer().is_none());
-
-        unsafe { env::set_var("OCTO_TUI_LOG_FD", "invalid") };
-        assert!(log_pipe_writer().is_none());
-
-        unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
-    }
 
     #[test]
     fn positional_args_ignore_cli_flag_values() {
@@ -512,39 +466,39 @@ mod tests {
     }
 
     #[test]
-    fn native_tui_log_detachment_only_applies_to_unforwarded_tui() {
-        let _guard = log_env_guard();
-        unsafe {
-            env::remove_var("OCTO_TUI_LOG_ADDR");
-            env::remove_var("OCTO_TUI_LOG_FD");
-        }
+    fn native_tui_log_detachment_only_applies_to_local_tui() {
+        assert!(native_tui_log_detachment_required(&RuntimeOptions {
+            ui: Some(UiMode::Tui),
+            ..RuntimeOptions::default()
+        }));
+        assert!(!native_tui_log_detachment_required(&RuntimeOptions {
+            ui: Some(UiMode::Headless),
+            ..RuntimeOptions::default()
+        }));
+        assert!(!native_tui_log_detachment_required(&RuntimeOptions {
+            ui: Some(UiMode::Tui),
+            tui_attach: Some("127.0.0.1:9724".to_string()),
+            ..RuntimeOptions::default()
+        }));
+    }
 
-        assert!(native_tui_log_detachment_required(&[
-            "--ui".to_string(),
-            "tui".to_string()
-        ]));
-        assert!(native_tui_log_detachment_required(&["--tui".to_string()]));
-        assert!(!native_tui_log_detachment_required(&[
-            "--ui".to_string(),
-            "headless".to_string()
-        ]));
-        assert!(!native_tui_log_detachment_required(&[
-            "--headless".to_string()
-        ]));
-
-        unsafe { env::set_var("OCTO_TUI_LOG_ADDR", "127.0.0.1:1") };
-        assert!(!native_tui_log_detachment_required(&[
-            "--ui".to_string(),
-            "tui".to_string()
-        ]));
-        unsafe { env::remove_var("OCTO_TUI_LOG_ADDR") };
-
-        unsafe { env::set_var("OCTO_TUI_LOG_FD", "9") };
-        assert!(!native_tui_log_detachment_required(&[
-            "--ui".to_string(),
-            "tui".to_string()
-        ]));
-        unsafe { env::remove_var("OCTO_TUI_LOG_FD") };
+    #[test]
+    fn startup_log_mode_skips_tui_and_labels_non_tui_modes() {
+        assert_eq!(startup_log_mode(&RuntimeOptions::default()), Some("cli"));
+        assert_eq!(
+            startup_log_mode(&RuntimeOptions {
+                ui: Some(UiMode::Headless),
+                ..RuntimeOptions::default()
+            }),
+            Some("headless")
+        );
+        assert_eq!(
+            startup_log_mode(&RuntimeOptions {
+                ui: Some(UiMode::Tui),
+                ..RuntimeOptions::default()
+            }),
+            None
+        );
     }
 
     #[test]
