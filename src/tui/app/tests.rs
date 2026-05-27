@@ -1534,6 +1534,71 @@ fn deferred_core_persistence_materializes_once_for_nested_batches() {
 }
 
 #[test]
+fn deferred_visible_sync_does_not_rebuild_visible_rows_during_batch_selection_capture() {
+    let mut app = test_app();
+    resolve_package(
+        &mut app,
+        "https://mega.nz/folder/existing",
+        &[("existing.mkv", 128)],
+    );
+    app.file_list_state.select(Some(0));
+    crate::tui::visible::reset_visible_rows_for_call_count();
+
+    app.with_deferred_batch_updates(|app| {
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg-a", "https://mega.nz/folder/a"),
+                source_url: "https://mega.nz/folder/a".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/a".to_string()),
+                display_name: "Package A".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "episode-a.mkv".to_string().into(),
+                    path: "episode-a.mkv".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg-b", "https://mega.nz/folder/b"),
+                source_url: "https://mega.nz/folder/b".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/b".to_string()),
+                display_name: "Package B".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "episode-b.mkv".to_string().into(),
+                    path: "episode-b.mkv".to_string(),
+                    size: 256,
+                }],
+                collision: None,
+            },
+        });
+    });
+
+    assert_eq!(crate::tui::visible::visible_rows_for_call_count(), 1);
+}
+
+#[test]
+fn sync_visible_files_reuses_overlay_sort_keys_for_unchanged_rows() {
+    let mut app = test_app();
+    app.upsert_overlay_file(
+        FileEntry {
+            id: "https://mega.nz/folder/root".to_string().into(),
+            name: "https://mega.nz/folder/root".to_string(),
+            size: 0,
+            downloaded: 0,
+            status: FileStatus::Queued,
+        },
+        Some("https://mega.nz/folder/root".to_string()),
+    );
+    crate::tui::visible::reset_build_file_sort_key_call_count();
+
+    app.sync_visible_files();
+
+    assert_eq!(crate::tui::visible::build_file_sort_key_call_count(), 0);
+}
+
+#[test]
 fn deferred_core_persistence_skips_snapshot_for_non_persist_events() {
     let mut app = test_app();
     resolve_package(

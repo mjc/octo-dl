@@ -11,6 +11,35 @@ use crate::tui::app::{
     FileEntry, FileStatus, FileUiState, SortDirection, SortKey, SortState, TransientRow,
 };
 
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static VISIBLE_ROWS_FOR_CALLS: Cell<usize> = const { Cell::new(0) };
+    static BUILD_FILE_SORT_KEY_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_visible_rows_for_call_count() {
+    VISIBLE_ROWS_FOR_CALLS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn visible_rows_for_call_count() -> usize {
+    VISIBLE_ROWS_FOR_CALLS.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_build_file_sort_key_call_count() {
+    BUILD_FILE_SORT_KEY_CALLS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn build_file_sort_key_call_count() -> usize {
+    BUILD_FILE_SORT_KEY_CALLS.with(Cell::get)
+}
+
 struct PackageProjection<'a> {
     order: usize,
     display_name: &'a str,
@@ -162,6 +191,8 @@ pub(crate) fn build_file_sort_key(
     package_order: usize,
     package_display_name: &str,
 ) -> CachedFileSortKey {
+    #[cfg(test)]
+    BUILD_FILE_SORT_KEY_CALLS.with(|count| count.set(count.get().saturating_add(1)));
     CachedFileSortKey {
         package_order,
         package_display_name: package_display_name.to_string(),
@@ -243,61 +274,60 @@ fn sorted_overlay_file_ids_with_keys(
     file_ui: &HashMap<FileId, crate::tui::app::FileUiState>,
     overlay_files: &IndexMap<FileId, TransientRow>,
 ) -> Vec<FileId> {
-    let mut overlay_file_ids = overlay_files.keys().cloned().collect::<Vec<_>>();
-    overlay_file_ids.sort_unstable_by(|left, right| {
-        let left_file = overlay_files
-            .get(left)
-            .expect("overlay id should have matching row");
-        let right_file = overlay_files
-            .get(right)
-            .expect("overlay id should have matching row");
-        let left_projection = file_ui
-            .get(left)
-            .and_then(|state| state.sort_key.as_ref())
-            .cloned()
-            .unwrap_or_else(|| {
-                build_file_sort_key(
-                    &left_file.file().name,
-                    &left_file.file().status,
-                    usize::MAX,
-                    left_file.source_url().unwrap_or(left.as_str()),
+    let overlay_file_ids = overlay_files.keys().cloned().collect::<Vec<_>>();
+    let group_labels = overlay_file_ids
+        .iter()
+        .map(|id| {
+            overlay_files
+                .get(id)
+                .and_then(TransientRow::source_url)
+                .unwrap_or(id.as_str())
+        })
+        .collect::<Vec<_>>();
+    let sort_projections = overlay_file_ids
+        .iter()
+        .map(|id| {
+            file_ui
+                .get(id)
+                .and_then(|state| state.sort_key.as_ref())
+                .map_or_else(
+                    || {
+                        let file = overlay_files
+                            .get(id)
+                            .expect("overlay id should have matching row");
+                        FileSortProjection::Owned(build_file_sort_key(
+                            &file.file().name,
+                            &file.file().status,
+                            usize::MAX,
+                            file.source_url().unwrap_or(id.as_str()),
+                        ))
+                    },
+                    FileSortProjection::Borrowed,
                 )
-            });
-        let right_projection = file_ui
-            .get(right)
-            .and_then(|state| state.sort_key.as_ref())
-            .cloned()
-            .unwrap_or_else(|| {
-                build_file_sort_key(
-                    &right_file.file().name,
-                    &right_file.file().status,
-                    usize::MAX,
-                    right_file.source_url().unwrap_or(right.as_str()),
-                )
-            });
-
-        (
-            left_projection.package_order,
-            left_projection.package_display_name.as_str(),
-        )
-            .cmp(&(
-                right_projection.package_order,
-                right_projection.package_display_name.as_str(),
-            ))
+        })
+        .collect::<Vec<_>>();
+    let mut indices: Vec<_> = (0..overlay_file_ids.len()).collect();
+    indices.sort_unstable_by(|&left, &right| {
+        group_labels[left]
+            .cmp(group_labels[right])
             .then_with(|| {
-                left_projection
+                sort_projections[left]
+                    .key()
                     .status_rank
-                    .cmp(&right_projection.status_rank)
+                    .cmp(&sort_projections[right].key().status_rank)
             })
             .then_with(|| {
                 cmp_natural_sort_keys(
-                    &left_projection.natural_name,
-                    &right_projection.natural_name,
+                    &sort_projections[left].key().natural_name,
+                    &sort_projections[right].key().natural_name,
                 )
             })
-            .then_with(|| left.cmp(right))
+            .then_with(|| overlay_file_ids[left].cmp(&overlay_file_ids[right]))
     });
-    overlay_file_ids
+    indices
+        .into_iter()
+        .map(|index| overlay_file_ids[index].clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -421,11 +451,9 @@ pub(super) fn visible_rows_for(
     expanded_packages: &HashSet<PackageId>,
     sort: &SortState,
 ) -> Vec<TuiRow> {
+    #[cfg(test)]
+    VISIBLE_ROWS_FOR_CALLS.with(|count| count.set(count.get().saturating_add(1)));
     let package_projections = package_projections(files, file_ui, core_state);
-    let package_percents = package_projections
-        .iter()
-        .map(|(package_id, package)| (*package_id, package_percent(package)))
-        .collect::<HashMap<_, _>>();
     if core_state.packages.is_empty() {
         return sorted_file_indices_with_keys(files, file_ui, overlay_files)
             .into_iter()
@@ -435,6 +463,12 @@ pub(super) fn visible_rows_for(
             })
             .collect();
     }
+    let package_percents = matches!(sort.key, SortKey::Percent).then(|| {
+        package_projections
+            .iter()
+            .map(|(package_id, package)| (*package_id, package_percent(package)))
+            .collect::<HashMap<_, _>>()
+    });
 
     let mut package_ids: Vec<_> = core_state.packages.keys().cloned().collect();
     package_ids.sort_by(|left, right| {
@@ -449,7 +483,11 @@ pub(super) fn visible_rows_for(
             SortKey::Name => left_projection
                 .display_name
                 .cmp(&right_projection.display_name),
-            SortKey::Percent => package_percents.get(left).cmp(&package_percents.get(right)),
+            SortKey::Percent => package_percents
+                .as_ref()
+                .map_or(Ordering::Equal, |percents| {
+                    percents.get(left).cmp(&percents.get(right))
+                }),
         };
 
         let ordering = if matches!(sort.key, SortKey::Queue) {
