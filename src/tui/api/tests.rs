@@ -82,7 +82,7 @@ fn state_with_snapshot_options(
 
 fn snapshot_bytes_from_json(snapshot: &str) -> bytes::Bytes {
     let Ok(snapshot) = serde_json::from_str::<TestSnapshotState>(snapshot) else {
-        return bytes::Bytes::from_static(b"not bincode");
+        return bytes::Bytes::from_static(b"not postcard");
     };
     let mut state = DownloadDashboardState::empty(DashboardUiMode::Tui, false, "", 9723);
     state.files = snapshot
@@ -119,7 +119,7 @@ fn snapshot_bytes_from_json(snapshot: &str) -> bytes::Bytes {
         })
         .collect();
     bytes::Bytes::from(
-        super::super::dashboard::dashboard_state_to_bincode(state)
+        super::super::dashboard::dashboard_state_to_postcard(state)
             .expect("test snapshot should serialize"),
     )
 }

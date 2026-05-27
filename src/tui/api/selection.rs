@@ -19,7 +19,7 @@ fn snapshot_state(
         ));
     };
 
-    crate::tui::dashboard::dashboard_state_from_bincode(shared.state_rx.borrow().as_ref()).map_err(
+    crate::tui::dashboard::dashboard_state_from_postcard(shared.state_rx.borrow().as_ref()).map_err(
         |_| {
             Box::new(
                 (

@@ -314,6 +314,13 @@ pub(crate) fn part_path(path: &str) -> PathBuf {
 }
 
 pub(crate) fn sidecar_path(path: &str) -> PathBuf {
+    let mut sidecar = String::with_capacity(path.len() + ".part.postcard".len());
+    sidecar.push_str(path);
+    sidecar.push_str(".part.postcard");
+    PathBuf::from(sidecar)
+}
+
+pub(crate) fn legacy_binary_sidecar_path(path: &str) -> PathBuf {
     let mut sidecar = String::with_capacity(path.len() + ".part.meta.bin".len());
     sidecar.push_str(path);
     sidecar.push_str(".part.meta.bin");
@@ -328,11 +335,17 @@ pub(crate) fn legacy_json_sidecar_path(path: &str) -> PathBuf {
 }
 
 pub(crate) fn has_resume_sidecar(path: &str) -> bool {
-    sidecar_path(path).exists() || legacy_json_sidecar_path(path).exists()
+    sidecar_path(path).exists()
+        || legacy_binary_sidecar_path(path).exists()
+        || legacy_json_sidecar_path(path).exists()
 }
 
 pub(crate) fn resume_sidecar_verified_bytes(path: &str) -> Option<u64> {
-    let sidecar = load_sidecar_sync(&sidecar_path(path), &legacy_json_sidecar_path(path))?;
+    let sidecar = load_sidecar_sync(
+        &sidecar_path(path),
+        &legacy_binary_sidecar_path(path),
+        &legacy_json_sidecar_path(path),
+    )?;
     if sidecar.version != CURRENT_RESUME_SIDECAR_VERSION {
         return Some(0);
     }
@@ -359,7 +372,12 @@ pub(crate) fn resume_sidecar_verified_bytes(path: &str) -> Option<u64> {
 /// Deletes resumable download artifacts for a final output path.
 pub async fn delete_resume_artifacts(path: &str) -> io::Result<()> {
     remove_file_if_exists(&part_path(path)).await?;
-    delete_sidecar_pair(&sidecar_path(path), &legacy_json_sidecar_path(path)).await
+    delete_sidecar_pair(
+        &sidecar_path(path),
+        &legacy_binary_sidecar_path(path),
+        &legacy_json_sidecar_path(path),
+    )
+    .await
 }
 
 /// Deletes the final output and resumable download artifacts for a path.
@@ -543,10 +561,19 @@ fn trust_resume_candidate(
     true
 }
 
-fn load_sidecar_sync(path: &Path, legacy_json_path: &Path) -> Option<ResumeSidecar> {
+fn load_sidecar_sync(
+    path: &Path,
+    legacy_binary_path: &Path,
+    legacy_json_path: &Path,
+) -> Option<ResumeSidecar> {
     std::fs::read(path)
         .ok()
-        .and_then(|data| deserialize_binary_sidecar(&data))
+        .and_then(|data| deserialize_postcard_sidecar(&data))
+        .or_else(|| {
+            std::fs::read(legacy_binary_path)
+                .ok()
+                .and_then(|data| deserialize_legacy_binary_sidecar(&data))
+        })
         .or_else(|| {
             std::fs::read(legacy_json_path)
                 .ok()
@@ -555,26 +582,46 @@ fn load_sidecar_sync(path: &Path, legacy_json_path: &Path) -> Option<ResumeSidec
 }
 
 async fn load_sidecar(path: &Path) -> Option<ResumeSidecar> {
+    let legacy_binary_path = legacy_binary_path_for_sidecar(path);
     let legacy_json_path = legacy_json_path_for_sidecar(path);
     match tokio::fs::read(path).await {
         Ok(data) => {
-            if let Some(sidecar) = deserialize_binary_sidecar(&data) {
+            if let Some(sidecar) = deserialize_postcard_sidecar(&data) {
                 return Some(sidecar);
+            }
+            if legacy_binary_path == path {
+                if let Some(sidecar) = deserialize_legacy_binary_sidecar(&data) {
+                    return Some(sidecar);
+                }
             }
             if legacy_json_path == path {
                 return deserialize_legacy_json_sidecar(&data);
             }
-            let legacy_data = tokio::fs::read(&legacy_json_path).await.ok()?;
-            deserialize_legacy_json_sidecar(&legacy_data)
+            if let Ok(legacy_binary_data) = tokio::fs::read(&legacy_binary_path).await
+                && let Some(sidecar) = deserialize_legacy_binary_sidecar(&legacy_binary_data)
+            {
+                return Some(sidecar);
+            }
+            let legacy_json_data = tokio::fs::read(&legacy_json_path).await.ok()?;
+            deserialize_legacy_json_sidecar(&legacy_json_data)
         }
         Err(_) => {
-            let data = tokio::fs::read(&legacy_json_path).await.ok()?;
-            deserialize_legacy_json_sidecar(&data)
+            if let Ok(legacy_binary_data) = tokio::fs::read(&legacy_binary_path).await
+                && let Some(sidecar) = deserialize_legacy_binary_sidecar(&legacy_binary_data)
+            {
+                return Some(sidecar);
+            }
+            let legacy_json_data = tokio::fs::read(&legacy_json_path).await.ok()?;
+            deserialize_legacy_json_sidecar(&legacy_json_data)
         }
     }
 }
 
-fn deserialize_binary_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
+fn deserialize_postcard_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
+    postcard::from_bytes(data).ok()
+}
+
+fn deserialize_legacy_binary_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
     bincode::deserialize(data).ok()
 }
 
@@ -586,7 +633,7 @@ fn deserialize_legacy_json_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
 
 async fn save_sidecar_atomic(path: &Path, sidecar: &ResumeSidecar) -> io::Result<()> {
     let tmp = sidecar_tmp_path(path);
-    let data = bincode::serialize(sidecar).map_err(io::Error::other)?;
+    let data = postcard::to_stdvec(sidecar).map_err(io::Error::other)?;
     let mut file = tokio::fs::File::create(&tmp).await?;
     file.write_all(&data).await?;
     file.flush().await?;
@@ -607,12 +654,32 @@ async fn save_sidecar_atomic(path: &Path, sidecar: &ResumeSidecar) -> io::Result
 }
 
 fn sidecar_tmp_path(path: &Path) -> PathBuf {
-    path.with_extension("bin.tmp")
+    path.with_extension("postcard.tmp")
+}
+
+fn legacy_binary_path_for_sidecar(path: &Path) -> PathBuf {
+    let path = path.as_os_str().to_string_lossy();
+    if let Some(stem) = path.strip_suffix(".part.postcard") {
+        let mut legacy = String::with_capacity(stem.len() + ".part.meta.bin".len());
+        legacy.push_str(stem);
+        legacy.push_str(".part.meta.bin");
+        return PathBuf::from(legacy);
+    }
+    if let Some(stem) = path.strip_suffix(".part.meta.json") {
+        let mut legacy = String::with_capacity(stem.len() + ".part.meta.bin".len());
+        legacy.push_str(stem);
+        legacy.push_str(".part.meta.bin");
+        return PathBuf::from(legacy);
+    }
+    PathBuf::from(path.as_ref())
 }
 
 fn legacy_json_path_for_sidecar(path: &Path) -> PathBuf {
     let path = path.as_os_str().to_string_lossy();
-    if let Some(stem) = path.strip_suffix(".part.meta.bin") {
+    if let Some(stem) = path
+        .strip_suffix(".part.postcard")
+        .or_else(|| path.strip_suffix(".part.meta.bin"))
+    {
         let mut json = String::with_capacity(stem.len() + ".part.meta.json".len());
         json.push_str(stem);
         json.push_str(".part.meta.json");
@@ -630,12 +697,20 @@ async fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 }
 
 async fn delete_sidecar(path: &Path) -> io::Result<()> {
+    let legacy_binary_path = legacy_binary_path_for_sidecar(path);
     let legacy_json_path = legacy_json_path_for_sidecar(path);
-    delete_sidecar_pair(path, &legacy_json_path).await
+    delete_sidecar_pair(path, &legacy_binary_path, &legacy_json_path).await
 }
 
-async fn delete_sidecar_pair(path: &Path, legacy_json_path: &Path) -> io::Result<()> {
+async fn delete_sidecar_pair(
+    path: &Path,
+    legacy_binary_path: &Path,
+    legacy_json_path: &Path,
+) -> io::Result<()> {
     remove_file_if_exists(path).await?;
+    if legacy_binary_path != path {
+        remove_file_if_exists(legacy_binary_path).await?;
+    }
     if legacy_json_path != path {
         remove_file_if_exists(legacy_json_path).await?;
     }
@@ -2006,7 +2081,7 @@ mod tests {
             ProgressCallbackState::new("file.bin".to_string(), 1024, 0, Arc::new(NoProgress)),
             ChunkVerifiedState::new(
                 ResumeTracker::new(1024, [0; 8], vec![None; 1]),
-                LazySidecarWriter::new("file.bin.part.meta.bin".into(), "file.bin.part".into()),
+                LazySidecarWriter::new("file.bin.part.postcard".into(), "file.bin.part".into()),
             ),
         );
 
@@ -3808,7 +3883,7 @@ mod tests {
     #[tokio::test]
     async fn sidecar_save_and_delete_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let sidecar_path = dir.path().join("file.bin.part.meta.bin");
+        let sidecar_path = dir.path().join("file.bin.part.postcard");
         let sidecar = ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size: 42,
@@ -3832,7 +3907,7 @@ mod tests {
     #[tokio::test]
     async fn sidecar_save_writes_binary_not_json() {
         let dir = tempfile::tempdir().unwrap();
-        let sidecar_path = dir.path().join("file.bin.part.meta.bin");
+        let sidecar_path = dir.path().join("file.bin.part.postcard");
         let sidecar = ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size: 42,
@@ -3847,17 +3922,46 @@ mod tests {
         save_sidecar_atomic(&sidecar_path, &sidecar).await.unwrap();
         let data = tokio::fs::read(&sidecar_path).await.unwrap();
 
-        assert!(bincode::deserialize::<ResumeSidecar>(&data).is_ok());
+        assert!(postcard::from_bytes::<ResumeSidecar>(&data).is_ok());
+        assert!(bincode::deserialize::<ResumeSidecar>(&data).is_err());
         assert!(serde_json::from_slice::<LegacyJsonResumeSidecar>(&data).is_err());
     }
 
     #[tokio::test]
-    async fn sidecar_path_uses_binary_extension_and_legacy_path_uses_json() {
+    async fn sidecar_path_uses_postcard_extension_and_legacy_paths_remain_available() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("file.bin").to_string_lossy().into_owned();
 
-        assert!(sidecar_path(&base).ends_with("file.bin.part.meta.bin"));
+        assert!(sidecar_path(&base).ends_with("file.bin.part.postcard"));
+        assert!(legacy_binary_sidecar_path(&base).ends_with("file.bin.part.meta.bin"));
         assert!(legacy_json_sidecar_path(&base).ends_with("file.bin.part.meta.json"));
+    }
+
+    #[tokio::test]
+    async fn load_sidecar_falls_back_to_legacy_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("file.bin").to_string_lossy().into_owned();
+        let postcard_path = sidecar_path(&base);
+        let legacy_binary_path = legacy_binary_sidecar_path(&base);
+        let legacy = ResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size: 42,
+            expected_condensed_mac: [7u8; 8],
+            verified_chunks: vec![VerifiedChunkRecord {
+                index: 3,
+                mac: [4u8; 16],
+            }],
+            part_fingerprint: None,
+        };
+
+        tokio::fs::write(&legacy_binary_path, bincode::serialize(&legacy).unwrap())
+            .await
+            .unwrap();
+        let loaded = load_sidecar(&postcard_path).await.unwrap();
+
+        assert_eq!(loaded.expected_condensed_mac, [7u8; 8]);
+        assert_eq!(loaded.verified_chunks[0].index, 3);
+        assert_eq!(loaded.verified_chunks[0].mac, [4u8; 16]);
     }
 
     #[tokio::test]
@@ -3915,7 +4019,7 @@ mod tests {
         let json_path = legacy_json_sidecar_path(&base);
         let legacy = legacy_json_sidecar_for_chunk(42, [9u8; 8], 7, [1u8; 16]);
 
-        tokio::fs::write(&binary_path, b"not-bincode")
+        tokio::fs::write(&binary_path, b"not-postcard")
             .await
             .unwrap();
         write_legacy_json_sidecar(&json_path, &legacy)
@@ -3926,6 +4030,36 @@ mod tests {
         assert_eq!(loaded.expected_condensed_mac, [9u8; 8]);
         assert_eq!(loaded.verified_chunks[0].index, 7);
         assert_eq!(loaded.verified_chunks[0].mac, [1u8; 16]);
+    }
+
+    #[tokio::test]
+    async fn load_sidecar_falls_back_to_legacy_binary_when_postcard_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("file.bin").to_string_lossy().into_owned();
+        let postcard_path = sidecar_path(&base);
+        let legacy_binary_path = legacy_binary_sidecar_path(&base);
+        let legacy = ResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size: 42,
+            expected_condensed_mac: [5u8; 8],
+            verified_chunks: vec![VerifiedChunkRecord {
+                index: 6,
+                mac: [7u8; 16],
+            }],
+            part_fingerprint: None,
+        };
+
+        tokio::fs::write(&postcard_path, b"not-postcard")
+            .await
+            .unwrap();
+        tokio::fs::write(&legacy_binary_path, bincode::serialize(&legacy).unwrap())
+            .await
+            .unwrap();
+
+        let loaded = load_sidecar(&postcard_path).await.unwrap();
+        assert_eq!(loaded.expected_condensed_mac, [5u8; 8]);
+        assert_eq!(loaded.verified_chunks[0].index, 6);
+        assert_eq!(loaded.verified_chunks[0].mac, [7u8; 16]);
     }
 
     #[tokio::test]
@@ -3953,10 +4087,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_sidecar_removes_binary_and_legacy_json() {
+    async fn delete_sidecar_removes_postcard_legacy_binary_and_legacy_json() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("file.bin").to_string_lossy().into_owned();
         let binary_path = sidecar_path(&base);
+        let legacy_binary_path = legacy_binary_sidecar_path(&base);
         let json_path = legacy_json_sidecar_path(&base);
         let binary = ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
@@ -3971,12 +4106,16 @@ mod tests {
         let legacy = legacy_json_sidecar_for_chunk(42, [1u8; 8], 0, [1u8; 16]);
 
         save_sidecar_atomic(&binary_path, &binary).await.unwrap();
+        tokio::fs::write(&legacy_binary_path, bincode::serialize(&binary).unwrap())
+            .await
+            .unwrap();
         write_legacy_json_sidecar(&json_path, &legacy)
             .await
             .unwrap();
         delete_sidecar(&binary_path).await.unwrap();
 
         assert!(!binary_path.exists());
+        assert!(!legacy_binary_path.exists());
         assert!(!json_path.exists());
     }
 
@@ -4153,7 +4292,7 @@ mod tests {
     #[tokio::test]
     async fn sidecar_writer_persists_verified_snapshots_in_order() {
         let dir = tempfile::tempdir().unwrap();
-        let sidecar_path = dir.path().join("file.bin.part.meta.json");
+        let sidecar_path = dir.path().join("file.bin.part.postcard");
         let part_path = dir.path().join("file.bin.part");
         tokio::fs::write(&part_path, b"partial").await.unwrap();
         let first = ResumeSidecar {
@@ -4197,7 +4336,7 @@ mod tests {
     #[tokio::test]
     async fn sidecar_writer_saves_snapshot_without_fingerprint_when_part_is_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let sidecar_path = dir.path().join("file.bin.part.meta.json");
+        let sidecar_path = dir.path().join("file.bin.part.postcard");
         let part_path = dir.path().join("file.bin.part");
         let snapshot = ResumeSidecar {
             version: CURRENT_RESUME_SIDECAR_VERSION,
@@ -4235,7 +4374,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_resume_artifacts_removes_part_and_both_sidecars() {
+    async fn delete_resume_artifacts_removes_part_and_all_sidecars() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file.bin");
         let path_str = path.to_string_lossy().to_string();
@@ -4243,6 +4382,9 @@ mod tests {
             .await
             .unwrap();
         tokio::fs::write(sidecar_path(&path_str), b"{}")
+            .await
+            .unwrap();
+        tokio::fs::write(legacy_binary_sidecar_path(&path_str), b"{}")
             .await
             .unwrap();
         tokio::fs::write(legacy_json_sidecar_path(&path_str), b"{}")
@@ -4253,6 +4395,7 @@ mod tests {
 
         assert!(!part_path(&path_str).exists());
         assert!(!sidecar_path(&path_str).exists());
+        assert!(!legacy_binary_sidecar_path(&path_str).exists());
         assert!(!legacy_json_sidecar_path(&path_str).exists());
     }
 

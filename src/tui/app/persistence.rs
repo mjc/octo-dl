@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crate::core::SessionSnapshot;
 
 // Keep session saves responsive while collapsing bursts of same-path writes that
-// would otherwise serialize the full TOML snapshot over and over during add-file storms.
+// would otherwise serialize the full snapshot over and over during add-file storms.
 #[cfg(not(test))]
 const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_millis(100);
 #[cfg(test)]
@@ -150,13 +150,8 @@ fn session_persistence_worker(
         };
         match request {
             SessionPersistenceRequest::Save { session, path } => {
-                next_request = persist_latest_save(
-                    session,
-                    path,
-                    &request_rx,
-                    &error_tx,
-                    &save_call_count,
-                );
+                next_request =
+                    persist_latest_save(session, path, &request_rx, &error_tx, &save_call_count);
             }
             SessionPersistenceRequest::Remove(path) => {
                 remove_snapshot(path, &error_tx);
@@ -177,8 +172,7 @@ fn persist_latest_save(
 ) -> Option<SessionPersistenceRequest> {
     let first_queued_at = Instant::now();
     loop {
-        let max_remaining =
-            SESSION_SAVE_MAX_DELAY.saturating_sub(first_queued_at.elapsed());
+        let max_remaining = SESSION_SAVE_MAX_DELAY.saturating_sub(first_queued_at.elapsed());
         let wait_for = SESSION_SAVE_DEBOUNCE.min(max_remaining);
         if wait_for.is_zero() {
             save_snapshot(session, path, error_tx, save_call_count);
@@ -217,11 +211,30 @@ fn persist_latest_save(
 }
 
 fn remove_snapshot(path: PathBuf, error_tx: &mpsc::Sender<SessionPersistenceError>) {
-    if let Err(error) = std::fs::remove_file(&path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        let _ = error_tx.send(SessionPersistenceError::Remove { path, error });
+    for candidate in [Some(path.clone()), alternate_session_path(&path)] {
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        if let Err(error) = std::fs::remove_file(&candidate)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            let _ = error_tx.send(SessionPersistenceError::Remove {
+                path: candidate,
+                error,
+            });
+            return;
+        }
     }
+}
+
+fn alternate_session_path(path: &std::path::Path) -> Option<PathBuf> {
+    let extension = path.extension().and_then(|extension| extension.to_str())?;
+    let sibling_extension = match extension {
+        "postcard" => "toml",
+        "toml" => "postcard",
+        _ => return None,
+    };
+    Some(path.with_extension(sibling_extension))
 }
 
 fn save_snapshot(
@@ -273,7 +286,7 @@ mod tests {
     #[test]
     fn save_and_flush_persists_session_snapshot() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.toml");
+        let path = dir.path().join("session.postcard");
         let persistence = SessionPersistence::new();
         persistence.reset_save_call_count();
         let mut session = session_snapshot(vec![(
@@ -305,25 +318,28 @@ mod tests {
     #[test]
     fn remove_and_flush_deletes_session_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.toml");
+        let path = dir.path().join("session.postcard");
+        let legacy_path = dir.path().join("session.toml");
         let session = session_snapshot(vec![(
             "https://mega.nz/file/root",
             UrlFixtureStatus::Fetched,
         )]);
         session.save_to_path(&path).unwrap();
+        session.save_to_path(&legacy_path).unwrap();
         let persistence = SessionPersistence::new();
 
         persistence.remove(path.clone());
         persistence.flush();
 
         assert!(!path.exists());
+        assert!(!legacy_path.exists());
         assert!(persistence.drain_errors().is_empty());
     }
 
     #[test]
     fn save_burst_persists_latest_snapshot_before_flush() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.toml");
+        let path = dir.path().join("session.postcard");
         let persistence = SessionPersistence::new();
         persistence.reset_save_call_count();
         let mut first = session_snapshot(vec![(
@@ -361,7 +377,7 @@ mod tests {
     #[test]
     fn remove_cancels_debounced_save_for_same_path() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.toml");
+        let path = dir.path().join("session.postcard");
         let persistence = SessionPersistence::new();
         persistence.reset_save_call_count();
         let session = session_snapshot(vec![(
@@ -381,8 +397,8 @@ mod tests {
     #[test]
     fn remove_other_path_does_not_cancel_debounced_save() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.toml");
-        let other_path = dir.path().join("other-session.toml");
+        let path = dir.path().join("session.postcard");
+        let other_path = dir.path().join("other-session.postcard");
         let persistence = SessionPersistence::new();
         persistence.reset_save_call_count();
         let session = session_snapshot(vec![(
@@ -403,7 +419,7 @@ mod tests {
     #[test]
     fn drop_flushes_pending_save_on_disconnect() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.toml");
+        let path = dir.path().join("session.postcard");
         let session = session_snapshot(vec![(
             "https://mega.nz/file/root",
             UrlFixtureStatus::Fetched,
@@ -423,7 +439,7 @@ mod tests {
     #[test]
     fn steady_same_path_save_stream_flushes_within_max_delay() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.toml");
+        let path = dir.path().join("session.postcard");
         let persistence = SessionPersistence::new();
         persistence.reset_save_call_count();
         let base = session_snapshot(vec![(

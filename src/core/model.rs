@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
+use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(test)]
 use std::cell::Cell;
@@ -226,7 +227,10 @@ pub type UrlId = String;
 
 #[cfg(test)]
 mod tests {
-    use super::{PackageId, PackageKey};
+    use super::{
+        DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState,
+        PackageId, PackageKey, SessionMeta,
+    };
 
     #[test]
     fn package_key_ids_are_stable_across_derivation_paths() {
@@ -234,6 +238,32 @@ mod tests {
         assert_eq!(
             PackageId::for_package_key(&package_key),
             PackageId::parse_or_key(package_key.as_str(), &package_key)
+        );
+    }
+
+    #[test]
+    fn download_state_files_support_borrowed_str_lookups() {
+        let mut state = DownloadState::new(SessionMeta::default());
+        let package_id = PackageId::new_v4();
+        let file_id = FileId::from("file.bin");
+        state.files.insert(
+            file_id.clone(),
+            FileState {
+                id: file_id,
+                package_id,
+                source_url: "https://example.invalid/file".to_string(),
+                path: "file.bin".to_string(),
+                size: 42,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState::default(),
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+
+        assert!(state.files.contains_key("file.bin"));
+        assert_eq!(
+            state.files.get("file.bin").map(|file| file.path.as_str()),
+            Some("file.bin")
         );
     }
 }
@@ -352,6 +382,8 @@ pub struct FileState {
     pub accounting: FileAccounting,
 }
 
+pub type FileStateIndex = IndexMap<FileId, FileState, FxBuildHasher>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TotalsState {
     pub run_total_bytes: u64,
@@ -365,7 +397,7 @@ pub struct TotalsState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DownloadState {
     pub packages: IndexMap<PackageId, PackageState>,
-    pub files: IndexMap<FileId, FileState>,
+    pub files: FileStateIndex,
     pub url_order: Vec<UrlId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<FileId>,
