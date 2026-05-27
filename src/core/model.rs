@@ -229,7 +229,7 @@ pub type UrlId = String;
 mod tests {
     use super::{
         DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState,
-        PackageId, PackageKey, SessionMeta,
+        PackageId, PackageKey, PackageProgressState, PackageStatus, SessionMeta,
     };
 
     #[test]
@@ -264,6 +264,64 @@ mod tests {
         assert_eq!(
             state.files.get("file.bin").map(|file| file.path.as_str()),
             Some("file.bin")
+        );
+    }
+
+    #[test]
+    fn package_progress_status_preserves_status_precedence() {
+        assert_eq!(
+            PackageProgressState::default().status(false),
+            PackageStatus::Pending
+        );
+        assert_eq!(
+            PackageProgressState {
+                queued: 2,
+                ..PackageProgressState::default()
+            }
+            .status(false),
+            PackageStatus::Queued
+        );
+        assert_eq!(
+            PackageProgressState {
+                complete: 1,
+                queued: 1,
+                ..PackageProgressState::default()
+            }
+            .status(false),
+            PackageStatus::Partial
+        );
+        assert_eq!(
+            PackageProgressState {
+                complete: 1,
+                downloading: 1,
+                ..PackageProgressState::default()
+            }
+            .status(false),
+            PackageStatus::Downloading
+        );
+        assert_eq!(
+            PackageProgressState {
+                complete: 2,
+                ..PackageProgressState::default()
+            }
+            .status(false),
+            PackageStatus::Complete
+        );
+        assert_eq!(
+            PackageProgressState {
+                failed: 1,
+                ..PackageProgressState::default()
+            }
+            .status(false),
+            PackageStatus::Failed
+        );
+        assert_eq!(
+            PackageProgressState {
+                complete: 1,
+                ..PackageProgressState::default()
+            }
+            .status(true),
+            PackageStatus::Failed
         );
     }
 }
@@ -308,6 +366,38 @@ pub enum PackageStatus {
     Partial,
     Complete,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PackageProgressState {
+    pub queued: usize,
+    pub downloading: usize,
+    pub complete: usize,
+    pub failed: usize,
+}
+
+impl PackageProgressState {
+    #[must_use]
+    pub const fn file_count(self) -> usize {
+        self.queued + self.downloading + self.complete + self.failed
+    }
+
+    #[must_use]
+    pub const fn status(self, has_error: bool) -> PackageStatus {
+        if has_error || self.failed > 0 {
+            PackageStatus::Failed
+        } else if self.downloading > 0 {
+            PackageStatus::Downloading
+        } else if self.complete > 0 && self.queued > 0 {
+            PackageStatus::Partial
+        } else if self.complete > 0 && self.file_count() > 0 {
+            PackageStatus::Complete
+        } else if self.queued > 0 {
+            PackageStatus::Queued
+        } else {
+            PackageStatus::Pending
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -365,9 +455,17 @@ pub struct PackageState {
     pub display_name: String,
     #[serde(default)]
     pub file_ids: Vec<FileId>,
-    pub status: PackageStatus,
+    #[serde(skip, default)]
+    pub progress: PackageProgressState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+impl PackageState {
+    #[must_use]
+    pub const fn status(&self) -> PackageStatus {
+        self.progress.status(self.error.is_some())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

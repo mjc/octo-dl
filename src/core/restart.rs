@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::core::model::{
     DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState,
-    FileStateIndex, PackageId, PackageState, PackageStatus, SessionMeta, UrlId,
+    FileStateIndex, PackageId, PackageProgressState, PackageState, SessionMeta, UrlId,
 };
 use crate::core::session::SessionSnapshot;
 use chrono::Utc;
@@ -176,7 +176,7 @@ pub fn reconcile_restart(
                     key: package.key.clone(),
                     display_name: package.display_name.clone(),
                     file_ids: package.files.iter().map(|file| file.id.clone()).collect(),
-                    status: PackageStatus::Pending,
+                    progress: PackageProgressState::default(),
                     error: package.error.clone(),
                 },
             );
@@ -248,12 +248,7 @@ pub fn reconcile_restart(
 
     state.packages = packages;
     state.files = files;
-    super::reducer::reduce(
-        &mut state,
-        super::reducer::CoreEvent::Tick {
-            now: std::time::Instant::now(),
-        },
-    );
+    super::reducer::rebuild_derived_state(&mut state);
 
     RestartSnapshot {
         state,

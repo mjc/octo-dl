@@ -416,7 +416,7 @@ fn package_is_auto_expanded_for(
         || core_state
             .packages
             .get(package_id)
-            .is_some_and(|package| matches!(package.status, PackageStatus::Failed))
+            .is_some_and(|package| matches!(package.status(), PackageStatus::Failed))
 }
 
 fn overlay_row_is_hidden_placeholder(file: &FileEntry, overlay: Option<&TransientRow>) -> bool {
@@ -478,8 +478,8 @@ pub(super) fn visible_rows_for(
         let right_package = &core_state.packages[right];
         let ordering = match sort.key {
             SortKey::Queue => left_projection.order.cmp(&right_projection.order),
-            SortKey::Status => package_status_rank(left_package.status)
-                .cmp(&package_status_rank(right_package.status)),
+            SortKey::Status => package_status_rank(left_package.status())
+                .cmp(&package_status_rank(right_package.status())),
             SortKey::Name => left_projection
                 .display_name
                 .cmp(&right_projection.display_name),
