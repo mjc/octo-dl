@@ -1262,6 +1262,7 @@ fn selected_row_uses_valid_visible_row_cache() {
 #[test]
 fn ensure_core_file_in_package_collapses_visible_syncs() {
     let mut app = test_app();
+    crate::core::reducer::reset_snapshot_from_state_call_count();
 
     app.ensure_core_file_in_package(
         &"episode-1.mkv".into(),
@@ -1275,6 +1276,7 @@ fn ensure_core_file_in_package_collapses_visible_syncs() {
 
     assert_eq!(app.visible_sync_count, 1);
     assert_eq!(app.session_persist_count, 1);
+    assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
     assert!(
         app.core_state
             .files
@@ -1285,6 +1287,7 @@ fn ensure_core_file_in_package_collapses_visible_syncs() {
 #[test]
 fn add_urls_collapses_placeholder_visible_syncs() {
     let mut app = test_app();
+    crate::core::reducer::reset_snapshot_from_state_call_count();
 
     app.handle_ui_action(UiAction::AddUrls(vec![
         "https://mega.nz/folder/one".to_string(),
@@ -1294,6 +1297,7 @@ fn add_urls_collapses_placeholder_visible_syncs() {
 
     assert_eq!(app.visible_sync_count, 1);
     assert_eq!(app.session_persist_count, 1);
+    assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
     assert_eq!(app.urls.len(), 3);
     assert_eq!(app.overlay_files.len(), 3);
 }
@@ -1365,6 +1369,191 @@ fn core_persisted_session_snapshot_is_saved_to_disk() {
         session.find_file("episode-1.mkv").unwrap().path,
         "episode-1.mkv"
     );
+}
+
+#[test]
+fn deferred_core_persistence_materializes_before_session_mutation() {
+    let mut app = test_app();
+    crate::core::reducer::reset_snapshot_from_state_call_count();
+
+    app.with_deferred_batch_updates(|app| {
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/root"),
+                source_url: "https://mega.nz/folder/root".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string()),
+                display_name: "Root".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "episode-1.mkv".to_string().into(),
+                    path: "episode-1.mkv".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        let _ = app.mutate_session_and_save(|session| {
+            let tracked_url = session
+                .urls
+                .iter_mut()
+                .find(|tracked_url| tracked_url.url == "https://mega.nz/folder/root")
+                .expect("package-resolved snapshot should seed the tracked url");
+            tracked_url.error = Some("boom".to_string());
+        });
+    });
+
+    assert_eq!(app.session_persist_count, 1);
+    assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
+    assert_eq!(
+        app.session
+            .as_ref()
+            .and_then(|session| session
+                .urls
+                .iter()
+                .find(|url| { url.url == "https://mega.nz/folder/root" }))
+            .and_then(|url| url.error.as_deref()),
+        Some("boom")
+    );
+}
+
+#[test]
+fn deferred_core_persistence_materializes_once_for_nested_batches() {
+    let mut app = test_app();
+    crate::core::reducer::reset_snapshot_from_state_call_count();
+
+    app.with_deferred_batch_updates(|app| {
+        app.with_deferred_batch_updates(|app| {
+            app.apply_core_event(CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: package_id("pkg-a", "https://mega.nz/folder/a"),
+                    source_url: "https://mega.nz/folder/a".to_string(),
+                    key: crate::core::PackageKey::new("https://mega.nz/folder/a".to_string()),
+                    display_name: "Package A".to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: "episode-a.mkv".to_string().into(),
+                        path: "episode-a.mkv".to_string(),
+                        size: 128,
+                    }],
+                    collision: None,
+                },
+            });
+            app.apply_core_event(CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: package_id("pkg-b", "https://mega.nz/folder/b"),
+                    source_url: "https://mega.nz/folder/b".to_string(),
+                    key: crate::core::PackageKey::new("https://mega.nz/folder/b".to_string()),
+                    display_name: "Package B".to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: "episode-b.mkv".to_string().into(),
+                        path: "episode-b.mkv".to_string(),
+                        size: 256,
+                    }],
+                    collision: None,
+                },
+            });
+        });
+    });
+
+    assert_eq!(app.session_persist_count, 1);
+    assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
+    assert_eq!(app.core_state.files.len(), 2);
+    assert_eq!(app.core_state.packages.len(), 2);
+}
+
+#[test]
+fn deferred_core_persistence_skips_snapshot_for_non_persist_events() {
+    let mut app = test_app();
+    resolve_package(
+        &mut app,
+        "https://mega.nz/folder/root",
+        &[("episode-1.mkv", 128)],
+    );
+    app.session_persist_count = 0;
+    crate::core::reducer::reset_snapshot_from_state_call_count();
+
+    app.with_deferred_batch_updates(|app| {
+        app.apply_core_event(CoreEvent::FileQueued {
+            file_id: "episode-1.mkv".to_string().into(),
+        });
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: "episode-1.mkv".to_string().into(),
+            size: 128,
+        });
+    });
+
+    assert_eq!(app.session_persist_count, 0);
+    assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 0);
+    assert!(matches!(
+        app.core_state.files["episode-1.mkv"].lifecycle,
+        FileLifecycle::Downloading
+    ));
+}
+
+#[test]
+fn deferred_core_persistence_materializes_once_for_multiple_session_mutations() {
+    let mut app = test_app();
+    crate::core::reducer::reset_snapshot_from_state_call_count();
+
+    app.with_deferred_batch_updates(|app| {
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/root"),
+                source_url: "https://mega.nz/folder/root".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string()),
+                display_name: "Root".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "episode-1.mkv".to_string().into(),
+                    path: "episode-1.mkv".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        let _ = app.mutate_session_and_save(|session| {
+            session.urls[0].error = Some("boom".to_string());
+        });
+        let _ = app.mutate_session_and_save(|session| {
+            session.packages[0].display_name = "Renamed".to_string();
+        });
+    });
+
+    assert_eq!(app.session_persist_count, 1);
+    assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
+    let session = app.session.as_ref().expect("session should exist");
+    assert_eq!(session.urls[0].error.as_deref(), Some("boom"));
+    assert_eq!(session.packages[0].display_name, "Renamed");
+}
+
+#[test]
+fn deferred_core_persistence_allows_session_remove_to_override_batch_snapshot() {
+    let mut app = test_app();
+    crate::core::reducer::reset_snapshot_from_state_call_count();
+
+    app.with_deferred_batch_updates(|app| {
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/root"),
+                source_url: "https://mega.nz/folder/root".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string()),
+                display_name: "Root".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "episode-1.mkv".to_string().into(),
+                    path: "episode-1.mkv".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        let _ = app.mutate_session_and_save(|session| {
+            session.urls.clear();
+            session.packages.clear();
+        });
+    });
+
+    assert_eq!(app.session_persist_count, 1);
+    assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
+    let session = app.session.as_ref().expect("session should exist");
+    assert!(session.urls.is_empty());
+    assert!(session.packages.is_empty());
 }
 
 #[test]
@@ -2227,6 +2416,7 @@ fn sync_visible_files_keeps_package_row_selected_when_failed_package_auto_expand
 #[test]
 fn drain_download_events_collapses_visible_syncs_for_batched_files() {
     let mut app = test_app();
+    crate::core::reducer::reset_snapshot_from_state_call_count();
     app.urls.push("https://mega.nz/folder/resolved".to_string());
     app.core_state
         .url_order
@@ -2256,5 +2446,6 @@ fn drain_download_events_collapses_visible_syncs_for_batched_files() {
 
     assert_eq!(app.visible_sync_count, 1);
     assert_eq!(app.session_persist_count, 1);
+    assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
     assert_eq!(app.core_state.files.len(), 3);
 }
