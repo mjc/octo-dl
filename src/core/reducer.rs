@@ -1534,6 +1534,70 @@ mod tests {
     }
 
     #[test]
+    fn deleting_middle_source_url_preserves_other_resume_urls_in_order() {
+        let pkg_a = package_id("pkg-a", "url-a");
+        let pkg_b = package_id("pkg-b", "url-b");
+        let pkg_c = package_id("pkg-c", "url-c");
+        let mut state = DownloadState::new(crate::core::SessionMeta::default());
+        state.url_order = vec!["url-a".to_string(), "url-b".to_string(), "url-c".to_string()];
+        for (pkg_id, url, file_id) in [
+            (pkg_a, "url-a", "a.bin"),
+            (pkg_b, "url-b", "b.bin"),
+            (pkg_c, "url-c", "c.bin"),
+        ] {
+            state.packages.insert(
+                pkg_id,
+                PackageState {
+                    id: pkg_id,
+                    key: crate::core::PackageKey::new(url.to_string()),
+                    display_name: url.to_string(),
+                    file_ids: vec![file_id.to_string().into()],
+                    status: PackageStatus::Pending,
+                    error: None,
+                },
+            );
+            state.files.insert(
+                file_id.to_string().into(),
+                FileState {
+                    id: file_id.to_string().into(),
+                    package_id: pkg_id,
+                    source_url: url.to_string(),
+                    path: file_id.to_string(),
+                    size: 1,
+                    lifecycle: FileLifecycle::Queued,
+                    progress: FileProgressState::default(),
+                    accounting: FileAccounting::CurrentRun,
+                },
+            );
+        }
+
+        let effects = reduce(
+            &mut state,
+            CoreEvent::FileDeleted {
+                file_id: "b.bin".to_string().into(),
+            },
+        );
+
+        assert_eq!(
+            state.url_order,
+            vec!["url-a".to_string(), "url-c".to_string()]
+        );
+        let saved = effects.iter().find_map(|effect| match effect {
+            CoreEffect::PersistSession(snapshot) => Some(snapshot),
+            _ => None,
+        });
+        assert_eq!(
+            saved
+                .expect("delete should persist session")
+                .urls
+                .iter()
+                .map(|url| url.url.as_str())
+                .collect::<Vec<_>>(),
+            vec!["url-a", "url-c"]
+        );
+    }
+
+    #[test]
     fn snapshot_from_state_preserves_package_file_order() {
         let pkg_id = package_id("pkg", "pkg");
         let mut state = DownloadState::new(crate::core::SessionMeta::default());
