@@ -1258,6 +1258,43 @@ fn selected_row_uses_valid_visible_row_cache() {
 }
 
 #[test]
+fn ensure_core_file_in_package_collapses_visible_syncs() {
+    let mut app = test_app();
+
+    app.ensure_core_file_in_package(
+        &"episode-1.mkv".into(),
+        "pkg",
+        "Package",
+        "https://mega.nz/folder/root",
+        "episode-1.mkv",
+        128,
+        crate::core::FileAccounting::CurrentRun,
+    );
+
+    assert_eq!(app.visible_sync_count, 1);
+    assert!(
+        app.core_state
+            .files
+            .contains_key(&FileId::from("episode-1.mkv"))
+    );
+}
+
+#[test]
+fn add_urls_collapses_placeholder_visible_syncs() {
+    let mut app = test_app();
+
+    app.handle_ui_action(UiAction::AddUrls(vec![
+        "https://mega.nz/folder/one".to_string(),
+        "https://mega.nz/folder/two".to_string(),
+        "https://mega.nz/folder/three".to_string(),
+    ]));
+
+    assert_eq!(app.visible_sync_count, 1);
+    assert_eq!(app.urls.len(), 3);
+    assert_eq!(app.overlay_files.len(), 3);
+}
+
+#[test]
 fn bookmarklet_added_url_placeholder_is_visible_with_existing_packages() {
     let mut app = test_app();
     app.apply_core_event(CoreEvent::PackageResolved {
@@ -2172,4 +2209,38 @@ fn sync_visible_files_keeps_package_row_selected_when_failed_package_auto_expand
         )))
     );
     assert_eq!(app.visible_rows().len(), 3);
+}
+
+#[test]
+fn drain_download_events_collapses_visible_syncs_for_batched_files() {
+    let mut app = test_app();
+    app.urls.push("https://mega.nz/folder/resolved".to_string());
+    app.core_state
+        .url_order
+        .push("https://mega.nz/folder/resolved".to_string());
+    let (_download_tx, mut download_rx) = mpsc::unbounded_channel();
+    for (name, size) in [
+        ("episode-1.mkv", 128),
+        ("episode-2.mkv", 256),
+        ("episode-3.mkv", 512),
+    ] {
+        _download_tx
+            .send(DownloadEvent::FileQueued(QueuedFile {
+                id: name.to_string().into(),
+                size,
+                accounting: crate::core::FileAccounting::CurrentRun,
+                origin: crate::tui::event::FileOrigin {
+                    package_id: Some(package_id("pkg", "Package")),
+                    package_display_name: Some("Package".to_string()),
+                    source_url: "https://mega.nz/folder/resolved".to_string(),
+                    submitted_url: "https://mega.nz/folder/resolved".to_string(),
+                },
+            }))
+            .expect("download event should send");
+    }
+
+    assert!(app.drain_download_events(&mut download_rx));
+
+    assert_eq!(app.visible_sync_count, 1);
+    assert_eq!(app.core_state.files.len(), 3);
 }

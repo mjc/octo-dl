@@ -276,45 +276,45 @@ impl App {
         &mut self,
         download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
     ) -> bool {
-        let mut handled = false;
-        let mut pending_progress: Vec<(FileId, crate::core::ProgressDelta, u64)> = Vec::new();
-        for _ in 0..MAX_DOWNLOAD_EVENTS_PER_TICK {
-            let Ok(event) = download_rx.try_recv() else {
-                break;
-            };
-            match event {
-                DownloadEvent::Progress {
-                    id,
-                    delta,
-                    attempt_id,
-                } => {
-                    if let Some((_, pending_delta, _)) =
-                        pending_progress
-                            .iter_mut()
-                            .find(|(pending_id, _, pending_attempt_id)| {
+        self.with_deferred_visible_sync(|app| {
+            let mut handled = false;
+            let mut pending_progress: Vec<(FileId, crate::core::ProgressDelta, u64)> = Vec::new();
+            for _ in 0..MAX_DOWNLOAD_EVENTS_PER_TICK {
+                let Ok(event) = download_rx.try_recv() else {
+                    break;
+                };
+                match event {
+                    DownloadEvent::Progress {
+                        id,
+                        delta,
+                        attempt_id,
+                    } => {
+                        if let Some((_, pending_delta, _)) = pending_progress.iter_mut().find(
+                            |(pending_id, _, pending_attempt_id)| {
                                 pending_id == &id && *pending_attempt_id == attempt_id
-                            })
-                    {
-                        pending_delta.total_bytes_delta = pending_delta
-                            .total_bytes_delta
-                            .saturating_add(delta.total_bytes_delta);
-                        pending_delta.network_bytes_delta = pending_delta
-                            .network_bytes_delta
-                            .saturating_add(delta.network_bytes_delta);
-                    } else {
-                        pending_progress.push((id, delta, attempt_id));
+                            },
+                        ) {
+                            pending_delta.total_bytes_delta = pending_delta
+                                .total_bytes_delta
+                                .saturating_add(delta.total_bytes_delta);
+                            pending_delta.network_bytes_delta = pending_delta
+                                .network_bytes_delta
+                                .saturating_add(delta.network_bytes_delta);
+                        } else {
+                            pending_progress.push((id, delta, attempt_id));
+                        }
+                        handled = true;
                     }
-                    handled = true;
-                }
-                other => {
-                    let _ = self.flush_pending_progress_events(&mut pending_progress);
-                    self.handle_download_event(other);
-                    handled = true;
+                    other => {
+                        let _ = app.flush_pending_progress_events(&mut pending_progress);
+                        app.handle_download_event(other);
+                        handled = true;
+                    }
                 }
             }
-        }
-        handled |= self.flush_pending_progress_events(&mut pending_progress);
-        handled
+            handled |= app.flush_pending_progress_events(&mut pending_progress);
+            handled
+        })
     }
 
     pub(crate) fn drain_token_messages(&mut self) {
@@ -498,11 +498,11 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::dashboard::DownloadDashboardState;
     use crate::{
         core::{CoreEvent, PackageKey, ResolvedFile, ResolvedPackage},
         test_support::{StateDirectoryGuard, package_id},
     };
-    use crate::tui::dashboard::DownloadDashboardState;
     use tempfile::tempdir;
 
     fn shared_snapshot(shared_state: &crate::tui::app::SharedAppState) -> DownloadDashboardState {
@@ -593,7 +593,8 @@ mod tests {
             size: 128,
         });
         let token = tokio_util::sync::CancellationToken::new();
-        app.cancellation_tokens.insert(file_id.clone(), token.clone());
+        app.cancellation_tokens
+            .insert(file_id.clone(), token.clone());
         let cancelled_id = file_id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(10)).await;

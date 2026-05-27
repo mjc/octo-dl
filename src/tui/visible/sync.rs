@@ -55,7 +55,7 @@ pub(super) fn sync_visible_files(
 ) -> Vec<TuiRow> {
     let selected_row = file_list_state.selected().unwrap_or(0);
     let core_file_ids: HashSet<_> = core_state.files.keys().cloned().collect();
-    let existing: IndexMap<_, _> = std::mem::take(files)
+    let existing: HashMap<_, _> = std::mem::take(files)
         .into_iter()
         .map(|file| (file.id.clone(), file))
         .collect();
@@ -64,7 +64,7 @@ pub(super) fn sync_visible_files(
     let mut next_files = Vec::new();
     for file in core_state.files.values() {
         let package = core_state.packages.get(&file.package_id);
-        let existing = existing.shift_remove(&file.id);
+        let existing = existing.remove(&file.id);
         if let Some(entry) = project_core_file(file, package, existing) {
             next_files.push(entry);
         }

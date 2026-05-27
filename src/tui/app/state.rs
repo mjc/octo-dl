@@ -290,25 +290,27 @@ impl App {
         size: u64,
         accounting: FileAccounting,
     ) {
-        self.apply_core_event(CoreEvent::PackageResolved {
-            package: ResolvedPackage {
-                id: PackageId::parse_or_key(
-                    package_id,
-                    &crate::core::PackageKey::new(package_display_name),
-                ),
-                key: crate::core::PackageKey::new(package_display_name),
-                source_url: source_url.to_string(),
-                display_name: package_display_name.to_string(),
-                files: vec![ResolvedFile {
-                    file_id: file_id.clone(),
-                    path: path.to_string(),
-                    size,
-                }],
-                collision: None,
-            },
-        });
-        self.apply_core_event(CoreEvent::FileQueued {
-            file_id: file_id.clone(),
+        self.with_deferred_visible_sync(|app| {
+            app.apply_core_event(CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: PackageId::parse_or_key(
+                        package_id,
+                        &crate::core::PackageKey::new(package_display_name),
+                    ),
+                    key: crate::core::PackageKey::new(package_display_name),
+                    source_url: source_url.to_string(),
+                    display_name: package_display_name.to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: file_id.clone(),
+                        path: path.to_string(),
+                        size,
+                    }],
+                    collision: None,
+                },
+            });
+            app.apply_core_event(CoreEvent::FileQueued {
+                file_id: file_id.clone(),
+            });
         });
         if let Some(file) = self.core_state.files.get_mut(file_id) {
             file.source_url = source_url.to_string();
