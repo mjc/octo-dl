@@ -179,7 +179,9 @@ impl DownloadProgress for TuiProgress {
 
     fn on_resume_validation_start(&self, name: &str) {
         let id = self.intern_id(name);
-        let _ = self.tx.send(DownloadEvent::ResumeValidationStarted { id, attempt_id: 0 });
+        let _ = self
+            .tx
+            .send(DownloadEvent::ResumeValidationStarted { id, attempt_id: 0 });
     }
 
     fn on_resume_validation_chunk(&self, name: &str, bytes_delta: u64) {

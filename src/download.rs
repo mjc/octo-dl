@@ -1376,8 +1376,8 @@ impl<F: FileSystem> Downloader<F> {
             }
             if self
                 .revalidate_candidate_from_part(&input, candidate, &mut buffer, cancellation_token)
-                .await
-            ? {
+                .await?
+            {
                 revalidated = revalidated.saturating_add(1);
                 trust_resume_candidate(&mut validation, candidate);
             } else {
@@ -2590,16 +2590,19 @@ mod tests {
         let sidecar = sidecar_for_chunk(file_size, expected, first.index, mac);
 
         let validation = tokio_downloader()
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -2626,16 +2629,19 @@ mod tests {
         fs.add_fingerprint(&part, fingerprint);
 
         let validation = mock_downloader(fs)
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -2659,16 +2665,19 @@ mod tests {
         fs.add_fingerprint(&part, fingerprint);
 
         let validation = mock_downloader(fs)
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -2697,16 +2706,19 @@ mod tests {
         }
 
         let validation = tokio_downloader()
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -2740,16 +2752,19 @@ mod tests {
         }
 
         let validation = tokio_downloader()
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -2794,16 +2809,19 @@ mod tests {
         fs.add_fingerprint(&part, fingerprint);
 
         let validation = mock_downloader(fs)
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -2842,16 +2860,19 @@ mod tests {
         fs.add_fingerprint(&part, fingerprint_with_allocated_bytes(file_size, Some(1)));
 
         let validation = mock_downloader(fs)
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -2880,16 +2901,19 @@ mod tests {
         fs.add_fingerprint(&part, actual);
 
         let validation = mock_downloader(fs)
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -2913,16 +2937,19 @@ mod tests {
         fs.add_fingerprint(&part, fingerprint);
 
         let validation = mock_downloader(fs)
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -2947,16 +2974,19 @@ mod tests {
         let progress = RecordingProgress::default();
 
         let validation = mock_downloader(fs)
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: Some(("file.bin", &progress)),
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: Some(("file.bin", &progress)),
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -2996,16 +3026,19 @@ mod tests {
         let progress = RecordingProgress::default();
 
         let validation = tokio_downloader()
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: Some(("file.bin", &progress)),
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: Some(("file.bin", &progress)),
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3095,16 +3128,19 @@ mod tests {
         sidecar.part_fingerprint = stale_fingerprint;
 
         let validation = tokio_downloader()
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3136,16 +3172,19 @@ mod tests {
         tokio::fs::write(&part, &data).await.unwrap();
 
         let validation = tokio_downloader()
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3165,9 +3204,13 @@ mod tests {
         let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
-        let mac = mega::compute_mega_chunk_mac(chunk_data(&data, first), &TEST_AES_KEY, &TEST_AES_IV);
+        let mac =
+            mega::compute_mega_chunk_mac(chunk_data(&data, first), &TEST_AES_KEY, &TEST_AES_IV);
         let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, mac);
-        let mut stale_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        let mut stale_fingerprint = TokioFileSystem::new()
+            .file_fingerprint(&part)
+            .await
+            .unwrap();
         stale_fingerprint.modified_ns = stale_fingerprint.modified_ns.saturating_add(1);
         sidecar.part_fingerprint = Some(stale_fingerprint);
 
@@ -3204,9 +3247,13 @@ mod tests {
         let expected = [9u8; 8];
         let boundaries = mega::mega_chunk_boundaries(file_size);
         let first = &boundaries[0];
-        let mac = mega::compute_mega_chunk_mac(chunk_data(&data, first), &TEST_AES_KEY, &TEST_AES_IV);
+        let mac =
+            mega::compute_mega_chunk_mac(chunk_data(&data, first), &TEST_AES_KEY, &TEST_AES_IV);
         let mut sidecar = sidecar_for_chunk(file_size, expected, first.index, mac);
-        let mut stale_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        let mut stale_fingerprint = TokioFileSystem::new()
+            .file_fingerprint(&part)
+            .await
+            .unwrap();
         stale_fingerprint.allocated_bytes = stale_fingerprint
             .allocated_bytes
             .map(|allocated| allocated.saturating_add(512))
@@ -3249,7 +3296,10 @@ mod tests {
         let mac =
             mega::compute_mega_chunk_mac(chunk_data(&data, second), &TEST_AES_KEY, &TEST_AES_IV);
         let mut sidecar = sidecar_for_chunk(file_size, expected, second.index, mac);
-        let mut fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        let mut fingerprint = TokioFileSystem::new()
+            .file_fingerprint(&part)
+            .await
+            .unwrap();
         fingerprint.modified_ns = fingerprint.modified_ns.saturating_add(1);
         sidecar.part_fingerprint = Some(fingerprint);
         let progress = RecordingProgress::default();
@@ -3273,9 +3323,18 @@ mod tests {
 
         assert_eq!(validation.trusted_count, 1);
         assert_eq!(validation.trusted_bytes, second.length);
-        assert_eq!(validation.trusted_chunks[usize_from_u32(second.index)], Some(mac));
-        assert_eq!(progress.total.load(std::sync::atomic::Ordering::SeqCst), second.length);
-        assert_eq!(progress.network.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            validation.trusted_chunks[usize_from_u32(second.index)],
+            Some(mac)
+        );
+        assert_eq!(
+            progress.total.load(std::sync::atomic::Ordering::SeqCst),
+            second.length
+        );
+        assert_eq!(
+            progress.network.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
         assert_eq!(progress.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             progress.max_delta.load(std::sync::atomic::Ordering::SeqCst),
@@ -3297,7 +3356,10 @@ mod tests {
         let mac =
             mega::compute_mega_chunk_mac(chunk_data(&data, second), &TEST_AES_KEY, &TEST_AES_IV);
         let mut sidecar = sidecar_for_chunk(file_size, expected, second.index, mac);
-        let mut fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        let mut fingerprint = TokioFileSystem::new()
+            .file_fingerprint(&part)
+            .await
+            .unwrap();
         fingerprint.allocated_bytes = fingerprint
             .allocated_bytes
             .map(|allocated| allocated.saturating_add(512))
@@ -3324,9 +3386,18 @@ mod tests {
 
         assert_eq!(validation.trusted_count, 1);
         assert_eq!(validation.trusted_bytes, second.length);
-        assert_eq!(validation.trusted_chunks[usize_from_u32(second.index)], Some(mac));
-        assert_eq!(progress.total.load(std::sync::atomic::Ordering::SeqCst), second.length);
-        assert_eq!(progress.network.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            validation.trusted_chunks[usize_from_u32(second.index)],
+            Some(mac)
+        );
+        assert_eq!(
+            progress.total.load(std::sync::atomic::Ordering::SeqCst),
+            second.length
+        );
+        assert_eq!(
+            progress.network.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
         assert_eq!(progress.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             progress.max_delta.load(std::sync::atomic::Ordering::SeqCst),
@@ -3348,7 +3419,10 @@ mod tests {
         let mac =
             mega::compute_mega_chunk_mac(chunk_data(&data, second), &TEST_AES_KEY, &TEST_AES_IV);
         let mut sidecar = sidecar_for_chunk(file_size, expected, second.index, mac);
-        let mut fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        let mut fingerprint = TokioFileSystem::new()
+            .file_fingerprint(&part)
+            .await
+            .unwrap();
         fingerprint.modified_ns = fingerprint.modified_ns.saturating_add(1);
         fingerprint.allocated_bytes = fingerprint
             .allocated_bytes
@@ -3376,9 +3450,18 @@ mod tests {
 
         assert_eq!(validation.trusted_count, 1);
         assert_eq!(validation.trusted_bytes, second.length);
-        assert_eq!(validation.trusted_chunks[usize_from_u32(second.index)], Some(mac));
-        assert_eq!(progress.total.load(std::sync::atomic::Ordering::SeqCst), second.length);
-        assert_eq!(progress.network.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            validation.trusted_chunks[usize_from_u32(second.index)],
+            Some(mac)
+        );
+        assert_eq!(
+            progress.total.load(std::sync::atomic::Ordering::SeqCst),
+            second.length
+        );
+        assert_eq!(
+            progress.network.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
         assert_eq!(progress.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             progress.max_delta.load(std::sync::atomic::Ordering::SeqCst),
@@ -3400,7 +3483,10 @@ mod tests {
         let mac =
             mega::compute_mega_chunk_mac(chunk_data(&data, second), &TEST_AES_KEY, &TEST_AES_IV);
         let mut sidecar = sidecar_for_chunk(file_size, expected, second.index, mac);
-        let mut fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        let mut fingerprint = TokioFileSystem::new()
+            .file_fingerprint(&part)
+            .await
+            .unwrap();
         fingerprint.dev = None;
         fingerprint.ino = None;
         sidecar.part_fingerprint = Some(fingerprint);
@@ -3425,9 +3511,18 @@ mod tests {
 
         assert_eq!(validation.trusted_count, 1);
         assert_eq!(validation.trusted_bytes, second.length);
-        assert_eq!(validation.trusted_chunks[usize_from_u32(second.index)], Some(mac));
-        assert_eq!(progress.total.load(std::sync::atomic::Ordering::SeqCst), second.length);
-        assert_eq!(progress.network.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            validation.trusted_chunks[usize_from_u32(second.index)],
+            Some(mac)
+        );
+        assert_eq!(
+            progress.total.load(std::sync::atomic::Ordering::SeqCst),
+            second.length
+        );
+        assert_eq!(
+            progress.network.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
         assert_eq!(progress.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             progress.max_delta.load(std::sync::atomic::Ordering::SeqCst),
@@ -3471,16 +3566,19 @@ mod tests {
         fs.add_fingerprint(&part, fingerprint);
 
         let validation = mock_downloader(fs)
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3502,16 +3600,19 @@ mod tests {
         let sidecar = sidecar_for_chunk(file_size, expected, 0, [1u8; 16]);
 
         let validation = tokio_downloader()
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3542,16 +3643,19 @@ mod tests {
             .unwrap();
 
         let validation = tokio_downloader()
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3573,16 +3677,19 @@ mod tests {
         let sidecar = sidecar_for_chunk(file_size, [0u8; 8], 0, [1u8; 16]);
 
         let validation = tokio_downloader()
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3620,16 +3727,19 @@ mod tests {
         .unwrap();
         let loaded_sidecar = load_sidecar(&sidecar).await.unwrap();
         let validation = tokio_downloader()
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &loaded_sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &loaded_sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3673,16 +3783,19 @@ mod tests {
 
         let loaded_sidecar = load_sidecar(&sidecar).await.unwrap();
         let validation = tokio_downloader()
-            .revalidate_sidecar_chunks(SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &loaded_sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            }, None)
+            .revalidate_sidecar_chunks(
+                SidecarValidationInput {
+                    boundaries: &boundaries,
+                    part_path: &part,
+                    sidecar: &loaded_sidecar,
+                    file_size,
+                    expected_condensed_mac: expected,
+                    aes_key: &TEST_AES_KEY,
+                    aes_iv: &TEST_AES_IV,
+                    progress: None,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3802,7 +3915,9 @@ mod tests {
         let json_path = legacy_json_sidecar_path(&base);
         let legacy = legacy_json_sidecar_for_chunk(42, [9u8; 8], 7, [1u8; 16]);
 
-        tokio::fs::write(&binary_path, b"not-bincode").await.unwrap();
+        tokio::fs::write(&binary_path, b"not-bincode")
+            .await
+            .unwrap();
         write_legacy_json_sidecar(&json_path, &legacy)
             .await
             .unwrap();
@@ -4234,9 +4349,12 @@ mod tests {
         let path_str = dir.path().join("movie.mkv").to_string_lossy().to_string();
         let file_size = 300_000_u64;
         let boundaries = mega::mega_chunk_boundaries(file_size);
-        tokio::fs::write(part_path(&path_str), vec![0u8; usize_from_u64(boundaries[0].length)])
-            .await
-            .unwrap();
+        tokio::fs::write(
+            part_path(&path_str),
+            vec![0u8; usize_from_u64(boundaries[0].length)],
+        )
+        .await
+        .unwrap();
         save_sidecar_atomic(
             &sidecar_path(&path_str),
             &ResumeSidecar {
@@ -4259,7 +4377,9 @@ mod tests {
         .await
         .unwrap();
 
-        let local = tokio_downloader().inspect_local_file(&path_str, file_size).await;
+        let local = tokio_downloader()
+            .inspect_local_file(&path_str, file_size)
+            .await;
 
         assert_eq!(local.status, FileStatus::Partial);
         assert_eq!(local.existing_partial_bytes, boundaries[0].length);
@@ -4272,9 +4392,12 @@ mod tests {
         let path_str = dir.path().join("movie.mkv").to_string_lossy().to_string();
         let file_size = 300_000_u64;
         let boundaries = mega::mega_chunk_boundaries(file_size);
-        tokio::fs::write(part_path(&path_str), vec![0u8; usize_from_u64(boundaries[0].length)])
-            .await
-            .unwrap();
+        tokio::fs::write(
+            part_path(&path_str),
+            vec![0u8; usize_from_u64(boundaries[0].length)],
+        )
+        .await
+        .unwrap();
         let legacy = LegacyJsonResumeSidecar {
             verified_chunks: vec![
                 LegacyJsonVerifiedChunkRecord {
@@ -4292,7 +4415,9 @@ mod tests {
             .await
             .unwrap();
 
-        let local = tokio_downloader().inspect_local_file(&path_str, file_size).await;
+        let local = tokio_downloader()
+            .inspect_local_file(&path_str, file_size)
+            .await;
 
         assert_eq!(local.status, FileStatus::Partial);
         assert_eq!(local.existing_partial_bytes, boundaries[0].length);
