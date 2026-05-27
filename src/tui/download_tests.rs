@@ -3,7 +3,7 @@ use super::super::event::{DownloadEvent, FileOrigin, QueuedFile};
 use super::*;
 use crate::core::{CoreEvent, ProgressDelta};
 use crate::test_support::{StateDirectoryGuard, UrlFixtureStatus, session_snapshot};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 
@@ -132,6 +132,16 @@ fn exclusive_resume_target_blocks_other_pending_downloads() {
         selected_while_target_active.is_empty(),
         "no other queued file should start while the Alt-R file is resuming"
     );
+}
+
+#[test]
+fn file_id_map_lookup_falls_back_when_ptr_key_differs() {
+    let stored = FileId::from(String::from("file.bin"));
+    let lookup = FileId::from(String::from("file.bin"));
+    let ptrs = HashSet::new();
+    let ids = HashMap::from([(stored, ())]);
+
+    assert!(contains_file_id_map_key(&ptrs, &ids, &lookup));
 }
 
 #[test]

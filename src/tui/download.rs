@@ -32,6 +32,20 @@ use super::event::{
 const PACKAGE_REVERIFY_CONCURRENCY: usize = 4;
 const VERIFICATION_PROGRESS_EVENT_BYTES: u64 = 8 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct FileIdPtrKey {
+    ptr: usize,
+    len: usize,
+}
+
+fn file_id_ptr_key(file_id: &FileId) -> FileIdPtrKey {
+    let id = file_id.as_str().as_bytes();
+    FileIdPtrKey {
+        ptr: id.as_ptr() as usize,
+        len: id.len(),
+    }
+}
+
 pub(crate) fn schedule_resume_artifact_delete(path: String) {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
@@ -265,7 +279,9 @@ struct SchedulerState {
     desired_pending_order: Vec<FileId>,
     pending_queue: VecDeque<FileId>,
     available_downloads: HashMap<FileId, QueuedDownload>,
+    available_download_ptrs: HashSet<FileIdPtrKey>,
     active_downloads: HashSet<FileId>,
+    active_download_ptrs: HashSet<FileIdPtrKey>,
     exclusive_resume_target: Option<FileId>,
     join_set: tokio::task::JoinSet<DownloadTaskResult>,
 }
@@ -276,10 +292,24 @@ impl SchedulerState {
             desired_pending_order: Vec::new(),
             pending_queue: VecDeque::new(),
             available_downloads: HashMap::new(),
+            available_download_ptrs: HashSet::new(),
             active_downloads: HashSet::new(),
+            active_download_ptrs: HashSet::new(),
             exclusive_resume_target: None,
             join_set: tokio::task::JoinSet::new(),
         }
+    }
+
+    fn has_available_download(&self, file_id: &FileId) -> bool {
+        self.available_download_ptrs
+            .contains(&file_id_ptr_key(file_id))
+            || self.available_downloads.contains_key(file_id)
+    }
+
+    fn has_active_download(&self, file_id: &FileId) -> bool {
+        self.active_download_ptrs
+            .contains(&file_id_ptr_key(file_id))
+            || self.active_downloads.contains(file_id)
     }
 
     fn sync_pending_order(&mut self, file_ids: Vec<FileId>) {
@@ -290,9 +320,7 @@ impl SchedulerState {
             && file_ids[..self.desired_pending_order.len()] == self.desired_pending_order
         {
             for file_id in &file_ids[self.desired_pending_order.len()..] {
-                if self.available_downloads.contains_key(file_id)
-                    && !self.active_downloads.contains(file_id)
-                {
+                if self.has_available_download(file_id) && !self.has_active_download(file_id) {
                     self.pending_queue.push_back(file_id.clone());
                 }
             }
@@ -305,25 +333,32 @@ impl SchedulerState {
 
     fn register_resolved_batch(&mut self, batch: CollectedBatch) -> CollectedBatch {
         for item in &batch.queued_items {
-            self.available_downloads
-                .insert(item.item.path.clone().into(), item.clone());
+            let file_id = FileId::from(item.item.path.as_str());
+            self.available_download_ptrs
+                .insert(file_id_ptr_key(&file_id));
+            self.available_downloads.insert(file_id, item.clone());
         }
         batch
     }
 
     fn finish_download(&mut self, file_id: &FileId, result: &crate::Result<crate::FileStats>) {
         self.active_downloads.remove(file_id);
+        self.active_download_ptrs.remove(&file_id_ptr_key(file_id));
         if matches!(result, Err(crate::Error::Cancelled)) {
             self.rebuild_pending_queue();
             return;
         }
         self.available_downloads.remove(file_id);
+        self.available_download_ptrs
+            .remove(&file_id_ptr_key(file_id));
     }
 
     fn pause_file_ids(&mut self, file_ids: &[FileId]) -> Vec<QueuedDownload> {
         let mut paused = Vec::new();
         for file_id in file_ids {
             if let Some(download) = self.available_downloads.remove(file_id) {
+                self.available_download_ptrs
+                    .remove(&file_id_ptr_key(file_id));
                 paused.push(download);
             }
         }
@@ -337,11 +372,13 @@ impl SchedulerState {
     fn unpause_downloads(&mut self, downloads: impl IntoIterator<Item = QueuedDownload>) {
         for download in downloads {
             let file_id = FileId::from(download.item.path.as_str());
+            self.available_download_ptrs
+                .insert(file_id_ptr_key(&file_id));
             self.available_downloads.insert(file_id.clone(), download);
             if !self.desired_pending_order.contains(&file_id) {
                 self.desired_pending_order.push(file_id.clone());
             }
-            if !self.active_downloads.contains(&file_id) {
+            if !self.has_active_download(&file_id) {
                 self.pending_queue.push_back(file_id.clone());
             }
             self.exclusive_resume_target = Some(file_id);
@@ -359,17 +396,32 @@ impl SchedulerState {
     }
 
     fn rebuild_pending_queue(&mut self) {
+        let desired_pending_order = &self.desired_pending_order;
+        let available_download_ptrs = &self.available_download_ptrs;
+        let available_downloads = &self.available_downloads;
+        let active_download_ptrs = &self.active_download_ptrs;
+        let active_downloads = &self.active_downloads;
         self.pending_queue.clear();
-        self.pending_queue.extend(
-            self.desired_pending_order
-                .iter()
-                .filter(|file_id| {
-                    self.available_downloads.contains_key(*file_id)
-                        && !self.active_downloads.contains(*file_id)
-                })
-                .cloned(),
-        );
+        for file_id in desired_pending_order {
+            let key = file_id_ptr_key(file_id);
+            let is_available =
+                available_download_ptrs.contains(&key) || available_downloads.contains_key(file_id);
+            let is_active =
+                active_download_ptrs.contains(&key) || active_downloads.contains(file_id);
+            if is_available && !is_active {
+                self.pending_queue.push_back(file_id.clone());
+            }
+        }
     }
+}
+
+#[cfg(test)]
+fn contains_file_id_map_key<V>(
+    ptrs: &HashSet<FileIdPtrKey>,
+    ids: &HashMap<FileId, V>,
+    file_id: &FileId,
+) -> bool {
+    ptrs.contains(&file_id_ptr_key(file_id)) || ids.contains_key(file_id)
 }
 
 #[cfg(test)]
