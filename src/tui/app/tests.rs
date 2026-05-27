@@ -1272,6 +1272,7 @@ fn ensure_core_file_in_package_collapses_visible_syncs() {
     );
 
     assert_eq!(app.visible_sync_count, 1);
+    assert_eq!(app.session_persist_count, 1);
     assert!(
         app.core_state
             .files
@@ -1290,6 +1291,7 @@ fn add_urls_collapses_placeholder_visible_syncs() {
     ]));
 
     assert_eq!(app.visible_sync_count, 1);
+    assert_eq!(app.session_persist_count, 1);
     assert_eq!(app.urls.len(), 3);
     assert_eq!(app.overlay_files.len(), 3);
 }
@@ -2242,5 +2244,6 @@ fn drain_download_events_collapses_visible_syncs_for_batched_files() {
     assert!(app.drain_download_events(&mut download_rx));
 
     assert_eq!(app.visible_sync_count, 1);
+    assert_eq!(app.session_persist_count, 1);
     assert_eq!(app.core_state.files.len(), 3);
 }

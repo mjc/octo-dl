@@ -127,8 +127,12 @@ impl App {
             memory_rss: 0,
             visible_sync_defer_depth: 0,
             visible_sync_pending: false,
+            session_persist_defer_depth: 0,
+            pending_session_persistence: None,
             #[cfg(test)]
             visible_sync_count: 0,
+            #[cfg(test)]
+            session_persist_count: 0,
         }
     }
 

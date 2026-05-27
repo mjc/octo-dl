@@ -276,7 +276,7 @@ impl App {
         &mut self,
         download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
     ) -> bool {
-        self.with_deferred_visible_sync(|app| {
+        self.with_deferred_batch_updates(|app| {
             let mut handled = false;
             let mut pending_progress: Vec<(FileId, crate::core::ProgressDelta, u64)> = Vec::new();
             for _ in 0..MAX_DOWNLOAD_EVENTS_PER_TICK {

@@ -290,7 +290,7 @@ impl App {
         size: u64,
         accounting: FileAccounting,
     ) {
-        self.with_deferred_visible_sync(|app| {
+        self.with_deferred_batch_updates(|app| {
             app.apply_core_event(CoreEvent::PackageResolved {
                 package: ResolvedPackage {
                     id: PackageId::parse_or_key(
@@ -436,11 +436,46 @@ impl App {
         }
     }
 
+    pub(super) fn flush_deferred_session_persistence(
+        &mut self,
+        pending: super::PendingSessionPersistence,
+    ) {
+        match pending {
+            super::PendingSessionPersistence::Save(session) => self.persist_session_now(session),
+            super::PendingSessionPersistence::Remove(path) => {
+                #[cfg(test)]
+                {
+                    self.session_persist_count += 1;
+                }
+                self.session_persistence.remove(path);
+            }
+        }
+    }
+
+    fn persist_session_now(&mut self, session: SessionSnapshot) {
+        #[cfg(test)]
+        {
+            self.session_persist_count += 1;
+        }
+        self.session_persistence
+            .save(session.clone(), session.state_path());
+        self.install_session(session);
+    }
+
     fn persist_session(&mut self, session: SessionSnapshot) -> bool {
         if session.urls.is_empty() && session.packages.is_empty() {
             let path = session.state_path();
-            self.session_persistence.remove(path);
             self.install_session(session);
+            if self.session_persist_defer_depth > 0 {
+                self.pending_session_persistence =
+                    Some(super::PendingSessionPersistence::Remove(path));
+            } else {
+                #[cfg(test)]
+                {
+                    self.session_persist_count += 1;
+                }
+                self.session_persistence.remove(path);
+            }
             return true;
         }
 
@@ -452,9 +487,13 @@ impl App {
             return false;
         }
 
-        self.session_persistence
-            .save(session.clone(), session.state_path());
-        self.install_session(session);
+        if self.session_persist_defer_depth > 0 {
+            self.pending_session_persistence =
+                Some(super::PendingSessionPersistence::Save(session.clone()));
+            self.install_session(session);
+        } else {
+            self.persist_session_now(session);
+        }
         true
     }
 }

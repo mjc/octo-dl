@@ -73,9 +73,27 @@ struct VisibleSyncDeferralGuard {
     app: NonNull<App>,
 }
 
+pub(super) enum PendingSessionPersistence {
+    Save(SessionSnapshot),
+    Remove(PathBuf),
+}
+
+struct SessionPersistenceDeferralGuard {
+    app: NonNull<App>,
+}
+
 impl VisibleSyncDeferralGuard {
     fn new(app: &mut App) -> Self {
         app.visible_sync_defer_depth += 1;
+        Self {
+            app: NonNull::from(app),
+        }
+    }
+}
+
+impl SessionPersistenceDeferralGuard {
+    fn new(app: &mut App) -> Self {
+        app.session_persist_defer_depth += 1;
         Self {
             app: NonNull::from(app),
         }
@@ -97,6 +115,22 @@ impl Drop for VisibleSyncDeferralGuard {
         if should_flush && !std::thread::panicking() {
             let selected_row_identity = app.selected_row();
             app.sync_visible_files_preserving_now(selected_row_identity);
+        }
+    }
+}
+
+impl Drop for SessionPersistenceDeferralGuard {
+    fn drop(&mut self) {
+        let app = unsafe { self.app.as_mut() };
+        debug_assert!(app.session_persist_defer_depth > 0);
+        app.session_persist_defer_depth = app.session_persist_defer_depth.saturating_sub(1);
+
+        if app.session_persist_defer_depth != 0 || std::thread::panicking() {
+            return;
+        }
+
+        if let Some(pending) = app.pending_session_persistence.take() {
+            app.flush_deferred_session_persistence(pending);
         }
     }
 }
@@ -193,8 +227,12 @@ pub struct App {
     pub last_tick: Instant,
     pub(crate) visible_sync_defer_depth: usize,
     pub(crate) visible_sync_pending: bool,
+    session_persist_defer_depth: usize,
+    pending_session_persistence: Option<PendingSessionPersistence>,
     #[cfg(test)]
     pub(crate) visible_sync_count: usize,
+    #[cfg(test)]
+    pub(crate) session_persist_count: usize,
 }
 
 impl App {
@@ -293,6 +331,20 @@ impl App {
         let result = f(self);
         drop(guard);
         result
+    }
+
+    pub(crate) fn with_deferred_session_persistence<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let guard = SessionPersistenceDeferralGuard::new(self);
+        let result = f(self);
+        drop(guard);
+        result
+    }
+
+    pub(crate) fn with_deferred_batch_updates<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.with_deferred_session_persistence(|app| app.with_deferred_visible_sync(f))
     }
 
     fn sync_visible_files_preserving_now(

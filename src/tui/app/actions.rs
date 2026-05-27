@@ -910,7 +910,7 @@ impl App {
         match action {
             UiAction::AddUrls(urls) => {
                 let count = urls.len();
-                self.with_deferred_visible_sync(|app| {
+                self.with_deferred_batch_updates(|app| {
                     for url in urls {
                         app.submit_url(url);
                     }
