@@ -103,10 +103,9 @@ impl SessionAdapter {
                 id: package.id,
                 key: package.key.clone(),
                 display_name: package.display_name.clone(),
-                files: package
-                    .file_ids
-                    .iter()
-                    .filter_map(|file_id| restart.state.files.get(file_id))
+                files: restart
+                    .state
+                    .package_files(&package.id)
                     .map(Self::snapshot_file_from_state)
                     .collect(),
                 error: package.error.clone(),

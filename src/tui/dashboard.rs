@@ -73,7 +73,7 @@ impl Serialize for BinaryCorePackageRowRef<'_> {
         row.serialize_field("source_url", self.stats.source_url)?;
         row.serialize_field("display_name", &self.package.display_name)?;
         row.serialize_field("status", &status)?;
-        row.serialize_field("file_ids", &PackageFileIdsRef(self.file_ids))?;
+        row.serialize_field("file_ids", &PackageFileIdsRef(&self.file_ids))?;
         row.serialize_field("present_files", &self.stats.present_files)?;
         row.serialize_field("completed_files", &self.stats.completed_files)?;
         row.serialize_field("downloaded_bytes", &self.stats.downloaded_bytes)?;
@@ -737,7 +737,7 @@ struct BinaryDashboardRowRef<'a>(&'a TuiRow);
 struct BinaryCorePackageRowRef<'a> {
     app: &'a App,
     package: &'a crate::core::PackageState,
-    file_ids: &'a [FileId],
+    file_ids: Vec<&'a FileId>,
     stats: CorePackageStats<'a>,
 }
 
@@ -765,7 +765,7 @@ struct DashboardFileRowRef<'a> {
     file: &'a super::app::FileEntry,
 }
 
-struct PackageFileIdsRef<'a>(&'a [FileId]);
+struct PackageFileIdsRef<'a>(&'a [&'a FileId]);
 
 struct SingleFileIdRef<'a>(&'a FileId);
 
@@ -974,14 +974,17 @@ impl Serialize for CorePackageRowRef<'_> {
             .then_some(self.stats.folder_label)
             .flatten();
         let mut row = serializer.serialize_struct("DashboardPackageRow", 13)?;
+        let file_ids = self
+            .app
+            .core_state
+            .package_files(&self.package.id)
+            .map(|file| &file.id)
+            .collect::<Vec<_>>();
         row.serialize_field("id", &DisplayRef(self.package.id))?;
         row.serialize_field("source_url", self.stats.source_url)?;
         row.serialize_field("display_name", &self.package.display_name)?;
         row.serialize_field("status", &status)?;
-        row.serialize_field(
-            "file_ids",
-            &PackageFileIdsRef(self.package.file_ids.as_slice()),
-        )?;
+        row.serialize_field("file_ids", &PackageFileIdsRef(file_ids.as_slice()))?;
         row.serialize_field("present_files", &self.stats.present_files)?;
         row.serialize_field("completed_files", &self.stats.completed_files)?;
         row.serialize_field("downloaded_bytes", &self.stats.downloaded_bytes)?;
@@ -1339,13 +1342,7 @@ impl Serialize for PackageLabelRef<'_> {
 impl<'a> CorePackageStats<'a> {
     #[cfg(test)]
     fn new(app: &'a App, package: &'a crate::core::PackageState) -> Self {
-        Self::from_files(
-            app,
-            package
-                .file_ids
-                .iter()
-                .filter_map(|file_id| app.core_state.files.get(file_id)),
-        )
+        Self::from_files(app, app.core_state.package_files(&package.id))
     }
 
     fn from_files(app: &'a App, files: impl IntoIterator<Item = &'a FileState>) -> Self {
@@ -1485,7 +1482,7 @@ fn binary_core_package_rows(app: &App) -> Vec<BinaryCorePackageRowRef<'_>> {
             (stats.present_files > 0).then_some(BinaryCorePackageRowRef {
                 app,
                 package,
-                file_ids: package.file_ids.as_slice(),
+                file_ids: files.iter().map(|file| &file.id).collect(),
                 stats,
             })
         })
@@ -2304,7 +2301,6 @@ mod tests {
                     "https://mega.nz/folder/failed".to_string().clone(),
                 ),
                 display_name: "Failed".to_string(),
-                file_ids: Vec::new(),
                 progress: crate::core::model::PackageProgressState::default(),
                 error: Some("boom".to_string()),
             },

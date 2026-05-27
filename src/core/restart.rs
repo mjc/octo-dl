@@ -3,12 +3,10 @@ use std::path::Path;
 
 use crate::core::model::{
     DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState,
-    FileStateIndex, PackageId, PackageProgressState, PackageState, PackageStateIndex, SessionMeta,
-    UrlId,
+    FileStateIndex, PackageProgressState, PackageState, PackageStateIndex, SessionMeta, UrlId,
 };
 use crate::core::session::SessionSnapshot;
 use chrono::Utc;
-use indexmap::IndexMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesystemFile {
@@ -176,7 +174,6 @@ pub fn reconcile_restart(
                     id: package.id.clone(),
                     key: package.key.clone(),
                     display_name: package.display_name.clone(),
-                    file_ids: package.files.iter().map(|file| file.id.clone()).collect(),
                     progress: PackageProgressState::default(),
                     error: package.error.clone(),
                 },
@@ -266,10 +263,10 @@ fn canonical_restart_session(snapshot: SessionSnapshot) -> SessionSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::model::SessionRunStatus;
     use crate::core::session::{
         FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
     };
+    use crate::core::{PackageId, model::SessionRunStatus};
     use crate::test_support::write_dummy_legacy_resume_sidecar_for_path;
     use tempfile::tempdir;
 

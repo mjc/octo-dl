@@ -4,6 +4,7 @@ use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(test)]
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -453,8 +454,6 @@ pub struct PackageState {
     pub id: PackageId,
     pub key: PackageKey,
     pub display_name: String,
-    #[serde(default)]
-    pub file_ids: Vec<FileId>,
     #[serde(skip, default)]
     pub progress: PackageProgressState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -522,6 +521,7 @@ impl DownloadState {
             return false;
         }
         self.packages.swap_indices(index, target);
+        self.reorder_files_by_package_order();
         true
     }
 
@@ -529,27 +529,34 @@ impl DownloadState {
         let Some(file) = self.files.get(file_id) else {
             return false;
         };
-        let Some(package) = self.packages.get_mut(&file.package_id) else {
-            return false;
-        };
-        let file_ids = &mut package.file_ids;
-        let Some(index) = file_ids.iter().position(|existing| existing == file_id) else {
+        let package_id = file.package_id;
+        let indices = self
+            .files
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (existing_id, existing_file))| {
+                (existing_file.package_id == package_id).then_some((index, existing_id))
+            })
+            .collect::<Vec<_>>();
+        let Some(index) = indices
+            .iter()
+            .position(|(_, existing)| *existing == file_id)
+        else {
             return false;
         };
         let target = index.saturating_add_signed(delta);
-        if target >= file_ids.len() || target == index {
+        if target >= indices.len() || target == index {
             return false;
         }
-        file_ids.swap(index, target);
+        self.files.move_index(indices[index].0, indices[target].0);
         true
     }
 
     pub fn package_files(&self, package_id: &PackageId) -> impl Iterator<Item = &FileState> + '_ {
-        self.packages
-            .get(package_id)
-            .into_iter()
-            .flat_map(|package| package.file_ids.iter())
-            .filter_map(|file_id| self.files.get(file_id))
+        let package_id = *package_id;
+        self.files
+            .values()
+            .filter(move |file| file.package_id == package_id)
     }
 
     #[must_use]
@@ -561,39 +568,27 @@ impl DownloadState {
 
     #[must_use]
     pub fn package_file_ids(&self, package_id: &PackageId) -> Vec<FileId> {
-        self.packages
-            .get(package_id)
-            .map(|package| package.file_ids.clone())
-            .unwrap_or_default()
+        self.package_files(package_id)
+            .map(|file| file.id.clone())
+            .collect()
     }
 
     #[must_use]
     pub fn pending_file_ids(&self) -> Vec<FileId> {
         #[cfg(test)]
         PENDING_FILE_IDS_CALLS.with(|count| count.set(count.get().saturating_add(1)));
-        let mut pending = Vec::with_capacity(
-            self.packages
-                .values()
-                .map(|package| package.progress.queued)
-                .sum(),
-        );
-        for package in self.packages.values() {
-            for file_id in &package.file_ids {
-                let Some(file) = self.files.get(file_id) else {
-                    continue;
-                };
-                if matches!(
+        self.files
+            .values()
+            .filter(|file| {
+                !matches!(
                     file.lifecycle,
                     FileLifecycle::Downloading
                         | FileLifecycle::Complete
                         | FileLifecycle::Failed { .. }
-                ) {
-                    continue;
-                }
-                pending.push(file.id.clone());
-            }
-        }
-        pending
+                )
+            })
+            .map(|file| file.id.clone())
+            .collect()
     }
 
     #[must_use]
@@ -601,5 +596,54 @@ impl DownloadState {
         self.packages
             .values()
             .find(|package| &package.key == package_key)
+    }
+
+    pub(crate) fn package_insert_index(&self, package_id: &PackageId) -> usize {
+        let Some(package_index) = self.packages.get_index_of(package_id) else {
+            return self.files.len();
+        };
+        let mut insert_index = self.files.len();
+        for (index, file) in self.files.values().enumerate() {
+            let Some(file_package_index) = self.packages.get_index_of(&file.package_id) else {
+                continue;
+            };
+            if file_package_index > package_index {
+                return insert_index.min(index);
+            }
+            insert_index = index.saturating_add(1);
+        }
+        insert_index
+    }
+
+    pub(crate) fn reorder_files_by_package_order(&mut self) {
+        let mut grouped =
+            HashMap::<PackageId, Vec<(FileId, FileState)>, FxBuildHasher>::with_hasher(
+                FxBuildHasher::default(),
+            );
+        for (file_id, file) in std::mem::take(&mut self.files) {
+            grouped
+                .entry(file.package_id)
+                .or_default()
+                .push((file_id, file));
+        }
+
+        let mut reordered = FileStateIndex::default();
+        for package_id in self.packages.keys().copied() {
+            if let Some(files) = grouped.remove(&package_id) {
+                for (file_id, file) in files {
+                    reordered.insert(file_id, file);
+                }
+            }
+        }
+        debug_assert!(
+            grouped.is_empty(),
+            "all files should belong to a known package before reordering"
+        );
+        for files in grouped.into_values() {
+            for (file_id, file) in files {
+                reordered.insert(file_id, file);
+            }
+        }
+        self.files = reordered;
     }
 }
