@@ -473,7 +473,7 @@ impl App {
         };
         if self.dashboard_binary_cache_key != Some(key) {
             self.dashboard_binary_cache =
-                Bytes::from(self.borrowed_dashboard_bincode(ui_mode, read_only));
+                Bytes::from(self.borrowed_dashboard_postcard(ui_mode, read_only));
             self.dashboard_binary_cache_key = Some(key);
         }
         self.dashboard_binary_cache.clone()

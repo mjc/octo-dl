@@ -290,7 +290,7 @@ impl App {
     ) -> SharedStateChannels {
         let (action_tx, action_rx) = mpsc::unbounded_channel::<UiAction>();
         let initial_state = enabled
-            .then(|| bytes::Bytes::from(self.borrowed_dashboard_bincode(ui_mode, false)))
+            .then(|| bytes::Bytes::from(self.borrowed_dashboard_postcard(ui_mode, false)))
             .unwrap_or_default();
         let (state_tx, state_rx) = watch::channel(initial_state);
         let shared_state = enabled.then_some(SharedAppState {

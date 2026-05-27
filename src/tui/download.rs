@@ -56,6 +56,7 @@ pub(crate) fn schedule_resume_artifact_delete(path: String) {
     } else {
         let part = crate::download::part_path(&path);
         let sidecar = crate::download::sidecar_path(&path);
+        let legacy_binary_sidecar = crate::download::legacy_binary_sidecar_path(&path);
         let legacy_json_sidecar = crate::download::legacy_json_sidecar_path(&path);
         if let Err(e) = std::fs::remove_file(&part)
             && e.kind() != std::io::ErrorKind::NotFound
@@ -68,6 +69,14 @@ pub(crate) fn schedule_resume_artifact_delete(path: String) {
             log::warn!(
                 "Failed to delete resume artifact {}: {e}",
                 sidecar.display()
+            );
+        }
+        if let Err(e) = std::fs::remove_file(&legacy_binary_sidecar)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!(
+                "Failed to delete resume artifact {}: {e}",
+                legacy_binary_sidecar.display()
             );
         }
         if let Err(e) = std::fs::remove_file(&legacy_json_sidecar)

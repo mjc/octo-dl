@@ -529,8 +529,10 @@ mod tests {
     use tempfile::tempdir;
 
     fn shared_snapshot(shared_state: &crate::tui::app::SharedAppState) -> DownloadDashboardState {
-        crate::tui::dashboard::dashboard_state_from_bincode(shared_state.state_rx.borrow().as_ref())
-            .expect("shared state should contain valid bincode")
+        crate::tui::dashboard::dashboard_state_from_postcard(
+            shared_state.state_rx.borrow().as_ref(),
+        )
+        .expect("shared state should contain valid postcard")
     }
 
     #[test]
