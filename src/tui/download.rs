@@ -283,6 +283,22 @@ impl SchedulerState {
     }
 
     fn sync_pending_order(&mut self, file_ids: Vec<FileId>) {
+        if file_ids == self.desired_pending_order {
+            return;
+        }
+        if file_ids.len() >= self.desired_pending_order.len()
+            && file_ids[..self.desired_pending_order.len()] == self.desired_pending_order
+        {
+            for file_id in &file_ids[self.desired_pending_order.len()..] {
+                if self.available_downloads.contains_key(file_id)
+                    && !self.active_downloads.contains(file_id)
+                {
+                    self.pending_queue.push_back(file_id.clone());
+                }
+            }
+            self.desired_pending_order = file_ids;
+            return;
+        }
         self.desired_pending_order = file_ids;
         self.rebuild_pending_queue();
     }
@@ -292,16 +308,16 @@ impl SchedulerState {
             self.available_downloads
                 .insert(item.item.path.clone().into(), item.clone());
         }
-        self.rebuild_pending_queue();
         batch
     }
 
     fn finish_download(&mut self, file_id: &FileId, result: &crate::Result<crate::FileStats>) {
         self.active_downloads.remove(file_id);
-        if !matches!(result, Err(crate::Error::Cancelled)) {
-            self.available_downloads.remove(file_id);
+        if matches!(result, Err(crate::Error::Cancelled)) {
+            self.rebuild_pending_queue();
+            return;
         }
-        self.rebuild_pending_queue();
+        self.available_downloads.remove(file_id);
     }
 
     fn pause_file_ids(&mut self, file_ids: &[FileId]) -> Vec<QueuedDownload> {
@@ -325,9 +341,11 @@ impl SchedulerState {
             if !self.desired_pending_order.contains(&file_id) {
                 self.desired_pending_order.push(file_id.clone());
             }
+            if !self.active_downloads.contains(&file_id) {
+                self.pending_queue.push_back(file_id.clone());
+            }
             self.exclusive_resume_target = Some(file_id);
         }
-        self.rebuild_pending_queue();
     }
 
     fn clear_exclusive_resume_target(&mut self, file_id: &FileId) {
@@ -342,16 +360,19 @@ impl SchedulerState {
 
     fn rebuild_pending_queue(&mut self) {
         self.pending_queue.clear();
-        self.pending_queue.extend(select_startable_file_ids(
-            &VecDeque::from(self.desired_pending_order.clone()),
-            &self.available_downloads.keys().cloned().collect(),
-            &self.active_downloads,
-            &None,
-            usize::MAX,
-        ));
+        self.pending_queue.extend(
+            self.desired_pending_order
+                .iter()
+                .filter(|file_id| {
+                    self.available_downloads.contains_key(*file_id)
+                        && !self.active_downloads.contains(*file_id)
+                })
+                .cloned(),
+        );
     }
 }
 
+#[cfg(test)]
 fn select_startable_file_ids(
     pending_queue: &VecDeque<FileId>,
     available_file_ids: &HashSet<FileId>,
@@ -1060,18 +1081,24 @@ fn start_pending_downloads(
     let capacity = runtime
         .concurrent_files
         .saturating_sub(scheduler.active_downloads.len());
-    let available_file_ids = scheduler
-        .available_downloads
-        .keys()
-        .cloned()
-        .collect::<HashSet<_>>();
-    let startable = select_startable_file_ids(
-        &scheduler.pending_queue,
-        &available_file_ids,
-        &scheduler.active_downloads,
-        &scheduler.exclusive_resume_target,
-        capacity,
-    );
+    let startable = if capacity == 0 {
+        Vec::new()
+    } else if let Some(target) = scheduler.exclusive_resume_target.as_ref() {
+        if scheduler.available_downloads.contains_key(target)
+            && !scheduler.active_downloads.contains(target)
+        {
+            vec![target.clone()]
+        } else {
+            Vec::new()
+        }
+    } else {
+        scheduler
+            .pending_queue
+            .iter()
+            .take(capacity)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
 
     for file_id in startable {
         let Some(item) = scheduler.available_downloads.get(&file_id).cloned() else {

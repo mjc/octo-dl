@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::core::model::{
@@ -126,6 +127,20 @@ pub enum CoreEffect {
 }
 
 pub type CoreEffects = SmallVec<[CoreEffect; 2]>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct FileIdPtrKey {
+    ptr: *const u8,
+    len: usize,
+}
+
+fn file_id_ptr_key(file_id: &FileId) -> FileIdPtrKey {
+    let id = file_id.as_str().as_bytes();
+    FileIdPtrKey {
+        ptr: id.as_ptr(),
+        len: id.len(),
+    }
+}
 
 fn should_persist_session(event: &CoreEvent) -> bool {
     !matches!(
@@ -804,7 +819,18 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
 }
 
 pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
-    let mut url_errors = std::collections::HashMap::<UrlId, String>::new();
+    let files_by_ptr: HashMap<_, _> = state
+        .files
+        .values()
+        .map(|file| (file_id_ptr_key(&file.id), file))
+        .collect();
+    let file_for_snapshot = |file_id: &FileId| {
+        files_by_ptr
+            .get(&file_id_ptr_key(file_id))
+            .copied()
+            .or_else(|| state.files.get(file_id))
+    };
+    let mut url_errors = HashMap::<UrlId, String>::with_capacity(state.packages.len());
     for file in state.files.values() {
         let source_url = &file.source_url;
         if url_errors.contains_key(source_url) {
@@ -825,7 +851,7 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
             let files = package
                 .file_ids
                 .iter()
-                .filter_map(|file_id| state.files.get(file_id))
+                .filter_map(file_for_snapshot)
                 .map(|file| FileSnapshot {
                     id: file.id.clone(),
                     package_id: file.package_id.clone(),
@@ -1365,6 +1391,96 @@ mod tests {
             _ => None,
         });
         assert!(saved.is_some_and(|snapshot| snapshot.urls.is_empty()));
+    }
+
+    #[test]
+    fn snapshot_from_state_preserves_package_file_order() {
+        let pkg_id = package_id("pkg", "pkg");
+        let mut state = DownloadState::new(crate::core::SessionMeta::default());
+        state.packages.insert(
+            pkg_id,
+            PackageState {
+                id: pkg_id,
+                key: crate::core::PackageKey::new("pkg"),
+                display_name: "pkg".to_string(),
+                file_ids: vec!["b.bin".into(), "a.bin".into()],
+                status: PackageStatus::Pending,
+                error: None,
+            },
+        );
+        state.files.insert(
+            "a.bin".into(),
+            FileState {
+                id: "a.bin".into(),
+                package_id: pkg_id,
+                source_url: "pkg".to_string(),
+                path: "a.bin".to_string(),
+                size: 10,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState::default(),
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+        state.files.insert(
+            "b.bin".into(),
+            FileState {
+                id: "b.bin".into(),
+                package_id: pkg_id,
+                source_url: "pkg".to_string(),
+                path: "b.bin".to_string(),
+                size: 20,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState::default(),
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+
+        let snapshot = snapshot_from_state(&state);
+        let files = &snapshot.packages[0].files;
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b.bin", "a.bin"]
+        );
+    }
+
+    #[test]
+    fn snapshot_from_state_handles_distinct_equal_file_ids() {
+        let pkg_id = package_id("pkg", "pkg");
+        let mut state = DownloadState::new(crate::core::SessionMeta::default());
+        let package_file_id = FileId::from(String::from("file.bin"));
+        let state_file_id = FileId::from(String::from("file.bin"));
+        state.packages.insert(
+            pkg_id,
+            PackageState {
+                id: pkg_id,
+                key: crate::core::PackageKey::new("pkg"),
+                display_name: "pkg".to_string(),
+                file_ids: vec![package_file_id],
+                status: PackageStatus::Pending,
+                error: None,
+            },
+        );
+        state.files.insert(
+            state_file_id.clone(),
+            FileState {
+                id: state_file_id,
+                package_id: pkg_id,
+                source_url: "pkg".to_string(),
+                path: "file.bin".to_string(),
+                size: 10,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState::default(),
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+
+        let snapshot = snapshot_from_state(&state);
+        assert_eq!(snapshot.packages.len(), 1);
+        assert_eq!(snapshot.packages[0].files.len(), 1);
+        assert_eq!(snapshot.packages[0].files[0].id, "file.bin");
     }
 
     #[test]
