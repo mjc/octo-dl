@@ -10,6 +10,7 @@ use std::sync::{
 use std::time::Duration;
 
 use indexmap::{IndexMap, IndexSet};
+use rustc_hash::FxBuildHasher;
 #[cfg(test)]
 #[path = "download_tests.rs"]
 mod tests;
@@ -286,10 +287,11 @@ struct DownloadTaskResult {
 
 struct SchedulerState {
     desired_pending_order: Vec<FileId>,
+    desired_pending_set: HashSet<FileId, FxBuildHasher>,
     pending_queue: VecDeque<FileId>,
-    available_downloads: HashMap<FileId, QueuedDownload>,
+    available_downloads: HashMap<FileId, QueuedDownload, FxBuildHasher>,
     available_download_ptrs: HashSet<FileIdPtrKey>,
-    active_downloads: HashSet<FileId>,
+    active_downloads: HashSet<FileId, FxBuildHasher>,
     active_download_ptrs: HashSet<FileIdPtrKey>,
     exclusive_resume_target: Option<FileId>,
     join_set: tokio::task::JoinSet<DownloadTaskResult>,
@@ -299,10 +301,11 @@ impl SchedulerState {
     fn new() -> Self {
         Self {
             desired_pending_order: Vec::new(),
+            desired_pending_set: HashSet::with_hasher(FxBuildHasher::default()),
             pending_queue: VecDeque::new(),
-            available_downloads: HashMap::new(),
+            available_downloads: HashMap::with_hasher(FxBuildHasher::default()),
             available_download_ptrs: HashSet::new(),
-            active_downloads: HashSet::new(),
+            active_downloads: HashSet::with_hasher(FxBuildHasher::default()),
             active_download_ptrs: HashSet::new(),
             exclusive_resume_target: None,
             join_set: tokio::task::JoinSet::new(),
@@ -334,9 +337,11 @@ impl SchedulerState {
                 }
             }
             self.desired_pending_order = file_ids;
+            self.rebuild_desired_pending_set();
             return;
         }
         self.desired_pending_order = file_ids;
+        self.rebuild_desired_pending_set();
         self.rebuild_pending_queue();
     }
 
@@ -364,17 +369,22 @@ impl SchedulerState {
 
     fn pause_file_ids(&mut self, file_ids: &[FileId]) -> Vec<QueuedDownload> {
         let mut paused = Vec::new();
+        let removed_file_ids = file_ids
+            .iter()
+            .map(|file_id| file_id.as_str())
+            .collect::<HashSet<_, FxBuildHasher>>();
         for file_id in file_ids {
             if let Some(download) = self.available_downloads.remove(file_id) {
                 self.available_download_ptrs
                     .remove(&file_id_ptr_key(file_id));
                 paused.push(download);
             }
+            self.desired_pending_set.remove(file_id);
         }
         self.desired_pending_order
-            .retain(|file_id| !file_ids.contains(file_id));
+            .retain(|file_id| !removed_file_ids.contains(file_id.as_str()));
         self.pending_queue
-            .retain(|file_id| !file_ids.contains(file_id));
+            .retain(|file_id| !removed_file_ids.contains(file_id.as_str()));
         paused
     }
 
@@ -384,7 +394,7 @@ impl SchedulerState {
             self.available_download_ptrs
                 .insert(file_id_ptr_key(&file_id));
             self.available_downloads.insert(file_id.clone(), download);
-            if !self.desired_pending_order.contains(&file_id) {
+            if self.desired_pending_set.insert(file_id.clone()) {
                 self.desired_pending_order.push(file_id.clone());
             }
             if !self.has_active_download(&file_id) {
@@ -421,6 +431,12 @@ impl SchedulerState {
                 self.pending_queue.push_back(file_id.clone());
             }
         }
+    }
+
+    fn rebuild_desired_pending_set(&mut self) {
+        self.desired_pending_set.clear();
+        self.desired_pending_set
+            .extend(self.desired_pending_order.iter().cloned());
     }
 }
 

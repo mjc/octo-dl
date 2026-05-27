@@ -480,6 +480,7 @@ pub struct FileState {
     pub accounting: FileAccounting,
 }
 
+pub type PackageStateIndex = IndexMap<PackageId, PackageState, FxBuildHasher>;
 pub type FileStateIndex = IndexMap<FileId, FileState, FxBuildHasher>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -494,7 +495,7 @@ pub struct TotalsState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DownloadState {
-    pub packages: IndexMap<PackageId, PackageState>,
+    pub packages: PackageStateIndex,
     pub files: FileStateIndex,
     pub url_order: Vec<UrlId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -555,7 +556,7 @@ impl DownloadState {
     pub fn package_has_files(&self, package_id: &PackageId) -> bool {
         self.packages
             .get(package_id)
-            .is_some_and(|package| !package.file_ids.is_empty())
+            .is_some_and(|package| package.progress.file_count() > 0)
     }
 
     #[must_use]
@@ -570,20 +571,29 @@ impl DownloadState {
     pub fn pending_file_ids(&self) -> Vec<FileId> {
         #[cfg(test)]
         PENDING_FILE_IDS_CALLS.with(|count| count.set(count.get().saturating_add(1)));
-        self.packages
-            .values()
-            .flat_map(|package| package.file_ids.iter())
-            .filter_map(|file_id| self.files.get(file_id))
-            .filter(|file| {
-                !matches!(
+        let mut pending = Vec::with_capacity(
+            self.packages
+                .values()
+                .map(|package| package.progress.queued)
+                .sum(),
+        );
+        for package in self.packages.values() {
+            for file_id in &package.file_ids {
+                let Some(file) = self.files.get(file_id) else {
+                    continue;
+                };
+                if matches!(
                     file.lifecycle,
                     FileLifecycle::Downloading
                         | FileLifecycle::Complete
                         | FileLifecycle::Failed { .. }
-                )
-            })
-            .map(|file| file.id.clone())
-            .collect()
+                ) {
+                    continue;
+                }
+                pending.push(file.id.clone());
+            }
+        }
+        pending
     }
 
     #[must_use]
