@@ -1557,6 +1557,112 @@ fn deferred_core_persistence_allows_session_remove_to_override_batch_snapshot() 
 }
 
 #[test]
+fn pending_order_sync_is_immediate_outside_batch() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    app.download_task_running = true;
+    crate::core::model::reset_pending_file_ids_call_count();
+
+    resolve_package(
+        &mut app,
+        "https://mega.nz/folder/root",
+        &[("episode-1.mkv", 128)],
+    );
+
+    assert_eq!(crate::core::model::pending_file_ids_call_count(), 1);
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        crate::tui::event::DownloadRequest::SyncPendingOrder {
+            file_ids: vec!["episode-1.mkv".to_string().into()],
+        }
+    );
+    assert!(url_rx.try_recv().is_err());
+}
+
+#[test]
+fn pending_order_sync_collapses_for_nested_batches() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    app.download_task_running = true;
+    crate::core::model::reset_pending_file_ids_call_count();
+
+    app.with_deferred_batch_updates(|app| {
+        app.with_deferred_batch_updates(|app| {
+            app.apply_core_event(CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: package_id("pkg-a", "https://mega.nz/folder/a"),
+                    source_url: "https://mega.nz/folder/a".to_string(),
+                    key: crate::core::PackageKey::new("https://mega.nz/folder/a".to_string()),
+                    display_name: "Package A".to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: "episode-a.mkv".to_string().into(),
+                        path: "episode-a.mkv".to_string(),
+                        size: 128,
+                    }],
+                    collision: None,
+                },
+            });
+            app.apply_core_event(CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: package_id("pkg-b", "https://mega.nz/folder/b"),
+                    source_url: "https://mega.nz/folder/b".to_string(),
+                    key: crate::core::PackageKey::new("https://mega.nz/folder/b".to_string()),
+                    display_name: "Package B".to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: "episode-b.mkv".to_string().into(),
+                        path: "episode-b.mkv".to_string(),
+                        size: 256,
+                    }],
+                    collision: None,
+                },
+            });
+        });
+    });
+
+    assert_eq!(crate::core::model::pending_file_ids_call_count(), 1);
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        crate::tui::event::DownloadRequest::SyncPendingOrder {
+            file_ids: vec![
+                "episode-a.mkv".to_string().into(),
+                "episode-b.mkv".to_string().into(),
+            ],
+        }
+    );
+    assert!(url_rx.try_recv().is_err());
+}
+
+#[test]
+fn pending_order_sync_skips_noop_batches() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    app.download_task_running = true;
+    resolve_package(
+        &mut app,
+        "https://mega.nz/folder/root",
+        &[("episode-1.mkv", 128)],
+    );
+    assert!(matches!(
+        url_rx.try_recv().unwrap(),
+        crate::tui::event::DownloadRequest::SyncPendingOrder { .. }
+    ));
+    crate::core::model::reset_pending_file_ids_call_count();
+
+    app.with_deferred_batch_updates(|app| {
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: "episode-1.mkv".to_string().into(),
+            size: 128,
+        });
+    });
+
+    assert_eq!(crate::core::model::pending_file_ids_call_count(), 0);
+    assert!(url_rx.try_recv().is_err());
+}
+
+#[test]
 fn download_status_message_reflects_actual_activity() {
     let mut app = test_app();
 
@@ -2417,6 +2523,10 @@ fn sync_visible_files_keeps_package_row_selected_when_failed_package_auto_expand
 fn drain_download_events_collapses_visible_syncs_for_batched_files() {
     let mut app = test_app();
     crate::core::reducer::reset_snapshot_from_state_call_count();
+    crate::core::model::reset_pending_file_ids_call_count();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    app.download_task_running = true;
     app.urls.push("https://mega.nz/folder/resolved".to_string());
     app.core_state
         .url_order
@@ -2447,5 +2557,17 @@ fn drain_download_events_collapses_visible_syncs_for_batched_files() {
     assert_eq!(app.visible_sync_count, 1);
     assert_eq!(app.session_persist_count, 1);
     assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
+    assert_eq!(crate::core::model::pending_file_ids_call_count(), 1);
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        crate::tui::event::DownloadRequest::SyncPendingOrder {
+            file_ids: vec![
+                "episode-1.mkv".to_string().into(),
+                "episode-2.mkv".to_string().into(),
+                "episode-3.mkv".to_string().into(),
+            ],
+        }
+    );
+    assert!(url_rx.try_recv().is_err());
     assert_eq!(app.core_state.files.len(), 3);
 }
