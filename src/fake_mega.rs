@@ -538,7 +538,8 @@ async fn benchmark_parallel_memory_download(
                         )));
                     }
                     for chunk in &chunks[run.start..run.end] {
-                        let start = usize::try_from(chunk.offset - first.offset).map_err(io::Error::other)?;
+                        let start = usize::try_from(chunk.offset - first.offset)
+                            .map_err(io::Error::other)?;
                         let end = start
                             .checked_add(usize::try_from(chunk.length).map_err(io::Error::other)?)
                             .ok_or_else(|| io::Error::other("chunk range overflow"))?;

@@ -1,136 +1,174 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use ratatui::Frame;
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::ListItem;
+use ratatui::text::Span;
+use ratatui::widgets::{Block, Borders, ListState};
 
 use crate::core::PackageStatus;
 use crate::format_bytes;
 use crate::tui::app::Popup;
 use crate::tui::dashboard::{
     DashboardChrome, DashboardFileRow, DashboardFileStatus, DashboardPackageRow, DashboardRow,
-    DownloadDashboardState, aggregate_transfer_label as dashboard_transfer_label,
+    DownloadDashboardState, aggregate_transfer_label as dashboard_transfer_label, clamp_selection,
     file_detail as dashboard_file_detail,
 };
 
-pub(super) fn dashboard_row_items(
+pub(super) fn draw_dashboard_file_list(
+    frame: &mut Frame,
     state: &DownloadDashboardState,
-    selected: Option<usize>,
-    content_width: usize,
-) -> Vec<ListItem<'static>> {
-    let packages: HashMap<&str, &DashboardPackageRow> = state
-        .packages
-        .iter()
-        .map(|package| (package.id.as_str(), package))
-        .collect();
-    let files: HashMap<&str, &DashboardFileRow> = state
-        .files
-        .iter()
-        .map(|file| (file.id.as_str(), file))
-        .collect();
+    list_state: &mut ListState,
+    area: Rect,
+) {
+    clamp_selection(list_state, state.rows.len());
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 || state.rows.is_empty() {
+        return;
+    }
 
-    state
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| match row {
-            DashboardRow::Package { package_id } => packages
-                .get(package_id.as_str())
-                .map(|package| {
-                    dashboard_package_item(package, selected == Some(index), content_width)
-                })
-                .unwrap_or_else(|| ListItem::new(Line::from(""))),
+    let selected = list_state.selected();
+    let visible_height = usize::from(inner.height);
+    if let Some(selected) = selected {
+        let offset = list_state.offset_mut();
+        if selected < *offset {
+            *offset = selected;
+        } else if selected >= offset.saturating_add(visible_height) {
+            *offset = selected.saturating_sub(visible_height.saturating_sub(1));
+        }
+    }
+    let offset = list_state.offset().min(state.rows.len().saturating_sub(1));
+    *list_state.offset_mut() = offset;
+
+    let render_width = usize::from(inner.width);
+    let content_width = usize::from(area.width.saturating_sub(4));
+    let blank = " ".repeat(render_width);
+    for (line, row_index) in (offset..state.rows.len()).take(visible_height).enumerate() {
+        let y = inner.y + u16::try_from(line).unwrap_or(0);
+        let selected_row = selected == Some(row_index);
+        frame.buffer_mut().set_stringn(
+            inner.x,
+            y,
+            &blank,
+            render_width,
+            highlight_fill_style(selected_row),
+        );
+
+        match &state.rows[row_index] {
+            DashboardRow::Package { package_id } => {
+                if let Some(package) = state
+                    .packages
+                    .iter()
+                    .find(|package| package.id == *package_id)
+                {
+                    render_dashboard_package_row(
+                        frame,
+                        package,
+                        inner.x,
+                        y,
+                        content_width,
+                        selected_row,
+                    );
+                }
+            }
             DashboardRow::File {
                 package_id,
                 file_id,
-            } => files
-                .get(file_id.as_str())
-                .map(|file| {
-                    dashboard_file_item(
+            } => {
+                if let Some(file) = state.files.iter().find(|file| file.id == *file_id) {
+                    render_dashboard_file_row(
+                        frame,
                         file,
                         package_id.is_empty() && !file.package_id.is_empty(),
-                        selected == Some(index),
+                        inner.x,
+                        y,
                         content_width,
-                    )
-                })
-                .unwrap_or_else(|| ListItem::new(Line::from(""))),
-        })
-        .collect()
+                        selected_row,
+                    );
+                }
+            }
+        }
+    }
 }
 
-fn dashboard_file_item(
+fn render_dashboard_file_row(
+    frame: &mut Frame,
     file: &DashboardFileRow,
     include_package: bool,
-    selected: bool,
+    x: u16,
+    y: u16,
     content_width: usize,
-) -> ListItem<'static> {
-    let (icon, color) = match &file.status {
-        DashboardFileStatus::Downloading => ("\u{25cf}", Color::Yellow),
-        DashboardFileStatus::Verifying => ("\u{25cf}", Color::Blue),
-        DashboardFileStatus::Queued => ("\u{25cb}", Color::DarkGray),
-        DashboardFileStatus::Complete => ("\u{2713}", Color::Green),
-        DashboardFileStatus::Error { .. } => ("\u{2717}", Color::Red),
+    selected: bool,
+) {
+    let color = match &file.status {
+        DashboardFileStatus::Downloading => Color::Yellow,
+        DashboardFileStatus::Verifying => Color::Blue,
+        DashboardFileStatus::Queued => Color::DarkGray,
+        DashboardFileStatus::Complete => Color::Green,
+        DashboardFileStatus::Error { .. } => Color::Red,
     };
     let detail_color = match &file.status {
         DashboardFileStatus::Downloading => Color::Yellow,
         DashboardFileStatus::Verifying => Color::Blue,
         _ => Color::DarkGray,
     };
-    let prefix_label = if include_package {
-        file.package_label
-            .as_deref()
-            .map(package_prefix_label)
-            .unwrap_or_default()
-    } else {
-        String::new()
+    let prefix = match &file.status {
+        DashboardFileStatus::Downloading | DashboardFileStatus::Verifying => "   \u{25cf} ",
+        DashboardFileStatus::Queued => "   \u{25cb} ",
+        DashboardFileStatus::Complete => "   \u{2713} ",
+        DashboardFileStatus::Error { .. } => "   \u{2717} ",
     };
+    let prefix_width = 5;
     let detail = dashboard_file_detail(file);
-    let mut prefix = String::with_capacity(6);
-    prefix.push_str("   ");
-    prefix.push_str(icon);
-    prefix.push(' ');
-    let prefix_width = text_width(&prefix);
     let detail_width = text_width(&detail).min(content_width / 2);
     let detail = truncate_end(&detail, detail_width);
-    let detail_width = text_width(&detail);
-    let mut display_name = String::with_capacity(prefix_label.len() + file.name.len());
-    display_name.push_str(&prefix_label);
-    display_name.push_str(&file.name);
+    let display_name = if include_package {
+        file.package_label.as_deref().map_or_else(
+            || Cow::Borrowed(file.name.as_str()),
+            |label| Cow::Owned(package_prefix_label(label) + &file.name),
+        )
+    } else {
+        Cow::Borrowed(file.name.as_str())
+    };
     let name = truncate_end(
-        &display_name,
+        display_name.as_ref(),
         content_width
             .saturating_sub(prefix_width)
-            .saturating_sub(detail_width)
+            .saturating_sub(text_width(detail.as_ref()))
             .saturating_sub(1),
     );
-    let name_width = text_width(&name);
-    let filler = " ".repeat(
-        content_width
-            .saturating_sub(prefix_width)
-            .saturating_sub(name_width)
-            .saturating_sub(detail_width),
+    let name_width = text_width(name.as_ref());
+    let filler_width = content_width
+        .saturating_sub(prefix_width)
+        .saturating_sub(name_width)
+        .saturating_sub(text_width(detail.as_ref()));
+    let row_style = highlight_style(color, selected);
+    let detail_style = highlight_style(detail_color, selected);
+    let mut cursor = x;
+    write_text(frame, &mut cursor, y, prefix, prefix_width, row_style);
+    write_text(frame, &mut cursor, y, name.as_ref(), name_width, row_style);
+    cursor = cursor.saturating_add(u16::try_from(filler_width).unwrap_or(u16::MAX));
+    write_text(
+        frame,
+        &mut cursor,
+        y,
+        detail.as_ref(),
+        text_width(detail.as_ref()),
+        detail_style,
     );
-    let mut row_style = Style::default().fg(color);
-    if selected {
-        row_style = row_style.add_modifier(Modifier::BOLD);
-    }
-    let mut label = String::with_capacity(prefix.len() + name.len());
-    label.push_str(&prefix);
-    label.push_str(&name);
-    ListItem::new(Line::from(vec![
-        Span::styled(label, row_style),
-        Span::raw(filler),
-        Span::styled(detail, Style::default().fg(detail_color)),
-    ]))
 }
 
-fn dashboard_package_item(
+fn render_dashboard_package_row(
+    frame: &mut Frame,
     package: &DashboardPackageRow,
-    selected: bool,
+    x: u16,
+    y: u16,
     content_width: usize,
-) -> ListItem<'static> {
+    selected: bool,
+) {
     let (icon, color) = package_status_style(package.status, package.percent);
     let marker = if package.present_files > 1 {
         if package.expanded { "-" } else { "+" }
@@ -143,13 +181,7 @@ fn dashboard_package_item(
         ""
     };
     let detail = dashboard_package_detail(package, speed_label, content_width);
-    let mut prefix = String::with_capacity(6);
-    prefix.push(' ');
-    prefix.push_str(marker);
-    prefix.push(' ');
-    prefix.push_str(icon);
-    prefix.push(' ');
-    let prefix_width = text_width(&prefix);
+    let prefix_width = 5;
     let detail_width = text_width(&detail).min(content_width / 2);
     let detail = truncate_end(&detail, detail_width);
     let detail_width = text_width(&detail);
@@ -161,24 +193,55 @@ fn dashboard_package_item(
             .saturating_sub(1),
     );
     let name_width = text_width(&name);
-    let filler = " ".repeat(
-        content_width
-            .saturating_sub(prefix_width)
-            .saturating_sub(name_width)
-            .saturating_sub(detail_width),
+    let filler_width = content_width
+        .saturating_sub(prefix_width)
+        .saturating_sub(name_width)
+        .saturating_sub(detail_width);
+    let row_style = highlight_style(color, selected);
+    let detail_style = highlight_style(Color::DarkGray, selected);
+    let mut cursor = x;
+    write_text(frame, &mut cursor, y, " ", 1, row_style);
+    write_text(frame, &mut cursor, y, marker, 1, row_style);
+    write_text(frame, &mut cursor, y, " ", 1, row_style);
+    write_text(frame, &mut cursor, y, icon, 1, row_style);
+    write_text(frame, &mut cursor, y, " ", 1, row_style);
+    write_text(frame, &mut cursor, y, name.as_ref(), name_width, row_style);
+    cursor = cursor.saturating_add(u16::try_from(filler_width).unwrap_or(u16::MAX));
+    write_text(
+        frame,
+        &mut cursor,
+        y,
+        detail.as_ref(),
+        detail_width,
+        detail_style,
     );
-    let mut row_style = Style::default().fg(color);
-    if selected {
-        row_style = row_style.add_modifier(Modifier::BOLD);
+}
+
+fn write_text(frame: &mut Frame, x: &mut u16, y: u16, text: &str, width: usize, style: Style) {
+    if text.is_empty() || width == 0 {
+        return;
     }
-    let mut label = String::with_capacity(prefix.len() + name.len());
-    label.push_str(&prefix);
-    label.push_str(&name);
-    ListItem::new(Line::from(vec![
-        Span::styled(label, row_style),
-        Span::raw(filler),
-        Span::styled(detail, Style::default().fg(Color::DarkGray)),
-    ]))
+    frame.buffer_mut().set_stringn(*x, y, text, width, style);
+    *x = x.saturating_add(u16::try_from(width).unwrap_or(u16::MAX));
+}
+
+fn highlight_fill_style(selected: bool) -> Style {
+    if selected {
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    }
+}
+
+fn highlight_style(color: Color, selected: bool) -> Style {
+    let style = Style::default().fg(color);
+    if selected {
+        style.bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
 }
 
 fn dashboard_package_detail(
