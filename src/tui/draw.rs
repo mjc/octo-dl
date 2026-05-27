@@ -8,11 +8,11 @@ use std::fmt::Write as _;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Gauge, List, Paragraph};
+use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 
 use self::dashboard::{
     compact_label, controls_label_from_snapshot, dashboard_aggregate_progress_label,
-    dashboard_row_items, dashboard_status_line, focused_url_input_view, package_status_style,
+    dashboard_status_line, draw_dashboard_file_list, focused_url_input_view, package_status_style,
     text_width, truncate_end,
 };
 use super::app::{App, FileEntry, FileStatus, Popup};
@@ -1441,27 +1441,6 @@ fn percent(downloaded: u64, size: u64) -> u64 {
     }
 }
 
-fn draw_dashboard_file_list(
-    frame: &mut ratatui::Frame,
-    state: &DownloadDashboardState,
-    list_state: &mut ratatui::widgets::ListState,
-    area: Rect,
-) {
-    clamp_selection(list_state, state.rows.len());
-    let content_width = usize::from(area.width.saturating_sub(4));
-    let selected = list_state.selected();
-    let items = dashboard_row_items(state, selected, content_width);
-    let file_list = List::new(items)
-        .block(Block::default().borders(Borders::ALL))
-        .highlight_symbol("")
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        );
-    frame.render_stateful_widget(file_list, area, list_state);
-}
-
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
@@ -1472,6 +1451,10 @@ mod tests {
     use crate::core::{CoreEvent, ResolvedFile, ResolvedPackage};
     use crate::test_support::package_id;
     use crate::tui::app::{App, ConfirmAction, FileEntry, FileStatus};
+    use crate::tui::dashboard::{
+        DashboardFileRow, DashboardFileStatus, DashboardMetrics, DashboardRow, DashboardTotals,
+        DashboardUiMode, DownloadDashboardState,
+    };
     use crate::tui::event::DownloadEvent;
 
     fn test_app() -> App {
@@ -1511,6 +1494,48 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
+    fn render_dashboard_text_with_size(
+        state: DownloadDashboardState,
+        width: u16,
+        height: u16,
+        selected: Option<usize>,
+    ) -> String {
+        let buffer = render_dashboard_buffer(state, width, height, selected);
+        let area = buffer.area;
+        let mut output = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = buffer.cell((x, y)).expect("cell should exist");
+                output.push_str(cell.symbol());
+            }
+            output.push('\n');
+        }
+        output
+    }
+
+    fn render_dashboard_buffer(
+        state: DownloadDashboardState,
+        width: u16,
+        height: u16,
+        selected: Option<usize>,
+    ) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        let mut list_state = ratatui::widgets::ListState::default();
+        list_state.select(selected);
+        terminal
+            .draw(|frame| {
+                draw_dashboard(
+                    frame,
+                    &state,
+                    &DashboardChrome::read_only(),
+                    &mut list_state,
+                )
+            })
+            .expect("draw should succeed");
+        terminal.backend().buffer().clone()
+    }
+
     fn buffer_contains_text_with_color(
         buffer: &ratatui::buffer::Buffer,
         needle: &str,
@@ -1527,6 +1552,38 @@ mod tests {
                         break;
                     };
                     if cell.symbol().chars().next() != Some(*expected) || cell.fg != color {
+                        matched = false;
+                        break;
+                    }
+                }
+                if matched {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn buffer_contains_text_with_style(
+        buffer: &ratatui::buffer::Buffer,
+        needle: &str,
+        fg: Color,
+        bg: Color,
+    ) -> bool {
+        let needle = needle.chars().collect::<Vec<_>>();
+        let area = buffer.area;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let mut matched = true;
+                for (offset, expected) in needle.iter().enumerate() {
+                    let Some(cell) = buffer.cell((x + offset as u16, y)) else {
+                        matched = false;
+                        break;
+                    };
+                    if cell.symbol().chars().next() != Some(*expected)
+                        || cell.fg != fg
+                        || cell.bg != bg
+                    {
                         matched = false;
                         break;
                     }
@@ -2507,5 +2564,106 @@ mod tests {
 
         assert!(rendered.contains("20 B/s"));
         assert!(rendered.contains("eta 4.0s"));
+    }
+
+    fn sample_dashboard_state() -> DownloadDashboardState {
+        DownloadDashboardState {
+            authenticated: true,
+            paused: false,
+            logging_in: false,
+            login_error: None,
+            popup: Popup::None,
+            ui_mode: DashboardUiMode::Attached,
+            read_only: true,
+            status: "ready".to_string(),
+            packages: Vec::new(),
+            files: Vec::new(),
+            rows: Vec::new(),
+            totals: DashboardTotals {
+                total_downloaded: 0,
+                total_size: 0,
+                files_completed: 0,
+                files_total: 0,
+                current_speed: 0,
+                run_total_bytes: 0,
+                run_completed_bytes: 0,
+                run_file_total: 0,
+                run_file_completed: 0,
+            },
+            metrics: DashboardMetrics {
+                cpu_usage: 0.0,
+                memory_rss: 0,
+                api_port: 9723,
+            },
+            config: crate::DownloadConfig::default(),
+        }
+    }
+
+    #[test]
+    fn draw_dashboard_snapshot_renders_orphan_file_package_prefix() {
+        let mut state = sample_dashboard_state();
+        state.files.push(DashboardFileRow {
+            id: "file-1".to_string(),
+            package_id: "pkg-1".to_string(),
+            name: "movie.mkv".to_string(),
+            size: 100,
+            downloaded: 0,
+            speed: 0,
+            status: DashboardFileStatus::Queued,
+            package_label: Some("pkg".to_string()),
+        });
+        state.rows.push(DashboardRow::File {
+            package_id: String::new(),
+            file_id: "file-1".to_string(),
+        });
+
+        let rendered = render_dashboard_text_with_size(state, 80, 12, None);
+
+        assert!(rendered.contains("[pkg] movie.mkv"));
+    }
+
+    #[test]
+    fn draw_dashboard_snapshot_keeps_selected_missing_row_highlight() {
+        let mut state = sample_dashboard_state();
+        state.rows.push(DashboardRow::Package {
+            package_id: "missing".to_string(),
+        });
+
+        let buffer = render_dashboard_buffer(state, 80, 12, Some(0));
+
+        assert!(buffer_contains_text_with_style(
+            &buffer,
+            " ",
+            Color::Reset,
+            Color::DarkGray,
+        ));
+    }
+
+    #[test]
+    fn draw_dashboard_snapshot_highlights_selected_verifying_detail() {
+        let mut state = sample_dashboard_state();
+        state.files.push(DashboardFileRow {
+            id: "file-1".to_string(),
+            package_id: "pkg-1".to_string(),
+            name: "verify.bin".to_string(),
+            size: 100,
+            downloaded: 40,
+            speed: 0,
+            status: DashboardFileStatus::Verifying,
+            package_label: None,
+        });
+        state.rows.push(DashboardRow::File {
+            package_id: "pkg-1".to_string(),
+            file_id: "file-1".to_string(),
+        });
+
+        let buffer = render_dashboard_buffer(state, 80, 12, Some(0));
+
+        assert!(buffer_contains_text_with_style(
+            &buffer,
+            "verify",
+            Color::Blue,
+            Color::DarkGray,
+        ));
     }
 }
