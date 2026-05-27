@@ -57,6 +57,8 @@ impl App {
 
     fn retry_source_url(&mut self, url: &str) {
         self.ensure_session_for_pending_urls();
+        let _ =
+            self.mutate_session_and_save(|session| SessionAdapter::mark_url_fetched(session, url));
         self.queue_url_placeholder(url.to_string());
         self.apply_core_command(CoreCommand::SubmitUrl {
             url: url.to_string(),

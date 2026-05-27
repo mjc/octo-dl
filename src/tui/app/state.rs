@@ -64,6 +64,34 @@ impl CoreApplyPolicy {
 }
 
 impl App {
+    fn merge_previous_url_errors_into_core_snapshot(&self, session: &mut SessionSnapshot) {
+        let Some(previous) = self.session.as_ref() else {
+            return;
+        };
+
+        for url in &mut session.urls {
+            if url.error.is_some() {
+                continue;
+            }
+            if self
+                .core_state
+                .files
+                .values()
+                .any(|file| file.source_url == url.url)
+            {
+                continue;
+            }
+            if let Some(error) = previous
+                .urls
+                .iter()
+                .find(|previous_url| previous_url.url == url.url)
+                .and_then(|previous_url| previous_url.error.clone())
+            {
+                url.error = Some(error);
+            }
+        }
+    }
+
     pub(crate) fn visible_file(&self, file_id: &FileId) -> Option<&crate::tui::app::FileEntry> {
         let &visible_index = self.visible_file_positions.get(file_id)?;
         self.files.get(visible_index)
@@ -191,7 +219,7 @@ impl App {
         for effect in effects {
             match effect {
                 CoreEffect::PersistSession(snapshot) => {
-                    let _ = self.persist_session(snapshot);
+                    let _ = self.persist_core_session_snapshot(snapshot);
                 }
                 CoreEffect::EnqueueUrlResolution { url } => {
                     let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
@@ -498,11 +526,19 @@ impl App {
         }
         self.pending_core_state_session_persistence = false;
         self.pending_session_persistence = None;
-        self.install_session(snapshot_from_state(&self.core_state));
+        let mut session = snapshot_from_state(&self.core_state);
+        self.merge_previous_url_errors_into_core_snapshot(&mut session);
+        self.install_session(session);
+    }
+
+    pub(super) fn persist_core_session_snapshot(&mut self, mut session: SessionSnapshot) -> bool {
+        self.merge_previous_url_errors_into_core_snapshot(&mut session);
+        self.persist_session(session)
     }
 
     pub(super) fn persist_session(&mut self, session: SessionSnapshot) -> bool {
         self.pending_core_state_session_persistence = false;
+        let session = session;
         if session.urls.is_empty() && session.packages.is_empty() {
             let path = session.state_path();
             self.install_session(session);
