@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 #[path = "tests_bootstrap.rs"]
@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     DownloadConfig, ServiceConfig,
-    core::{DownloadState, SessionMeta, SessionSnapshot},
+    core::{DownloadState, SavedMegaSession, SessionMeta, SessionSnapshot},
 };
 
 use crate::tui::dashboard::DashboardUiMode;
@@ -23,6 +23,8 @@ use super::{
     App, DownloadEvent, NoCredentialsFallback, Popup, SharedAppState, SharedStateChannels, UiAction,
 };
 use crate::tui::event::DownloadRequest;
+
+const AUTO_LOGIN_IDLE_DELAY: Duration = Duration::from_millis(750);
 
 fn path_io_error(action: &str, path: &Path, error: io::Error) -> io::Error {
     io::Error::new(
@@ -65,6 +67,10 @@ impl App {
             quit_policy: super::QuitPolicy::from_bool(quit_enabled),
             login: super::LoginState::new(),
             authenticated: false,
+            saved_mega_session: None,
+            deferred_login_fallback: None,
+            deferred_login_deadline: None,
+            last_user_activity: Instant::now(),
             url_input: String::new(),
             url_input_cursor: 0,
             url_input_active: false,
@@ -221,6 +227,59 @@ impl App {
         Ok(())
     }
 
+    pub(crate) fn note_user_activity(&mut self) {
+        self.last_user_activity = Instant::now();
+        if self.deferred_login_fallback.is_some() {
+            self.deferred_login_deadline = Some(self.last_user_activity + AUTO_LOGIN_IDLE_DELAY);
+        }
+    }
+
+    pub(crate) fn schedule_auto_login(&mut self, fallback: NoCredentialsFallback) {
+        if self.authenticated || self.login.logging_in || self.download_task_running {
+            return;
+        }
+        self.deferred_login_fallback = Some(match (self.deferred_login_fallback, fallback) {
+            (Some(NoCredentialsFallback::ShowPopup), _) | (_, NoCredentialsFallback::ShowPopup) => {
+                NoCredentialsFallback::ShowPopup
+            }
+            _ => NoCredentialsFallback::Silent,
+        });
+        self.deferred_login_deadline = Some(self.last_user_activity + AUTO_LOGIN_IDLE_DELAY);
+    }
+
+    pub(crate) fn poll_deferred_auto_login(&mut self) -> bool {
+        if self.authenticated || self.login.logging_in || self.download_task_running {
+            self.deferred_login_fallback = None;
+            self.deferred_login_deadline = None;
+            return false;
+        }
+        let Some(deadline) = self.deferred_login_deadline else {
+            return false;
+        };
+        if Instant::now() < deadline || self.url_input_active || self.popup != Popup::None {
+            return false;
+        }
+        let fallback = self
+            .deferred_login_fallback
+            .take()
+            .unwrap_or(NoCredentialsFallback::Silent);
+        self.deferred_login_deadline = None;
+        self.auto_login(fallback)
+    }
+
+    fn clear_deferred_auto_login(&mut self) {
+        self.deferred_login_fallback = None;
+        self.deferred_login_deadline = None;
+    }
+
+    fn matching_saved_mega_session(&self) -> Option<(String, String)> {
+        let saved = self.saved_mega_session.as_ref()?.decrypt()?;
+        if self.login.has_credentials() && !saved.0.eq_ignore_ascii_case(self.login.email()) {
+            return None;
+        }
+        Some(saved)
+    }
+
     pub(crate) fn shared_state_channels(
         &self,
         enabled: bool,
@@ -270,19 +329,38 @@ impl App {
     }
 
     pub(crate) fn begin_login(&mut self) {
+        self.clear_deferred_auto_login();
+        self.begin_background_auth(None);
+    }
+
+    fn begin_background_auth(&mut self, resume_session: Option<(String, String)>) {
+        if self.authenticated || self.login.logging_in || self.client_rx.is_some() {
+            return;
+        }
+
         self.login.error = None;
         self.login.logging_in = true;
-        self.status = "Logging in...".to_string();
+        self.status = if resume_session.is_some() {
+            "Resuming saved session...".to_string()
+        } else {
+            "Logging in...".to_string()
+        };
         let tx = self.event_tx.clone();
         let email = self.login.email().to_owned();
         let password = self.login.password().to_owned();
         let mfa = self.login.mfa_option().map(str::to_owned);
+        let resume_session = resume_session.clone();
 
         let (client_tx, client_rx) = tokio::sync::oneshot::channel();
         self.client_rx = Some(client_rx);
 
         tokio::spawn(async move {
-            let _ = tx.send(DownloadEvent::StatusMessage("Logging in...".to_string()));
+            let mut clear_saved_session = false;
+            let _ = tx.send(DownloadEvent::StatusMessage(if resume_session.is_some() {
+                "Resuming saved session...".to_string()
+            } else {
+                "Logging in...".to_string()
+            }));
 
             let http = match super::super::download::build_http_client() {
                 Ok(http) => http,
@@ -290,45 +368,111 @@ impl App {
                     let _ = tx.send(DownloadEvent::LoginResult {
                         success: false,
                         error: Some(format!("Failed to build HTTP client: {e}")),
+                        saved_session: None,
+                        clear_saved_session: false,
                     });
                     return;
                 }
             };
 
-            let mut mega_client = match mega::Client::builder().build(http.clone()) {
+            let build_client = || mega::Client::builder().build(http.clone());
+
+            let mut mega_client = match build_client() {
                 Ok(client) => client,
                 Err(e) => {
                     let _ = tx.send(DownloadEvent::LoginResult {
                         success: false,
                         error: Some(format!("Failed to create MEGA client: {e}")),
+                        saved_session: None,
+                        clear_saved_session: false,
                     });
                     return;
                 }
             };
 
-            if let Err(e) = mega_client.login(&email, &password, mfa.as_deref()).await {
+            if let Some((session_email, serialized_session)) = resume_session {
+                match mega_client.resume_session(&serialized_session).await {
+                    Ok(()) => {
+                        let saved_session = mega_client
+                            .serialize_session()
+                            .await
+                            .ok()
+                            .map(|session| SavedMegaSession::encrypt(&session_email, &session));
+                        let _ = client_tx.send((mega_client, http));
+                        let _ = tx.send(DownloadEvent::LoginResult {
+                            success: true,
+                            error: None,
+                            saved_session,
+                            clear_saved_session: false,
+                        });
+                        return;
+                    }
+                    Err(_) => {
+                        clear_saved_session = true;
+                    }
+                }
+
+                mega_client = match build_client() {
+                    Ok(client) => client,
+                    Err(e) => {
+                        let _ = tx.send(DownloadEvent::LoginResult {
+                            success: false,
+                            error: Some(format!("Failed to create MEGA client: {e}")),
+                            saved_session: None,
+                            clear_saved_session,
+                        });
+                        return;
+                    }
+                };
+            }
+
+            if email.is_empty() || password.is_empty() {
                 let _ = tx.send(DownloadEvent::LoginResult {
                     success: false,
-                    error: Some(e.to_string()),
+                    error: Some("No saved credentials available".to_string()),
+                    saved_session: None,
+                    clear_saved_session,
                 });
                 return;
             }
 
+            if let Err(e) = mega_client.login(&email, &password, mfa.as_deref()).await {
+                let _ = tx.send(DownloadEvent::LoginResult {
+                    success: false,
+                    error: Some(e.to_string()),
+                    saved_session: None,
+                    clear_saved_session,
+                });
+                return;
+            }
+
+            let saved_session = mega_client
+                .serialize_session()
+                .await
+                .ok()
+                .map(|session| SavedMegaSession::encrypt(&email, &session));
             let _ = client_tx.send((mega_client, http));
             let _ = tx.send(DownloadEvent::LoginResult {
                 success: true,
                 error: None,
+                saved_session,
+                clear_saved_session,
             });
         });
     }
 
     pub(crate) fn auto_login(&mut self, fallback: NoCredentialsFallback) -> bool {
-        if self.login.has_credentials() {
-            self.begin_login();
+        self.clear_deferred_auto_login();
+        if let Some(saved_session) = self.matching_saved_mega_session() {
+            self.begin_background_auth(Some(saved_session));
+            true
+        } else if self.login.has_credentials() {
+            self.begin_background_auth(None);
             true
         } else {
             if fallback == NoCredentialsFallback::ShowPopup {
                 self.popup = Popup::Login;
+                return true;
             }
             false
         }
@@ -428,6 +572,19 @@ impl App {
             }
         }
 
+        self.saved_mega_session =
+            service_config
+                .credentials
+                .saved_session
+                .clone()
+                .filter(|saved_session| {
+                    let Some((email, _)) = saved_session.decrypt() else {
+                        log::warn!("Failed to decrypt saved MEGA session from config");
+                        return false;
+                    };
+                    !self.login.has_credentials() || email.eq_ignore_ascii_case(self.login.email())
+                });
+
         if service_config.api.api_key.is_none() {
             let key = uuid::Uuid::new_v4().simple().to_string();
             log::info!("Generated API key: {key}");
@@ -445,13 +602,18 @@ impl App {
         };
 
         let mut service_config = ServiceConfig::load_or_create(config_path)?;
-        service_config.credentials = crate::ServiceCredentials {
-            encrypted: false,
-            email: self.login.email().to_string(),
-            password: self.login.password().to_string(),
-            mfa: String::new(),
-        };
-        service_config.credentials.encrypt_in_place();
+        if self.login.has_credentials() {
+            service_config.credentials = crate::ServiceCredentials {
+                encrypted: false,
+                email: self.login.email().to_string(),
+                password: self.login.password().to_string(),
+                mfa: String::new(),
+                saved_session: self.saved_mega_session.clone(),
+            };
+            service_config.credentials.encrypt_in_place();
+        } else {
+            service_config.credentials.saved_session = self.saved_mega_session.clone();
+        }
         service_config.api.port = self.api_port;
         service_config.api.api_key = self.api_key.clone();
         service_config.download = self.config.config.clone();

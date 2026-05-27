@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     DownloadConfig,
-    core::{FileId, SavedCredentials, SessionSnapshot, SessionUrlSnapshot},
+    core::{FileId, SavedCredentials, SavedMegaSession, SessionSnapshot, SessionUrlSnapshot},
     format_bytes,
     tui::dashboard::DashboardUiMode,
 };
@@ -55,11 +55,23 @@ impl App {
         SavedCredentials::encrypt(self.login.email(), self.login.password(), None)
     }
 
-    pub(crate) fn complete_login(&mut self, success: bool, error: Option<String>) {
+    pub(crate) fn complete_login(
+        &mut self,
+        success: bool,
+        error: Option<String>,
+        saved_session: Option<SavedMegaSession>,
+        clear_saved_session: bool,
+    ) {
         self.login.logging_in = false;
+        if clear_saved_session {
+            self.saved_mega_session = None;
+        }
         if success {
             self.authenticated = true;
             self.popup = super::Popup::None;
+            if let Some(saved_session) = saved_session {
+                self.saved_mega_session = Some(saved_session);
+            }
             self.status = "Login successful".to_string();
             if let Err(error) = self.persist_login_credentials_to_config() {
                 log::error!("Failed to persist login credentials: {error}");
@@ -67,6 +79,11 @@ impl App {
             }
             self.start_download_task();
         } else {
+            if clear_saved_session
+                && let Err(persist_error) = self.persist_login_credentials_to_config()
+            {
+                log::error!("Failed to clear saved MEGA session: {persist_error}");
+            }
             let status = error.as_deref().map_or_else(
                 || "Login failed".to_string(),
                 |error| format!("Login failed: {error}"),
@@ -180,13 +197,18 @@ impl App {
 
     pub(crate) fn handle_download_event(&mut self, event: DownloadEvent) {
         match event {
-            DownloadEvent::LoginResult { success, error } => {
+            DownloadEvent::LoginResult {
+                success,
+                error,
+                saved_session,
+                clear_saved_session,
+            } => {
                 if success {
                     log::info!("Login successful");
                 } else {
                     log::error!("Login failed: {}", error.as_deref().unwrap_or("unknown"));
                 }
-                self.complete_login(success, error);
+                self.complete_login(success, error, saved_session, clear_saved_session);
             }
             DownloadEvent::FilesCollected {
                 total,
@@ -383,7 +405,7 @@ impl App {
         false
     }
 
-    fn has_active_dashboard_transfer(&self) -> bool {
+    pub(crate) fn has_active_dashboard_transfer(&self) -> bool {
         self.files
             .iter()
             .any(|file| matches!(file.status, FileStatus::Downloading))
@@ -415,6 +437,7 @@ impl App {
         self.drain_token_messages();
         dashboard_dirty |= self.drain_ui_actions(action_rx);
         self.poll_session_persistence();
+        dashboard_dirty |= self.poll_deferred_auto_login();
 
         dashboard_dirty
     }

@@ -161,6 +161,8 @@ pub struct ServiceCredentials {
     pub password: String,
     #[serde(default)]
     pub mfa: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_session: Option<crate::core::SavedMegaSession>,
 }
 
 impl ServiceCredentials {
@@ -270,6 +272,7 @@ impl ServiceConfig {
                 email: String::new(),
                 password: String::new(),
                 mfa: String::new(),
+                saved_session: None,
             },
             api: ApiConfig::default(),
             download: DownloadConfig {
@@ -323,6 +326,7 @@ mod service_config_tests {
                 email: "user@example.com".to_string(),
                 password: "secret".to_string(),
                 mfa: String::new(),
+                saved_session: None,
             },
             api: ApiConfig::default(),
             download: DownloadConfig::default(),
@@ -343,6 +347,7 @@ mod service_config_tests {
             email: "test@test.com".to_string(),
             password: "hunter2".to_string(),
             mfa: String::new(),
+            saved_session: None,
         };
 
         let (e, p, m) = creds.decrypt_if_needed().unwrap();
@@ -371,6 +376,7 @@ mod service_config_tests {
                 email: "a@b.com".to_string(),
                 password: "pass".to_string(),
                 mfa: String::new(),
+                saved_session: None,
             },
             api: ApiConfig::default(),
             download: DownloadConfig::default(),

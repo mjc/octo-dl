@@ -1399,7 +1399,12 @@ fn download_status_message_reflects_actual_activity() {
 fn login_failure_status_adds_single_context_prefix() {
     let mut app = test_app();
 
-    app.complete_login(false, Some("invalid RSA private key format".to_string()));
+    app.complete_login(
+        false,
+        Some("invalid RSA private key format".to_string()),
+        None,
+        false,
+    );
 
     assert_eq!(
         app.login.error.as_deref(),
