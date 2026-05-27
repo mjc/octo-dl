@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use indexmap::IndexMap;
 
+use crate::core::reducer::{reduce_without_session_persist, should_persist_session};
 use crate::core::{
     CoreCommand, CoreEffect, CoreEffects, CoreEvent, FileAccounting, FileId, PackageId,
     ResolvedFile, ResolvedPackage, RestartSnapshot, SavedCredentials, SessionSnapshot,
@@ -153,8 +154,15 @@ impl App {
 
     fn apply_core_event_with_policy(&mut self, event: CoreEvent, policy: CoreApplyPolicy) {
         let selected_row_identity = policy.sync_visible.then(|| self.selected_row()).flatten();
+        let defer_core_session_persistence =
+            self.session_persist_defer_depth > 0 && should_persist_session(&event);
         self.seed_core_session_from_session();
-        let effects = reduce(&mut self.core_state, event);
+        let effects = if defer_core_session_persistence {
+            reduce_without_session_persist(&mut self.core_state, event)
+        } else {
+            reduce(&mut self.core_state, event)
+        };
+        self.pending_core_state_session_persistence |= defer_core_session_persistence;
         self.apply_core_effects(effects, policy.sync_pending);
         if policy.sync_visible {
             self.sync_visible_files_preserving(selected_row_identity);
@@ -324,6 +332,7 @@ impl App {
         &mut self,
         f: impl FnOnce(&mut SessionSnapshot) -> R,
     ) -> Option<R> {
+        self.materialize_deferred_core_session();
         self.session.clone().map(|mut session| {
             let result = f(&mut session);
             let _ = self.persist_session(session);
@@ -462,7 +471,17 @@ impl App {
         self.install_session(session);
     }
 
-    fn persist_session(&mut self, session: SessionSnapshot) -> bool {
+    fn materialize_deferred_core_session(&mut self) {
+        if !self.pending_core_state_session_persistence {
+            return;
+        }
+        self.pending_core_state_session_persistence = false;
+        self.pending_session_persistence = None;
+        self.install_session(snapshot_from_state(&self.core_state));
+    }
+
+    pub(super) fn persist_session(&mut self, session: SessionSnapshot) -> bool {
+        self.pending_core_state_session_persistence = false;
         if session.urls.is_empty() && session.packages.is_empty() {
             let path = session.state_path();
             self.install_session(session);
