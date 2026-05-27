@@ -208,8 +208,6 @@ pub struct App {
     pub url_input: String,
     pub url_input_cursor: usize,
     pub url_input_active: bool,
-    // Tracked URLs for session persistence
-    pub urls: Vec<String>,
     // File queue (main content)
     pub files: Vec<FileEntry>,
     cached_visible_rows: Vec<visible::TuiRow>,
@@ -301,6 +299,38 @@ pub struct App {
 }
 
 impl App {
+    fn url_has_remaining_work(&self, url: &str) -> bool {
+        let mut saw_file_for_url = false;
+        for file in self.core_state.files.values() {
+            if file.source_url != url {
+                continue;
+            }
+            saw_file_for_url = true;
+            if !matches!(file.lifecycle, crate::core::FileLifecycle::Complete) {
+                return true;
+            }
+        }
+        !saw_file_for_url
+    }
+
+    pub(crate) fn has_tracked_url(&self, url: &str) -> bool {
+        self.core_state
+            .url_order
+            .iter()
+            .any(|existing| existing == url)
+            && self.url_has_remaining_work(url)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_urls(&self) -> Vec<String> {
+        self.core_state
+            .url_order
+            .iter()
+            .filter(|url| self.url_has_remaining_work(url))
+            .cloned()
+            .collect()
+    }
+
     fn visible_rows_cache_key(&self) -> VisibleRowsCacheKey {
         let mut expanded = self.expanded_packages.iter().copied().collect::<Vec<_>>();
         expanded.sort_unstable();

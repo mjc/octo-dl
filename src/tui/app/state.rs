@@ -404,7 +404,6 @@ impl App {
         self.restore_restart_snapshot(restart);
 
         let resumed_urls = SessionAdapter::apply_restart(&mut session, restart);
-        self.urls.clone_from(&resumed_urls);
         for url in resumed_urls {
             let has_files_for_url = restart
                 .state

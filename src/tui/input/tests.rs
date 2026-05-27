@@ -1265,7 +1265,7 @@ fn add_url_deduplicates() {
     let mut url_rx = app.url_rx.take().expect("url_rx should exist");
     app.submit_url("https://mega.nz/file/abc".to_string());
     app.submit_url("https://mega.nz/file/abc".to_string());
-    assert_eq!(app.urls.len(), 1);
+    assert_eq!(app.tracked_urls().len(), 1);
     assert_eq!(
         url_rx.try_recv().unwrap(),
         DownloadRequest::SubmitUrl {

@@ -47,19 +47,15 @@ impl App {
     }
 
     pub(crate) fn submit_url(&mut self, url: String) {
-        if self.urls.contains(&url) {
+        if self.has_tracked_url(&url) {
             return;
         }
-        self.urls.push(url.clone());
         self.ensure_session_for_pending_urls();
         self.queue_url_placeholder(url.clone());
         self.apply_core_command(CoreCommand::SubmitUrl { url });
     }
 
     fn retry_source_url(&mut self, url: &str) {
-        if !self.urls.iter().any(|existing| existing == url) {
-            self.urls.push(url.to_string());
-        }
         self.ensure_session_for_pending_urls();
         self.queue_url_placeholder(url.to_string());
         self.apply_core_command(CoreCommand::SubmitUrl {
@@ -171,7 +167,6 @@ impl App {
 
     fn is_tracked_error_scope(&self, scope: &str) -> bool {
         matches!(scope, "setup" | "download")
-            || self.urls.iter().any(|url| url == scope)
             || self.core_state.url_order.iter().any(|url| url == scope)
             || self.overlay_files.contains_key(scope)
     }
@@ -240,10 +235,6 @@ impl App {
             .or_else(|| existing_package.map(|package| package.id))
             .unwrap_or_else(|| PackageId::for_package_key(&package_key));
         if file.origin.submitted_url != file.origin.source_url {
-            self.urls.retain(|url| url != &file.origin.submitted_url);
-            if !self.urls.iter().any(|url| url == &file.origin.source_url) {
-                self.urls.push(file.origin.source_url.clone());
-            }
             self.core_state
                 .url_order
                 .retain(|url| url != &file.origin.submitted_url);
@@ -553,7 +544,6 @@ impl App {
             let _ = self.mutate_session_and_save(|session| {
                 SessionAdapter::remove_url(session, id.as_str())
             });
-            self.urls.retain(|url| url != id.as_str());
             self.core_state.url_order.retain(|url| url != id.as_str());
         }
         if is_core_backed {
@@ -587,12 +577,11 @@ impl App {
             .map(|(_, source_url)| FileId::from(source_url.as_str()))
             .collect();
 
-        for (file_id, source_url) in &file_contexts {
+        for (file_id, _) in &file_contexts {
             self.cancel_file_token(file_id);
             self.file_attempt_ids.remove(file_id);
             self.reset_pending_files.remove(file_id);
             self.clear_verification_state(file_id);
-            self.urls.retain(|url| url != source_url);
         }
         self.apply_core_command(CoreCommand::DeletePackage { package_id });
         for source_id in source_ids {

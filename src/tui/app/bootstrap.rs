@@ -74,7 +74,6 @@ impl App {
             url_input: String::new(),
             url_input_cursor: 0,
             url_input_active: false,
-            urls: Vec::new(),
             files: Vec::new(),
             cached_visible_rows: Vec::new(),
             cached_visible_rows_key: Default::default(),
