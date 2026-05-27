@@ -91,7 +91,7 @@ struct SchedulerPendingSyncDeferralGuard {
 impl VisibleSyncDeferralGuard {
     fn new(app: &mut App) -> Self {
         if app.visible_sync_defer_depth == 0 {
-            app.pending_visible_selection = Some(app.selected_row());
+            app.pending_visible_selection = Some(app.selected_row_from_last_sync());
         }
         app.visible_sync_defer_depth += 1;
         Self {
@@ -369,6 +369,11 @@ impl App {
             return self.cached_visible_rows.get(selected).cloned();
         }
         visible::visible_rows(self).get(selected).cloned()
+    }
+
+    fn selected_row_from_last_sync(&self) -> Option<visible::TuiRow> {
+        let selected = self.file_list_state.selected()?;
+        self.cached_visible_rows.get(selected).cloned()
     }
 
     pub(crate) fn sync_visible_files(&mut self) {

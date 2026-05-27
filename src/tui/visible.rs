@@ -11,6 +11,11 @@ use crate::core::{DownloadState, FileId, PackageId};
 use crate::tui::app::{FileEntry, FileUiState, SortState, TransientRow};
 
 pub(crate) use rows::CachedFileSortKey;
+#[cfg(test)]
+pub(crate) use rows::{
+    build_file_sort_key_call_count, reset_build_file_sort_key_call_count,
+    reset_visible_rows_for_call_count, visible_rows_for_call_count,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TuiRow {

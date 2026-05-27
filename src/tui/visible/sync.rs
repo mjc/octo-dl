@@ -98,15 +98,37 @@ pub(super) fn sync_visible_files(
 
     for (id, entry) in overlay_files.iter() {
         if !core_file_ids.contains(id) {
+            let source_url = entry.source_url().unwrap_or(id.as_str());
+            let existing = existing.remove(id);
+            let reuse_cached_sort_key = existing.as_ref().is_some_and(|existing| {
+                existing.name == entry.file().name
+                    && existing.status == entry.file().status
+                    && file_ui
+                        .get(id)
+                        .and_then(|ui| ui.sort_key.as_ref())
+                        .is_some_and(|sort_key| {
+                            cached_file_sort_key_matches(sort_key, usize::MAX, source_url)
+                        })
+            });
             let state = file_ui.entry(id.clone()).or_default();
-            state.sort_key = Some(build_file_sort_key(
-                &entry.file().name,
-                &entry.file().status,
-                usize::MAX,
-                entry.source_url().unwrap_or(id.as_str()),
-            ));
+            if !reuse_cached_sort_key {
+                state.sort_key = Some(build_file_sort_key(
+                    &entry.file().name,
+                    &entry.file().status,
+                    usize::MAX,
+                    source_url,
+                ));
+            }
             state.package_id = None;
-            next_files.push(entry.file().clone());
+            if let Some(mut existing) = existing {
+                existing.name = entry.file().name.clone();
+                existing.size = entry.file().size;
+                existing.downloaded = entry.file().downloaded;
+                existing.status = entry.file().status.clone();
+                next_files.push(existing);
+            } else {
+                next_files.push(entry.file().clone());
+            }
         }
     }
 

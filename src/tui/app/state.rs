@@ -153,7 +153,18 @@ impl App {
     }
 
     fn apply_core_event_with_policy(&mut self, event: CoreEvent, policy: CoreApplyPolicy) {
-        let selected_row_identity = policy.sync_visible.then(|| self.selected_row()).flatten();
+        let selected_row_identity = if policy.sync_visible {
+            if self.visible_sync_defer_depth > 0 {
+                self.pending_visible_selection
+                    .clone()
+                    .flatten()
+                    .or_else(|| self.selected_row_from_last_sync())
+            } else {
+                self.selected_row()
+            }
+        } else {
+            None
+        };
         let defer_core_session_persistence =
             self.session_persist_defer_depth > 0 && should_persist_session(&event);
         self.seed_core_session_from_session();
