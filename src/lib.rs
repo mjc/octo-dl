@@ -40,6 +40,8 @@ pub mod core;
 pub mod dlc;
 pub mod download;
 pub mod error;
+#[cfg(feature = "tui")]
+pub mod fake_mega;
 pub mod format;
 pub mod fs;
 pub(crate) mod progress;

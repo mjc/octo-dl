@@ -1521,6 +1521,7 @@ dependencies = [
  "chrono",
  "console",
  "crossterm",
+ "ctr",
  "dirs",
  "env_logger",
  "futures",
