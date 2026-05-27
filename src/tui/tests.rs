@@ -668,7 +668,6 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
             id: package_id.clone(),
             key: crate::core::PackageKey::new(source_url.clone().clone()),
             display_name: "Retry Folder".to_string(),
-            file_ids: Vec::new(),
             progress: crate::core::model::PackageProgressState::default(),
             error: Some("boom".to_string()),
         },

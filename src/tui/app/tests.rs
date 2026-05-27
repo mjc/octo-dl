@@ -1857,7 +1857,6 @@ fn visible_rows_hide_empty_failed_packages() {
             id: package_id,
             key: crate::core::PackageKey::new("https://mega.nz/folder/failed".to_string().clone()),
             display_name: "Failed".to_string(),
-            file_ids: Vec::new(),
             progress: crate::core::model::PackageProgressState::default(),
             error: Some("boom".to_string()),
         },

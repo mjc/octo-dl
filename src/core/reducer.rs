@@ -130,20 +130,6 @@ pub enum CoreEffect {
 
 pub type CoreEffects = SmallVec<[CoreEffect; 2]>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct FileIdPtrKey {
-    ptr: *const u8,
-    len: usize,
-}
-
-fn file_id_ptr_key(file_id: &FileId) -> FileIdPtrKey {
-    let id = file_id.as_str().as_bytes();
-    FileIdPtrKey {
-        ptr: id.as_ptr(),
-        len: id.len(),
-    }
-}
-
 #[cfg(test)]
 thread_local! {
     static SNAPSHOT_FROM_STATE_CALLS: Cell<usize> = const { Cell::new(0) };
@@ -297,31 +283,6 @@ fn remove_package_progress(
     }
 }
 
-fn insert_file_into_package_index(
-    state: &mut DownloadState,
-    file_id: &FileId,
-    package_id: PackageId,
-) {
-    if let Some(package) = state.packages.get_mut(&package_id)
-        && !package.file_ids.contains(file_id)
-    {
-        package.file_ids.push(file_id.clone());
-    }
-}
-
-fn remove_file_from_package_index(
-    state: &mut DownloadState,
-    file_id: &FileId,
-    package_id: PackageId,
-) {
-    if let Some(package) = state.packages.get_mut(&package_id) {
-        let file_ids = &mut package.file_ids;
-        if let Some(index) = file_ids.iter().position(|existing| existing == file_id) {
-            file_ids.swap_remove(index);
-        }
-    }
-}
-
 fn remove_unreferenced_source_url(state: &mut DownloadState, source_url: &UrlId) {
     if !state
         .files
@@ -337,17 +298,15 @@ fn package_status_from_files(state: &DownloadState, package_id: PackageId) -> Pa
     let Some(package) = state.packages.get(&package_id) else {
         return PackageStatus::Pending;
     };
-    let file_ids = &package.file_ids;
 
     let mut has_downloading = false;
     let mut has_failed = false;
     let mut has_queued = false;
     let mut has_complete = false;
+    let mut file_count = 0_usize;
 
-    for file_id in file_ids {
-        let Some(file) = state.files.get(file_id) else {
-            continue;
-        };
+    for file in state.package_files(&package_id) {
+        file_count = file_count.saturating_add(1);
         match file.lifecycle {
             FileLifecycle::Downloading => has_downloading = true,
             FileLifecycle::Failed { .. } => has_failed = true,
@@ -362,7 +321,7 @@ fn package_status_from_files(state: &DownloadState, package_id: PackageId) -> Pa
         PackageStatus::Downloading
     } else if has_complete && (has_queued || has_downloading) {
         PackageStatus::Partial
-    } else if has_complete && !file_ids.is_empty() {
+    } else if has_complete && file_count > 0 {
         PackageStatus::Complete
     } else if has_queued {
         PackageStatus::Queued
@@ -386,15 +345,11 @@ fn recompute_session_status(state: &mut DownloadState) {
 
 fn apply_file_change(
     state: &mut DownloadState,
-    file_id: &FileId,
+    _file_id: &FileId,
     before: FileDerivedState,
     after: FileDerivedState,
 ) {
     remove_totals_contribution(state, before);
-    if before.package_id != after.package_id {
-        remove_file_from_package_index(state, file_id, before.package_id);
-        insert_file_into_package_index(state, file_id, after.package_id);
-    }
     if before.package_id != after.package_id {
         remove_package_progress(state, before.package_id, before.lifecycle_bucket);
         add_package_progress(state, after.package_id, after.lifecycle_bucket);
@@ -424,10 +379,12 @@ fn complete_file(state: &mut DownloadState, file_id: &FileId) {
 
 fn insert_file_state(state: &mut DownloadState, file: FileState) {
     let derived = FileDerivedState::from(&file);
-    insert_file_into_package_index(state, &file.id, file.package_id);
     add_package_progress(state, file.package_id, derived.lifecycle_bucket);
     add_totals_contribution(state, derived);
-    state.files.insert(file.id.clone(), file);
+    let insert_index = state.package_insert_index(&file.package_id);
+    state
+        .files
+        .shift_insert(insert_index, file.id.clone(), file);
     recompute_session_status(state);
 }
 
@@ -482,8 +439,8 @@ fn reduce_impl(
                 return effects;
             }
             let incoming_package_id = package.id.clone();
-            let mut reassigned_file_ids = Vec::new();
             let mut reassigned_progress = Vec::new();
+            let mut reordered_files = false;
             let previous_package = state
                 .packages
                 .iter()
@@ -494,9 +451,9 @@ fn reduce_impl(
                 && previous_package_id != &incoming_package_id
             {
                 if let Some(previous_state) = state.packages.shift_remove(previous_package_id) {
-                    reassigned_file_ids = previous_state.file_ids;
-                    for file_id in &reassigned_file_ids {
-                        if let Some(file) = state.files.get_mut(file_id) {
+                    reordered_files = previous_state.progress.file_count() > 0;
+                    for file in state.files.values_mut() {
+                        if file.package_id == *previous_package_id {
                             reassigned_progress
                                 .push(PackageProgressBucket::from_lifecycle(&file.lifecycle));
                             file.package_id = incoming_package_id;
@@ -533,18 +490,12 @@ fn reduce_impl(
                         id: incoming_package_id.clone(),
                         key: package.key.clone(),
                         display_name: package_display_name.clone(),
-                        file_ids: Vec::new(),
                         progress: PackageProgressState::default(),
                         error: None,
                     });
                 package_entry.key = package.key.clone();
                 if !preserve_display_name {
                     package_entry.display_name = package_display_name;
-                }
-                for file_id in &reassigned_file_ids {
-                    if !package_entry.file_ids.contains(file_id) {
-                        package_entry.file_ids.push(file_id.clone());
-                    }
                 }
             }
             for lifecycle_bucket in reassigned_progress {
@@ -601,6 +552,9 @@ fn reduce_impl(
             }
             if let Some(package_entry) = state.packages.get_mut(&incoming_package_id) {
                 package_entry.error = package_error;
+            }
+            if reordered_files {
+                state.reorder_files_by_package_order();
             }
             recompute_session_status(state);
         }
@@ -794,13 +748,8 @@ fn reduce_impl(
                 let before = FileDerivedState::from(&file);
                 let source_url = file.source_url.clone();
                 remove_totals_contribution(state, before);
-                remove_file_from_package_index(state, &file_id, before.package_id);
                 remove_package_progress(state, before.package_id, before.lifecycle_bucket);
-                if state
-                    .packages
-                    .get(&before.package_id)
-                    .is_some_and(|package| package.file_ids.is_empty())
-                {
+                if !state.package_has_files(&before.package_id) {
                     state.packages.shift_remove(&before.package_id);
                 }
                 remove_unreferenced_source_url(state, &source_url);
@@ -808,9 +757,10 @@ fn reduce_impl(
             }
         }
         CoreEvent::PackageDeleted { package_id } => {
-            if let Some(package) = state.packages.shift_remove(&package_id) {
+            let file_ids = state.package_file_ids(&package_id);
+            if state.packages.shift_remove(&package_id).is_some() {
                 let mut removed_source_urls = std::collections::HashSet::new();
-                for file_id in package.file_ids {
+                for file_id in file_ids {
                     if let Some(file) = state.files.shift_remove(&file_id) {
                         let before = FileDerivedState::from(&file);
                         removed_source_urls.insert(file.source_url.clone());
@@ -917,17 +867,6 @@ pub(crate) fn rebuild_derived_state(state: &mut DownloadState) {
 pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
     #[cfg(test)]
     SNAPSHOT_FROM_STATE_CALLS.with(|count| count.set(count.get().saturating_add(1)));
-    let files_by_ptr: HashMap<_, _> = state
-        .files
-        .values()
-        .map(|file| (file_id_ptr_key(&file.id), file))
-        .collect();
-    let file_for_snapshot = |file_id: &FileId| {
-        files_by_ptr
-            .get(&file_id_ptr_key(file_id))
-            .copied()
-            .or_else(|| state.files.get(file_id))
-    };
     let mut url_errors = HashMap::<UrlId, String>::with_capacity(state.packages.len());
     for file in state.files.values() {
         let source_url = &file.source_url;
@@ -942,14 +881,29 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
         };
         url_errors.insert(source_url.clone(), error.clone());
     }
+    let mut package_files =
+        HashMap::<PackageId, Vec<&FileState>, rustc_hash::FxBuildHasher>::with_hasher(
+            rustc_hash::FxBuildHasher::default(),
+        );
+    for package in state.packages.values() {
+        package_files.insert(
+            package.id,
+            Vec::with_capacity(package.progress.file_count()),
+        );
+    }
+    for file in state.files.values() {
+        if let Some(files) = package_files.get_mut(&file.package_id) {
+            files.push(file);
+        }
+    }
     let packages = state
         .packages
         .values()
         .filter_map(|package| {
-            let files = package
-                .file_ids
-                .iter()
-                .filter_map(file_for_snapshot)
+            let files = package_files
+                .remove(&package.id)
+                .unwrap_or_default()
+                .into_iter()
                 .map(|file| FileSnapshot {
                     id: file.id.clone(),
                     package_id: file.package_id.clone(),
@@ -1034,6 +988,15 @@ fn recompute_derived(state: &mut DownloadState) {
 #[cfg(debug_assertions)]
 fn debug_assert_invariants(state: &DownloadState) {
     let mut package_keys = std::collections::HashSet::new();
+    let package_positions = state
+        .packages
+        .keys()
+        .enumerate()
+        .map(|(index, package_id)| (*package_id, index))
+        .collect::<HashMap<_, _, rustc_hash::FxBuildHasher>>();
+    let mut file_counts = HashMap::<PackageId, usize, rustc_hash::FxBuildHasher>::with_hasher(
+        rustc_hash::FxBuildHasher::default(),
+    );
     for (package_id, package) in &state.packages {
         debug_assert_eq!(
             package_id, &package.id,
@@ -1043,38 +1006,38 @@ fn debug_assert_invariants(state: &DownloadState) {
             package_keys.insert(package.key.clone()),
             "only one package may exist per package key"
         );
-        debug_assert!(
-            !package.file_ids.is_empty(),
-            "packages without files are invalid in canonical state"
-        );
         debug_assert_eq!(
             package.status(),
             package_status_from_files(state, package.id),
             "package progress cache must match fresh file scan"
         );
-        for file_id in &package.file_ids {
-            debug_assert!(
-                state.files.contains_key(file_id),
-                "package file_ids must reference known files"
-            );
-        }
     }
+    let mut last_package_position = None::<usize>;
     for (file_id, file) in &state.files {
         debug_assert_eq!(file_id, &file.id, "file map key must equal file.id");
         debug_assert!(
             state.packages.contains_key(&file.package_id),
             "every file must belong to a known package"
         );
+        let package_position = *package_positions
+            .get(&file.package_id)
+            .expect("files must belong to known package positions");
         debug_assert!(
-            state
-                .packages
-                .get(&file.package_id)
-                .is_some_and(|package| package.file_ids.contains(file_id)),
-            "every file must appear in its package file_ids"
+            last_package_position.is_none_or(|last| package_position >= last),
+            "files must stay grouped in package order"
         );
+        last_package_position = Some(package_position);
+        *file_counts.entry(file.package_id).or_default() += 1;
         debug_assert!(
             state.totals.displayed_network_bytes <= state.totals.run_completed_bytes,
             "network bytes cannot exceed visible completed bytes"
+        );
+    }
+    for package in state.packages.values() {
+        debug_assert_eq!(
+            package.progress.file_count(),
+            file_counts.get(&package.id).copied().unwrap_or(0),
+            "package progress count must match files in canonical order"
         );
     }
 }
@@ -1096,7 +1059,6 @@ mod tests {
                 id: pkg_id,
                 key: crate::core::PackageKey::new("pkg".to_string().clone()),
                 display_name: "pkg".to_string(),
-                file_ids: vec!["file.bin".to_string().into()],
                 progress: PackageProgressState {
                     queued: 1,
                     ..PackageProgressState::default()
@@ -1244,7 +1206,6 @@ mod tests {
                 id: pkg_id,
                 key: crate::core::PackageKey::new("pkg"),
                 display_name: "pkg".to_string(),
-                file_ids: vec!["a.bin".into(), "b.bin".into()],
                 progress: PackageProgressState::default(),
                 error: None,
             },
@@ -1448,7 +1409,6 @@ mod tests {
                     "https://mega.nz/folder/test".to_string().clone(),
                 ),
                 display_name: "Folder".to_string(),
-                file_ids: vec!["a.bin".to_string().into()],
                 progress: PackageProgressState {
                     queued: 1,
                     ..PackageProgressState::default()
@@ -1515,7 +1475,6 @@ mod tests {
                     "https://mega.nz/folder/pkg-a".to_string().clone(),
                 ),
                 display_name: "Package A".to_string(),
-                file_ids: vec!["a.bin".to_string().into()],
                 progress: PackageProgressState {
                     queued: 1,
                     ..PackageProgressState::default()
@@ -1588,7 +1547,6 @@ mod tests {
                     "https://mega.nz/folder/test".to_string().clone(),
                 ),
                 display_name: "https://mega.nz/folder/test".to_string(),
-                file_ids: vec!["a.bin".to_string().into()],
                 progress: PackageProgressState {
                     queued: 1,
                     ..PackageProgressState::default()
@@ -1699,7 +1657,6 @@ mod tests {
                     id: pkg_id,
                     key: crate::core::PackageKey::new(url.to_string()),
                     display_name: url.to_string(),
-                    file_ids: vec![file_id.to_string().into()],
                     progress: PackageProgressState {
                         queued: 1,
                         ..PackageProgressState::default()
@@ -1758,25 +1715,11 @@ mod tests {
                 id: pkg_id,
                 key: crate::core::PackageKey::new("pkg"),
                 display_name: "pkg".to_string(),
-                file_ids: vec!["b.bin".into(), "a.bin".into()],
                 progress: PackageProgressState {
                     queued: 2,
                     ..PackageProgressState::default()
                 },
                 error: None,
-            },
-        );
-        state.files.insert(
-            "a.bin".into(),
-            FileState {
-                id: "a.bin".into(),
-                package_id: pkg_id,
-                source_url: "pkg".to_string(),
-                path: "a.bin".to_string(),
-                size: 10,
-                lifecycle: FileLifecycle::Queued,
-                progress: FileProgressState::default(),
-                accounting: FileAccounting::CurrentRun,
             },
         );
         state.files.insert(
@@ -1787,6 +1730,19 @@ mod tests {
                 source_url: "pkg".to_string(),
                 path: "b.bin".to_string(),
                 size: 20,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState::default(),
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+        state.files.insert(
+            "a.bin".into(),
+            FileState {
+                id: "a.bin".into(),
+                package_id: pkg_id,
+                source_url: "pkg".to_string(),
+                path: "a.bin".to_string(),
+                size: 10,
                 lifecycle: FileLifecycle::Queued,
                 progress: FileProgressState::default(),
                 accounting: FileAccounting::CurrentRun,
@@ -1808,7 +1764,6 @@ mod tests {
     fn snapshot_from_state_handles_distinct_equal_file_ids() {
         let pkg_id = package_id("pkg", "pkg");
         let mut state = DownloadState::new(crate::core::SessionMeta::default());
-        let package_file_id = FileId::from(String::from("file.bin"));
         let state_file_id = FileId::from(String::from("file.bin"));
         state.packages.insert(
             pkg_id,
@@ -1816,7 +1771,6 @@ mod tests {
                 id: pkg_id,
                 key: crate::core::PackageKey::new("pkg"),
                 display_name: "pkg".to_string(),
-                file_ids: vec![package_file_id],
                 progress: PackageProgressState {
                     queued: 1,
                     ..PackageProgressState::default()
