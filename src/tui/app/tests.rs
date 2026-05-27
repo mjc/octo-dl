@@ -1246,6 +1246,80 @@ fn pending_empty_package_placeholder_is_visible() {
 }
 
 #[test]
+fn deleting_pending_url_removes_it_from_core_state_and_session() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    let url = "https://mega.nz/folder/root".to_string();
+
+    app.submit_url(url.clone());
+    app.handle_ui_action(UiAction::DeleteFile(url.clone().into()));
+    app.sync_session_for_shutdown();
+    app.flush_session_persistence();
+
+    assert!(app.urls.is_empty());
+    assert!(app.core_state.url_order.is_empty());
+    assert!(
+        app.session
+            .as_ref()
+            .is_some_and(|session| session.urls.is_empty() && session.packages.is_empty())
+    );
+    assert!(crate::core::SessionSnapshot::latest().is_none());
+}
+
+#[test]
+fn deleting_url_level_error_stays_deleted_after_shutdown_sync() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    let url = "https://mega.nz/folder/bad".to_string();
+
+    app.submit_url(url.clone());
+    app.handle_download_event(crate::tui::event::DownloadEvent::ScopeError {
+        scope: url.clone(),
+        error: "bad folder".to_string(),
+    });
+    app.handle_ui_action(UiAction::DeleteFile(url.clone().into()));
+    app.sync_session_for_shutdown();
+    app.flush_session_persistence();
+
+    assert!(app.visible_rows().is_empty());
+    assert!(app.urls.is_empty());
+    assert!(app.core_state.url_order.is_empty());
+    assert!(
+        app.session
+            .as_ref()
+            .is_some_and(|session| session.urls.is_empty() && session.packages.is_empty())
+    );
+    assert!(crate::core::SessionSnapshot::latest().is_none());
+}
+
+#[test]
+fn deleting_one_pending_url_preserves_other_pending_urls_across_shutdown() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    let removed = "https://mega.nz/folder/remove".to_string();
+    let kept = "https://mega.nz/folder/keep".to_string();
+
+    app.submit_url(removed.clone());
+    app.submit_url(kept.clone());
+    app.handle_ui_action(UiAction::DeleteFile(removed.clone().into()));
+    app.sync_session_for_shutdown();
+    app.flush_session_persistence();
+
+    assert_eq!(app.urls, vec![kept.clone()]);
+    assert_eq!(app.core_state.url_order, vec![kept.clone()]);
+    let session = app.session.as_ref().expect("session should remain");
+    assert_eq!(session.urls.len(), 1);
+    assert_eq!(session.urls[0].url, kept);
+    assert!(session.urls[0].error.is_none());
+    let latest = crate::core::SessionSnapshot::latest().expect("session should be saved");
+    assert_eq!(latest.urls.len(), 1);
+    assert_eq!(latest.urls[0].url, "https://mega.nz/folder/keep");
+}
+
+#[test]
 fn selected_row_uses_valid_visible_row_cache() {
     let mut app = test_app();
     let cached_row = TuiRow::File {

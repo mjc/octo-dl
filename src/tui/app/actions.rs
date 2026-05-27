@@ -554,6 +554,7 @@ impl App {
                 SessionAdapter::remove_url(session, id.as_str())
             });
             self.urls.retain(|url| url != id.as_str());
+            self.core_state.url_order.retain(|url| url != id.as_str());
         }
         if is_core_backed {
             self.apply_core_command(CoreCommand::DeleteFile {
