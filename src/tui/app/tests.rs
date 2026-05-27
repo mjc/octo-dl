@@ -196,6 +196,8 @@ fn dashboard_json_contains_visible_file_state_without_internal_fields() {
         FileUiState {
             speed: 32,
             rate: Default::default(),
+            sort_key: None,
+            package_id: None,
         },
     );
     app.cpu_usage = 12.5;
@@ -2148,6 +2150,8 @@ fn sync_visible_files_prunes_stale_file_ui_state() {
         FileUiState {
             speed: 42,
             rate: Default::default(),
+            sort_key: None,
+            package_id: None,
         },
     );
     app.file_ui.insert(
@@ -2155,6 +2159,8 @@ fn sync_visible_files_prunes_stale_file_ui_state() {
         FileUiState {
             speed: 99,
             rate: Default::default(),
+            sort_key: None,
+            package_id: None,
         },
     );
 

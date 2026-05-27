@@ -6,12 +6,14 @@ use ratatui::widgets::ListState;
 use crate::core::{DownloadState, FileId, FileLifecycle, FileState, PackageId, PackageState};
 
 use super::TuiRow;
-use super::rows::visible_rows_for;
+use super::rows::{build_file_sort_key, cached_file_sort_key_matches, visible_rows_for};
 use crate::tui::app::{FileEntry, FileStatus, FileUiState, SortState, TransientRow};
 
 fn project_core_file(
     file: &FileState,
-    _package: Option<&PackageState>,
+    package: Option<&PackageState>,
+    package_order: usize,
+    file_ui: &mut HashMap<FileId, FileUiState>,
     existing: Option<FileEntry>,
 ) -> Option<FileEntry> {
     let status = match &file.lifecycle {
@@ -25,6 +27,26 @@ fn project_core_file(
         FileLifecycle::Complete => file.size,
         _ => crate::core::visible_completed_bytes_for_display(file),
     };
+    let reuse_cached_sort_key = existing.as_ref().is_some_and(|existing| {
+        existing.name == file.path
+            && existing.status == status
+            && file_ui
+                .get(&file.id)
+                .and_then(|ui| ui.sort_key.as_ref())
+                .is_some_and(|sort_key| cached_file_sort_key_matches(sort_key, package_order, ""))
+    });
+    if !reuse_cached_sort_key {
+        let state = file_ui.entry(file.id.clone()).or_default();
+        state.sort_key = Some(build_file_sort_key(
+            &file.path,
+            &status,
+            package_order,
+            package.map_or("", |_| ""),
+        ));
+        state.package_id = Some(file.package_id);
+    } else if let Some(state) = file_ui.get_mut(&file.id) {
+        state.package_id = Some(file.package_id);
+    }
     if let Some(mut existing) = existing {
         existing.name = file.path.clone();
         existing.size = file.size;
@@ -64,14 +86,26 @@ pub(super) fn sync_visible_files(
     let mut next_files = Vec::new();
     for file in core_state.files.values() {
         let package = core_state.packages.get(&file.package_id);
+        let package_order = core_state
+            .packages
+            .get_index_of(&file.package_id)
+            .unwrap_or(usize::MAX);
         let existing = existing.remove(&file.id);
-        if let Some(entry) = project_core_file(file, package, existing) {
+        if let Some(entry) = project_core_file(file, package, package_order, file_ui, existing) {
             next_files.push(entry);
         }
     }
 
     for (id, entry) in overlay_files.iter() {
         if !core_file_ids.contains(id) {
+            let state = file_ui.entry(id.clone()).or_default();
+            state.sort_key = Some(build_file_sort_key(
+                &entry.file().name,
+                &entry.file().status,
+                usize::MAX,
+                entry.source_url().unwrap_or(id.as_str()),
+            ));
+            state.package_id = None;
             next_files.push(entry.file().clone());
         }
     }
@@ -84,7 +118,14 @@ pub(super) fn sync_visible_files(
         .collect();
     let visible_ids: HashSet<_> = files.iter().map(|file| file.id.clone()).collect();
     file_ui.retain(|file_id, _| visible_ids.contains(file_id));
-    let visible_rows = visible_rows_for(files, core_state, overlay_files, expanded_packages, sort);
+    let visible_rows = visible_rows_for(
+        files,
+        file_ui,
+        core_state,
+        overlay_files,
+        expanded_packages,
+        sort,
+    );
     if let Some(selected_row_identity) = selected_row_identity {
         if let Some(display_row) = visible_rows
             .iter()

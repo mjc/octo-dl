@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use crate::core::PackageId;
+
 use super::{App, FileStatus};
 
 const MIN_RATE_SAMPLE_SPAN: Duration = Duration::from_secs(1);
@@ -9,6 +11,8 @@ const THROUGHPUT_DECAY: Duration = Duration::from_secs(30);
 pub(crate) struct FileUiState {
     pub speed: u64,
     pub rate: TransferRate,
+    pub sort_key: Option<crate::tui::visible::CachedFileSortKey>,
+    pub package_id: Option<PackageId>,
 }
 
 #[derive(Debug, Clone)]
