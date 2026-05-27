@@ -910,9 +910,11 @@ impl App {
         match action {
             UiAction::AddUrls(urls) => {
                 let count = urls.len();
-                for url in urls {
-                    self.submit_url(url);
-                }
+                self.with_deferred_visible_sync(|app| {
+                    for url in urls {
+                        app.submit_url(url);
+                    }
+                });
                 self.status = format!("Received {count} URL(s) from bookmarklet");
             }
             UiAction::Login {

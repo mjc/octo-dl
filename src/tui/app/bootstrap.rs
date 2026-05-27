@@ -125,6 +125,10 @@ impl App {
             cpu_usage: 0.0,
             last_tick: Instant::now(),
             memory_rss: 0,
+            visible_sync_defer_depth: 0,
+            visible_sync_pending: false,
+            #[cfg(test)]
+            visible_sync_count: 0,
         }
     }
 

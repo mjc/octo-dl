@@ -24,6 +24,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::ptr::NonNull;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -66,6 +67,38 @@ struct DashboardCacheKey {
     revision: u64,
     ui_mode: DashboardUiMode,
     read_only: bool,
+}
+
+struct VisibleSyncDeferralGuard {
+    app: NonNull<App>,
+}
+
+impl VisibleSyncDeferralGuard {
+    fn new(app: &mut App) -> Self {
+        app.visible_sync_defer_depth += 1;
+        Self {
+            app: NonNull::from(app),
+        }
+    }
+}
+
+impl Drop for VisibleSyncDeferralGuard {
+    fn drop(&mut self) {
+        let app = unsafe { self.app.as_mut() };
+        debug_assert!(app.visible_sync_defer_depth > 0);
+        app.visible_sync_defer_depth = app.visible_sync_defer_depth.saturating_sub(1);
+
+        if app.visible_sync_defer_depth != 0 {
+            return;
+        }
+
+        let should_flush = app.visible_sync_pending;
+        app.visible_sync_pending = false;
+        if should_flush && !std::thread::panicking() {
+            let selected_row_identity = app.selected_row();
+            app.sync_visible_files_preserving_now(selected_row_identity);
+        }
+    }
 }
 
 pub struct App {
@@ -158,6 +191,10 @@ pub struct App {
     pub memory_rss: u64,
     // Speed tracking
     pub last_tick: Instant,
+    pub(crate) visible_sync_defer_depth: usize,
+    pub(crate) visible_sync_pending: bool,
+    #[cfg(test)]
+    pub(crate) visible_sync_count: usize,
 }
 
 impl App {
@@ -232,11 +269,33 @@ impl App {
     }
 
     pub(crate) fn sync_visible_files(&mut self) {
+        if self.visible_sync_defer_depth > 0 {
+            self.visible_sync_pending = true;
+            return;
+        }
         let selected_row_identity = self.selected_row();
-        self.sync_visible_files_preserving(selected_row_identity);
+        self.sync_visible_files_preserving_now(selected_row_identity);
     }
 
     pub(crate) fn sync_visible_files_preserving(
+        &mut self,
+        selected_row_identity: Option<visible::TuiRow>,
+    ) {
+        if self.visible_sync_defer_depth > 0 {
+            self.visible_sync_pending = true;
+            return;
+        }
+        self.sync_visible_files_preserving_now(selected_row_identity);
+    }
+
+    pub(crate) fn with_deferred_visible_sync<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let guard = VisibleSyncDeferralGuard::new(self);
+        let result = f(self);
+        drop(guard);
+        result
+    }
+
+    fn sync_visible_files_preserving_now(
         &mut self,
         selected_row_identity: Option<visible::TuiRow>,
     ) {
@@ -251,6 +310,10 @@ impl App {
             &self.sort,
             selected_row_identity,
         );
+        #[cfg(test)]
+        {
+            self.visible_sync_count += 1;
+        }
         self.cached_visible_rows_key = self.visible_rows_cache_key();
         self.cached_visible_rows = visible_rows;
     }
