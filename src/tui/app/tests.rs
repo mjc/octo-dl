@@ -1603,6 +1603,56 @@ fn core_persisted_session_snapshot_is_saved_to_disk() {
 }
 
 #[test]
+fn shutdown_persists_latest_file_progress_after_non_persisted_progress_events() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    let file_id: FileId = "episode-1.mkv".to_string().into();
+
+    app.ensure_session_for_pending_urls();
+    resolve_package(
+        &mut app,
+        "https://mega.nz/folder/root",
+        &[("episode-1.mkv", 1_000)],
+    );
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: file_id.clone(),
+        size: 1_000,
+    });
+    app.flush_session_persistence();
+
+    app.handle_file_progress_event(
+        file_id.clone(),
+        crate::core::ProgressDelta {
+            total_bytes_delta: 400,
+            network_bytes_delta: 400,
+        },
+        0,
+    );
+
+    let latest_before_shutdown =
+        crate::core::SessionSnapshot::latest().expect("session should exist before shutdown");
+    assert_eq!(
+        latest_before_shutdown
+            .find_file("episode-1.mkv")
+            .expect("file should exist before shutdown")
+            .progress
+            .visible_completed_bytes,
+        0
+    );
+
+    app.sync_session_for_shutdown();
+
+    let latest = crate::core::SessionSnapshot::latest().expect("session should be saved");
+    let file = latest
+        .find_file("episode-1.mkv")
+        .expect("file should exist after shutdown");
+    assert_eq!(file.progress.visible_completed_bytes, 400);
+    assert_eq!(file.progress.downloaded_network_bytes, 400);
+    assert_eq!(file.lifecycle, FileLifecycle::Downloading);
+}
+
+#[test]
 fn deferred_core_persistence_materializes_before_session_mutation() {
     let mut app = test_app();
     crate::core::reducer::reset_snapshot_from_state_call_count();
