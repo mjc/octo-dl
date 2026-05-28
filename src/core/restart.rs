@@ -516,6 +516,40 @@ mod tests {
     }
 
     #[test]
+    fn restart_clamps_stale_session_partial_progress_to_verified_sidecar_bytes() {
+        let mut snapshot = sample_snapshot();
+        let file = snapshot.find_file_mut("a.bin").unwrap();
+        file.lifecycle = FileLifecycle::Downloading;
+        file.progress = FileProgressState {
+            verified_existing_bytes: 0,
+            downloaded_network_bytes: 95,
+            visible_completed_bytes: 95,
+        };
+
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot {
+                complete_files: Vec::new(),
+                partial_files: vec![PartialFileSnapshot {
+                    file_id: "a.bin".to_string().into(),
+                    bytes: 95,
+                    has_sidecar: true,
+                    verified_bytes: 40,
+                }],
+            },
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        let file = &restart.state.files["a.bin"];
+        assert_eq!(file.lifecycle, FileLifecycle::Queued);
+        assert_eq!(file.accounting, FileAccounting::CurrentRun);
+        assert_eq!(file.progress.visible_completed_bytes, 40);
+        assert_eq!(file.progress.downloaded_network_bytes, 0);
+        assert_eq!(file.progress.verified_existing_bytes, 0);
+        assert_eq!(restart.resume_file_ids, vec!["a.bin".to_string()]);
+    }
+
+    #[test]
     fn restart_rejects_duplicate_packages_for_same_source_url() {
         let source_url = "https://mega.nz/folder/dup".to_string();
         let mut snapshot = sample_snapshot();
