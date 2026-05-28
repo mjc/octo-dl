@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::core::model::{
-    DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
-    PackageKey, PackageProgressState, PackageState, PackageStatus, SessionRunStatus, UrlId,
+    DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState,
+    FileStateIndex, PackageId, PackageKey, PackageProgressState, PackageState, PackageStatus,
+    SessionRunStatus, UrlId,
 };
 use crate::core::restart::RestartSnapshot;
 use crate::core::session::{FileSnapshot, PackageSnapshot, SessionSnapshot};
@@ -778,16 +779,19 @@ fn reduce_impl(
             }
         }
         CoreEvent::PackageDeleted { package_id } => {
-            let file_ids = state.package_file_ids(&package_id);
             if state.packages.shift_remove(&package_id).is_some() {
                 let mut removed_source_urls = std::collections::HashSet::new();
-                for file_id in file_ids {
-                    if let Some(file) = state.files.shift_remove(&file_id) {
+                let mut remaining_files = FileStateIndex::default();
+                for (file_id, file) in std::mem::take(&mut state.files) {
+                    if file.package_id == package_id {
                         let before = FileDerivedState::from(&file);
                         removed_source_urls.insert(file.source_url.clone());
                         remove_totals_contribution(state, before);
+                    } else {
+                        remaining_files.insert(file_id, file);
                     }
                 }
+                state.files = remaining_files;
                 for source_url in removed_source_urls {
                     remove_unreferenced_source_url(state, &source_url);
                 }
@@ -1989,6 +1993,64 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["url-c", "url-b"]
         );
+    }
+
+    #[test]
+    fn deleting_middle_package_preserves_remaining_file_order_and_totals() {
+        let pkg_a = package_id("pkg-a", "url-a");
+        let pkg_b = package_id("pkg-b", "url-b");
+        let pkg_c = package_id("pkg-c", "url-c");
+        let mut state = DownloadState::new(crate::core::SessionMeta::default());
+        state.url_order = vec![
+            "url-a".to_string(),
+            "url-b".to_string(),
+            "url-c".to_string(),
+        ];
+        insert_package(
+            &mut state,
+            pkg_a,
+            "url-a",
+            &[("a-1.bin", 10), ("a-2.bin", 11)],
+        );
+        insert_package(
+            &mut state,
+            pkg_b,
+            "url-b",
+            &[("b-1.bin", 20), ("b-2.bin", 21)],
+        );
+        insert_package(&mut state, pkg_c, "url-c", &[("c-1.bin", 30)]);
+        rebuild_derived_state(&mut state);
+        reduce(
+            &mut state,
+            CoreEvent::FileCompleted {
+                file_id: "a-1.bin".to_string().into(),
+            },
+        );
+        reduce(
+            &mut state,
+            CoreEvent::FileCompleted {
+                file_id: "b-1.bin".to_string().into(),
+            },
+        );
+
+        reduce(&mut state, CoreEvent::PackageDeleted { package_id: pkg_b });
+
+        assert_eq!(
+            state
+                .files
+                .keys()
+                .map(|file_id| file_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-1.bin", "a-2.bin", "c-1.bin"]
+        );
+        assert_eq!(
+            state.url_order,
+            vec!["url-a".to_string(), "url-c".to_string()]
+        );
+        assert_eq!(state.totals.run_total_bytes, 51);
+        assert_eq!(state.totals.run_completed_bytes, 10);
+        assert_eq!(state.totals.run_file_total, 3);
+        assert_eq!(state.totals.run_file_completed, 1);
     }
 
     #[test]
