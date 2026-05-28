@@ -179,6 +179,26 @@ fn unavailable_resume_priority_blocks_new_downloads_until_reverify_finishes() {
 }
 
 #[test]
+fn reverify_for_unavailable_file_does_not_leave_ghost_resume_priority_entry() {
+    let mut scheduler = SchedulerState::new();
+    let ghost = FileId::from("failed-ghost.bin");
+
+    let paused = scheduler.pause_file_ids(std::slice::from_ref(&ghost));
+    assert!(paused.is_empty());
+
+    let paused_ids = paused
+        .iter()
+        .map(|download| FileId::from(download.item.path.as_str()))
+        .collect::<Vec<_>>();
+    scheduler.mark_resume_priority_file_ids(&paused_ids);
+
+    assert!(
+        !scheduler.resume_priority_set.contains(&ghost),
+        "failed or otherwise unavailable files must not leave behind resume-priority blockers"
+    );
+}
+
+#[test]
 fn file_id_map_lookup_falls_back_when_ptr_key_differs() {
     let stored = FileId::from(String::from("file.bin"));
     let lookup = FileId::from(String::from("file.bin"));
