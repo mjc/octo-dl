@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -103,6 +103,14 @@ impl TokioFileSystem {
     }
 }
 
+fn sync_file_blocking(path: &Path) -> std::io::Result<()> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    file.sync_all()
+}
+
 #[async_trait]
 impl FileSystem for TokioFileSystem {
     async fn file_exists(&self, path: &Path) -> bool {
@@ -159,8 +167,16 @@ impl FileSystem for TokioFileSystem {
     }
 
     async fn sync_file(&self, path: &Path) -> std::io::Result<()> {
-        let file = tokio::fs::OpenOptions::new().read(true).open(path).await?;
-        file.sync_data().await
+        let path = PathBuf::from(path);
+        match tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || sync_file_blocking(&path)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => sync_file_blocking(&path),
+        }
     }
 
     async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
@@ -275,5 +291,18 @@ mod tests {
         let fs = TokioFileSystem::new();
         // Should not error on missing file
         fs.remove_file(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tokio_fs_sync_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.txt");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"hello").unwrap();
+        file.flush().unwrap();
+        drop(file);
+
+        let fs = TokioFileSystem::new();
+        fs.sync_file(&path).await.unwrap();
     }
 }

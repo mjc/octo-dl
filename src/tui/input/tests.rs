@@ -998,6 +998,11 @@ fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
     assert!(token.is_cancelled());
     assert!(app.verifying_files.contains("active.bin"));
     assert!(app.verification_inflight_files.contains("active.bin"));
+    assert_eq!(
+        app.file_attempt_ids.get("active.bin"),
+        Some(&1),
+        "Alt-R should advance the attempt generation before stale cancel/progress events arrive"
+    );
     assert_eq!(app.files[0].status, FileStatus::Queued);
     assert_eq!(
         app.files[0].downloaded, 0,
@@ -1038,7 +1043,7 @@ fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
     app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
         id: "active.bin".to_string().into(),
         size: 100,
-        attempt_id: 0,
+        attempt_id: 1,
     });
     assert!(!app.verifying_files.contains("active.bin"));
     assert!(!app.verification_inflight_files.contains("active.bin"));
@@ -1147,6 +1152,13 @@ fn handle_main_input_alt_r_on_package_verifies_all_files_by_kind() {
             "expected {file_id} to accept verification progress"
         );
     }
+    assert_eq!(
+        app.file_attempt_ids.get("file-0.bin"),
+        Some(&1),
+        "Alt-R from a package row should also advance the active file generation"
+    );
+    assert_eq!(app.file_attempt_ids.get("file-1.bin"), None);
+    assert_eq!(app.file_attempt_ids.get("file-4.bin"), None);
     for index in [2, 3] {
         let file_id = crate::core::FileId::from(format!("file-{index}.bin").as_str());
         assert!(!app.verifying_files.contains(&file_id));

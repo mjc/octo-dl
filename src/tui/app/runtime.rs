@@ -11,7 +11,7 @@ use crate::{
     tui::dashboard::DashboardUiMode,
 };
 
-use super::{App, DownloadEvent, FileEntry, FileStatus, UiAction};
+use super::{App, DownloadEvent, FileEntry, FileIdSet, FileStatus, UiAction};
 
 const MAX_DOWNLOAD_EVENTS_PER_TICK: usize = 256;
 const MAX_TOKEN_MESSAGES_PER_TICK: usize = 256;
@@ -30,10 +30,45 @@ fn progress_summary_pct(
 }
 
 impl App {
+    fn active_shutdown_file_ids(&self) -> Vec<FileId> {
+        let mut pending = FileIdSet::default();
+        pending.extend(
+            self.files
+                .iter()
+                .filter(|file| matches!(file.status, FileStatus::Downloading))
+                .map(|file| file.id.clone()),
+        );
+        pending.extend(self.shutdown_blocking_verifications.iter().cloned());
+        pending.extend(self.cancellation_tokens.keys().cloned());
+        pending.into_iter().collect()
+    }
+
+    fn skip_nonblocking_shutdown_verifications(&mut self) {
+        let file_ids = self
+            .verification_inflight_files
+            .iter()
+            .filter(|id| !self.shutdown_blocking_verifications.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in file_ids {
+            let completed =
+                self.verification_targets.get(&id) == Some(&super::VerificationTarget::Completed);
+            self.handle_verification_skipped_event(id, completed);
+        }
+    }
+
     pub(crate) fn begin_shutdown(&mut self) -> bool {
         self.drain_token_messages();
+        self.skip_nonblocking_shutdown_verifications();
+        self.shutdown_pending_files.clear();
+        for id in self.active_shutdown_file_ids() {
+            self.track_shutdown_pending_file(&id);
+        }
         self.pause_downloads();
-        !self.cancellation_tokens.is_empty()
+        for id in self.cancellation_tokens.keys().cloned().collect::<Vec<_>>() {
+            self.track_shutdown_pending_file(&id);
+        }
+        !self.shutdown_pending_files.is_empty()
     }
 
     fn flush_pending_progress_events(
@@ -345,7 +380,15 @@ impl App {
             let Ok(msg) = self.token_rx.try_recv() else {
                 break;
             };
-            self.cancellation_tokens.insert(msg.file_id, msg.token);
+            let file_id = msg.file_id;
+            let token = msg.token;
+            if self.paused {
+                token.cancel();
+                if !self.shutdown_pending_files.contains(&file_id) {
+                    continue;
+                }
+            }
+            self.cancellation_tokens.insert(file_id, token);
         }
     }
 
@@ -503,7 +546,7 @@ impl App {
                 self.drain_download_events(download_rx) | self.drain_ui_actions(action_rx);
             self.drain_token_messages();
             self.poll_session_persistence();
-            if shutting_down && self.cancellation_tokens.is_empty() {
+            if shutting_down && self.shutdown_pending_files.is_empty() {
                 break;
             }
             if dashboard_dirty && let Some(state_tx) = state_tx {
@@ -526,6 +569,7 @@ mod tests {
     use crate::{
         core::{CoreEvent, PackageKey, ResolvedFile, ResolvedPackage},
         test_support::{StateDirectoryGuard, package_id},
+        tui::event::TokenMessage,
     };
     use tempfile::tempdir;
 
@@ -643,6 +687,163 @@ mod tests {
         .expect("headless shutdown should complete after cancellation drains");
 
         assert!(token.is_cancelled());
+        assert!(app.cancellation_tokens.is_empty());
+        assert!(app.paused);
+    }
+
+    #[tokio::test]
+    async fn headless_shutdown_waits_for_late_download_token_registration() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let (event_tx, download_rx) = mpsc::unbounded_channel();
+        let (_action_tx, action_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx.clone(), true);
+        let token_tx = app
+            .token_tx
+            .as_ref()
+            .expect("token tx should exist")
+            .clone();
+        let file_id = crate::core::FileId::from("episode.bin");
+
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/root"),
+                source_url: "https://mega.nz/folder/root".to_string(),
+                key: PackageKey::new("https://mega.nz/folder/root".to_string()),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.clone(),
+                    path: "episode.bin".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: file_id.clone(),
+            size: 128,
+        });
+
+        let token = tokio_util::sync::CancellationToken::new();
+        let sent_token = token.clone();
+        let sent_id = file_id.clone();
+        let send_tx = event_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = token_tx.send(TokenMessage {
+                file_id: sent_id.clone(),
+                token: sent_token,
+            });
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = send_tx.send(DownloadEvent::FileCancelled {
+                id: sent_id,
+                attempt_id: 0,
+            });
+        });
+
+        let handle = tokio::spawn(async move {
+            let mut download_rx = download_rx;
+            let mut action_rx = action_rx;
+            app.run_headless_until_shutdown(
+                &mut download_rx,
+                &mut action_rx,
+                None,
+                std::future::ready(()),
+            )
+            .await;
+            app
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !handle.is_finished(),
+            "headless shutdown should wait for late token registration"
+        );
+
+        let app = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("headless shutdown should finish after late cancellation")
+            .expect("headless task should join");
+
+        assert!(token.is_cancelled());
+        assert!(app.shutdown_pending_files.is_empty());
+        assert!(app.cancellation_tokens.is_empty());
+        assert!(app.paused);
+    }
+
+    #[tokio::test]
+    async fn headless_shutdown_waits_for_late_resume_validation_token_registration() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let (event_tx, download_rx) = mpsc::unbounded_channel();
+        let (_action_tx, action_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx.clone(), true);
+        let token_tx = app
+            .token_tx
+            .as_ref()
+            .expect("token tx should exist")
+            .clone();
+        let file_id = crate::core::FileId::from("episode.bin");
+
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/root"),
+                source_url: "https://mega.nz/folder/root".to_string(),
+                key: PackageKey::new("https://mega.nz/folder/root".to_string()),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.clone(),
+                    path: "episode.bin".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        app.handle_resume_validation_started_event(file_id.clone(), 0);
+
+        let token = tokio_util::sync::CancellationToken::new();
+        let sent_token = token.clone();
+        let sent_id = file_id.clone();
+        let send_tx = event_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = token_tx.send(TokenMessage {
+                file_id: sent_id.clone(),
+                token: sent_token,
+            });
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = send_tx.send(DownloadEvent::FileCancelled {
+                id: sent_id,
+                attempt_id: 0,
+            });
+        });
+
+        let handle = tokio::spawn(async move {
+            let mut download_rx = download_rx;
+            let mut action_rx = action_rx;
+            app.run_headless_until_shutdown(
+                &mut download_rx,
+                &mut action_rx,
+                None,
+                std::future::ready(()),
+            )
+            .await;
+            app
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !handle.is_finished(),
+            "headless shutdown should wait for late resume-validation tokens"
+        );
+
+        let app = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("headless shutdown should finish after late verification cancellation")
+            .expect("headless task should join");
+
+        assert!(token.is_cancelled());
+        assert!(app.shutdown_pending_files.is_empty());
         assert!(app.cancellation_tokens.is_empty());
         assert!(app.paused);
     }

@@ -113,6 +113,8 @@ impl App {
             client_rx: None,
             download_task_running: false,
             cancellation_tokens: FileIdMap::default(),
+            shutdown_pending_files: FileIdSet::default(),
+            shutdown_blocking_verifications: FileIdSet::default(),
             file_attempt_ids: HashMap::new(),
             reset_pending_files: FileIdSet::default(),
             reverify_pending_files: FileIdSet::default(),

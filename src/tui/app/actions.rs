@@ -27,14 +27,23 @@ fn reverify_target_for_core_file(file: &crate::core::FileState) -> Option<Verifi
 }
 
 impl App {
+    pub(crate) fn track_shutdown_pending_file(&mut self, id: &FileId) {
+        self.shutdown_pending_files.insert(id.clone());
+    }
+
+    pub(crate) fn resolve_shutdown_pending_file(&mut self, id: &FileId) {
+        self.shutdown_pending_files.remove(id);
+    }
+
     fn clear_verification_state(&mut self, id: &FileId) {
         self.verifying_files.remove(id);
         self.verification_inflight_files.remove(id);
         self.verification_targets.remove(id);
+        self.shutdown_blocking_verifications.remove(id);
         self.reverify_pending_files.remove(id);
     }
 
-    fn forget_visible_file(&mut self, id: &FileId) {
+    pub(crate) fn forget_visible_file(&mut self, id: &FileId) {
         self.overlay_files.shift_remove(id);
         self.files.retain(|file| file.id != *id);
         self.visible_file_positions = self
@@ -204,6 +213,9 @@ impl App {
         self.verifying_files.remove(&id);
         self.verification_inflight_files.remove(&id);
         self.verification_targets.remove(&id);
+        self.shutdown_blocking_verifications.remove(&id);
+        self.cancellation_tokens.remove(&id);
+        self.resolve_shutdown_pending_file(&id);
         self.apply_core_event(CoreEvent::FileFailed {
             file_id: id.clone(),
             message: error.clone(),
@@ -299,6 +311,7 @@ impl App {
         self.verifying_files.remove(&id);
         self.verification_inflight_files.remove(&id);
         self.verification_targets.remove(&id);
+        self.shutdown_blocking_verifications.remove(&id);
         self.reset_pending_files.remove(&id);
         if self.reverify_pending_files.remove(&id) {
             self.apply_core_event(CoreEvent::FileResumeStarted {
@@ -326,6 +339,7 @@ impl App {
         }
         self.verifying_files.insert(id.clone());
         self.verification_inflight_files.insert(id.clone());
+        self.shutdown_blocking_verifications.insert(id.clone());
         self.verification_targets
             .insert(id.clone(), VerificationTarget::Resume);
         self.apply_core_event(CoreEvent::FileVerificationStarted {
@@ -353,6 +367,7 @@ impl App {
             self.verifying_files.remove(&id);
             self.verification_inflight_files.remove(&id);
             self.verification_targets.remove(&id);
+            self.shutdown_blocking_verifications.remove(&id);
         }
         self.apply_core_progress_event(CoreEvent::FileProgress {
             file_id: id.clone(),
@@ -420,6 +435,7 @@ impl App {
             log::info!("Ignoring resume reverify for untracked file: {id}");
             return;
         }
+        self.resolve_shutdown_pending_file(&id);
         self.reset_pending_files.remove(&id);
         self.apply_core_event(CoreEvent::FileResumeReverified {
             file_id: id.clone(),
@@ -428,6 +444,7 @@ impl App {
         });
         self.verification_inflight_files.remove(&id);
         self.verification_targets.remove(&id);
+        self.shutdown_blocking_verifications.remove(&id);
         if !self.reverify_pending_files.contains(&id) {
             self.verifying_files.remove(&id);
         }
@@ -443,6 +460,8 @@ impl App {
         self.verifying_files.remove(&id);
         self.verification_inflight_files.remove(&id);
         self.verification_targets.remove(&id);
+        self.shutdown_blocking_verifications.remove(&id);
+        self.resolve_shutdown_pending_file(&id);
         if !self.core_state.files.contains_key(&id) {
             log::info!("Ignoring completed-file verification for untracked file: {id}");
             return;
@@ -474,6 +493,7 @@ impl App {
     }
 
     pub(crate) fn handle_verification_skipped_event(&mut self, id: FileId, completed: bool) {
+        self.resolve_shutdown_pending_file(&id);
         self.clear_verification_state(&id);
         if !self.core_state.files.contains_key(&id) {
             log::info!("Ignoring verification skip for untracked file: {id}");
@@ -508,6 +528,10 @@ impl App {
         }
         self.verifying_files.remove(&id);
         self.verification_inflight_files.remove(&id);
+        self.verification_targets.remove(&id);
+        self.shutdown_blocking_verifications.remove(&id);
+        self.cancellation_tokens.remove(&id);
+        self.resolve_shutdown_pending_file(&id);
         self.apply_core_event(CoreEvent::FileCompleted {
             file_id: id.clone(),
         });
@@ -530,6 +554,7 @@ impl App {
             return;
         }
         self.cancellation_tokens.remove(&id);
+        self.resolve_shutdown_pending_file(&id);
         self.clear_verification_state(&id);
         self.apply_core_event(CoreEvent::FileCancelled {
             file_id: id.clone(),
@@ -541,6 +566,7 @@ impl App {
     pub(crate) fn perform_delete_file_action(&mut self, id: &FileId) {
         let is_core_backed = self.core_state.files.contains_key(id);
         self.cancel_file_token(id);
+        self.resolve_shutdown_pending_file(id);
         self.file_attempt_ids.remove(id);
         self.reset_pending_files.remove(id);
         self.clear_verification_state(id);
@@ -708,6 +734,9 @@ impl App {
         };
 
         self.cancel_file_token(id);
+        if matches!(context.status, super::FileStatus::Downloading) {
+            self.bump_file_attempt_id(id);
+        }
         self.verifying_files.insert(id.clone());
         self.verification_inflight_files.insert(id.clone());
         self.verification_targets.insert(id.clone(), target);
@@ -770,6 +799,9 @@ impl App {
 
         for (file_id, source_url, lifecycle, target) in files {
             self.cancel_file_token(&file_id);
+            if matches!(lifecycle, crate::core::FileLifecycle::Downloading) {
+                self.bump_file_attempt_id(&file_id);
+            }
             self.verifying_files.insert(file_id.clone());
             self.verification_inflight_files.insert(file_id.clone());
             self.verification_targets.insert(file_id.clone(), target);

@@ -442,6 +442,10 @@ pub struct FileProgressState {
     pub verified_existing_bytes: u64,
     pub downloaded_network_bytes: u64,
     pub visible_completed_bytes: u64,
+    #[serde(skip, default)]
+    pub verification_origin_complete: bool,
+    #[serde(skip, default)]
+    pub verification_restore_downloaded_network_bytes: u64,
 }
 
 #[must_use]

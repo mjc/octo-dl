@@ -200,6 +200,7 @@ pub fn reconcile_restart(
             let observed = crate::download::ObservedLocalFile {
                 final_size: complete_map.get(&file.id).copied(),
                 part_size: partial_map.get(&file.id).map(|partial| partial.bytes),
+                part_allocated_bytes: None,
                 has_sidecar: partial_map
                     .get(&file.id)
                     .is_some_and(|partial| partial.has_sidecar),
@@ -221,13 +222,15 @@ pub fn reconcile_restart(
                 file.progress = FileProgressState {
                     verified_existing_bytes: 0,
                     downloaded_network_bytes: 0,
-                    visible_completed_bytes: local.verified_resume_bytes.min(file.size),
+                    visible_completed_bytes: if local.has_resume_sidecar {
+                        local.verified_resume_bytes.min(file.size)
+                    } else {
+                        local.existing_partial_bytes.min(file.size)
+                    },
+                    ..FileProgressState::default()
                 };
                 file.accounting = FileAccounting::CurrentRun;
                 resume_file_ids.push(file.id.clone());
-            } else if matches!(file.lifecycle, FileLifecycle::Complete) {
-                file.accounting = FileAccounting::Preexisting;
-                preexisting_complete_file_ids.push(file.id.clone());
             } else {
                 file.lifecycle = FileLifecycle::Queued;
                 file.accounting = FileAccounting::CurrentRun;
@@ -452,6 +455,7 @@ mod tests {
             verified_existing_bytes: 0,
             downloaded_network_bytes: 0,
             visible_completed_bytes: 95,
+            ..FileProgressState::default()
         };
         file.lifecycle = FileLifecycle::Failed {
             message: "corrupt".to_string(),
@@ -494,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_ignores_preallocated_partial_length_without_verified_sidecar_bytes() {
+    fn restart_surfaces_partial_length_without_verified_sidecar_bytes() {
         let snapshot = sample_snapshot();
         let restart = reconcile_restart(
             Some(snapshot),
@@ -512,7 +516,7 @@ mod tests {
 
         let file = &restart.state.files["a.bin"];
         assert_eq!(file.lifecycle, FileLifecycle::Queued);
-        assert_eq!(file.progress.visible_completed_bytes, 0);
+        assert_eq!(file.progress.visible_completed_bytes, 100);
     }
 
     #[test]
@@ -524,6 +528,7 @@ mod tests {
             verified_existing_bytes: 0,
             downloaded_network_bytes: 95,
             visible_completed_bytes: 95,
+            ..FileProgressState::default()
         };
 
         let restart = reconcile_restart(
@@ -678,5 +683,137 @@ mod tests {
             restart.resumable_urls(),
             vec!["https://mega.nz/file/test".to_string()]
         );
+    }
+
+    #[test]
+    fn restart_missing_completed_file_is_requeued_instead_of_staying_complete() {
+        let mut snapshot = sample_snapshot();
+        let file = snapshot.find_file_mut("a.bin").unwrap();
+        file.lifecycle = FileLifecycle::Complete;
+        file.accounting = FileAccounting::Preexisting;
+        file.progress = FileProgressState {
+            visible_completed_bytes: 100,
+            ..FileProgressState::default()
+        };
+
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot::default(),
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        let file = &restart.state.files["a.bin"];
+        assert_eq!(file.lifecycle, FileLifecycle::Queued);
+        assert_eq!(file.accounting, FileAccounting::CurrentRun);
+        assert_eq!(restart.resume_file_ids, vec!["a.bin".to_string()]);
+        assert!(restart.preexisting_complete_file_ids.is_empty());
+    }
+
+    #[test]
+    fn restart_missing_completed_file_resets_visible_progress() {
+        let mut snapshot = sample_snapshot();
+        let file = snapshot.find_file_mut("a.bin").unwrap();
+        file.lifecycle = FileLifecycle::Complete;
+        file.accounting = FileAccounting::Preexisting;
+        file.progress = FileProgressState {
+            visible_completed_bytes: 100,
+            ..FileProgressState::default()
+        };
+
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot::default(),
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        let file = &restart.state.files["a.bin"];
+        assert_eq!(file.progress, FileProgressState::default());
+    }
+
+    #[test]
+    fn restart_missing_completed_file_keeps_source_url_resumable() {
+        let mut snapshot = sample_snapshot();
+        let file = snapshot.find_file_mut("a.bin").unwrap();
+        file.lifecycle = FileLifecycle::Complete;
+        file.accounting = FileAccounting::Preexisting;
+        file.progress = FileProgressState {
+            visible_completed_bytes: 100,
+            ..FileProgressState::default()
+        };
+
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot::default(),
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        assert_eq!(
+            restart.resumable_urls(),
+            vec!["https://mega.nz/file/test".to_string()]
+        );
+    }
+
+    #[test]
+    fn restart_missing_completed_file_counts_against_run_totals_again() {
+        let mut snapshot = sample_snapshot();
+        let file = snapshot.find_file_mut("a.bin").unwrap();
+        file.lifecycle = FileLifecycle::Complete;
+        file.accounting = FileAccounting::Preexisting;
+        file.progress = FileProgressState {
+            visible_completed_bytes: 100,
+            ..FileProgressState::default()
+        };
+
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot::default(),
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        assert_eq!(restart.state.totals.run_file_total, 1);
+        assert_eq!(restart.state.totals.run_file_completed, 0);
+        assert_eq!(restart.state.totals.run_completed_bytes, 0);
+    }
+
+    #[test]
+    fn restart_partial_without_sidecar_surfaces_existing_partial_bytes() {
+        let snapshot = sample_snapshot();
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot {
+                complete_files: Vec::new(),
+                partial_files: vec![PartialFileSnapshot {
+                    file_id: "a.bin".to_string().into(),
+                    bytes: 80,
+                    has_sidecar: false,
+                    verified_bytes: 0,
+                }],
+            },
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        let file = &restart.state.files["a.bin"];
+        assert_eq!(file.lifecycle, FileLifecycle::Queued);
+        assert_eq!(file.progress.visible_completed_bytes, 80);
+    }
+
+    #[test]
+    fn restart_partial_without_sidecar_counts_existing_bytes_in_totals() {
+        let snapshot = sample_snapshot();
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot {
+                complete_files: Vec::new(),
+                partial_files: vec![PartialFileSnapshot {
+                    file_id: "a.bin".to_string().into(),
+                    bytes: 80,
+                    has_sidecar: false,
+                    verified_bytes: 0,
+                }],
+            },
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        assert_eq!(restart.state.totals.run_completed_bytes, 80);
     }
 }
