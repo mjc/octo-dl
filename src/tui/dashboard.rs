@@ -1468,7 +1468,6 @@ impl<'a> BinaryDashboardFileProjection<'a> {
 }
 
 fn binary_core_package_rows(app: &App) -> Vec<BinaryCorePackageRowRef<'_>> {
-    let package_positions = app.core_state.package_positions();
     let mut package_rows = app
         .core_state
         .packages
@@ -1493,14 +1492,23 @@ fn binary_core_package_rows(app: &App) -> Vec<BinaryCorePackageRowRef<'_>> {
             }
         })
         .collect::<Vec<_>>();
-    for file in app.core_state.files.values() {
-        let Some(&package_index) = package_positions.get(&file.package_id) else {
-            continue;
-        };
-        let package_row = &mut package_rows[package_index];
-        package_row.file_ids.push(&file.id);
-        package_row.stats.record_file(app, file);
+    let mut remaining_files = app.core_state.files.values().peekable();
+    for package_row in &mut package_rows {
+        while remaining_files
+            .peek()
+            .is_some_and(|file| file.package_id == package_row.package.id)
+        {
+            let file = remaining_files
+                .next()
+                .expect("peeked file should remain available");
+            package_row.file_ids.push(&file.id);
+            package_row.stats.record_file(app, file);
+        }
     }
+    debug_assert!(
+        remaining_files.next().is_none(),
+        "dashboard package rows expect files grouped in package order"
+    );
     package_rows
         .into_iter()
         .filter_map(|row| {
