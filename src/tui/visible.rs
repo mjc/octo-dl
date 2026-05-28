@@ -1,14 +1,14 @@
 mod rows;
 mod sync;
 
-use std::collections::{HashMap, HashSet};
-
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 
 use super::app::App;
 use crate::core::{DownloadState, FileId, PackageId};
-use crate::tui::app::{FileEntry, FileUiState, SortState, TransientRow};
+use crate::tui::app::{
+    ExpandedPackages, FileEntry, FileUiMap, SortState, TransientRow, VisibleFilePositions,
+};
 
 pub(crate) use rows::CachedFileSortKey;
 #[cfg(test)]
@@ -48,12 +48,12 @@ pub(super) fn sorted_file_indices(
 
 pub(super) fn sync_visible_files(
     files: &mut Vec<FileEntry>,
-    visible_file_positions: &mut HashMap<FileId, usize>,
+    visible_file_positions: &mut VisibleFilePositions,
     overlay_files: &mut IndexMap<FileId, TransientRow>,
-    file_ui: &mut HashMap<FileId, FileUiState>,
+    file_ui: &mut FileUiMap,
     file_list_state: &mut ListState,
     core_state: &DownloadState,
-    expanded_packages: &HashSet<PackageId>,
+    expanded_packages: &ExpandedPackages,
     sort: &SortState,
     selected_row_identity: Option<TuiRow>,
 ) -> Vec<TuiRow> {

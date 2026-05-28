@@ -1914,6 +1914,88 @@ mod tests {
     }
 
     #[test]
+    fn insert_file_state_places_files_into_package_group_order() {
+        let pkg_a = package_id("pkg-a", "url-a");
+        let pkg_b = package_id("pkg-b", "url-b");
+        let pkg_c = package_id("pkg-c", "url-c");
+        let mut state = DownloadState::new(crate::core::SessionMeta::default());
+        for (pkg_id, label) in [(pkg_a, "url-a"), (pkg_b, "url-b"), (pkg_c, "url-c")] {
+            state.packages.insert(
+                pkg_id,
+                PackageState {
+                    id: pkg_id,
+                    key: crate::core::PackageKey::new(label),
+                    display_name: label.to_string(),
+                    progress: PackageProgressState::default(),
+                    error: None,
+                },
+            );
+        }
+
+        insert_file_state(
+            &mut state,
+            FileState {
+                id: "a-1.bin".into(),
+                package_id: pkg_a,
+                source_url: "url-a".to_string(),
+                path: "a-1.bin".to_string(),
+                size: 10,
+                lifecycle: FileLifecycle::Planned,
+                progress: FileProgressState::default(),
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+        insert_file_state(
+            &mut state,
+            FileState {
+                id: "c-1.bin".into(),
+                package_id: pkg_c,
+                source_url: "url-c".to_string(),
+                path: "c-1.bin".to_string(),
+                size: 30,
+                lifecycle: FileLifecycle::Planned,
+                progress: FileProgressState::default(),
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+        insert_file_state(
+            &mut state,
+            FileState {
+                id: "b-1.bin".into(),
+                package_id: pkg_b,
+                source_url: "url-b".to_string(),
+                path: "b-1.bin".to_string(),
+                size: 20,
+                lifecycle: FileLifecycle::Planned,
+                progress: FileProgressState::default(),
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+        insert_file_state(
+            &mut state,
+            FileState {
+                id: "b-2.bin".into(),
+                package_id: pkg_b,
+                source_url: "url-b".to_string(),
+                path: "b-2.bin".to_string(),
+                size: 25,
+                lifecycle: FileLifecycle::Planned,
+                progress: FileProgressState::default(),
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+
+        assert_eq!(
+            state
+                .files
+                .keys()
+                .map(|file_id| file_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-1.bin", "b-1.bin", "b-2.bin", "c-1.bin"]
+        );
+    }
+
+    #[test]
     fn package_move_round_trip_updates_url_order_to_match_package_order() {
         let pkg_a = package_id("pkg-a", "url-a");
         let pkg_b = package_id("pkg-b", "url-b");

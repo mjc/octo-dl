@@ -1,18 +1,19 @@
-use std::collections::{HashMap, HashSet};
-
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 
-use crate::core::{DownloadState, FileId, FileLifecycle, FileState, PackageId};
+use crate::core::{DownloadState, FileId, FileLifecycle, FileState};
 
 use super::TuiRow;
 use super::rows::{build_file_sort_key, cached_file_sort_key_matches, visible_rows_for};
-use crate::tui::app::{FileEntry, FileStatus, FileUiState, SortState, TransientRow};
+use crate::tui::app::{
+    ExpandedPackages, FileEntry, FileIdSet, FileStatus, FileUiMap, SortState, TransientRow,
+    VisibleFilePositions,
+};
 
 fn project_core_file(
     file: &FileState,
     package_order: usize,
-    file_ui: &mut HashMap<FileId, FileUiState>,
+    file_ui: &mut FileUiMap,
     existing: Option<FileEntry>,
 ) -> Option<FileEntry> {
     let status = match &file.lifecycle {
@@ -21,6 +22,7 @@ fn project_core_file(
         FileLifecycle::Complete => FileStatus::Complete,
         FileLifecycle::Failed { message } => FileStatus::Error(message.clone()),
     };
+    let downloading = matches!(status, FileStatus::Downloading);
 
     let downloaded = match &file.lifecycle {
         FileLifecycle::Complete => file.size,
@@ -38,8 +40,14 @@ fn project_core_file(
         let state = file_ui.entry(file.id.clone()).or_default();
         state.sort_key = Some(build_file_sort_key(&file.path, &status, package_order, ""));
         state.package_id = Some(file.package_id);
+        if !downloading {
+            state.speed = 0;
+        }
     } else if let Some(state) = file_ui.get_mut(&file.id) {
         state.package_id = Some(file.package_id);
+        if !downloading {
+            state.speed = 0;
+        }
     }
     if let Some(mut existing) = existing {
         existing.name = file.path.clone();
@@ -60,12 +68,12 @@ fn project_core_file(
 
 pub(super) fn sync_visible_files(
     files: &mut Vec<FileEntry>,
-    visible_file_positions: &mut HashMap<FileId, usize>,
+    visible_file_positions: &mut VisibleFilePositions,
     overlay_files: &mut IndexMap<FileId, TransientRow>,
-    file_ui: &mut HashMap<FileId, FileUiState>,
+    file_ui: &mut FileUiMap,
     file_list_state: &mut ListState,
     core_state: &DownloadState,
-    expanded_packages: &HashSet<PackageId>,
+    expanded_packages: &ExpandedPackages,
     sort: &SortState,
     selected_row_identity: Option<TuiRow>,
 ) -> Vec<TuiRow> {
@@ -128,6 +136,9 @@ pub(super) fn sync_visible_files(
                 ));
             }
             state.package_id = None;
+            if !matches!(entry.file().status, FileStatus::Downloading) {
+                state.speed = 0;
+            }
             if let Some(mut existing) = existing {
                 existing.name = entry.file().name.clone();
                 existing.size = entry.file().size;
@@ -146,7 +157,7 @@ pub(super) fn sync_visible_files(
     for (index, file) in files.iter().enumerate() {
         visible_file_positions.insert(file.id.clone(), index);
     }
-    let visible_ids: HashSet<_> = files.iter().map(|file| file.id.clone()).collect();
+    let visible_ids: FileIdSet = files.iter().map(|file| file.id.clone()).collect();
     file_ui.retain(|file_id, _| visible_ids.contains(file_id));
     let visible_rows = visible_rows_for(
         files,

@@ -113,6 +113,11 @@ impl App {
             crate::core::FileLifecycle::Complete => FileStatus::Complete,
             crate::core::FileLifecycle::Failed { message } => FileStatus::Error(message.clone()),
         };
+        if !matches!(visible_file.status, FileStatus::Downloading)
+            && let Some(state) = self.file_ui.get_mut(file_id)
+        {
+            state.speed = 0;
+        }
         Some((previous_downloaded, visible_file.downloaded))
     }
 
@@ -144,8 +149,12 @@ impl App {
 
         let accepted = downloaded.saturating_sub(previous_downloaded);
         let state = self.file_ui.entry(file_id.clone()).or_default();
-        state.rate.record(network_downloaded, now);
-        state.speed = state.rate.bytes_per_sec(now);
+        if matches!(visible_file.status, FileStatus::Downloading) {
+            state.rate.record(network_downloaded, now);
+            state.speed = state.rate.bytes_per_sec(now);
+        } else {
+            state.speed = 0;
+        }
         Some(accepted)
     }
 

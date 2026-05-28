@@ -299,6 +299,41 @@ fn aggregate_rate_ignores_reused_bytes() {
 }
 
 #[test]
+fn update_speeds_only_initializes_downloading_file_ui() {
+    let start = Instant::now();
+    let mut app = test_app();
+    app.files.push(FileEntry {
+        id: "downloading.bin".to_string().into(),
+        name: "downloading.bin".to_string(),
+        size: 2_000,
+        downloaded: 1_000,
+        status: FileStatus::Downloading,
+    });
+    app.files.push(FileEntry {
+        id: "queued.bin".to_string().into(),
+        name: "queued.bin".to_string(),
+        size: 2_000,
+        downloaded: 0,
+        status: FileStatus::Queued,
+    });
+    app.files.push(FileEntry {
+        id: "done.bin".to_string().into(),
+        name: "done.bin".to_string(),
+        size: 2_000,
+        downloaded: 2_000,
+        status: FileStatus::Complete,
+    });
+    app.core_state.totals.run_file_downloading = 1;
+    app.aggregate_rate.reset(1_000, start);
+
+    app.update_speeds_at(start + Duration::from_secs(1));
+
+    assert!(app.file_ui.contains_key("downloading.bin"));
+    assert!(!app.file_ui.contains_key("queued.bin"));
+    assert!(!app.file_ui.contains_key("done.bin"));
+}
+
+#[test]
 fn record_progress_caps_downloaded_at_file_size() {
     let mut app = test_app();
     let file = FileEntry {
@@ -406,6 +441,45 @@ fn verification_progress_updates_visible_file_without_network_rate() {
         0
     );
     assert_eq!(app.file_speed(&"file.bin".into()), 0);
+}
+
+#[test]
+fn completed_file_sync_clears_stale_file_speed() {
+    let mut app = test_app();
+    let file_id: crate::core::FileId = "file.bin".to_string().into();
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id("pkg", "https://mega.nz/file/root"),
+            source_url: "https://mega.nz/file/root".to_string(),
+            key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+            display_name: "Package".to_string(),
+            files: vec![ResolvedFile {
+                file_id: file_id.clone(),
+                path: "file.bin".to_string(),
+                size: 100,
+            }],
+            collision: None,
+        },
+    });
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: file_id.clone(),
+        size: 100,
+    });
+    app.file_ui.insert(
+        file_id.clone(),
+        FileUiState {
+            speed: 123,
+            rate: TransferRate::default(),
+            sort_key: None,
+            package_id: Some(package_id("pkg", "https://mega.nz/file/root")),
+        },
+    );
+
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: file_id.clone(),
+    });
+
+    assert_eq!(app.file_speed(&file_id), 0);
 }
 
 #[test]
