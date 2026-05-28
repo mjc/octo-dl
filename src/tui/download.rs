@@ -749,7 +749,11 @@ async fn handle_download_request(
             file_ids,
         } => {
             let paused = scheduler.pause_file_ids(&file_ids);
-            scheduler.mark_resume_priority_file_ids(&file_ids);
+            let paused_ids = paused
+                .iter()
+                .map(|download| FileId::from(download.item.path.as_str()))
+                .collect::<Vec<_>>();
+            scheduler.mark_resume_priority_file_ids(&paused_ids);
             queue_download_request_events(
                 &DownloadRequest::ReverifyFileIds {
                     source_url: source_url.clone(),
