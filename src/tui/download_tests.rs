@@ -35,6 +35,36 @@ async fn verification_executor_limits_parallel_work_to_four() {
     );
 }
 
+#[test]
+fn drain_ready_requests_collects_follow_up_verification_requests_in_order() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let first = DownloadRequest::ReverifyFileIds {
+        source_url: "https://mega.nz/folder/root".to_string(),
+        file_ids: vec!["resume-a.bin".into()],
+    };
+    let second = DownloadRequest::VerifyCompletedFileIds {
+        source_url: "https://mega.nz/folder/root".to_string(),
+        file_ids: vec!["complete-a.bin".into()],
+    };
+    let late = DownloadRequest::ReverifyFileIds {
+        source_url: "https://mega.nz/folder/root".to_string(),
+        file_ids: vec!["resume-b.bin".into()],
+    };
+    tx.send(second.clone()).expect("second request should queue");
+
+    let mut pending = VecDeque::from([first.clone()]);
+    drain_ready_requests(&mut pending, &mut rx);
+    assert_eq!(pending, VecDeque::from([first, second.clone()]));
+
+    let handled_first = pending.pop_front().expect("first request should be pending");
+    assert!(matches!(handled_first, DownloadRequest::ReverifyFileIds { .. }));
+    tx.send(late.clone()).expect("late request should queue");
+
+    drain_ready_requests(&mut pending, &mut rx);
+    assert_eq!(pending, VecDeque::from([second, late]));
+    assert!(rx.try_recv().is_err());
+}
+
 fn test_app() -> App {
     let (tx, _rx) = mpsc::unbounded_channel();
     App::new(9723, tx, true)

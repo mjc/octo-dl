@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
-use std::future::Future;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -661,19 +660,31 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
         tokio::select! {
             request_opt = url_rx.recv() => {
                 let Some(request) = request_opt else { break };
-                if !handle_download_request(
+                if !handle_download_request_batch(
                     request,
+                    &mut url_rx,
                     &runtime,
                     &mut scheduler,
                     &tx,
                     &token_tx,
-                ).await {
+                )
+                .await
+                {
                     break;
                 }
                 start_pending_downloads(&runtime, &mut scheduler, &tx, &token_tx, &pause_rx);
             }
             Some(result) = scheduler.join_set.join_next(), if !scheduler.active_downloads.is_empty() => {
                 handle_download_join_result(result, &mut scheduler, &tx);
+                if !flush_ready_download_requests(
+                    &runtime,
+                    &mut scheduler,
+                    &tx,
+                    &token_tx,
+                    &mut url_rx,
+                ).await {
+                    break;
+                }
                 start_pending_downloads(&runtime, &mut scheduler, &tx, &token_tx, &pause_rx);
             }
             changed = pause_rx.changed() => {
@@ -681,6 +692,15 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
                     break;
                 }
                 if !*pause_rx.borrow() {
+                    if !flush_ready_download_requests(
+                        &runtime,
+                        &mut scheduler,
+                        &tx,
+                        &token_tx,
+                        &mut url_rx,
+                    ).await {
+                        break;
+                    }
                     start_pending_downloads(&runtime, &mut scheduler, &tx, &token_tx, &pause_rx);
                 }
             }
@@ -690,6 +710,52 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
     while let Some(result) = scheduler.join_set.join_next().await {
         handle_download_join_result(result, &mut scheduler, &tx);
     }
+}
+
+fn drain_ready_requests(
+    pending: &mut VecDeque<DownloadRequest>,
+    url_rx: &mut mpsc::UnboundedReceiver<DownloadRequest>,
+) {
+    while let Ok(request) = url_rx.try_recv() {
+        pending.push_back(request);
+    }
+}
+
+async fn handle_download_request_batch(
+    first_request: DownloadRequest,
+    url_rx: &mut mpsc::UnboundedReceiver<DownloadRequest>,
+    runtime: &DownloadRuntime,
+    scheduler: &mut SchedulerState,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+    token_tx: &mpsc::UnboundedSender<TokenMessage>,
+) -> bool {
+    let mut pending = VecDeque::from([first_request]);
+    loop {
+        drain_ready_requests(&mut pending, url_rx);
+        let Some(request) = pending.pop_front() else {
+            return true;
+        };
+        if !handle_download_request(request, runtime, scheduler, tx, token_tx).await {
+            return false;
+        }
+    }
+}
+
+async fn flush_ready_download_requests(
+    runtime: &DownloadRuntime,
+    scheduler: &mut SchedulerState,
+    tx: &mpsc::UnboundedSender<DownloadEvent>,
+    token_tx: &mpsc::UnboundedSender<TokenMessage>,
+    url_rx: &mut mpsc::UnboundedReceiver<DownloadRequest>,
+) -> bool {
+    while let Ok(request) = url_rx.try_recv() {
+        if !handle_download_request_batch(request, url_rx, runtime, scheduler, tx, token_tx)
+        .await
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn queue_download_request_events(
