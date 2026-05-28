@@ -248,6 +248,9 @@ fn add_totals_contribution(state: &mut DownloadState, file: FileDerivedState) {
         .displayed_network_bytes
         .saturating_add(file.downloaded_network_bytes);
     state.totals.run_file_total = state.totals.run_file_total.saturating_add(1);
+    if matches!(file.lifecycle_bucket, PackageProgressBucket::Downloading) {
+        state.totals.run_file_downloading = state.totals.run_file_downloading.saturating_add(1);
+    }
     if matches!(file.lifecycle_bucket, PackageProgressBucket::Complete) {
         state.totals.run_file_completed = state.totals.run_file_completed.saturating_add(1);
     }
@@ -267,6 +270,9 @@ fn remove_totals_contribution(state: &mut DownloadState, file: FileDerivedState)
         .displayed_network_bytes
         .saturating_sub(file.downloaded_network_bytes);
     state.totals.run_file_total = state.totals.run_file_total.saturating_sub(1);
+    if matches!(file.lifecycle_bucket, PackageProgressBucket::Downloading) {
+        state.totals.run_file_downloading = state.totals.run_file_downloading.saturating_sub(1);
+    }
     if matches!(file.lifecycle_bucket, PackageProgressBucket::Complete) {
         state.totals.run_file_completed = state.totals.run_file_completed.saturating_sub(1);
     }
@@ -985,6 +991,9 @@ fn recompute_derived(state: &mut DownloadState) {
             .displayed_network_bytes
             .saturating_add(file.progress.downloaded_network_bytes.min(file.size));
         totals.run_file_total = totals.run_file_total.saturating_add(1);
+        if matches!(file.lifecycle, FileLifecycle::Downloading) {
+            totals.run_file_downloading = totals.run_file_downloading.saturating_add(1);
+        }
         if matches!(file.lifecycle, FileLifecycle::Complete) {
             totals.run_file_completed = totals.run_file_completed.saturating_add(1);
         }
@@ -1295,6 +1304,59 @@ mod tests {
             }
         );
         assert_eq!(state.packages[&pkg_id].status(), PackageStatus::Partial);
+    }
+
+    #[test]
+    fn rebuild_derived_state_restores_downloading_totals() {
+        let pkg_id = package_id("pkg", "pkg");
+        let mut state = DownloadState::new(crate::core::SessionMeta::default());
+        state.packages.insert(
+            pkg_id,
+            PackageState {
+                id: pkg_id,
+                key: crate::core::PackageKey::new("pkg"),
+                display_name: "pkg".to_string(),
+                progress: PackageProgressState::default(),
+                error: None,
+            },
+        );
+        state.files.insert(
+            "downloading.bin".into(),
+            FileState {
+                id: "downloading.bin".into(),
+                package_id: pkg_id,
+                source_url: "pkg".to_string(),
+                path: "downloading.bin".to_string(),
+                size: 20,
+                lifecycle: FileLifecycle::Downloading,
+                progress: FileProgressState::default(),
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+        state.files.insert(
+            "complete.bin".into(),
+            FileState {
+                id: "complete.bin".into(),
+                package_id: pkg_id,
+                source_url: "pkg".to_string(),
+                path: "complete.bin".to_string(),
+                size: 10,
+                lifecycle: FileLifecycle::Complete,
+                progress: FileProgressState {
+                    visible_completed_bytes: 10,
+                    downloaded_network_bytes: 10,
+                    ..FileProgressState::default()
+                },
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+
+        rebuild_derived_state(&mut state);
+
+        assert_eq!(state.totals.run_file_total, 2);
+        assert_eq!(state.totals.run_file_completed, 1);
+        assert_eq!(state.totals.run_file_downloading, 1);
+        assert_eq!(state.packages[&pkg_id].progress.downloading, 1);
     }
 
     #[test]

@@ -208,11 +208,7 @@ impl App {
             }
         }
 
-        self.current_speed = if self
-            .files
-            .iter()
-            .any(|file| matches!(file.status, FileStatus::Downloading))
-        {
+        self.current_speed = if self.core_state.totals.run_file_downloading > 0 {
             self.aggregate_rate
                 .record(self.total_network_downloaded, now);
             self.aggregate_rate.bytes_per_sec(now)

@@ -266,6 +266,7 @@ fn aggregate_rate_uses_progress_since_current_baseline() {
     });
     app.total_downloaded = 1_000;
     app.total_network_downloaded = 1_000;
+    app.core_state.totals.run_file_downloading = 1;
     app.aggregate_rate.reset(1_000, start);
 
     app.total_downloaded = app.total_downloaded.saturating_add(100);
@@ -287,6 +288,7 @@ fn aggregate_rate_ignores_reused_bytes() {
         status: FileStatus::Downloading,
     });
     app.total_downloaded = 1_000;
+    app.core_state.totals.run_file_downloading = 1;
     app.aggregate_rate.reset(0, start);
 
     app.total_downloaded = app.total_downloaded.saturating_add(1_000);
@@ -1965,6 +1967,26 @@ fn download_status_message_reflects_actual_activity() {
     app.update_download_status_message();
 
     assert_eq!(app.status, "");
+}
+
+#[test]
+fn download_status_message_uses_core_downloading_totals() {
+    let mut app = test_app();
+
+    resolve_package(
+        &mut app,
+        "https://mega.nz/folder/root",
+        &[("episode-1.mkv", 128)],
+    );
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: "episode-1.mkv".to_string().into(),
+        size: 128,
+    });
+    app.files.clear();
+
+    app.update_download_status_message();
+
+    assert_eq!(app.status, "Downloading (0/1)");
 }
 
 #[test]

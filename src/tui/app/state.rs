@@ -459,11 +459,7 @@ impl App {
         } else if self.files_completed == self.files_total && self.files_total > 0 {
             self.status = "All downloads complete".to_string();
         } else if self.files_total > 0 {
-            let activity = if self
-                .files
-                .iter()
-                .any(|file| matches!(file.status, super::FileStatus::Downloading))
-            {
+            let activity = if self.core_state.totals.run_file_downloading > 0 {
                 "Downloading"
             } else {
                 "Queued"
