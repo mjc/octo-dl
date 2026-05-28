@@ -76,7 +76,7 @@ struct VisibleSyncDeferralGuard {
 }
 
 pub(super) enum PendingSessionPersistence {
-    Save(SessionSnapshot),
+    SaveCurrent,
     Remove(PathBuf),
 }
 

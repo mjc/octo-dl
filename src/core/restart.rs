@@ -164,7 +164,10 @@ pub fn reconcile_restart(
                 .iter()
                 .any(|existing| existing == &tracked_url.url)
             {
-                state.url_order.push(tracked_url.url);
+                state.url_order.push(tracked_url.url.clone());
+            }
+            if let Some(error) = tracked_url.error {
+                state.url_errors.insert(tracked_url.url, error);
             }
         }
         for package in &snapshot_packages {

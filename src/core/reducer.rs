@@ -40,6 +40,13 @@ pub enum CoreEvent {
     UrlSubmitted {
         url: UrlId,
     },
+    UrlResolved {
+        url: UrlId,
+    },
+    UrlFailed {
+        url: UrlId,
+        message: String,
+    },
     PackageResolved {
         package: ResolvedPackage,
     },
@@ -290,6 +297,7 @@ fn remove_unreferenced_source_url(state: &mut DownloadState, source_url: &UrlId)
         .any(|file| file.source_url == *source_url)
     {
         state.url_order.retain(|url| url != source_url);
+        state.url_errors.remove(source_url);
     }
 }
 
@@ -409,7 +417,18 @@ fn reduce_impl(
             if !state.url_order.iter().any(|existing| existing == &url) {
                 state.url_order.push(url.clone());
             }
+            state.url_errors.remove(&url);
             effects.push(CoreEffect::EnqueueUrlResolution { url });
+        }
+        CoreEvent::UrlResolved { url } => {
+            state.url_errors.remove(&url);
+            remove_unreferenced_source_url(state, &url);
+        }
+        CoreEvent::UrlFailed { url, message } => {
+            if !state.url_order.iter().any(|existing| existing == &url) {
+                state.url_order.push(url.clone());
+            }
+            state.url_errors.insert(url, message);
         }
         CoreEvent::PackageResolved { package } => {
             if !state
@@ -431,6 +450,7 @@ fn reduce_impl(
                 state
                     .packages
                     .retain(|_, existing| existing.key != package.key);
+                remove_unreferenced_source_url(state, &package.source_url);
                 if persist_session {
                     effects.push(CoreEffect::PersistSession(snapshot_from_state(state)));
                 }
@@ -867,7 +887,7 @@ pub(crate) fn rebuild_derived_state(state: &mut DownloadState) {
 pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
     #[cfg(test)]
     SNAPSHOT_FROM_STATE_CALLS.with(|count| count.set(count.get().saturating_add(1)));
-    let mut url_errors = HashMap::<UrlId, String>::with_capacity(state.packages.len());
+    let mut url_errors = state.url_errors.clone();
     for file in state.files.values() {
         let source_url = &file.source_url;
         if url_errors.contains_key(source_url) {
@@ -881,32 +901,29 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
         };
         url_errors.insert(source_url.clone(), error.clone());
     }
-    let mut package_files =
-        HashMap::<PackageId, Vec<&FileState>, rustc_hash::FxBuildHasher>::with_hasher(
-            rustc_hash::FxBuildHasher::default(),
-        );
-    for package in state.packages.values() {
-        package_files.insert(
-            package.id,
-            Vec::with_capacity(package.progress.file_count()),
-        );
-    }
+    let package_positions = state.package_positions();
+    let mut package_files = state
+        .packages
+        .values()
+        .map(|package| Vec::with_capacity(package.progress.file_count()))
+        .collect::<Vec<Vec<&FileState>>>();
     for file in state.files.values() {
-        if let Some(files) = package_files.get_mut(&file.package_id) {
-            files.push(file);
-        }
+        let Some(&package_index) = package_positions.get(&file.package_id) else {
+            continue;
+        };
+        package_files[package_index].push(file);
     }
     let packages = state
         .packages
         .values()
+        .zip(package_files)
         .filter_map(|package| {
-            let files = package_files
-                .remove(&package.id)
-                .unwrap_or_default()
+            let files = package
+                .1
                 .into_iter()
                 .map(|file| FileSnapshot {
                     id: file.id.clone(),
-                    package_id: file.package_id.clone(),
+                    package_id: file.package_id,
                     source_url: file.source_url.clone(),
                     path: file.path.clone(),
                     size: file.size,
@@ -919,11 +936,11 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
                 return None;
             }
             Some(PackageSnapshot {
-                id: package.id.clone(),
-                key: package.key.clone(),
-                display_name: package.display_name.clone(),
+                id: package.0.id,
+                key: package.0.key.clone(),
+                display_name: package.0.display_name.clone(),
                 files,
-                error: package.error.clone(),
+                error: package.0.error.clone(),
             })
         })
         .collect();
@@ -1290,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn package_resolved_with_no_files_does_not_create_package_state() {
+    fn package_resolved_with_no_files_does_not_leave_resume_url_state() {
         let mut state = DownloadState::default();
         let effects = reduce(
             &mut state,
@@ -1320,6 +1337,12 @@ mod tests {
 
         assert!(state.packages.is_empty());
         assert!(state.files.is_empty());
+        assert!(state.url_order.is_empty());
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            CoreEffect::PersistSession(snapshot)
+                if snapshot.urls.is_empty() && snapshot.packages.is_empty()
+        )));
         assert!(effects.iter().any(|effect| matches!(
             effect,
             CoreEffect::PublishStatusMessage(message)

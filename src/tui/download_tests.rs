@@ -2,7 +2,7 @@ use super::super::app::{App, FileEntry, FileStatus, UiAction};
 use super::super::event::{DownloadEvent, FileOrigin, QueuedFile};
 use super::*;
 use crate::core::{CoreEvent, ProgressDelta};
-use crate::test_support::{StateDirectoryGuard, UrlFixtureStatus, session_snapshot};
+use crate::test_support::StateDirectoryGuard;
 use std::collections::{HashMap, HashSet, VecDeque};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
@@ -279,8 +279,7 @@ fn url_level_error_replaces_placeholder_in_overlay() {
     let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
     let url = "https://mega.nz/folder/root".to_string();
-    let session = session_snapshot(vec![(url.as_str(), UrlFixtureStatus::Pending)]);
-    app.session = Some(session);
+    app.apply_core_event(CoreEvent::UrlSubmitted { url: url.clone() });
 
     app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
     app.handle_download_event(DownloadEvent::ScopeError {

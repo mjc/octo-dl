@@ -497,6 +497,8 @@ pub struct DownloadState {
     pub packages: PackageStateIndex,
     pub files: FileStateIndex,
     pub url_order: Vec<UrlId>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub url_errors: HashMap<UrlId, String, FxBuildHasher>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<FileId>,
     pub totals: TotalsState,
@@ -600,12 +602,13 @@ impl DownloadState {
     }
 
     pub(crate) fn package_insert_index(&self, package_id: &PackageId) -> usize {
-        let Some(package_index) = self.packages.get_index_of(package_id) else {
+        let package_positions = self.package_positions();
+        let Some(&package_index) = package_positions.get(package_id) else {
             return self.files.len();
         };
         let mut insert_index = self.files.len();
         for (index, file) in self.files.values().enumerate() {
-            let Some(file_package_index) = self.packages.get_index_of(&file.package_id) else {
+            let Some(&file_package_index) = package_positions.get(&file.package_id) else {
                 continue;
             };
             if file_package_index > package_index {
@@ -649,16 +652,18 @@ impl DownloadState {
     }
 
     fn reorder_urls_by_package_order(&mut self) {
+        let mut source_url_package_ids =
+            HashMap::<&str, PackageId, FxBuildHasher>::with_hasher(FxBuildHasher::default());
+        for file in self.files.values() {
+            source_url_package_ids
+                .entry(file.source_url.as_str())
+                .or_insert(file.package_id);
+        }
         let mut grouped =
             HashMap::<PackageId, Vec<UrlId>, FxBuildHasher>::with_hasher(FxBuildHasher::default());
         let mut unresolved = Vec::new();
         for url in std::mem::take(&mut self.url_order) {
-            let Some(package_id) = self
-                .files
-                .values()
-                .find(|file| file.source_url == url)
-                .map(|file| file.package_id)
-            else {
+            let Some(&package_id) = source_url_package_ids.get(url.as_str()) else {
                 unresolved.push(url);
                 continue;
             };
@@ -676,5 +681,14 @@ impl DownloadState {
         }
         reordered.extend(unresolved);
         self.url_order = reordered;
+    }
+
+    pub(crate) fn package_positions(&self) -> HashMap<PackageId, usize, FxBuildHasher> {
+        self.packages
+            .keys()
+            .copied()
+            .enumerate()
+            .map(|(index, package_id)| (package_id, index))
+            .collect()
     }
 }
