@@ -289,11 +289,11 @@ struct SchedulerState {
     desired_pending_order: Vec<FileId>,
     desired_pending_set: HashSet<FileId, FxBuildHasher>,
     pending_queue: VecDeque<FileId>,
+    resume_priority_set: HashSet<FileId, FxBuildHasher>,
     available_downloads: HashMap<FileId, QueuedDownload, FxBuildHasher>,
     available_download_ptrs: HashSet<FileIdPtrKey>,
     active_downloads: HashSet<FileId, FxBuildHasher>,
     active_download_ptrs: HashSet<FileIdPtrKey>,
-    exclusive_resume_target: Option<FileId>,
     join_set: tokio::task::JoinSet<DownloadTaskResult>,
 }
 
@@ -303,11 +303,11 @@ impl SchedulerState {
             desired_pending_order: Vec::new(),
             desired_pending_set: HashSet::with_hasher(FxBuildHasher::default()),
             pending_queue: VecDeque::new(),
+            resume_priority_set: HashSet::with_hasher(FxBuildHasher::default()),
             available_downloads: HashMap::with_hasher(FxBuildHasher::default()),
             available_download_ptrs: HashSet::new(),
             active_downloads: HashSet::with_hasher(FxBuildHasher::default()),
             active_download_ptrs: HashSet::new(),
-            exclusive_resume_target: None,
             join_set: tokio::task::JoinSet::new(),
         }
     }
@@ -379,6 +379,7 @@ impl SchedulerState {
                     .remove(&file_id_ptr_key(file_id));
                 paused.push(download);
             }
+            self.resume_priority_set.remove(file_id);
             self.desired_pending_set.remove(file_id);
         }
         self.desired_pending_order
@@ -400,17 +401,20 @@ impl SchedulerState {
             if !self.has_active_download(&file_id) {
                 self.pending_queue.push_back(file_id.clone());
             }
-            self.exclusive_resume_target = Some(file_id);
+            self.resume_priority_set.insert(file_id);
         }
     }
 
-    fn clear_exclusive_resume_target(&mut self, file_id: &FileId) {
-        if self
-            .exclusive_resume_target
-            .as_ref()
-            .is_some_and(|target| target == file_id)
-        {
-            self.exclusive_resume_target = None;
+    fn mark_resume_priority_file_ids(&mut self, file_ids: &[FileId]) {
+        self.resume_priority_set.extend(file_ids.iter().cloned());
+    }
+
+    fn clear_resume_priority_file_ids(
+        &mut self,
+        file_ids: impl IntoIterator<Item = FileId>,
+    ) {
+        for file_id in file_ids {
+            self.resume_priority_set.remove(&file_id);
         }
     }
 
@@ -452,18 +456,32 @@ fn contains_file_id_map_key<V>(
 #[cfg(test)]
 fn select_startable_file_ids(
     pending_queue: &VecDeque<FileId>,
+    resume_priority_set: &HashSet<FileId>,
     available_file_ids: &HashSet<FileId>,
     active_downloads: &HashSet<FileId>,
-    exclusive_resume_target: &Option<FileId>,
     capacity: usize,
 ) -> Vec<FileId> {
     if capacity == 0 {
         return Vec::new();
     }
-    if let Some(target) = exclusive_resume_target {
-        if available_file_ids.contains(target) && !active_downloads.contains(target) {
-            return vec![target.clone()];
-        }
+
+    let resume_priority = pending_queue
+        .iter()
+        .filter(|file_id| {
+            resume_priority_set.contains(*file_id)
+                && available_file_ids.contains(*file_id)
+                && !active_downloads.contains(*file_id)
+        })
+        .take(capacity)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !resume_priority.is_empty() {
+        return resume_priority;
+    }
+    if resume_priority_set
+        .iter()
+        .any(|file_id| !active_downloads.contains(file_id))
+    {
         return Vec::new();
     }
 
@@ -731,6 +749,7 @@ async fn handle_download_request(
             file_ids,
         } => {
             let paused = scheduler.pause_file_ids(&file_ids);
+            scheduler.mark_resume_priority_file_ids(&file_ids);
             queue_download_request_events(
                 &DownloadRequest::ReverifyFileIds {
                     source_url: source_url.clone(),
@@ -739,8 +758,15 @@ async fn handle_download_request(
                 tx,
             );
             let reverified = reverify_resume_files(source_url, file_ids, runtime, tx).await;
+            let reverified_ids = reverified.keys().cloned().collect::<HashSet<_>>();
+            scheduler.clear_resume_priority_file_ids(
+                paused
+                    .iter()
+                    .map(|download| FileId::from(download.item.path.as_str()))
+                    .filter(|file_id| !reverified_ids.contains(file_id)),
+            );
             scheduler.unpause_downloads(paused.into_iter().filter(|download| {
-                reverified.contains_key(&FileId::from(download.item.path.as_str()))
+                reverified_ids.contains(&FileId::from(download.item.path.as_str()))
             }));
             true
         }
@@ -1160,21 +1186,38 @@ fn start_pending_downloads(
         .saturating_sub(scheduler.active_downloads.len());
     let startable = if capacity == 0 {
         Vec::new()
-    } else if let Some(target) = scheduler.exclusive_resume_target.as_ref() {
-        if scheduler.available_downloads.contains_key(target)
-            && !scheduler.active_downloads.contains(target)
-        {
-            vec![target.clone()]
-        } else {
-            Vec::new()
-        }
     } else {
-        scheduler
+        let resume_priority = scheduler
             .pending_queue
             .iter()
+            .filter(|file_id| {
+                scheduler.resume_priority_set.contains(*file_id)
+                    && scheduler.available_downloads.contains_key(*file_id)
+                    && !scheduler.active_downloads.contains(*file_id)
+            })
             .take(capacity)
             .cloned()
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        if !resume_priority.is_empty() {
+            resume_priority
+        } else if scheduler
+            .resume_priority_set
+            .iter()
+            .any(|file_id| !scheduler.active_downloads.contains(file_id))
+        {
+            Vec::new()
+        } else {
+            scheduler
+                .pending_queue
+                .iter()
+                .filter(|file_id| {
+                    scheduler.available_downloads.contains_key(*file_id)
+                        && !scheduler.active_downloads.contains(*file_id)
+                })
+                .take(capacity)
+                .cloned()
+                .collect::<Vec<_>>()
+        }
     };
 
     for file_id in startable {
@@ -1184,10 +1227,10 @@ fn start_pending_downloads(
         scheduler
             .pending_queue
             .retain(|pending| pending != &file_id);
+        scheduler.resume_priority_set.remove(&file_id);
         if !scheduler.active_downloads.insert(file_id.clone()) {
             continue;
         }
-        scheduler.clear_exclusive_resume_target(&file_id);
         let cancel_token = register_download_token(&item, token_tx);
         spawn_file_download(
             &mut scheduler.join_set,

@@ -104,33 +104,77 @@ fn describe_panic_handles_known_and_unknown_payloads() {
 }
 
 #[test]
-fn exclusive_resume_target_blocks_other_pending_downloads() {
-    let target = FileId::from("target.bin");
-    let other = FileId::from("other.bin");
-    let pending_queue = VecDeque::from([other.clone(), target.clone()]);
-    let available = HashSet::from([other.clone(), target.clone()]);
+fn resume_priority_targets_block_other_pending_downloads() {
+    let resume_a = FileId::from("resume-a.bin");
+    let resume_b = FileId::from("resume-b.bin");
+    let new_a = FileId::from("new-a.bin");
+    let new_b = FileId::from("new-b.bin");
+    let pending_queue = VecDeque::from([
+        new_a.clone(),
+        resume_a.clone(),
+        new_b.clone(),
+        resume_b.clone(),
+    ]);
+    let resume_priority_set = HashSet::from([resume_a.clone(), resume_b.clone()]);
+    let available = HashSet::from([
+        resume_a.clone(),
+        resume_b.clone(),
+        new_a.clone(),
+        new_b.clone(),
+    ]);
 
     let selected = select_startable_file_ids(
         &pending_queue,
+        &resume_priority_set,
         &available,
         &HashSet::new(),
-        &Some(target.clone()),
         2,
     );
 
-    assert_eq!(selected, vec![target.clone()]);
+    assert_eq!(selected, vec![resume_a.clone(), resume_b.clone()]);
 
-    let selected_while_target_active = select_startable_file_ids(
+    let selected_while_one_resume_active = select_startable_file_ids(
         &pending_queue,
+        &resume_priority_set,
         &available,
-        &HashSet::from([target.clone()]),
-        &Some(target),
+        &HashSet::from([resume_a]),
         2,
+    );
+
+    assert_eq!(
+        selected_while_one_resume_active,
+        vec![resume_b],
+        "new queued files must stay blocked until the Alt-R resume priority queue is drained"
+    );
+}
+
+#[test]
+fn unavailable_resume_priority_blocks_new_downloads_until_reverify_finishes() {
+    let resume_a = FileId::from("resume-a.bin");
+    let resume_b = FileId::from("resume-b.bin");
+    let new_a = FileId::from("new-a.bin");
+    let new_b = FileId::from("new-b.bin");
+    let pending_queue = VecDeque::from([
+        new_a.clone(),
+        resume_a.clone(),
+        new_b.clone(),
+        resume_b.clone(),
+    ]);
+    let resume_priority_set = HashSet::from([resume_a.clone(), resume_b.clone()]);
+    let available = HashSet::from([resume_a.clone(), new_a, new_b]);
+    let active = HashSet::from([resume_a]);
+
+    let selected = select_startable_file_ids(
+        &pending_queue,
+        &resume_priority_set,
+        &available,
+        &active,
+        1,
     );
 
     assert!(
-        selected_while_target_active.is_empty(),
-        "no other queued file should start while the Alt-R file is resuming"
+        selected.is_empty(),
+        "new queued files must remain blocked while another Alt-R file is still being reverified"
     );
 }
 
