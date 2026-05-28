@@ -3001,6 +3001,7 @@ fn pause_downloads_queues_core_backed_active_files() {
 
     assert!(app.paused);
     assert!(token.is_cancelled());
+    assert!(!app.cancellation_tokens.contains_key("episode.bin"));
     assert_eq!(
         app.core_state.files["episode.bin"].lifecycle,
         FileLifecycle::Queued

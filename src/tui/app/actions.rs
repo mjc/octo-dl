@@ -103,10 +103,8 @@ impl App {
             .map(|file| file.id.clone())
             .collect();
         self.set_paused(true);
-        for token in self.cancellation_tokens.values() {
-            token.cancel();
-        }
         for file_id in downloading_ids {
+            self.cancel_file_token(&file_id);
             if self.core_state.files.contains_key(&file_id) {
                 self.apply_core_event(CoreEvent::FileCancelled {
                     file_id: file_id.clone(),

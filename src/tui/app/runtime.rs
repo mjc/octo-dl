@@ -57,6 +57,19 @@ impl App {
         }
     }
 
+    pub(crate) fn skip_all_shutdown_verifications(&mut self) {
+        let file_ids = self
+            .verification_inflight_files
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in file_ids {
+            let completed =
+                self.verification_targets.get(&id) == Some(&super::VerificationTarget::Completed);
+            self.handle_verification_skipped_event(id, completed);
+        }
+    }
+
     pub(crate) fn begin_shutdown(&mut self) -> bool {
         self.drain_token_messages();
         self.skip_nonblocking_shutdown_verifications();
@@ -65,7 +78,13 @@ impl App {
             self.track_shutdown_pending_file(&id);
         }
         self.pause_downloads();
-        for id in self.cancellation_tokens.keys().cloned().collect::<Vec<_>>() {
+        for (id, token) in self
+            .cancellation_tokens
+            .iter()
+            .map(|(id, token)| (id.clone(), token.clone()))
+            .collect::<Vec<_>>()
+        {
+            token.cancel();
             self.track_shutdown_pending_file(&id);
         }
         !self.shutdown_pending_files.is_empty()
