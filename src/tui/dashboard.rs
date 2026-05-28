@@ -741,6 +741,12 @@ struct BinaryCorePackageRowRef<'a> {
     stats: CorePackageStats<'a>,
 }
 
+struct BinaryCorePackageRowBuilder<'a> {
+    package: &'a crate::core::PackageState,
+    file_ids: Vec<&'a FileId>,
+    stats: CorePackageStats<'a>,
+}
+
 struct BinaryLegacyPackageRowRef<'a> {
     app: &'a App,
     file: &'a super::app::FileEntry,
@@ -1345,8 +1351,8 @@ impl<'a> CorePackageStats<'a> {
         Self::from_files(app, app.core_state.package_files(&package.id))
     }
 
+    #[cfg(test)]
     fn from_files(app: &'a App, files: impl IntoIterator<Item = &'a FileState>) -> Self {
-        #[cfg(test)]
         CORE_PACKAGE_STATS_CALLS.with(|count| count.set(count.get().saturating_add(1)));
         let mut stats = Self {
             source_url: "",
@@ -1462,28 +1468,47 @@ impl<'a> BinaryDashboardFileProjection<'a> {
 }
 
 fn binary_core_package_rows(app: &App) -> Vec<BinaryCorePackageRowRef<'_>> {
-    let mut package_files = app
+    let package_positions = app.core_state.package_positions();
+    let mut package_rows = app
         .core_state
         .packages
         .values()
-        .map(|package| Vec::with_capacity(package.progress.file_count()))
-        .collect::<Vec<Vec<&FileState>>>();
-    for file in app.core_state.files.values() {
-        if let Some((index, _, _)) = app.core_state.packages.get_full(&file.package_id) {
-            package_files[index].push(file);
-        }
-    }
-    app.core_state
-        .packages
-        .values()
-        .zip(package_files)
-        .filter_map(|(package, files)| {
-            let stats = CorePackageStats::from_files(app, files.iter().copied());
-            (stats.present_files > 0).then_some(BinaryCorePackageRowRef {
-                app,
+        .map(|package| {
+            #[cfg(test)]
+            CORE_PACKAGE_STATS_CALLS.with(|count| count.set(count.get().saturating_add(1)));
+            BinaryCorePackageRowBuilder {
                 package,
-                file_ids: files.iter().map(|file| &file.id).collect(),
-                stats,
+                file_ids: Vec::with_capacity(package.progress.file_count()),
+                stats: CorePackageStats {
+                    source_url: "",
+                    present_files: 0,
+                    completed_files: 0,
+                    downloaded_bytes: 0,
+                    total_bytes: 0,
+                    downloading: false,
+                    verifying: false,
+                    folder_label: None,
+                    folder_conflict: false,
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    for file in app.core_state.files.values() {
+        let Some(&package_index) = package_positions.get(&file.package_id) else {
+            continue;
+        };
+        let package_row = &mut package_rows[package_index];
+        package_row.file_ids.push(&file.id);
+        package_row.stats.record_file(app, file);
+    }
+    package_rows
+        .into_iter()
+        .filter_map(|row| {
+            (row.stats.present_files > 0).then_some(BinaryCorePackageRowRef {
+                app,
+                package: row.package,
+                file_ids: row.file_ids,
+                stats: row.stats,
             })
         })
         .collect()
@@ -1984,6 +2009,42 @@ mod tests {
                 .windows(package_id.len())
                 .any(|window| window == package_id.as_slice()),
             "binary dashboard payload should not embed package UUID text",
+        );
+    }
+
+    #[test]
+    fn borrowed_dashboard_postcard_preserves_package_file_id_order() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, tx, true);
+        let package_id = package_id("pkg", "https://mega.nz/folder/pkg");
+        resolve_test_package(
+            &mut app,
+            "Package",
+            vec![
+                ("one.bin", "folder/one.bin", 100),
+                ("two.bin", "folder/two.bin", 200),
+                ("three.bin", "folder/three.bin", 300),
+            ],
+        );
+        app.apply_core_event(CoreEvent::FileMoveRequested {
+            file_id: "three.bin".into(),
+            delta: -2,
+        });
+
+        let state = dashboard_state_from_postcard(
+            &app.borrowed_dashboard_postcard(DashboardUiMode::Tui, false),
+        )
+        .unwrap();
+
+        assert_eq!(state.packages.len(), 1);
+        assert_eq!(state.packages[0].id, package_id.to_string());
+        assert_eq!(
+            state.packages[0].file_ids,
+            vec![
+                "three.bin".to_string(),
+                "one.bin".to_string(),
+                "two.bin".to_string()
+            ]
         );
     }
 
