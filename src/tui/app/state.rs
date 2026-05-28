@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::time::Instant;
 
 use indexmap::IndexMap;
 
@@ -9,7 +10,7 @@ use crate::core::{
     build_restart_snapshot, reduce, snapshot_from_state, validate_snapshot,
 };
 
-use super::persistence::SessionPersistenceError;
+use super::persistence::{SESSION_SAVE_DEBOUNCE, SessionPersistenceError};
 use super::{App, FileStatus, SessionAdapter};
 use crate::tui::event::DownloadRequest;
 
@@ -431,6 +432,7 @@ impl App {
     }
 
     pub(crate) fn poll_session_persistence(&mut self) {
+        self.maybe_flush_pending_session_persistence(false);
         for error in self.session_persistence.drain_errors() {
             match error {
                 SessionPersistenceError::Save { id, error } => {
@@ -446,6 +448,7 @@ impl App {
     }
 
     pub(crate) fn flush_session_persistence(&mut self) {
+        self.maybe_flush_pending_session_persistence(true);
         self.session_persistence.flush();
         self.poll_session_persistence();
     }
@@ -469,12 +472,27 @@ impl App {
         }
     }
 
-    pub(super) fn flush_deferred_session_persistence(
-        &mut self,
-        pending: super::PendingSessionPersistence,
-    ) {
+    pub(super) fn maybe_flush_pending_session_persistence(&mut self, force: bool) {
+        if self.session_persist_defer_depth > 0 {
+            return;
+        }
+        let Some(pending) = self.pending_session_persistence.take() else {
+            return;
+        };
         match pending {
-            super::PendingSessionPersistence::SaveCurrent => {
+            super::PendingSessionPersistence::SaveCurrent { queued_at }
+                if !force && queued_at.elapsed() < SESSION_SAVE_DEBOUNCE =>
+            {
+                self.pending_session_persistence =
+                    Some(super::PendingSessionPersistence::SaveCurrent { queued_at });
+            }
+            pending => self.flush_deferred_session_persistence(pending),
+        }
+    }
+
+    fn flush_deferred_session_persistence(&mut self, pending: super::PendingSessionPersistence) {
+        match pending {
+            super::PendingSessionPersistence::SaveCurrent { .. } => {
                 if let Some(session) = self.session.clone() {
                     self.persist_session_now(session);
                 }
@@ -499,6 +517,34 @@ impl App {
         self.install_session(session);
     }
 
+    pub(super) fn persist_session_deferred(&mut self, session: SessionSnapshot) -> bool {
+        let path = session.state_path();
+        if session.urls.is_empty() && session.packages.is_empty() {
+            self.pending_core_state_session_persistence = false;
+            self.pending_session_persistence = Some(super::PendingSessionPersistence::Remove(path));
+            self.install_session(session);
+            return true;
+        }
+
+        if let Err(error) = validate_snapshot(&session)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        {
+            log::error!("Failed to save session {}: {error}", session.id);
+            self.status = format!("Failed to save session: {error}");
+            return false;
+        }
+
+        let queued_at = match self.pending_session_persistence.take() {
+            Some(super::PendingSessionPersistence::SaveCurrent { queued_at }) => queued_at,
+            _ => Instant::now(),
+        };
+        self.pending_core_state_session_persistence = false;
+        self.pending_session_persistence =
+            Some(super::PendingSessionPersistence::SaveCurrent { queued_at });
+        self.install_session(session);
+        true
+    }
+
     fn materialize_deferred_core_session(&mut self) {
         if !self.pending_core_state_session_persistence {
             return;
@@ -514,6 +560,10 @@ impl App {
     }
 
     pub(super) fn persist_session(&mut self, session: SessionSnapshot) -> bool {
+        if self.session_persist_defer_depth > 0 {
+            return self.persist_session_deferred(session);
+        }
+
         self.pending_core_state_session_persistence = false;
         let session = session;
         if session.urls.is_empty() && session.packages.is_empty() {
@@ -539,12 +589,7 @@ impl App {
             self.status = format!("Failed to save session: {error}");
             return false;
         }
-        if self.session_persist_defer_depth > 0 {
-            self.pending_session_persistence = Some(super::PendingSessionPersistence::SaveCurrent);
-            self.install_session(session);
-        } else {
-            self.persist_session_now(session);
-        }
+        self.persist_session_now(session);
         true
     }
 }

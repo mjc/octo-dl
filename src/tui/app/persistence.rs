@@ -13,14 +13,14 @@ use crate::core::SessionSnapshot;
 // Keep session saves responsive while collapsing bursts of same-path writes that
 // would otherwise serialize the full snapshot over and over during add-file storms.
 #[cfg(not(test))]
-const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_millis(100);
+pub(crate) const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_millis(100);
 #[cfg(test)]
-const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_millis(10);
+pub(crate) const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_millis(10);
 
 #[cfg(not(test))]
-const SESSION_SAVE_MAX_DELAY: Duration = Duration::from_millis(500);
+pub(crate) const SESSION_SAVE_MAX_DELAY: Duration = Duration::from_millis(500);
 #[cfg(test)]
-const SESSION_SAVE_MAX_DELAY: Duration = Duration::from_millis(50);
+pub(crate) const SESSION_SAVE_MAX_DELAY: Duration = Duration::from_millis(50);
 
 #[cfg(test)]
 type SaveCallCount = Arc<AtomicUsize>;

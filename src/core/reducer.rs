@@ -893,62 +893,48 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
     #[cfg(test)]
     SNAPSHOT_FROM_STATE_CALLS.with(|count| count.set(count.get().saturating_add(1)));
     let mut url_errors = state.url_errors.clone();
-    for file in state.files.values() {
-        let source_url = &file.source_url;
-        if url_errors.contains_key(source_url) {
+    let mut remaining_files = state.files.values().peekable();
+    let mut packages = Vec::with_capacity(state.packages.len());
+    for package in state.packages.values() {
+        let mut files = Vec::with_capacity(package.progress.file_count());
+        while remaining_files
+            .peek()
+            .is_some_and(|file| file.package_id == package.id)
+        {
+            let file = remaining_files
+                .next()
+                .expect("peeked file should remain available");
+            if let Some(error) = package.error.as_ref()
+                && !url_errors.contains_key(&file.source_url)
+            {
+                url_errors.insert(file.source_url.clone(), error.clone());
+            }
+            files.push(FileSnapshot {
+                id: file.id.clone(),
+                package_id: file.package_id,
+                source_url: file.source_url.clone(),
+                path: file.path.clone(),
+                size: file.size,
+                lifecycle: file.lifecycle.clone(),
+                progress: file.progress.clone(),
+                accounting: file.accounting,
+            });
+        }
+        if files.is_empty() {
             continue;
         }
-        let Some(package) = state.packages.get(&file.package_id) else {
-            continue;
-        };
-        let Some(error) = package.error.as_ref() else {
-            continue;
-        };
-        url_errors.insert(source_url.clone(), error.clone());
+        packages.push(PackageSnapshot {
+            id: package.id,
+            key: package.key.clone(),
+            display_name: package.display_name.clone(),
+            files,
+            error: package.error.clone(),
+        });
     }
-    let package_positions = state.package_positions();
-    let mut package_files = state
-        .packages
-        .values()
-        .map(|package| Vec::with_capacity(package.progress.file_count()))
-        .collect::<Vec<Vec<&FileState>>>();
-    for file in state.files.values() {
-        let Some(&package_index) = package_positions.get(&file.package_id) else {
-            continue;
-        };
-        package_files[package_index].push(file);
-    }
-    let packages = state
-        .packages
-        .values()
-        .zip(package_files)
-        .filter_map(|package| {
-            let files = package
-                .1
-                .into_iter()
-                .map(|file| FileSnapshot {
-                    id: file.id.clone(),
-                    package_id: file.package_id,
-                    source_url: file.source_url.clone(),
-                    path: file.path.clone(),
-                    size: file.size,
-                    lifecycle: file.lifecycle.clone(),
-                    progress: file.progress.clone(),
-                    accounting: file.accounting,
-                })
-                .collect::<Vec<_>>();
-            if files.is_empty() {
-                return None;
-            }
-            Some(PackageSnapshot {
-                id: package.0.id,
-                key: package.0.key.clone(),
-                display_name: package.0.display_name.clone(),
-                files,
-                error: package.0.error.clone(),
-            })
-        })
-        .collect();
+    debug_assert!(
+        remaining_files.next().is_none(),
+        "snapshot_from_state expects files grouped in package order"
+    );
     SessionSnapshot {
         version: 6,
         id: state.session_meta.session_id.clone(),
@@ -1822,6 +1808,47 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["b.bin", "a.bin"]
         );
+    }
+
+    #[test]
+    fn snapshot_from_state_projects_package_errors_onto_url_rows() {
+        let pkg_id = package_id("pkg", "https://mega.nz/folder/pkg");
+        let mut state = DownloadState::new(crate::core::SessionMeta::default());
+        state.url_order = vec!["https://mega.nz/folder/pkg".to_string()];
+        state.packages.insert(
+            pkg_id,
+            PackageState {
+                id: pkg_id,
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg"),
+                display_name: "pkg".to_string(),
+                progress: PackageProgressState {
+                    failed: 1,
+                    ..PackageProgressState::default()
+                },
+                error: Some("boom".to_string()),
+            },
+        );
+        state.files.insert(
+            "file.bin".into(),
+            FileState {
+                id: "file.bin".into(),
+                package_id: pkg_id,
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                path: "file.bin".to_string(),
+                size: 10,
+                lifecycle: FileLifecycle::Failed {
+                    message: "boom".to_string(),
+                },
+                progress: FileProgressState::default(),
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+
+        let snapshot = snapshot_from_state(&state);
+
+        assert_eq!(snapshot.urls.len(), 1);
+        assert_eq!(snapshot.urls[0].url, "https://mega.nz/folder/pkg");
+        assert_eq!(snapshot.urls[0].error.as_deref(), Some("boom"));
     }
 
     #[test]

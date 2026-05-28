@@ -1381,6 +1381,8 @@ fn ensure_core_file_in_package_collapses_visible_syncs() {
         crate::core::FileAccounting::CurrentRun,
     );
 
+    app.flush_session_persistence();
+
     assert_eq!(app.visible_sync_count, 1);
     assert_eq!(app.session_persist_count, 1);
     assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
@@ -1402,11 +1404,57 @@ fn add_urls_collapses_placeholder_visible_syncs() {
         "https://mega.nz/folder/three".to_string(),
     ]));
 
+    app.flush_session_persistence();
+
     assert_eq!(app.visible_sync_count, 1);
     assert_eq!(app.session_persist_count, 1);
     assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
     assert_eq!(app.tracked_urls().len(), 3);
     assert_eq!(app.overlay_files.len(), 3);
+}
+
+#[test]
+fn deferred_batch_persistence_waits_for_poll_before_writing_snapshot() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+
+    app.with_deferred_batch_updates(|app| {
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/root"),
+                source_url: "https://mega.nz/folder/root".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string()),
+                display_name: "Root".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: "episode-1.mkv".to_string().into(),
+                    path: "episode-1.mkv".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+    });
+
+    assert!(crate::core::SessionSnapshot::latest().is_none());
+    assert_eq!(
+        app.session
+            .as_ref()
+            .map(|session| session.file_count())
+            .unwrap_or_default(),
+        1
+    );
+    assert_eq!(app.session_persist_count, 0);
+
+    std::thread::sleep(super::persistence::SESSION_SAVE_DEBOUNCE);
+    app.poll_session_persistence();
+    assert_eq!(app.session_persist_count, 1);
+    assert!(crate::core::SessionSnapshot::latest().is_none());
+
+    app.flush_session_persistence();
+
+    let latest = crate::core::SessionSnapshot::latest().expect("session should be saved");
+    assert_eq!(latest.file_count(), 1);
 }
 
 #[test]
@@ -1508,6 +1556,8 @@ fn deferred_core_persistence_materializes_before_session_mutation() {
         });
     });
 
+    app.flush_session_persistence();
+
     assert_eq!(app.session_persist_count, 1);
     assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
     assert_eq!(
@@ -1590,6 +1640,8 @@ fn deferred_core_persistence_materializes_once_for_nested_batches() {
             });
         });
     });
+
+    app.flush_session_persistence();
 
     assert_eq!(app.session_persist_count, 1);
     assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
@@ -1737,6 +1789,8 @@ fn deferred_core_persistence_materializes_once_for_multiple_session_mutations() 
         });
     });
 
+    app.flush_session_persistence();
+
     assert_eq!(app.session_persist_count, 1);
     assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
     let session = app.session.as_ref().expect("session should exist");
@@ -1769,6 +1823,8 @@ fn deferred_core_persistence_allows_session_remove_to_override_batch_snapshot() 
             session.packages.clear();
         });
     });
+
+    app.flush_session_persistence();
 
     assert_eq!(app.session_persist_count, 1);
     assert_eq!(crate::core::reducer::snapshot_from_state_call_count(), 1);
@@ -2769,6 +2825,8 @@ fn drain_download_events_collapses_visible_syncs_for_batched_files() {
     }
 
     assert!(app.drain_download_events(&mut download_rx));
+
+    app.flush_session_persistence();
 
     assert_eq!(app.visible_sync_count, 1);
     assert_eq!(app.session_persist_count, 1);

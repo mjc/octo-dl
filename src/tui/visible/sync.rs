@@ -70,31 +70,38 @@ pub(super) fn sync_visible_files(
     selected_row_identity: Option<TuiRow>,
 ) -> Vec<TuiRow> {
     let selected_row = file_list_state.selected().unwrap_or(0);
-    let core_file_ids: HashSet<_> = core_state.files.keys().cloned().collect();
     let mut existing_files = std::mem::take(files)
         .into_iter()
         .map(Some)
         .collect::<Vec<_>>();
-    let package_positions = core_state.package_positions();
     let mut next_files = Vec::new();
     next_files.reserve(core_state.files.len().saturating_add(overlay_files.len()));
-    for file in core_state.files.values() {
-        let package_order = package_positions
-            .get(&file.package_id)
-            .copied()
-            .unwrap_or(usize::MAX);
-        let existing = visible_file_positions
-            .get(&file.id)
-            .copied()
-            .and_then(|index| existing_files.get_mut(index))
-            .and_then(Option::take);
-        if let Some(entry) = project_core_file(file, package_order, file_ui, existing) {
-            next_files.push(entry);
+    let mut remaining_files = core_state.files.values().peekable();
+    for (package_order, package) in core_state.packages.values().enumerate() {
+        while remaining_files
+            .peek()
+            .is_some_and(|file| file.package_id == package.id)
+        {
+            let file = remaining_files
+                .next()
+                .expect("peeked file should remain available");
+            let existing = visible_file_positions
+                .get(&file.id)
+                .copied()
+                .and_then(|index| existing_files.get_mut(index))
+                .and_then(Option::take);
+            if let Some(entry) = project_core_file(file, package_order, file_ui, existing) {
+                next_files.push(entry);
+            }
         }
     }
+    debug_assert!(
+        remaining_files.next().is_none(),
+        "visible sync expects files grouped in package order"
+    );
 
     for (id, entry) in overlay_files.iter() {
-        if !core_file_ids.contains(id) {
+        if !core_state.files.contains_key(id) {
             let source_url = entry.source_url().unwrap_or(id.as_str());
             let existing = visible_file_positions
                 .get(id)

@@ -76,7 +76,7 @@ struct VisibleSyncDeferralGuard {
 }
 
 pub(super) enum PendingSessionPersistence {
-    SaveCurrent,
+    SaveCurrent { queued_at: Instant },
     Remove(PathBuf),
 }
 
@@ -157,15 +157,11 @@ impl Drop for SessionPersistenceDeferralGuard {
 
         if app.pending_core_state_session_persistence {
             app.pending_core_state_session_persistence = false;
-            app.pending_session_persistence = None;
             let snapshot = crate::core::snapshot_from_state(&app.core_state);
-            let _ = app.persist_session(snapshot);
-            return;
+            let _ = app.persist_session_deferred(snapshot);
         }
 
-        if let Some(pending) = app.pending_session_persistence.take() {
-            app.flush_deferred_session_persistence(pending);
-        }
+        app.maybe_flush_pending_session_persistence(false);
     }
 }
 
