@@ -10,7 +10,7 @@ use crate::{
         FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id, push_file,
         session_snapshot,
     },
-    tui::{DashboardUiMode, app::VerificationTarget, visible::TuiRow},
+    tui::{DashboardUiMode, app::VerificationTarget, event::DownloadEvent, visible::TuiRow},
 };
 
 fn test_app() -> App {
@@ -1207,10 +1207,7 @@ fn url_resolved_updates_session_status_and_clears_overlay() {
     let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
     let url = "https://mega.nz/folder/root".to_string();
-    app.session = Some(session_snapshot(vec![(
-        url.as_str(),
-        UrlFixtureStatus::Pending,
-    )]));
+    app.apply_core_event(CoreEvent::UrlSubmitted { url: url.clone() });
 
     app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
     assert!(app.overlay_files.contains_key(url.as_str()));
@@ -1219,8 +1216,7 @@ fn url_resolved_updates_session_status_and_clears_overlay() {
 
     assert!(!app.overlay_files.contains_key(url.as_str()));
     let session = app.session.as_ref().expect("session should remain");
-    assert_eq!(session.urls[0].url, url);
-    assert!(session.urls[0].error.is_none());
+    assert!(session.urls.is_empty());
 }
 
 #[test]
@@ -1292,6 +1288,43 @@ fn deleting_url_level_error_stays_deleted_after_shutdown_sync() {
             .is_some_and(|session| session.urls.is_empty() && session.packages.is_empty())
     );
     assert!(crate::core::SessionSnapshot::latest().is_none());
+}
+
+#[test]
+fn empty_package_resolution_stays_gone_after_shutdown_restart() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let mut app = test_app();
+    let url = "https://mega.nz/folder/empty".to_string();
+
+    app.submit_url(url.clone());
+    app.handle_download_event(DownloadEvent::UrlQueued { url: url.clone() });
+    app.apply_core_event(CoreEvent::PackageResolved {
+        package: ResolvedPackage {
+            id: package_id(&url, &url),
+            source_url: url.clone(),
+            key: crate::core::PackageKey::new(url.clone()),
+            display_name: "Empty package".to_string(),
+            files: Vec::new(),
+            collision: None,
+        },
+    });
+    app.handle_download_event(DownloadEvent::UrlResolved { url: url.clone() });
+    app.sync_session_for_shutdown();
+    app.flush_session_persistence();
+
+    assert!(app.tracked_urls().is_empty());
+    assert!(app.core_state.url_order.is_empty());
+    assert!(crate::core::SessionSnapshot::latest().is_none());
+
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let mut resumed = App::new(0, event_tx, true);
+    resumed.resume_latest_session();
+
+    assert!(resumed.tracked_urls().is_empty());
+    assert!(resumed.visible_rows().is_empty());
+    let mut url_rx = resumed.url_rx.take().expect("url_rx should exist");
+    assert!(url_rx.try_recv().is_err());
 }
 
 #[test]
@@ -1980,10 +2013,7 @@ fn url_level_overlay_error_does_not_also_render_empty_package_row() {
     let _guard = StateDirectoryGuard::set(dir.path());
     let mut app = test_app();
     let url = "https://mega.nz/folder/bad".to_string();
-    app.session = Some(session_snapshot(vec![(
-        url.as_str(),
-        UrlFixtureStatus::Pending,
-    )]));
+    app.apply_core_event(CoreEvent::UrlSubmitted { url: url.clone() });
 
     app.handle_download_event(crate::tui::event::DownloadEvent::ScopeError {
         scope: url.clone(),

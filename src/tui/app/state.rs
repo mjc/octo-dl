@@ -64,34 +64,6 @@ impl CoreApplyPolicy {
 }
 
 impl App {
-    fn merge_previous_url_errors_into_core_snapshot(&self, session: &mut SessionSnapshot) {
-        let Some(previous) = self.session.as_ref() else {
-            return;
-        };
-
-        for url in &mut session.urls {
-            if url.error.is_some() {
-                continue;
-            }
-            if self
-                .core_state
-                .files
-                .values()
-                .any(|file| file.source_url == url.url)
-            {
-                continue;
-            }
-            if let Some(error) = previous
-                .urls
-                .iter()
-                .find(|previous_url| previous_url.url == url.url)
-                .and_then(|previous_url| previous_url.error.clone())
-            {
-                url.error = Some(error);
-            }
-        }
-    }
-
     pub(crate) fn visible_file(&self, file_id: &FileId) -> Option<&crate::tui::app::FileEntry> {
         let &visible_index = self.visible_file_positions.get(file_id)?;
         self.files.get(visible_index)
@@ -316,7 +288,10 @@ impl App {
         if self.session.is_none() {
             return;
         }
-        if self.core_state.packages.is_empty() && self.core_state.files.is_empty() {
+        if self.core_state.url_order.is_empty()
+            && self.core_state.packages.is_empty()
+            && self.core_state.files.is_empty()
+        {
             return;
         }
 
@@ -499,7 +474,11 @@ impl App {
         pending: super::PendingSessionPersistence,
     ) {
         match pending {
-            super::PendingSessionPersistence::Save(session) => self.persist_session_now(session),
+            super::PendingSessionPersistence::SaveCurrent => {
+                if let Some(session) = self.session.clone() {
+                    self.persist_session_now(session);
+                }
+            }
             super::PendingSessionPersistence::Remove(path) => {
                 #[cfg(test)]
                 {
@@ -526,13 +505,11 @@ impl App {
         }
         self.pending_core_state_session_persistence = false;
         self.pending_session_persistence = None;
-        let mut session = snapshot_from_state(&self.core_state);
-        self.merge_previous_url_errors_into_core_snapshot(&mut session);
+        let session = snapshot_from_state(&self.core_state);
         self.install_session(session);
     }
 
-    pub(super) fn persist_core_session_snapshot(&mut self, mut session: SessionSnapshot) -> bool {
-        self.merge_previous_url_errors_into_core_snapshot(&mut session);
+    pub(super) fn persist_core_session_snapshot(&mut self, session: SessionSnapshot) -> bool {
         self.persist_session(session)
     }
 
@@ -562,10 +539,8 @@ impl App {
             self.status = format!("Failed to save session: {error}");
             return false;
         }
-
         if self.session_persist_defer_depth > 0 {
-            self.pending_session_persistence =
-                Some(super::PendingSessionPersistence::Save(session.clone()));
+            self.pending_session_persistence = Some(super::PendingSessionPersistence::SaveCurrent);
             self.install_session(session);
         } else {
             self.persist_session_now(session);

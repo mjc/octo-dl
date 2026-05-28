@@ -57,8 +57,6 @@ impl App {
 
     fn retry_source_url(&mut self, url: &str) {
         self.ensure_session_for_pending_urls();
-        let _ =
-            self.mutate_session_and_save(|session| SessionAdapter::mark_url_fetched(session, url));
         self.queue_url_placeholder(url.to_string());
         self.apply_core_command(CoreCommand::SubmitUrl {
             url: url.to_string(),
@@ -163,8 +161,10 @@ impl App {
     }
 
     fn is_session_url(&self, url: &str) -> bool {
-        self.read_session(|session| SessionAdapter::contains_url(session, url))
-            .unwrap_or(false)
+        self.core_state
+            .url_order
+            .iter()
+            .any(|tracked_url| tracked_url == url)
     }
 
     fn is_tracked_error_scope(&self, scope: &str) -> bool {
@@ -174,8 +174,10 @@ impl App {
     }
 
     fn handle_session_url_error(&mut self, url: &str, error: &str) {
-        let _ = self
-            .mutate_session_and_save(|session| SessionAdapter::mark_url_error(session, url, error));
+        self.apply_core_event(CoreEvent::UrlFailed {
+            url: url.to_string(),
+            message: error.to_string(),
+        });
         let _ = self
             .overlay_files
             .shift_remove(&FileId::from(url))
@@ -274,8 +276,9 @@ impl App {
         let url_id = FileId::from(url);
         self.forget_visible_file(&url_id);
         self.sync_visible_files();
-        let _ =
-            self.mutate_session_and_save(|session| SessionAdapter::mark_url_fetched(session, url));
+        self.apply_core_event(CoreEvent::UrlResolved {
+            url: url.to_string(),
+        });
         self.recompute_totals();
     }
 

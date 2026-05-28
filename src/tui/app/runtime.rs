@@ -150,7 +150,7 @@ impl App {
             .iter()
             .map(|url| SessionUrlSnapshot {
                 url: url.clone(),
-                error: None,
+                error: self.core_state.url_errors.get(url).cloned(),
             })
             .collect();
         self.save_session(session);

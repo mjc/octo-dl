@@ -8,21 +8,12 @@ use crate::core::{
 pub(super) struct SessionAdapter;
 
 impl SessionAdapter {
-    pub(super) fn contains_url(session: &SessionSnapshot, url: &str) -> bool {
-        session.urls.iter().any(|entry| entry.url == url)
-    }
-
     #[cfg(test)]
     pub(super) fn replace_state(session: &mut SessionSnapshot, next: SessionSnapshot) {
         *session = next;
     }
 
-    pub(super) fn mark_url_fetched(session: &mut SessionSnapshot, url: &str) {
-        if let Some(tracked_url) = session.urls.iter_mut().find(|entry| entry.url == url) {
-            tracked_url.error = None;
-        }
-    }
-
+    #[cfg(test)]
     pub(super) fn mark_url_error(session: &mut SessionSnapshot, url: &str, error: &str) {
         Self::ensure_url(session, url).error = Some(error.to_string());
     }
@@ -75,7 +66,7 @@ impl SessionAdapter {
             .iter()
             .map(|url| SessionUrlSnapshot {
                 url: url.clone(),
-                error: None,
+                error: restart.state.url_errors.get(url).cloned(),
             })
             .collect();
 
@@ -222,6 +213,7 @@ impl SessionAdapter {
         true
     }
 
+    #[cfg(test)]
     fn ensure_url<'a>(session: &'a mut SessionSnapshot, url: &str) -> &'a mut SessionUrlSnapshot {
         if let Some(index) = session.urls.iter().position(|entry| entry.url == url) {
             return &mut session.urls[index];

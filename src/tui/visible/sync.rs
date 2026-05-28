@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 
-use crate::core::{DownloadState, FileId, FileLifecycle, FileState, PackageId, PackageState};
+use crate::core::{DownloadState, FileId, FileLifecycle, FileState, PackageId};
 
 use super::TuiRow;
 use super::rows::{build_file_sort_key, cached_file_sort_key_matches, visible_rows_for};
@@ -11,7 +11,6 @@ use crate::tui::app::{FileEntry, FileStatus, FileUiState, SortState, TransientRo
 
 fn project_core_file(
     file: &FileState,
-    package: Option<&PackageState>,
     package_order: usize,
     file_ui: &mut HashMap<FileId, FileUiState>,
     existing: Option<FileEntry>,
@@ -37,12 +36,7 @@ fn project_core_file(
     });
     if !reuse_cached_sort_key {
         let state = file_ui.entry(file.id.clone()).or_default();
-        state.sort_key = Some(build_file_sort_key(
-            &file.path,
-            &status,
-            package_order,
-            package.map_or("", |_| ""),
-        ));
+        state.sort_key = Some(build_file_sort_key(&file.path, &status, package_order, ""));
         state.package_id = Some(file.package_id);
     } else if let Some(state) = file_ui.get_mut(&file.id) {
         state.package_id = Some(file.package_id);
@@ -77,21 +71,24 @@ pub(super) fn sync_visible_files(
 ) -> Vec<TuiRow> {
     let selected_row = file_list_state.selected().unwrap_or(0);
     let core_file_ids: HashSet<_> = core_state.files.keys().cloned().collect();
-    let existing: HashMap<_, _> = std::mem::take(files)
+    let mut existing_files = std::mem::take(files)
         .into_iter()
-        .map(|file| (file.id.clone(), file))
-        .collect();
-
-    let mut existing = existing;
+        .map(Some)
+        .collect::<Vec<_>>();
+    let package_positions = core_state.package_positions();
     let mut next_files = Vec::new();
+    next_files.reserve(core_state.files.len().saturating_add(overlay_files.len()));
     for file in core_state.files.values() {
-        let package = core_state.packages.get(&file.package_id);
-        let package_order = core_state
-            .packages
-            .get_index_of(&file.package_id)
+        let package_order = package_positions
+            .get(&file.package_id)
+            .copied()
             .unwrap_or(usize::MAX);
-        let existing = existing.remove(&file.id);
-        if let Some(entry) = project_core_file(file, package, package_order, file_ui, existing) {
+        let existing = visible_file_positions
+            .get(&file.id)
+            .copied()
+            .and_then(|index| existing_files.get_mut(index))
+            .and_then(Option::take);
+        if let Some(entry) = project_core_file(file, package_order, file_ui, existing) {
             next_files.push(entry);
         }
     }
@@ -99,7 +96,11 @@ pub(super) fn sync_visible_files(
     for (id, entry) in overlay_files.iter() {
         if !core_file_ids.contains(id) {
             let source_url = entry.source_url().unwrap_or(id.as_str());
-            let existing = existing.remove(id);
+            let existing = visible_file_positions
+                .get(id)
+                .copied()
+                .and_then(|index| existing_files.get_mut(index))
+                .and_then(Option::take);
             let reuse_cached_sort_key = existing.as_ref().is_some_and(|existing| {
                 existing.name == entry.file().name
                     && existing.status == entry.file().status
@@ -133,11 +134,11 @@ pub(super) fn sync_visible_files(
     }
 
     *files = next_files;
-    *visible_file_positions = files
-        .iter()
-        .enumerate()
-        .map(|(index, file)| (file.id.clone(), index))
-        .collect();
+    visible_file_positions.clear();
+    visible_file_positions.reserve(files.len());
+    for (index, file) in files.iter().enumerate() {
+        visible_file_positions.insert(file.id.clone(), index);
+    }
     let visible_ids: HashSet<_> = files.iter().map(|file| file.id.clone()).collect();
     file_ui.retain(|file_id, _| visible_ids.contains(file_id));
     let visible_rows = visible_rows_for(
