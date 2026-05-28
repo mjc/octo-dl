@@ -20,8 +20,8 @@ mod tests;
 #[path = "app/types.rs"]
 mod types;
 
+use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::ptr::NonNull;
@@ -30,6 +30,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -52,6 +53,12 @@ use super::event::DownloadRequest;
 use super::event::{DownloadEvent, QueuedFile, TokenMessage};
 use super::session::SessionAdapter;
 use super::visible;
+
+pub(crate) type VisibleFilePositions = FxHashMap<FileId, usize>;
+pub(crate) type FileUiMap = FxHashMap<FileId, FileUiState>;
+pub(crate) type FileIdSet = FxHashSet<FileId>;
+pub(crate) type ExpandedPackages = FxHashSet<PackageId>;
+pub(crate) type FileIdMap<V> = FxHashMap<FileId, V>;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct VisibleRowsCacheKey {
@@ -211,12 +218,12 @@ pub struct App {
     dashboard_revision: u64,
     dashboard_binary_cache_key: Option<DashboardCacheKey>,
     dashboard_binary_cache: Bytes,
-    pub(crate) visible_file_positions: HashMap<FileId, usize>,
+    pub(crate) visible_file_positions: VisibleFilePositions,
     pub(crate) overlay_files: IndexMap<FileId, TransientRow>,
-    pub(crate) file_ui: HashMap<FileId, FileUiState>,
+    pub(crate) file_ui: FileUiMap,
     pub(crate) queued_file_effects: IndexMap<String, Vec<FileId>>,
     pub file_list_state: ListState,
-    pub expanded_packages: HashSet<PackageId>,
+    pub expanded_packages: ExpandedPackages,
     pub sort: SortState,
     // Aggregate stats
     pub total_downloaded: u64,
@@ -254,18 +261,18 @@ pub struct App {
     pub client_rx: Option<tokio::sync::oneshot::Receiver<(mega::Client, reqwest::Client)>>,
     pub(super) download_task_running: bool,
     // Cancellation tokens for active downloads (maps file path to token)
-    pub cancellation_tokens: HashMap<FileId, CancellationToken>,
+    pub cancellation_tokens: FileIdMap<CancellationToken>,
     // Per-file download attempt IDs for retry/reset flows
     pub file_attempt_ids: HashMap<FileId, u64>,
     // Files reset from the UI — used to suppress stale terminal events from the old attempt
-    pub reset_pending_files: HashSet<FileId>,
+    pub reset_pending_files: FileIdSet,
     // Files paused for Alt-R reverify — their restart should preserve verified progress.
-    pub reverify_pending_files: HashSet<FileId>,
+    pub reverify_pending_files: FileIdSet,
     // Files currently running an explicit verification pass.
-    pub verifying_files: HashSet<FileId>,
+    pub verifying_files: FileIdSet,
     // Files allowed to accept verification progress callbacks.
-    pub(crate) verification_inflight_files: HashSet<FileId>,
-    pub(crate) verification_targets: HashMap<FileId, VerificationTarget>,
+    pub(crate) verification_inflight_files: FileIdSet,
+    pub(crate) verification_targets: FileIdMap<VerificationTarget>,
     // Session
     pub session: Option<SessionSnapshot>,
     pub(crate) session_persistence: SessionPersistence,

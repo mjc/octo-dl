@@ -196,16 +196,13 @@ impl App {
     pub(crate) fn update_speeds_at(&mut self, now: Instant) {
         self.last_tick = now;
 
-        for file in &self.files {
-            if let Some(state) = self.file_ui.get_mut(&file.id) {
-                if matches!(file.status, FileStatus::Downloading) {
-                    state.speed = state.rate.bytes_per_sec(now);
-                } else {
-                    state.speed = 0;
-                }
-            } else {
-                self.file_ui.entry(file.id.clone()).or_default();
-            }
+        for file in self
+            .files
+            .iter()
+            .filter(|file| matches!(file.status, FileStatus::Downloading))
+        {
+            let state = self.file_ui.entry(file.id.clone()).or_default();
+            state.speed = state.rate.bytes_per_sec(now);
         }
 
         self.current_speed = if self.core_state.totals.run_file_downloading > 0 {

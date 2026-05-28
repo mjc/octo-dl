@@ -1,14 +1,14 @@
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
-
 use indexmap::IndexMap;
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use std::cmp::Ordering;
 
 use crate::core::{DownloadState, FileId, PackageId, PackageStatus};
 
 use super::TuiRow;
 use crate::tui::app::{
-    FileEntry, FileStatus, FileUiState, SortDirection, SortKey, SortState, TransientRow,
+    ExpandedPackages, FileEntry, FileStatus, FileUiMap, SortDirection, SortKey, SortState,
+    TransientRow,
 };
 
 #[cfg(test)]
@@ -48,7 +48,7 @@ struct PackageProjection<'a> {
 
 fn package_projections<'a>(
     files: &'a [FileEntry],
-    file_ui: &'a HashMap<FileId, FileUiState>,
+    file_ui: &'a FileUiMap,
     core_state: &'a DownloadState,
 ) -> IndexMap<PackageId, PackageProjection<'a>> {
     let mut projections = core_state
@@ -217,7 +217,7 @@ impl FileSortProjection<'_> {
 
 fn sorted_file_indices_with_keys(
     files: &[FileEntry],
-    file_ui: &HashMap<FileId, crate::tui::app::FileUiState>,
+    file_ui: &FileUiMap,
     overlay_files: &IndexMap<FileId, TransientRow>,
 ) -> Vec<usize> {
     let sort_projections = files
@@ -271,7 +271,7 @@ fn sorted_file_indices_with_keys(
 }
 
 fn sorted_overlay_file_ids_with_keys(
-    file_ui: &HashMap<FileId, crate::tui::app::FileUiState>,
+    file_ui: &FileUiMap,
     overlay_files: &IndexMap<FileId, TransientRow>,
 ) -> Vec<FileId> {
     let overlay_file_ids = overlay_files.keys().cloned().collect::<Vec<_>>();
@@ -375,7 +375,7 @@ pub(super) fn sorted_file_indices(
                 },
             )
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
     sorted_file_indices_with_keys(files, &file_ui, overlay_files)
 }
 
@@ -408,7 +408,7 @@ fn package_status_rank(status: PackageStatus) -> u8 {
 }
 
 fn package_is_auto_expanded_for(
-    expanded_packages: &HashSet<PackageId>,
+    expanded_packages: &ExpandedPackages,
     core_state: &DownloadState,
     package_id: &PackageId,
 ) -> bool {
@@ -445,10 +445,10 @@ fn package_has_visible_children(
 
 pub(super) fn visible_rows_for(
     files: &[FileEntry],
-    file_ui: &HashMap<FileId, crate::tui::app::FileUiState>,
+    file_ui: &FileUiMap,
     core_state: &DownloadState,
     overlay_files: &IndexMap<FileId, TransientRow>,
-    expanded_packages: &HashSet<PackageId>,
+    expanded_packages: &ExpandedPackages,
     sort: &SortState,
 ) -> Vec<TuiRow> {
     #[cfg(test)]
@@ -467,7 +467,7 @@ pub(super) fn visible_rows_for(
         package_projections
             .iter()
             .map(|(package_id, package)| (*package_id, package_percent(package)))
-            .collect::<HashMap<_, _>>()
+            .collect::<FxHashMap<_, _>>()
     });
 
     let mut package_ids: Vec<_> = core_state.packages.keys().cloned().collect();
@@ -638,7 +638,7 @@ mod tests {
                     },
                 )
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<FxHashMap<_, _>>();
 
         let indices = sorted_file_indices_with_keys(&files, &file_ui, &IndexMap::new());
         let ordered = indices

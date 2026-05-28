@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,7 +20,8 @@ use crate::{
 use crate::tui::dashboard::DashboardUiMode;
 
 use super::{
-    App, DownloadEvent, NoCredentialsFallback, Popup, SharedAppState, SharedStateChannels, UiAction,
+    App, DownloadEvent, ExpandedPackages, FileIdMap, FileIdSet, FileUiMap, NoCredentialsFallback,
+    Popup, SharedAppState, SharedStateChannels, UiAction, VisibleFilePositions,
 };
 use crate::tui::event::DownloadRequest;
 
@@ -80,12 +81,12 @@ impl App {
             dashboard_revision: 0,
             dashboard_binary_cache_key: None,
             dashboard_binary_cache: bytes::Bytes::new(),
-            visible_file_positions: HashMap::new(),
+            visible_file_positions: VisibleFilePositions::default(),
             overlay_files: IndexMap::new(),
-            file_ui: HashMap::new(),
+            file_ui: FileUiMap::default(),
             queued_file_effects: IndexMap::new(),
             file_list_state: ListState::default(),
-            expanded_packages: HashSet::new(),
+            expanded_packages: ExpandedPackages::default(),
             sort: super::SortState::new(),
             total_downloaded: 0,
             total_size: 0,
@@ -111,13 +112,13 @@ impl App {
             token_tx: Some(token_tx),
             client_rx: None,
             download_task_running: false,
-            cancellation_tokens: HashMap::new(),
+            cancellation_tokens: FileIdMap::default(),
             file_attempt_ids: HashMap::new(),
-            reset_pending_files: HashSet::new(),
-            reverify_pending_files: HashSet::new(),
-            verifying_files: HashSet::new(),
-            verification_inflight_files: HashSet::new(),
-            verification_targets: HashMap::new(),
+            reset_pending_files: FileIdSet::default(),
+            reverify_pending_files: FileIdSet::default(),
+            verifying_files: FileIdSet::default(),
+            verification_inflight_files: FileIdSet::default(),
+            verification_targets: FileIdMap::default(),
             session: None,
             session_persistence: super::SessionPersistence::new(),
             core_state: DownloadState::new(SessionMeta {

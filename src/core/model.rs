@@ -604,21 +604,26 @@ impl DownloadState {
     }
 
     pub(crate) fn package_insert_index(&self, package_id: &PackageId) -> usize {
-        let package_positions = self.package_positions();
-        let Some(&package_index) = package_positions.get(package_id) else {
+        if !self.packages.contains_key(package_id) {
             return self.files.len();
-        };
-        let mut insert_index = self.files.len();
-        for (index, file) in self.files.values().enumerate() {
-            let Some(&file_package_index) = package_positions.get(&file.package_id) else {
-                continue;
-            };
-            if file_package_index > package_index {
-                return insert_index.min(index);
-            }
-            insert_index = index.saturating_add(1);
         }
-        insert_index
+
+        let mut insert_index = 0_usize;
+        let mut remaining_files = self.files.values().peekable();
+        for current_package_id in self.packages.keys() {
+            while remaining_files
+                .peek()
+                .is_some_and(|file| file.package_id == *current_package_id)
+            {
+                remaining_files.next();
+                insert_index = insert_index.saturating_add(1);
+            }
+            if current_package_id == package_id {
+                return insert_index;
+            }
+        }
+
+        self.files.len()
     }
 
     pub(crate) fn reorder_files_by_package_order(&mut self) {
@@ -683,14 +688,5 @@ impl DownloadState {
         }
         reordered.extend(unresolved);
         self.url_order = reordered;
-    }
-
-    pub(crate) fn package_positions(&self) -> HashMap<PackageId, usize, FxBuildHasher> {
-        self.packages
-            .keys()
-            .copied()
-            .enumerate()
-            .map(|(index, package_id)| (package_id, index))
-            .collect()
     }
 }
