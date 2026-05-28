@@ -488,6 +488,8 @@ pub struct TotalsState {
     pub run_completed_bytes: u64,
     pub run_file_total: usize,
     pub run_file_completed: usize,
+    #[serde(default)]
+    pub run_file_downloading: usize,
     pub displayed_network_bytes: u64,
     pub displayed_network_rate_bps: u64,
 }
