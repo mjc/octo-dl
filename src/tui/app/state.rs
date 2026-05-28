@@ -333,6 +333,9 @@ impl App {
         size: u64,
         accounting: FileAccounting,
     ) {
+        if self.overlay_files.contains_key(file_id) {
+            self.forget_visible_file(file_id);
+        }
         self.with_deferred_batch_updates(|app| {
             app.apply_core_event(CoreEvent::PackageResolved {
                 package: ResolvedPackage {
@@ -361,6 +364,9 @@ impl App {
             file.path = path.to_string();
             file.accounting = accounting;
         }
+        crate::core::reducer::rebuild_derived_state(&mut self.core_state);
+        let _ = self.refresh_visible_core_file(file_id);
+        self.apply_cached_totals();
     }
 
     pub(crate) fn mutate_session_and_save<R>(

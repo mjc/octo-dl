@@ -27,7 +27,11 @@ fn finish_interactive_shutdown_if_ready(app: &mut App, shutting_down: &mut bool)
         }
     }
 
-    if *shutting_down && app.cancellation_tokens.is_empty() {
+    if *shutting_down {
+        app.drain_token_messages();
+    }
+
+    if *shutting_down && app.shutdown_pending_files.is_empty() {
         app.sync_session_for_shutdown();
         return true;
     }
@@ -183,7 +187,7 @@ async fn run_interactive_tui_loop(
 mod tests {
     use super::*;
     use crate::core::{CoreEvent, FileId, FileLifecycle, PackageKey, ResolvedFile, ResolvedPackage};
-    use crate::tui::app::{FileEntry, FileStatus};
+    use crate::tui::app::{FileEntry, FileStatus, VerificationTarget};
     use crate::tui::terminal_support::TerminalPanicHookGuard;
     use parking_lot::Mutex;
     use std::sync::Arc;
@@ -348,6 +352,193 @@ mod tests {
             .expect("file should exist after shutdown");
         assert_eq!(file.progress.visible_completed_bytes, 64);
         assert_eq!(file.progress.downloaded_network_bytes, 64);
+        assert_eq!(file.lifecycle, FileLifecycle::Queued);
+    }
+
+    #[test]
+    fn interactive_quit_waits_for_late_download_token_registration_before_syncing_session() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let file_id = FileId::from("episode.bin");
+
+        app.ensure_session_for_pending_urls();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/root"),
+                source_url: "https://mega.nz/folder/root".to_string(),
+                key: PackageKey::new("https://mega.nz/folder/root".to_string()),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.clone(),
+                    path: "episode.bin".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: file_id.clone(),
+            size: 128,
+        });
+        app.handle_file_progress_event(
+            file_id.clone(),
+            crate::core::ProgressDelta {
+                total_bytes_delta: 64,
+                network_bytes_delta: 64,
+            },
+            0,
+        );
+        app.flush_session_persistence();
+
+        let latest_before_quit =
+            crate::core::SessionSnapshot::latest().expect("session should exist before quit");
+        assert_eq!(
+            latest_before_quit
+                .find_file("episode.bin")
+                .expect("file should exist before quit")
+                .progress
+                .visible_completed_bytes,
+            0
+        );
+
+        app.should_quit = true;
+        let mut shutting_down = false;
+
+        assert!(!finish_interactive_shutdown_if_ready(
+            &mut app,
+            &mut shutting_down
+        ));
+        assert!(shutting_down);
+        assert!(app.paused);
+        assert!(app.cancellation_tokens.is_empty());
+
+        let latest_during_shutdown =
+            crate::core::SessionSnapshot::latest().expect("session should still exist");
+        assert_eq!(
+            latest_during_shutdown
+                .find_file("episode.bin")
+                .expect("file should still exist during shutdown")
+                .progress
+                .visible_completed_bytes,
+            0
+        );
+    }
+
+    #[test]
+    fn interactive_quit_waits_for_late_resume_validation_token_before_syncing_session() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let file_id = FileId::from("episode.bin");
+
+        app.ensure_session_for_pending_urls();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/root"),
+                source_url: "https://mega.nz/folder/root".to_string(),
+                key: PackageKey::new("https://mega.nz/folder/root".to_string()),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.clone(),
+                    path: "episode.bin".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        app.handle_resume_validation_started_event(file_id.clone(), 0);
+        app.handle_verification_progress_event(file_id.clone(), 64);
+        app.flush_session_persistence();
+
+        let latest_before_quit =
+            crate::core::SessionSnapshot::latest().expect("session should exist before quit");
+        assert_eq!(
+            latest_before_quit
+                .find_file("episode.bin")
+                .expect("file should exist before quit")
+                .progress
+                .visible_completed_bytes,
+            0
+        );
+
+        app.should_quit = true;
+        let mut shutting_down = false;
+
+        assert!(!finish_interactive_shutdown_if_ready(
+            &mut app,
+            &mut shutting_down
+        ));
+        assert!(shutting_down);
+        assert!(app.paused);
+        assert!(app.cancellation_tokens.is_empty());
+        assert!(app.verifying_files.contains(&file_id));
+
+        let latest_during_shutdown =
+            crate::core::SessionSnapshot::latest().expect("session should still exist");
+        assert_eq!(
+            latest_during_shutdown
+                .find_file("episode.bin")
+                .expect("file should still exist during shutdown")
+                .progress
+                .visible_completed_bytes,
+            0
+        );
+    }
+
+    #[test]
+    fn interactive_quit_skips_manual_reverify_without_blocking_shutdown() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let file_id = FileId::from("episode.bin");
+
+        app.ensure_session_for_pending_urls();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/root"),
+                source_url: "https://mega.nz/folder/root".to_string(),
+                key: PackageKey::new("https://mega.nz/folder/root".to_string()),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.clone(),
+                    path: "episode.bin".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        app.verifying_files.insert(file_id.clone());
+        app.verification_inflight_files.insert(file_id.clone());
+        app.verification_targets
+            .insert(file_id.clone(), VerificationTarget::Resume);
+        app.apply_core_event(CoreEvent::FileVerificationStarted {
+            file_id: file_id.clone(),
+        });
+        app.handle_verification_progress_event(file_id.clone(), 64);
+        app.flush_session_persistence();
+
+        app.should_quit = true;
+        let mut shutting_down = false;
+
+        assert!(finish_interactive_shutdown_if_ready(
+            &mut app,
+            &mut shutting_down
+        ));
+        assert!(shutting_down);
+        assert!(app.shutdown_pending_files.is_empty());
+        assert!(!app.verifying_files.contains(&file_id));
+        assert!(!app.verification_inflight_files.contains(&file_id));
+
+        let latest = crate::core::SessionSnapshot::latest().expect("session should be saved");
+        let file = latest
+            .find_file("episode.bin")
+            .expect("file should exist after shutdown");
+        assert_eq!(file.progress.visible_completed_bytes, 64);
+        assert_eq!(file.progress.verified_existing_bytes, 0);
         assert_eq!(file.lifecycle, FileLifecycle::Queued);
     }
 }

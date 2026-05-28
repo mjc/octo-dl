@@ -262,6 +262,8 @@ pub struct App {
     pub(super) download_task_running: bool,
     // Cancellation tokens for active downloads (maps file path to token)
     pub cancellation_tokens: FileIdMap<CancellationToken>,
+    pub(crate) shutdown_pending_files: FileIdSet,
+    pub(crate) shutdown_blocking_verifications: FileIdSet,
     // Per-file download attempt IDs for retry/reset flows
     pub file_attempt_ids: HashMap<FileId, u64>,
     // Files reset from the UI — used to suppress stale terminal events from the old attempt

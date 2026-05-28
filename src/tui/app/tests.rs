@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::tempdir;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus},
@@ -671,11 +672,17 @@ fn file_error_clears_verification_state() {
     let mut app = test_app();
     resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
     let file_id = mark_verification_inflight(&mut app, "file.bin");
+    let token = CancellationToken::new();
+    app.cancellation_tokens.insert(file_id.clone(), token.clone());
+    app.track_shutdown_pending_file(&file_id);
 
     app.handle_file_error_event(file_id.clone(), "network failed".to_string(), 0);
 
     assert!(!app.verifying_files.contains(&file_id));
     assert!(!app.verification_inflight_files.contains(&file_id));
+    assert!(!app.cancellation_tokens.contains_key(&file_id));
+    assert!(!app.shutdown_pending_files.contains(&file_id));
+    assert!(!token.is_cancelled());
     assert!(matches!(
         app.core_state.files[&file_id].lifecycle,
         FileLifecycle::Failed { .. }
@@ -703,11 +710,17 @@ fn file_complete_clears_verification_state() {
     let mut app = test_app();
     resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
     let file_id = mark_verification_inflight(&mut app, "file.bin");
+    let token = CancellationToken::new();
+    app.cancellation_tokens.insert(file_id.clone(), token.clone());
+    app.track_shutdown_pending_file(&file_id);
 
     app.handle_file_complete_event(file_id.clone(), 0);
 
     assert!(!app.verifying_files.contains(&file_id));
     assert!(!app.verification_inflight_files.contains(&file_id));
+    assert!(!app.cancellation_tokens.contains_key(&file_id));
+    assert!(!app.shutdown_pending_files.contains(&file_id));
+    assert!(!token.is_cancelled());
     assert!(matches!(
         app.core_state.files[&file_id].lifecycle,
         FileLifecycle::Complete
@@ -921,6 +934,116 @@ fn reverify_package_includes_failed_file_with_partial_progress() {
         }
     );
     assert!(url_rx.try_recv().is_err());
+}
+
+#[test]
+fn reverify_active_file_bumps_attempt_generation() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    let file_id: crate::core::FileId = "active.bin".to_string().into();
+    resolve_package(&mut app, "https://mega.nz/file/root", &[("active.bin", 100)]);
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: file_id.clone(),
+        size: 100,
+    });
+    app.apply_core_event(CoreEvent::FileProgress {
+        file_id: file_id.clone(),
+        total_bytes_delta: 47,
+        network_bytes_delta: 47,
+    });
+    app.sync_visible_files();
+
+    app.perform_reverify_file_action(&file_id);
+
+    assert_eq!(app.file_attempt_ids.get(&file_id), Some(&1));
+    assert!(app.verifying_files.contains(&file_id));
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        crate::tui::event::DownloadRequest::ReverifyFileIds {
+            source_url: "https://mega.nz/file/root".to_string(),
+            file_ids: vec![file_id],
+        }
+    );
+    assert!(url_rx.try_recv().is_err());
+}
+
+#[test]
+fn stale_old_attempt_progress_is_ignored_during_alt_r_reverify() {
+    let mut app = test_app();
+    let (url_tx, _url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    let file_id: crate::core::FileId = "active.bin".to_string().into();
+    resolve_package(&mut app, "https://mega.nz/file/root", &[("active.bin", 100)]);
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: file_id.clone(),
+        size: 100,
+    });
+    app.apply_core_event(CoreEvent::FileProgress {
+        file_id: file_id.clone(),
+        total_bytes_delta: 47,
+        network_bytes_delta: 47,
+    });
+    app.sync_visible_files();
+
+    app.perform_reverify_file_action(&file_id);
+    app.handle_download_event(crate::tui::event::DownloadEvent::Progress {
+        id: file_id.clone(),
+        delta: crate::core::ProgressDelta {
+            total_bytes_delta: 5,
+            network_bytes_delta: 5,
+        },
+        attempt_id: 0,
+    });
+
+    let file = app.visible_file(&file_id).expect("file should remain visible");
+    assert_eq!(file.downloaded, 0);
+    assert!(app.verifying_files.contains(&file_id));
+    assert!(app.verification_inflight_files.contains(&file_id));
+    assert_eq!(
+        app.file_attempt_ids.get(&file_id),
+        Some(&1),
+        "stale old-attempt events must no longer match after Alt-R on an active file"
+    );
+}
+
+#[test]
+fn stale_old_attempt_cancel_is_ignored_after_alt_r_resume() {
+    let mut app = test_app();
+    let (url_tx, _url_rx) = mpsc::unbounded_channel();
+    app.url_tx = url_tx;
+    let file_id: crate::core::FileId = "active.bin".to_string().into();
+    resolve_package(&mut app, "https://mega.nz/file/root", &[("active.bin", 100)]);
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: file_id.clone(),
+        size: 100,
+    });
+    app.apply_core_event(CoreEvent::FileProgress {
+        file_id: file_id.clone(),
+        total_bytes_delta: 47,
+        network_bytes_delta: 47,
+    });
+    app.sync_visible_files();
+
+    app.perform_reverify_file_action(&file_id);
+    app.handle_download_event(crate::tui::event::DownloadEvent::ResumeReverified {
+        id: file_id.clone(),
+        chunks: 1,
+        bytes: 47,
+    });
+    app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
+        id: file_id.clone(),
+        size: 100,
+        attempt_id: 1,
+    });
+    app.handle_download_event(crate::tui::event::DownloadEvent::FileCancelled {
+        id: file_id.clone(),
+        attempt_id: 0,
+    });
+
+    let file = app.visible_file(&file_id).expect("file should remain visible");
+    assert_eq!(file.downloaded, 47);
+    assert_eq!(file.status, FileStatus::Downloading);
 }
 
 #[test]
@@ -2439,6 +2562,51 @@ fn resume_reuse_then_progress_keeps_file_bandwidth_on_fresh_bytes_only() {
     assert_eq!(core_file.progress.downloaded_network_bytes, 25);
     assert_eq!(app.total_downloaded, 85);
     assert_eq!(app.total_network_downloaded, 25);
+}
+
+#[test]
+fn fast_trusted_resume_progress_is_not_double_counted_when_reuse_event_arrives() {
+    let mut app = test_app();
+    let url = "https://mega.nz/file/root";
+    let file_id = crate::core::FileId::from("file-id");
+    app.ensure_core_file(
+        &file_id,
+        url,
+        "file-id",
+        100,
+        crate::core::FileAccounting::CurrentRun,
+    );
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
+        id: file_id.clone(),
+        size: 100,
+        attempt_id: 0,
+    });
+    app.handle_download_event(crate::tui::event::DownloadEvent::Progress {
+        id: file_id.clone(),
+        delta: crate::core::ProgressDelta {
+            total_bytes_delta: 60,
+            network_bytes_delta: 0,
+        },
+        attempt_id: 0,
+    });
+    app.handle_download_event(crate::tui::event::DownloadEvent::ResumeReused {
+        id: file_id.clone(),
+        chunks: 1,
+        bytes: 60,
+        attempt_id: 0,
+    });
+
+    let core_file = app
+        .core_state
+        .files
+        .get(&file_id)
+        .expect("core file should exist");
+    assert_eq!(core_file.progress.visible_completed_bytes, 60);
+    assert_eq!(core_file.progress.verified_existing_bytes, 60);
+    assert_eq!(core_file.progress.downloaded_network_bytes, 0);
+    assert_eq!(app.total_downloaded, 60);
+    assert_eq!(app.total_network_downloaded, 0);
 }
 
 #[test]

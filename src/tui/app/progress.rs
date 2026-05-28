@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::core::PackageId;
+use crate::core::{FileAccounting, FileLifecycle, PackageId};
 
 use super::{App, FileStatus};
 
@@ -123,25 +123,40 @@ impl App {
     }
 
     pub(crate) fn apply_cached_totals(&mut self) {
+        let mut preexisting_complete_bytes = 0_u64;
+        let mut preexisting_complete_files = 0_usize;
+        for file in self.core_state.files.values() {
+            if matches!(file.accounting, FileAccounting::Preexisting)
+                && matches!(file.lifecycle, FileLifecycle::Complete)
+            {
+                preexisting_complete_bytes =
+                    preexisting_complete_bytes.saturating_add(file.size);
+                preexisting_complete_files = preexisting_complete_files.saturating_add(1);
+            }
+        }
         self.total_size = self
             .core_state
             .totals
             .run_total_bytes
+            .saturating_add(preexisting_complete_bytes)
             .saturating_add(self.overlay_total_size);
         self.total_downloaded = self
             .core_state
             .totals
             .run_completed_bytes
+            .saturating_add(preexisting_complete_bytes)
             .saturating_add(self.overlay_total_downloaded);
         self.files_completed = self
             .core_state
             .totals
             .run_file_completed
+            .saturating_add(preexisting_complete_files)
             .saturating_add(self.overlay_files_completed);
         self.files_total = self
             .core_state
             .totals
             .run_file_total
+            .saturating_add(preexisting_complete_files)
             .saturating_add(self.overlay_files_total);
         self.total_network_downloaded = self
             .core_state

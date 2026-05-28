@@ -943,7 +943,9 @@ async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> cra
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot};
+    use crate::test_support::{
+        CurrentDirGuard, FileFixtureStatus, UrlFixtureStatus, push_file, session_snapshot,
+    };
 
     #[test]
     fn progress_bar_creation() {
@@ -1001,6 +1003,8 @@ mod tests {
 
     #[test]
     fn resume_url_selection_excludes_fetched_urls_with_only_terminal_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let _cwd = CurrentDirGuard::set(dir.path());
         let mut session = session_snapshot(vec![(
             "https://mega.nz/file/complete",
             UrlFixtureStatus::Fetched,
@@ -1012,6 +1016,7 @@ mod tests {
             123,
             FileFixtureStatus::Completed,
         );
+        std::fs::write("complete.bin", vec![0_u8; 123]).unwrap();
 
         let urls = resumable_urls(&session);
         assert!(urls.is_empty());

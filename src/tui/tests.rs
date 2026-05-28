@@ -5,7 +5,8 @@ use crate::{
         SessionRunStatus, SessionSnapshot,
     },
     test_support::{
-        FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id, push_file,
+        CurrentDirGuard, FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id,
+        push_file,
         session_snapshot, write_dummy_legacy_resume_sidecar_for_path,
     },
     tui::{
@@ -221,6 +222,7 @@ fn resume_session_does_not_override_existing_login_credentials() {
 fn resume_session_restores_files_and_only_requeues_remaining_urls() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
+    let _cwd = CurrentDirGuard::set(dir.path());
 
     let mut session = session_snapshot(vec![
         ("https://mega.nz/file/completed", UrlFixtureStatus::Fetched),
@@ -240,6 +242,7 @@ fn resume_session_restores_files_and_only_requeues_remaining_urls() {
         256,
         FileFixtureStatus::Pending,
     );
+    std::fs::write("completed.mkv", vec![0_u8; 128]).unwrap();
     session.save().unwrap();
 
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -579,6 +582,115 @@ fn submitted_url_bootstraps_session_for_shutdown_persistence() {
             .iter()
             .any(|entry| entry.url == "https://mega.nz/file/pending")
     );
+}
+
+#[test]
+fn resume_session_missing_completed_file_is_requeued_and_shown_as_queued() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/completed",
+        UrlFixtureStatus::Fetched,
+    )]);
+    push_file(
+        &mut session,
+        0,
+        "completed.mkv",
+        128,
+        FileFixtureStatus::Completed,
+    );
+    session.save().unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+
+    app.resume_latest_session();
+
+    let completed = app
+        .files
+        .iter()
+        .find(|file| file.id == "completed.mkv")
+        .expect("completed file should stay visible");
+    assert_eq!(completed.status, FileStatus::Queued);
+    assert_eq!(completed.downloaded, 0);
+    assert_eq!(
+        app.tracked_urls(),
+        ["https://mega.nz/file/completed".to_string()].as_slice()
+    );
+
+    let mut url_rx = app.url_rx.take().expect("url_rx should exist");
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::ResumeFileIds {
+            source_url: "https://mega.nz/file/completed".to_string(),
+            file_ids: vec!["completed.mkv".to_string().into()],
+            attempt_ids: std::collections::HashMap::new(),
+        }
+    );
+    assert!(url_rx.try_recv().is_err());
+}
+
+#[test]
+fn resume_session_missing_completed_file_does_not_report_completed_startup_progress() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/completed",
+        UrlFixtureStatus::Fetched,
+    )]);
+    push_file(
+        &mut session,
+        0,
+        "completed.mkv",
+        128,
+        FileFixtureStatus::Completed,
+    );
+    session.save().unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+
+    app.resume_latest_session();
+
+    assert_eq!(app.files_completed, 0);
+    assert_eq!(app.total_downloaded, 0);
+}
+
+#[test]
+fn resume_session_partial_without_sidecar_surfaces_existing_bytes_on_startup() {
+    let dir = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let _cwd = CurrentDirGuard::set(dir.path());
+    std::fs::write("partial.bin.part", vec![0_u8; 80]).unwrap();
+
+    let mut session = session_snapshot(vec![(
+        "https://mega.nz/file/partial",
+        UrlFixtureStatus::Fetched,
+    )]);
+    push_file(
+        &mut session,
+        0,
+        "partial.bin",
+        128,
+        FileFixtureStatus::Pending,
+    );
+    session.save().unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(0, event_tx, true);
+
+    app.resume_latest_session();
+
+    let partial = app
+        .files
+        .iter()
+        .find(|file| file.id == "partial.bin")
+        .expect("partial file should stay visible");
+    assert_eq!(partial.status, FileStatus::Queued);
+    assert_eq!(partial.downloaded, 80);
+    assert_eq!(app.total_downloaded, 80);
 }
 
 #[test]

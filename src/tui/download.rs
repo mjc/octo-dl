@@ -1340,7 +1340,6 @@ async fn collect_node_set(
     let (package_id, package_display_name) = package_identity_for_nodes(nodes, &collected);
     resolved.package_id = Some(package_id);
     resolved.package_display_name = Some(package_display_name);
-    let skipped_count = 0;
     let keep_file = |path: &str| -> bool {
         match &node_set.requested_files {
             RequestedFiles::All => true,
@@ -1358,6 +1357,7 @@ async fn collect_node_set(
         .into_iter()
         .filter(|item| keep_file(&item.path))
         .collect::<Vec<_>>();
+    let skipped_count = completed.len();
 
     let mut partial_count: usize = 0;
     for item in &to_download {

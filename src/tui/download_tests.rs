@@ -339,8 +339,10 @@ fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
         .unwrap();
     assert_eq!(file.status, FileStatus::Complete);
     assert_eq!(file.downloaded, 128);
-    assert_eq!(app.files_completed, 0);
+    assert_eq!(app.files_completed, 1);
     assert_eq!(app.files_total, 1);
+    assert_eq!(app.total_downloaded, 128);
+    assert_eq!(app.total_size, 128);
 }
 
 #[test]
