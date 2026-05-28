@@ -18,6 +18,23 @@ fn should_draw_after_tick(app: &App, dashboard_dirty: bool) -> bool {
     dashboard_dirty || app.has_active_dashboard_transfer()
 }
 
+fn finish_interactive_shutdown_if_ready(app: &mut App, shutting_down: &mut bool) -> bool {
+    if app.should_quit && !*shutting_down {
+        *shutting_down = true;
+        if !app.begin_shutdown() {
+            app.sync_session_for_shutdown();
+            return true;
+        }
+    }
+
+    if *shutting_down && app.cancellation_tokens.is_empty() {
+        app.sync_session_for_shutdown();
+        return true;
+    }
+
+    false
+}
+
 pub async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
@@ -81,6 +98,7 @@ async fn run_interactive_tui_loop(
     let mut download_state_dirty = false;
     let mut dashboard_dirty = state_sync_enabled;
     let mut auto_login_after_first_draw = true;
+    let mut shutting_down = false;
 
     loop {
         let mut publish_dashboard_now = false;
@@ -148,8 +166,7 @@ async fn run_interactive_tui_loop(
             dashboard_dirty = false;
         }
 
-        if app.should_quit {
-            app.sync_session_for_shutdown();
+        if finish_interactive_shutdown_if_ready(app, &mut shutting_down) {
             break;
         }
 
@@ -165,10 +182,14 @@ async fn run_interactive_tui_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{CoreEvent, FileId, FileLifecycle, PackageKey, ResolvedFile, ResolvedPackage};
     use crate::tui::app::{FileEntry, FileStatus};
     use crate::tui::terminal_support::TerminalPanicHookGuard;
     use parking_lot::Mutex;
     use std::sync::Arc;
+    use tempfile::tempdir;
+
+    use crate::test_support::{StateDirectoryGuard, package_id};
 
     static TEST_PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
 
@@ -241,5 +262,92 @@ mod tests {
             status: FileStatus::Downloading,
         });
         assert!(should_draw_after_tick(&app, false));
+    }
+
+    #[test]
+    fn interactive_quit_waits_for_cancellation_before_syncing_session() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let file_id = FileId::from("episode.bin");
+
+        app.ensure_session_for_pending_urls();
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", "https://mega.nz/folder/root"),
+                source_url: "https://mega.nz/folder/root".to_string(),
+                key: PackageKey::new("https://mega.nz/folder/root".to_string()),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.clone(),
+                    path: "episode.bin".to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: file_id.clone(),
+            size: 128,
+        });
+        app.handle_file_progress_event(
+            file_id.clone(),
+            crate::core::ProgressDelta {
+                total_bytes_delta: 64,
+                network_bytes_delta: 64,
+            },
+            0,
+        );
+        app.flush_session_persistence();
+
+        let latest_before_quit =
+            crate::core::SessionSnapshot::latest().expect("session should exist before quit");
+        assert_eq!(
+            latest_before_quit
+                .find_file("episode.bin")
+                .expect("file should exist before quit")
+                .progress
+                .visible_completed_bytes,
+            0
+        );
+
+        let token = tokio_util::sync::CancellationToken::new();
+        app.cancellation_tokens.insert(file_id.clone(), token.clone());
+        app.should_quit = true;
+        let mut shutting_down = false;
+
+        assert!(!finish_interactive_shutdown_if_ready(
+            &mut app,
+            &mut shutting_down
+        ));
+        assert!(shutting_down);
+        assert!(app.paused);
+        assert!(token.is_cancelled());
+
+        let latest_during_shutdown =
+            crate::core::SessionSnapshot::latest().expect("session should still exist");
+        assert_eq!(
+            latest_during_shutdown
+                .find_file("episode.bin")
+                .expect("file should still exist during shutdown")
+                .progress
+                .visible_completed_bytes,
+            0
+        );
+
+        app.handle_file_cancelled_event(file_id.clone(), 0);
+        assert!(finish_interactive_shutdown_if_ready(
+            &mut app,
+            &mut shutting_down
+        ));
+
+        let latest = crate::core::SessionSnapshot::latest().expect("session should be saved");
+        let file = latest
+            .find_file("episode.bin")
+            .expect("file should exist after shutdown");
+        assert_eq!(file.progress.visible_completed_bytes, 64);
+        assert_eq!(file.progress.downloaded_network_bytes, 64);
+        assert_eq!(file.lifecycle, FileLifecycle::Queued);
     }
 }

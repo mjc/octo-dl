@@ -30,7 +30,7 @@ fn progress_summary_pct(
 }
 
 impl App {
-    fn begin_headless_shutdown(&mut self) -> bool {
+    pub(crate) fn begin_shutdown(&mut self) -> bool {
         self.drain_token_messages();
         self.pause_downloads();
         !self.cancellation_tokens.is_empty()
@@ -465,7 +465,7 @@ impl App {
                 () = &mut shutdown, if !shutting_down => {
                     shutting_down = true;
                     log::info!("Shutdown requested; cancelling active downloads");
-                    if !self.begin_headless_shutdown() {
+                    if !self.begin_shutdown() {
                         break;
                     }
                 },
@@ -578,14 +578,14 @@ mod tests {
     }
 
     #[test]
-    fn begin_headless_shutdown_cancels_active_tokens() {
+    fn begin_shutdown_cancels_active_tokens() {
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let mut app = App::new(9723, event_tx, true);
         let token = tokio_util::sync::CancellationToken::new();
         app.cancellation_tokens
             .insert("episode.bin".to_string().into(), token.clone());
 
-        let waiting = app.begin_headless_shutdown();
+        let waiting = app.begin_shutdown();
 
         assert!(waiting);
         assert!(app.paused);
