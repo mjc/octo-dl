@@ -1,5 +1,6 @@
 #[cfg(test)]
 use std::cell::Cell;
+#[cfg(debug_assertions)]
 use std::collections::HashMap;
 use std::time::Instant;
 
