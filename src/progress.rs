@@ -24,6 +24,7 @@ impl CumulativeProgress {
 #[cfg(test)]
 mod tests {
     use super::CumulativeProgress;
+    use proptest::{collection::vec, prelude::*};
 
     #[test]
     fn cumulative_progress_yields_true_deltas() {
@@ -69,5 +70,43 @@ mod tests {
         assert_eq!(tracker.delta(1_280), 256);
         assert_eq!(tracker.delta(1_152), 0);
         assert_eq!(tracker.delta(1_536), 256);
+    }
+
+    proptest! {
+        #[test]
+        fn cumulative_progress_matches_max_tracking_oracle(
+            initial_high_water in any::<u64>(),
+            cumulatives in vec(any::<u64>(), 0..64),
+        ) {
+            let tracker = CumulativeProgress::with_high_water(initial_high_water);
+            let mut expected_high_water = initial_high_water;
+
+            for cumulative in cumulatives {
+                let expected_delta = cumulative.saturating_sub(expected_high_water);
+                prop_assert_eq!(tracker.delta(cumulative), expected_delta);
+                expected_high_water = expected_high_water.max(cumulative);
+            }
+        }
+
+        #[test]
+        fn cumulative_progress_total_growth_matches_final_high_water(
+            initial_high_water in any::<u64>(),
+            cumulatives in vec(any::<u64>(), 0..64),
+        ) {
+            let tracker = CumulativeProgress::with_high_water(initial_high_water);
+            let total_delta: u128 = cumulatives
+                .iter()
+                .map(|&cumulative| u128::from(tracker.delta(cumulative)))
+                .sum();
+            let final_high_water = cumulatives
+                .iter()
+                .copied()
+                .fold(initial_high_water, u64::max);
+
+            prop_assert_eq!(
+                total_delta,
+                u128::from(final_high_water.saturating_sub(initial_high_water))
+            );
+        }
     }
 }
