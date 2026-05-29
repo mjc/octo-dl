@@ -834,6 +834,26 @@ fn delete_package_clears_verification_state_for_all_files() {
 }
 
 #[test]
+fn delete_package_clears_shutdown_pending_state_for_all_files() {
+    let mut app = test_app();
+    let package_id = resolve_package(
+        &mut app,
+        "https://mega.nz/folder/root",
+        &[("one.bin", 100), ("two.bin", 100)],
+    );
+    let one = crate::core::FileId::from("one.bin");
+    let two = crate::core::FileId::from("two.bin");
+    app.track_shutdown_pending_file(&one);
+    app.track_shutdown_pending_file(&two);
+
+    app.perform_delete_package_action(package_id);
+
+    for file_id in [one, two] {
+        assert!(!app.shutdown_pending_files.contains(&file_id));
+    }
+}
+
+#[test]
 fn reverify_package_with_only_never_started_files_is_noop() {
     let mut app = test_app();
     let (url_tx, mut url_rx) = mpsc::unbounded_channel();

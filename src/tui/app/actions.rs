@@ -611,6 +611,7 @@ impl App {
 
         for (file_id, _) in &file_contexts {
             self.cancel_file_token(file_id);
+            self.resolve_shutdown_pending_file(file_id);
             self.file_attempt_ids.remove(file_id);
             self.reset_pending_files.remove(file_id);
             self.clear_verification_state(file_id);
