@@ -6,6 +6,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, ListState};
+use rustc_hash::FxHashMap;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::core::PackageStatus;
 use crate::format_bytes;
@@ -46,6 +48,16 @@ pub(super) fn draw_dashboard_file_list(
     let render_width = usize::from(inner.width);
     let content_width = usize::from(area.width.saturating_sub(4));
     let blank = " ".repeat(render_width);
+    let packages_by_id = state
+        .packages
+        .iter()
+        .map(|package| (package.id.clone(), package))
+        .collect::<FxHashMap<_, _>>();
+    let files_by_id = state
+        .files
+        .iter()
+        .map(|file| (file.id.clone(), file))
+        .collect::<FxHashMap<_, _>>();
     for (line, row_index) in (offset..state.rows.len()).take(visible_height).enumerate() {
         let y = inner.y + u16::try_from(line).unwrap_or(0);
         let selected_row = selected == Some(row_index);
@@ -59,11 +71,7 @@ pub(super) fn draw_dashboard_file_list(
 
         match &state.rows[row_index] {
             DashboardRow::Package { package_id } => {
-                if let Some(package) = state
-                    .packages
-                    .iter()
-                    .find(|package| package.id == *package_id)
-                {
+                if let Some(package) = packages_by_id.get(package_id) {
                     render_dashboard_package_row(
                         frame,
                         package,
@@ -78,7 +86,7 @@ pub(super) fn draw_dashboard_file_list(
                 package_id,
                 file_id,
             } => {
-                if let Some(file) = state.files.iter().find(|file| file.id == *file_id) {
+                if let Some(file) = files_by_id.get(file_id) {
                     render_dashboard_file_row(
                         frame,
                         file,
@@ -595,35 +603,41 @@ pub(super) fn compact_label(value: &str) -> String {
         .to_string()
 }
 
-pub(super) fn truncate_end(value: &str, max_chars: usize) -> String {
-    truncate_end_cow(value, max_chars).into_owned()
+pub(super) fn truncate_end(value: &str, max_width: usize) -> String {
+    truncate_end_cow(value, max_width).into_owned()
 }
 
-pub(super) fn truncate_end_cow(value: &str, max_chars: usize) -> Cow<'_, str> {
-    if max_chars == 0 {
+pub(super) fn truncate_end_cow(value: &str, max_width: usize) -> Cow<'_, str> {
+    if max_width == 0 {
         return Cow::Borrowed("");
     }
     if value.is_ascii() {
-        if value.len() <= max_chars {
+        if value.len() <= max_width {
             return Cow::Borrowed(value);
         }
-        if max_chars <= 1 {
+        if max_width <= 1 {
             return Cow::Borrowed("\u{2026}");
         }
-        let mut truncated = value[..max_chars.saturating_sub(1)].to_string();
+        let mut truncated = value[..max_width.saturating_sub(1)].to_string();
         truncated.push('\u{2026}');
         return Cow::Owned(truncated);
     }
-    if text_width(value) <= max_chars {
+    if text_width(value) <= max_width {
         return Cow::Borrowed(value);
     }
-    if max_chars <= 1 {
+    if max_width <= 1 {
         return Cow::Borrowed("\u{2026}");
     }
-    let mut truncated = value
-        .chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>();
+    let mut width = 0_usize;
+    let mut truncated = String::new();
+    for ch in value.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width.saturating_add(ch_width) > max_width.saturating_sub(1) {
+            break;
+        }
+        width = width.saturating_add(ch_width);
+        truncated.push(ch);
+    }
     truncated.push('\u{2026}');
     Cow::Owned(truncated)
 }
@@ -632,6 +646,24 @@ pub(super) fn text_width(value: &str) -> usize {
     if value.is_ascii() {
         value.len()
     } else {
-        value.chars().count()
+        UnicodeWidthStr::width(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{text_width, truncate_end};
+
+    #[test]
+    fn text_width_uses_unicode_display_width() {
+        assert_eq!(text_width("表"), 2);
+        assert_eq!(text_width("a表"), 3);
+    }
+
+    #[test]
+    fn truncate_end_respects_unicode_display_width() {
+        assert_eq!(truncate_end("表x", 2), "…");
+        assert_eq!(truncate_end("ab表cd", 4), "ab…");
+        assert_eq!(text_width(&truncate_end("a表cd", 4)), 4);
     }
 }

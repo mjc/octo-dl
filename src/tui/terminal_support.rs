@@ -47,7 +47,15 @@ impl Drop for TerminalGuard {
 
 pub(crate) struct TerminalPanicHookGuard {
     _lock: parking_lot::MutexGuard<'static, ()>,
-    previous_hook: Arc<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync + 'static>,
+    previous_hook: Option<Arc<PanicHook>>,
+}
+
+struct PanicHook(Box<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync + 'static>);
+
+impl PanicHook {
+    fn call(&self, info: &panic::PanicHookInfo<'_>) {
+        (self.0)(info);
+    }
 }
 
 impl TerminalPanicHookGuard {
@@ -57,15 +65,15 @@ impl TerminalPanicHookGuard {
 
     pub(crate) fn install_with_cleanup(cleanup: Arc<dyn Fn() + Send + Sync + 'static>) -> Self {
         let lock = TERMINAL_PANIC_HOOK_LOCK.lock();
-        let previous_hook = Arc::new(panic::take_hook());
+        let previous_hook = Arc::new(PanicHook(panic::take_hook()));
         let previous_for_hook = Arc::clone(&previous_hook);
         panic::set_hook(Box::new(move |info| {
             cleanup();
-            previous_for_hook(info);
+            previous_for_hook.call(info);
         }));
         Self {
             _lock: lock,
-            previous_hook,
+            previous_hook: Some(previous_hook),
         }
     }
 }
@@ -75,8 +83,10 @@ impl Drop for TerminalPanicHookGuard {
         if std::thread::panicking() {
             return;
         }
-        let previous_hook = Arc::clone(&self.previous_hook);
-        panic::set_hook(Box::new(move |info| previous_hook(info)));
+        drop(panic::take_hook());
+        if let Some(previous_hook) = self.previous_hook.take().and_then(Arc::into_inner) {
+            panic::set_hook(previous_hook.0);
+        }
     }
 }
 

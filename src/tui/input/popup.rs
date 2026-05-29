@@ -82,104 +82,13 @@ fn handle_config_input(app: &mut App, key: KeyEvent) {
             app.config.active_field = (app.config.active_field + 1) % field_count;
         }
         KeyCode::Char('+' | '=') | KeyCode::Right => {
-            match ConfigField::ALL[app.config.active_field] {
-                ConfigField::ChunksPerFile => app.handle_ui_action(UiAction::UpdateConfig {
-                    chunks_per_file: Some(app.config.config.chunks_per_file.saturating_add(1)),
-                    mega_chunks_per_request: None,
-                    concurrent_files: None,
-                    force_overwrite: None,
-                    cleanup_on_error: None,
-                }),
-                ConfigField::MegaChunksPerRequest => app.handle_ui_action(UiAction::UpdateConfig {
-                    chunks_per_file: None,
-                    mega_chunks_per_request: Some(
-                        app.config.config.mega_chunks_per_request.saturating_add(1),
-                    ),
-                    concurrent_files: None,
-                    force_overwrite: None,
-                    cleanup_on_error: None,
-                }),
-                ConfigField::ConcurrentFiles => app.handle_ui_action(UiAction::UpdateConfig {
-                    chunks_per_file: None,
-                    mega_chunks_per_request: None,
-                    concurrent_files: Some(app.config.config.concurrent_files.saturating_add(1)),
-                    force_overwrite: None,
-                    cleanup_on_error: None,
-                }),
-                ConfigField::ForceOverwrite => app.handle_ui_action(UiAction::UpdateConfig {
-                    chunks_per_file: None,
-                    mega_chunks_per_request: None,
-                    concurrent_files: None,
-                    force_overwrite: Some(!app.config.config.force_overwrite),
-                    cleanup_on_error: None,
-                }),
-                ConfigField::CleanupOnError => app.handle_ui_action(UiAction::UpdateConfig {
-                    chunks_per_file: None,
-                    mega_chunks_per_request: None,
-                    concurrent_files: None,
-                    force_overwrite: None,
-                    cleanup_on_error: Some(!app.config.config.cleanup_on_error),
-                }),
-            }
+            update_active_config_field(app, true);
         }
-        KeyCode::Char('-') | KeyCode::Left => match ConfigField::ALL[app.config.active_field] {
-            ConfigField::ChunksPerFile => app.handle_ui_action(UiAction::UpdateConfig {
-                chunks_per_file: Some(app.config.config.chunks_per_file.saturating_sub(1).max(1)),
-                mega_chunks_per_request: None,
-                concurrent_files: None,
-                force_overwrite: None,
-                cleanup_on_error: None,
-            }),
-            ConfigField::MegaChunksPerRequest => app.handle_ui_action(UiAction::UpdateConfig {
-                chunks_per_file: None,
-                mega_chunks_per_request: Some(
-                    app.config
-                        .config
-                        .mega_chunks_per_request
-                        .saturating_sub(1)
-                        .max(1),
-                ),
-                concurrent_files: None,
-                force_overwrite: None,
-                cleanup_on_error: None,
-            }),
-            ConfigField::ConcurrentFiles => app.handle_ui_action(UiAction::UpdateConfig {
-                chunks_per_file: None,
-                mega_chunks_per_request: None,
-                concurrent_files: Some(app.config.config.concurrent_files.saturating_sub(1).max(1)),
-                force_overwrite: None,
-                cleanup_on_error: None,
-            }),
-            ConfigField::ForceOverwrite => app.handle_ui_action(UiAction::UpdateConfig {
-                chunks_per_file: None,
-                mega_chunks_per_request: None,
-                concurrent_files: None,
-                force_overwrite: Some(!app.config.config.force_overwrite),
-                cleanup_on_error: None,
-            }),
-            ConfigField::CleanupOnError => app.handle_ui_action(UiAction::UpdateConfig {
-                chunks_per_file: None,
-                mega_chunks_per_request: None,
-                concurrent_files: None,
-                force_overwrite: None,
-                cleanup_on_error: Some(!app.config.config.cleanup_on_error),
-            }),
-        },
+        KeyCode::Char('-') | KeyCode::Left => update_active_config_field(app, false),
         KeyCode::Char(' ') => match ConfigField::ALL[app.config.active_field] {
-            ConfigField::ForceOverwrite => app.handle_ui_action(UiAction::UpdateConfig {
-                chunks_per_file: None,
-                mega_chunks_per_request: None,
-                concurrent_files: None,
-                force_overwrite: Some(!app.config.config.force_overwrite),
-                cleanup_on_error: None,
-            }),
-            ConfigField::CleanupOnError => app.handle_ui_action(UiAction::UpdateConfig {
-                chunks_per_file: None,
-                mega_chunks_per_request: None,
-                concurrent_files: None,
-                force_overwrite: None,
-                cleanup_on_error: Some(!app.config.config.cleanup_on_error),
-            }),
+            ConfigField::ForceOverwrite | ConfigField::CleanupOnError => {
+                update_active_config_field(app, true)
+            }
             _ => {}
         },
         KeyCode::Enter | KeyCode::Esc => {
@@ -187,6 +96,63 @@ fn handle_config_input(app: &mut App, key: KeyEvent) {
         }
         _ => {}
     }
+}
+
+fn update_active_config_field(app: &mut App, increment: bool) {
+    let action = match ConfigField::ALL[app.config.active_field] {
+        ConfigField::ChunksPerFile => UiAction::UpdateConfig {
+            chunks_per_file: Some(if increment {
+                app.config.config.chunks_per_file.saturating_add(1)
+            } else {
+                app.config.config.chunks_per_file.saturating_sub(1).max(1)
+            }),
+            mega_chunks_per_request: None,
+            concurrent_files: None,
+            force_overwrite: None,
+            cleanup_on_error: None,
+        },
+        ConfigField::MegaChunksPerRequest => UiAction::UpdateConfig {
+            chunks_per_file: None,
+            mega_chunks_per_request: Some(if increment {
+                app.config.config.mega_chunks_per_request.saturating_add(1)
+            } else {
+                app.config
+                    .config
+                    .mega_chunks_per_request
+                    .saturating_sub(1)
+                    .max(1)
+            }),
+            concurrent_files: None,
+            force_overwrite: None,
+            cleanup_on_error: None,
+        },
+        ConfigField::ConcurrentFiles => UiAction::UpdateConfig {
+            chunks_per_file: None,
+            mega_chunks_per_request: None,
+            concurrent_files: Some(if increment {
+                app.config.config.concurrent_files.saturating_add(1)
+            } else {
+                app.config.config.concurrent_files.saturating_sub(1).max(1)
+            }),
+            force_overwrite: None,
+            cleanup_on_error: None,
+        },
+        ConfigField::ForceOverwrite => UiAction::UpdateConfig {
+            chunks_per_file: None,
+            mega_chunks_per_request: None,
+            concurrent_files: None,
+            force_overwrite: Some(!app.config.config.force_overwrite),
+            cleanup_on_error: None,
+        },
+        ConfigField::CleanupOnError => UiAction::UpdateConfig {
+            chunks_per_file: None,
+            mega_chunks_per_request: None,
+            concurrent_files: None,
+            force_overwrite: None,
+            cleanup_on_error: Some(!app.config.config.cleanup_on_error),
+        },
+    };
+    app.handle_ui_action(action);
 }
 
 fn handle_confirm_input(app: &mut App, key: KeyEvent) {

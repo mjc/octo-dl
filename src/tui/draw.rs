@@ -411,14 +411,11 @@ fn render_file_row_app(
         detail_width,
         text_width(display_name),
     );
-    let mut row_style = Style::default().fg(if app.is_verification_active(file_id) {
+    let row_style = Style::default().fg(if app.is_verification_active(file_id) {
         Color::Blue
     } else {
         color
     });
-    if selected {
-        row_style = row_style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
-    }
     let row_style = selected_style(row_style, selected);
     let detail_style = selected_style(Style::default().fg(detail_color), selected);
     let mut cursor = x;

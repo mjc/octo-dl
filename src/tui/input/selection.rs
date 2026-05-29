@@ -141,6 +141,12 @@ pub(super) fn move_selected_queue_item(app: &mut App, delta: isize) {
         }) => {
             app.handle_ui_action(UiAction::MoveFile { file_id, delta });
         }
+        Some(TuiRow::File {
+            package_id: None,
+            file_id,
+        }) => {
+            app.handle_ui_action(UiAction::MoveFile { file_id, delta });
+        }
         _ => {}
     }
 }

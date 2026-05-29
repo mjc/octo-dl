@@ -18,6 +18,20 @@ fn test_app() -> App {
     App::new(9723, tx, true)
 }
 
+fn assert_verification_state(
+    app: &App,
+    file_id: &str,
+    downloaded: u64,
+    verification_inflight: bool,
+) {
+    assert!(app.verifying_files.contains(file_id));
+    assert_eq!(
+        app.verification_inflight_files.contains(file_id),
+        verification_inflight
+    );
+    assert_eq!(app.files[0].downloaded, downloaded);
+}
+
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent {
         code,
@@ -1021,24 +1035,14 @@ fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
         id: "active.bin".to_string().into(),
         bytes_delta: 40,
     });
-    assert!(app.verifying_files.contains("active.bin"));
-    assert!(app.verification_inflight_files.contains("active.bin"));
-    assert_eq!(
-        app.files[0].downloaded, 40,
-        "blue verification progress should advance as bytes are checked"
-    );
+    assert_verification_state(&app, "active.bin", 40, true);
 
     app.handle_download_event(crate::tui::event::DownloadEvent::ResumeReverified {
         id: "active.bin".to_string().into(),
         chunks: 1,
         bytes: 70,
     });
-    assert!(app.verifying_files.contains("active.bin"));
-    assert!(!app.verification_inflight_files.contains("active.bin"));
-    assert_eq!(
-        app.files[0].downloaded, 70,
-        "Alt-R should publish the newly verified percent before resuming the progress bar"
-    );
+    assert_verification_state(&app, "active.bin", 70, false);
 
     app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
         id: "active.bin".to_string().into(),
