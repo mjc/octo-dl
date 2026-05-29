@@ -50,14 +50,20 @@ fn drain_ready_requests_collects_follow_up_verification_requests_in_order() {
         source_url: "https://mega.nz/folder/root".to_string(),
         file_ids: vec!["resume-b.bin".into()],
     };
-    tx.send(second.clone()).expect("second request should queue");
+    tx.send(second.clone())
+        .expect("second request should queue");
 
     let mut pending = VecDeque::from([first.clone()]);
     drain_ready_requests(&mut pending, &mut rx);
     assert_eq!(pending, VecDeque::from([first, second.clone()]));
 
-    let handled_first = pending.pop_front().expect("first request should be pending");
-    assert!(matches!(handled_first, DownloadRequest::ReverifyFileIds { .. }));
+    let handled_first = pending
+        .pop_front()
+        .expect("first request should be pending");
+    assert!(matches!(
+        handled_first,
+        DownloadRequest::ReverifyFileIds { .. }
+    ));
     tx.send(late.clone()).expect("late request should queue");
 
     drain_ready_requests(&mut pending, &mut rx);
@@ -194,13 +200,8 @@ fn unavailable_resume_priority_blocks_new_downloads_until_reverify_finishes() {
     let available = HashSet::from([resume_a.clone(), new_a, new_b]);
     let active = HashSet::from([resume_a]);
 
-    let selected = select_startable_file_ids(
-        &pending_queue,
-        &resume_priority_set,
-        &available,
-        &active,
-        1,
-    );
+    let selected =
+        select_startable_file_ids(&pending_queue, &resume_priority_set, &available, &active, 1);
 
     assert!(
         selected.is_empty(),

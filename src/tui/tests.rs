@@ -6,8 +6,7 @@ use crate::{
     },
     test_support::{
         CurrentDirGuard, FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id,
-        push_file,
-        session_snapshot, write_dummy_legacy_resume_sidecar_for_path,
+        push_file, session_snapshot, write_dummy_legacy_resume_sidecar_for_path,
     },
     tui::{
         draw::draw,
@@ -588,6 +587,7 @@ fn submitted_url_bootstraps_session_for_shutdown_persistence() {
 fn resume_session_missing_completed_file_is_requeued_and_shown_as_queued() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
+    let _cwd = CurrentDirGuard::set(dir.path());
 
     let mut session = session_snapshot(vec![(
         "https://mega.nz/file/completed",
@@ -635,6 +635,7 @@ fn resume_session_missing_completed_file_is_requeued_and_shown_as_queued() {
 fn resume_session_missing_completed_file_does_not_report_completed_startup_progress() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
+    let _cwd = CurrentDirGuard::set(dir.path());
 
     let mut session = session_snapshot(vec![(
         "https://mega.nz/file/completed",

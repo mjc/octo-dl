@@ -408,10 +408,7 @@ impl SchedulerState {
         self.resume_priority_set.extend(file_ids.iter().cloned());
     }
 
-    fn clear_resume_priority_file_ids(
-        &mut self,
-        file_ids: impl IntoIterator<Item = FileId>,
-    ) {
+    fn clear_resume_priority_file_ids(&mut self, file_ids: impl IntoIterator<Item = FileId>) {
         for file_id in file_ids {
             self.resume_priority_set.remove(&file_id);
         }
@@ -749,9 +746,7 @@ async fn flush_ready_download_requests(
     url_rx: &mut mpsc::UnboundedReceiver<DownloadRequest>,
 ) -> bool {
     while let Ok(request) = url_rx.try_recv() {
-        if !handle_download_request_batch(request, url_rx, runtime, scheduler, tx, token_tx)
-        .await
-        {
+        if !handle_download_request_batch(request, url_rx, runtime, scheduler, tx, token_tx).await {
             return false;
         }
     }
