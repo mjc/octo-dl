@@ -6,18 +6,10 @@ use tokio_util::sync::CancellationToken;
 use crate::fs::FileSystem;
 use crate::stats::FileStats;
 
-use super::callbacks::{
-    ChunkVerifiedState, DownloadCallbackState, DownloadProgress, ProgressCallbackState,
-    ResumeValidationStatusProgress,
-};
+use super::callbacks::DownloadProgress;
 use super::downloader::Downloader;
 use super::finalize::DownloadFinishContext;
-use super::resume_state::should_reuse_resume_state;
-use super::resume_tracker::ResumeTracker;
-use super::resume_validation::ResumeValidation;
-use super::sidecar::{delete_sidecar, part_path, sidecar_path};
-use super::sidecar_writer::LazySidecarWriter;
-use super::verify::expected_mac;
+use super::sidecar::{part_path, sidecar_path};
 
 impl<F: FileSystem> Downloader<F> {
     /// Ensures the parent directory exists for a file path.
@@ -64,78 +56,23 @@ impl<F: FileSystem> Downloader<F> {
 
         let pp = part_path(path);
         let sp = sidecar_path(path);
-        let expected_condensed_mac = expected_mac(node)?;
-        let boundaries = mega::mega_chunk_boundaries(node.size());
-        log::debug!(
-            "Download resume setup for {path}: size={} trust_resume_state={} force_overwrite={} part={} sidecar={} chunks={}",
-            node.size(),
-            trust_resume_state,
-            self.config.force_overwrite,
-            pp.display(),
-            sp.display(),
-            boundaries.len()
-        );
-        let reuse_resume_state =
-            should_reuse_resume_state(self.config.force_overwrite, trust_resume_state);
-        let resume_validation = if reuse_resume_state {
-            let resume_status_progress = ResumeValidationStatusProgress::new(progress.as_ref());
-            self.revalidate_resume_chunks(
+        let prepared = self
+            .prepare_transfer_resume(
                 node,
-                &boundaries,
+                path,
+                progress,
+                trust_resume_state,
                 &pp,
                 &sp,
-                expected_condensed_mac,
-                Some((path, &resume_status_progress)),
                 cancellation_token.as_ref(),
             )
-            .await?
-        } else {
-            ResumeValidation::empty(boundaries.len())
-        };
-        log::debug!(
-            "Download resume validation for {path}: sidecar_loaded={} trusted_chunks={} trusted_bytes={} source={:?}",
-            resume_validation.sidecar_loaded,
-            resume_validation.trusted_count,
-            resume_validation.trusted_bytes,
-            resume_validation.source
-        );
-        let preserve_existing = resume_validation.trusted_count > 0;
-        if !preserve_existing {
-            let _ = delete_sidecar(&sp).await;
-        }
-        if resume_validation.sidecar_loaded && resume_validation.trusted_count == 0 {
-            log::debug!("Resume sidecar found for {path}, but no chunks were reusable");
-        }
-        let trusted_bytes = resume_validation.trusted_bytes;
-
-        if trusted_bytes > 0 {
-            progress.on_resume_reused(path, resume_validation.trusted_count, trusted_bytes);
-        }
+            .await?;
 
         let file = self
             .fs
-            .open_part_file(&pp, node.size(), preserve_existing)
+            .open_part_file(&pp, node.size(), prepared.preserve_existing)
             .await?;
-
-        let trusted_for_download: Arc<[Option<[u8; 16]>]> =
-            resume_validation.trusted_chunks.clone().into();
-        let callback_state = Arc::new(DownloadCallbackState::new(
-            ProgressCallbackState::new(
-                path.to_string(),
-                node.size().saturating_sub(trusted_bytes),
-                trusted_bytes,
-                Arc::clone(progress),
-            ),
-            ChunkVerifiedState::new(
-                ResumeTracker::new(
-                    node.size(),
-                    expected_condensed_mac,
-                    resume_validation.trusted_chunks,
-                ),
-                LazySidecarWriter::new(sp.clone(), pp.clone()),
-            ),
-        ));
-        let callbacks: Arc<dyn mega::ParallelDownloadCallbacks> = callback_state.clone();
+        let callbacks: Arc<dyn mega::ParallelDownloadCallbacks> = prepared.callback_state.clone();
 
         let download_result = if let Some(token) = cancellation_token {
             let download_fut = self
@@ -145,7 +82,7 @@ impl<F: FileSystem> Downloader<F> {
                     file,
                     self.config.chunks_per_file,
                     Some(self.config.mega_chunks_per_request),
-                    Arc::clone(&trusted_for_download),
+                    Arc::clone(&prepared.trusted_for_download),
                     Some(callbacks),
                 );
             tokio::select! {
@@ -161,7 +98,7 @@ impl<F: FileSystem> Downloader<F> {
                     file,
                     self.config.chunks_per_file,
                     Some(self.config.mega_chunks_per_request),
-                    trusted_for_download,
+                    prepared.trusted_for_download,
                     Some(callbacks),
                 )
                 .await
@@ -173,9 +110,9 @@ impl<F: FileSystem> Downloader<F> {
                 path,
                 part_path: &pp,
                 sidecar_path: &sp,
-                reused_bytes: trusted_bytes,
-                stats: &callback_state.progress.stats,
-                chunk_verified: &callback_state.chunk_verified,
+                reused_bytes: prepared.trusted_bytes,
+                stats: &prepared.callback_state.progress.stats,
+                chunk_verified: &prepared.callback_state.chunk_verified,
                 progress,
                 name: path,
             },
