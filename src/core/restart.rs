@@ -293,7 +293,7 @@ mod tests {
             }],
             packages: vec![PackageSnapshot {
                 id: package_id("pkg", "https://mega.nz/file/test"),
-                key: crate::core::PackageKey::new("https://mega.nz/file/test".to_string().clone()),
+                key: crate::core::PackageKey::new("https://mega.nz/file/test".to_string()),
                 display_name: "pkg".to_string(),
                 files: vec![FileSnapshot {
                     id: "a.bin".to_string().into(),

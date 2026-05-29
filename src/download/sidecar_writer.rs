@@ -1,8 +1,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 
 use crate::fs::FileFingerprint;
@@ -69,15 +69,22 @@ struct SidecarWriterWorker {
     part_path: PathBuf,
     last_persisted_generation: Option<SidecarGeneration>,
     persist_event_tx: PersistEventTx,
+    abort_requested: Arc<AtomicBool>,
 }
 
 impl SidecarWriterWorker {
-    fn new(path: PathBuf, part_path: PathBuf, persist_event_tx: PersistEventTx) -> Self {
+    fn new(
+        path: PathBuf,
+        part_path: PathBuf,
+        persist_event_tx: PersistEventTx,
+        abort_requested: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             path,
             part_path,
             last_persisted_generation: None,
             persist_event_tx,
+            abort_requested,
         }
     }
 
@@ -112,6 +119,9 @@ impl SidecarWriterWorker {
 
     fn run(mut self, rx: mpsc::Receiver<SidecarWriterCommand>) {
         while let Ok(command) = rx.recv() {
+            if self.abort_requested.load(Ordering::Relaxed) {
+                break;
+            }
             match command {
                 SidecarWriterCommand::Persist(request) => {
                     self.persist_snapshot(request.generation, request.snapshot, request.allow_equal)
@@ -125,6 +135,7 @@ impl SidecarWriterWorker {
 pub(super) struct LazySidecarWriter {
     tx: Mutex<Option<Sender<SidecarWriterCommand>>>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    abort_requested: Arc<AtomicBool>,
     #[cfg(test)]
     persist_event_rx: PersistEventRx,
 }
@@ -132,10 +143,12 @@ pub(super) struct LazySidecarWriter {
 impl LazySidecarWriter {
     pub(super) fn new(path: PathBuf, part_path: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel();
+        let abort_requested = Arc::new(AtomicBool::new(false));
         #[cfg(test)]
         let (persist_event_tx, persist_event_rx) = mpsc::channel();
         #[cfg(test)]
         let persist_event_rx = Arc::new(Mutex::new(persist_event_rx));
+        let worker_abort_requested = Arc::clone(&abort_requested);
         let worker = std::thread::Builder::new()
             .name(format!("sidecar-writer:{}", path.display()))
             .spawn(move || {
@@ -146,6 +159,7 @@ impl LazySidecarWriter {
                     persist_event_tx,
                     #[cfg(not(test))]
                     (),
+                    worker_abort_requested,
                 )
                 .run(rx)
             })
@@ -153,6 +167,7 @@ impl LazySidecarWriter {
         Self {
             tx: Mutex::new(Some(tx)),
             worker: Mutex::new(Some(worker)),
+            abort_requested,
             #[cfg(test)]
             persist_event_rx,
         }
@@ -201,9 +216,14 @@ impl LazySidecarWriter {
         self.persist_snapshot(generation, snapshot, true);
     }
 
-    pub(super) async fn finish(&self, _shutdown: SidecarWriterShutdown) {
+    pub(super) async fn finish(&self, shutdown: SidecarWriterShutdown) {
+        if matches!(shutdown, SidecarWriterShutdown::Abort) {
+            self.abort_requested.store(true, Ordering::Relaxed);
+        }
         if let Some(tx) = self.tx.lock().unwrap().take() {
-            let _ = tx.send(SidecarWriterCommand::Finish);
+            if !matches!(shutdown, SidecarWriterShutdown::Abort) {
+                let _ = tx.send(SidecarWriterCommand::Finish);
+            }
         }
         let worker = self.worker.lock().unwrap().take();
         if let Some(worker) = worker {

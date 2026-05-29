@@ -188,7 +188,10 @@ impl SessionSnapshot {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
         }
-        std::fs::rename(tmp, path)?;
+        if let Err(error) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -620,5 +623,33 @@ packages = []
 
         assert!(SessionSnapshot::latest().is_none());
         assert!(path.exists());
+    }
+
+    #[test]
+    fn save_to_path_cleans_up_temp_file_when_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let session = SessionSnapshot::new(
+            DownloadConfig::default(),
+            SavedCredentials::encrypt("a", "b", None),
+        );
+        let mut session = session;
+        session.urls.push(SessionUrlSnapshot {
+            url: "https://mega.nz/folder/test".to_string(),
+            error: None,
+        });
+        let target_dir = dir.path().join("existing-target.postcard");
+        std::fs::create_dir(&target_dir).unwrap();
+        let tmp_path = temporary_save_path(&target_dir);
+
+        let error = session
+            .save_to_path(&target_dir)
+            .expect_err("renaming over a directory should fail");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::IsADirectory);
+        assert!(
+            !tmp_path.exists(),
+            "temporary snapshot should be removed after rename failure"
+        );
     }
 }

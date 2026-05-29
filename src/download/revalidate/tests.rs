@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use super::super::resume_state::ResumeReuseSource;
 use super::super::resume_state::resume_validation_percent;
 use super::super::revalidation_buffer::REVALIDATION_BUFFER_BYTES;
 use super::super::sidecar_store::{ResumeSidecar, VerifiedChunkRecord, save_sidecar_atomic};

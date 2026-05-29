@@ -61,6 +61,12 @@ pub(super) fn trust_resume_candidate(
     true
 }
 
+pub(super) fn mark_sidecar_source_if_trusted(validation: &mut ResumeValidation) {
+    if validation.trusted_count > 0 {
+        validation.source = Some(ResumeReuseSource::Sidecar);
+    }
+}
+
 pub(crate) fn should_emit_resume_validation_progress(
     last_report_at: Instant,
     now: Instant,
@@ -74,6 +80,8 @@ pub(crate) fn resume_fingerprint_matches(
 ) -> bool {
     expected.len == actual.len
         && (expected.modified_ns == 0 || expected.modified_ns == actual.modified_ns)
+        // Older or non-Unix captures may not have stable allocation/device/inode
+        // identifiers, so only enforce them when the sidecar recorded them.
         && expected
             .allocated_bytes
             .is_none_or(|allocated| actual.allocated_bytes == Some(allocated))

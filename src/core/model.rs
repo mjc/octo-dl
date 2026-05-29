@@ -133,13 +133,13 @@ impl FromStr for PackageId {
 
 impl PartialEq<&str> for PackageId {
     fn eq(&self, other: &&str) -> bool {
-        self.to_string() == *other
+        uuid::Uuid::parse_str(other).is_ok_and(|other| self.0 == other)
     }
 }
 
 impl PartialEq<String> for PackageId {
     fn eq(&self, other: &String) -> bool {
-        self.to_string() == *other
+        self == &other.as_str()
     }
 }
 
@@ -363,7 +363,6 @@ mod tests {
             let json = serde_json::to_string(&file_id).unwrap();
             let decoded: FileId = serde_json::from_str(&json).unwrap();
 
-            prop_assert_eq!(file_id.as_str(), raw.as_str());
             prop_assert_eq!(file_id.as_str(), raw.as_str());
             prop_assert_eq!(decoded.as_str(), file_id.as_str());
         }
