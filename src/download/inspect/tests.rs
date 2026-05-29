@@ -1,11 +1,11 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
-use super::super::test_support::*;
-use super::super::{
-    CURRENT_RESUME_SIDECAR_VERSION, LegacyJsonVerifiedChunkRecord, ResumeSidecar,
-    VerifiedChunkRecord,
+use super::super::downloader::CURRENT_RESUME_SIDECAR_VERSION;
+use super::super::sidecar_store::{
+    LegacyJsonVerifiedChunkRecord, ResumeSidecar, VerifiedChunkRecord,
 };
+use super::super::test_support::*;
 use super::*;
 
 #[test]
