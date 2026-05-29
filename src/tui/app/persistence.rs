@@ -194,14 +194,33 @@ fn session_persistence_worker(
 }
 
 fn persist_latest_save(
-    mut session: SessionSnapshot,
+    session: SessionSnapshot,
     path: PathBuf,
     request_rx: &mpsc::Receiver<SessionPersistenceRequest>,
     error_tx: &mpsc::Sender<SessionPersistenceError>,
     save_call_count: &SaveCallCount,
     save_event_tx: &SaveEventTx,
 ) -> Option<SessionPersistenceRequest> {
-    let first_queued_at = Instant::now();
+    persist_latest_save_from(
+        session,
+        path,
+        request_rx,
+        error_tx,
+        save_call_count,
+        save_event_tx,
+        Instant::now(),
+    )
+}
+
+fn persist_latest_save_from(
+    mut session: SessionSnapshot,
+    path: PathBuf,
+    request_rx: &mpsc::Receiver<SessionPersistenceRequest>,
+    error_tx: &mpsc::Sender<SessionPersistenceError>,
+    save_call_count: &SaveCallCount,
+    save_event_tx: &SaveEventTx,
+    first_queued_at: Instant,
+) -> Option<SessionPersistenceRequest> {
     loop {
         let max_remaining = SESSION_SAVE_MAX_DELAY.saturating_sub(first_queued_at.elapsed());
         let wait_for = SESSION_SAVE_DEBOUNCE.min(max_remaining);
@@ -467,28 +486,50 @@ mod tests {
     fn steady_same_path_save_stream_flushes_within_max_delay() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.postcard");
-        let persistence = SessionPersistence::new();
-        let save_events = persistence.save_event_listener();
-        persistence.reset_save_call_count();
         let base = session_snapshot(vec![(
             "https://mega.nz/file/root",
             UrlFixtureStatus::Fetched,
         )]);
+        let (request_tx, request_rx) = mpsc::channel();
+        let (error_tx, error_rx) = mpsc::channel();
+        let save_call_count = Arc::new(AtomicUsize::new(0));
+        let (save_event_tx, save_event_rx) = mpsc::channel();
 
-        for index in 0..10 {
+        let mut first = base.clone();
+        first.id = "session-0".to_string();
+
+        for index in 1..10 {
             let mut session = base.clone();
             session.id = format!("session-{index}");
-            persistence.save(session, path.clone());
-            thread::sleep(SESSION_SAVE_DEBOUNCE / 2);
+            request_tx
+                .send(SessionPersistenceRequest::Save {
+                    session,
+                    path: path.clone(),
+                })
+                .unwrap();
         }
 
-        assert_eq!(wait_for_save_event(&save_events), Some(path.clone()));
-        persistence.flush();
+        let first_queued_at =
+            Instant::now() - (SESSION_SAVE_MAX_DELAY - (SESSION_SAVE_DEBOUNCE / 2));
+        let next = persist_latest_save_from(
+            first,
+            path.clone(),
+            &request_rx,
+            &error_tx,
+            &save_call_count,
+            &save_event_tx,
+            first_queued_at,
+        );
+
+        assert!(next.is_none());
+        assert_eq!(
+            save_event_rx.recv_timeout(Duration::from_millis(20)).ok(),
+            Some(path.clone())
+        );
         let loaded = SessionSnapshot::load(&path).unwrap();
         assert_eq!(loaded.id, "session-9");
-        let extra_saves = drain_save_events(&save_events);
-        assert!(extra_saves.len() <= 1);
-        assert!(extra_saves.iter().all(|saved_path| saved_path == &path));
-        assert_eq!(persistence.save_call_count(), 1 + extra_saves.len());
+        assert!(error_rx.try_recv().is_err());
+        assert!(save_event_rx.try_recv().is_err());
+        assert_eq!(save_call_count.load(Ordering::Relaxed), 1);
     }
 }

@@ -850,7 +850,6 @@ mod tests {
         let legacy_path = SessionSnapshot::legacy_state_path_for(&session.id);
         session.save_to_path(&legacy_path).unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
         session.status = SessionRunStatus::Paused;
         session.save().unwrap();
         assert_eq!(

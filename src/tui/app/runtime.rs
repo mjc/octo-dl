@@ -591,12 +591,23 @@ mod tests {
         tui::event::TokenMessage,
     };
     use tempfile::tempdir;
+    use tokio::sync::oneshot;
 
     fn shared_snapshot(shared_state: &crate::tui::app::SharedAppState) -> DownloadDashboardState {
         crate::tui::dashboard::dashboard_state_from_postcard(
             shared_state.state_rx.borrow().as_ref(),
         )
         .expect("shared state should contain valid postcard")
+    }
+
+    async fn assert_task_stays_pending<T>(handle: &tokio::task::JoinHandle<T>) {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+            assert!(
+                !handle.is_finished(),
+                "task finished before the gated event was released"
+            );
+        }
     }
 
     #[test]
@@ -659,8 +670,8 @@ mod tests {
     async fn headless_shutdown_waits_for_file_cancellation_events() {
         let dir = tempdir().expect("temp dir should exist");
         let _guard = StateDirectoryGuard::set(dir.path());
-        let (event_tx, mut download_rx) = mpsc::unbounded_channel();
-        let (_action_tx, mut action_rx) = mpsc::unbounded_channel();
+        let (event_tx, download_rx) = mpsc::unbounded_channel();
+        let (_action_tx, action_rx) = mpsc::unbounded_channel();
         let mut app = App::new(9723, event_tx.clone(), true);
         let file_id = crate::core::FileId::from("episode.bin");
         app.apply_core_event(CoreEvent::PackageResolved {
@@ -685,28 +696,42 @@ mod tests {
         app.cancellation_tokens
             .insert(file_id.clone(), token.clone());
         let cancelled_id = file_id.clone();
+        let (release_cancel_tx, release_cancel_rx) = oneshot::channel();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = release_cancel_rx.await;
             let _ = event_tx.send(DownloadEvent::FileCancelled {
                 id: cancelled_id,
                 attempt_id: 0,
             });
         });
 
-        tokio::time::timeout(
-            Duration::from_secs(1),
+        let handle = tokio::spawn(async move {
+            let mut download_rx = download_rx;
+            let mut action_rx = action_rx;
             app.run_headless_until_shutdown(
                 &mut download_rx,
                 &mut action_rx,
                 None,
                 std::future::ready(()),
-            ),
-        )
-        .await
-        .expect("headless shutdown should complete after cancellation drains");
+            )
+            .await;
+            app
+        });
+
+        while !token.is_cancelled() {
+            tokio::task::yield_now().await;
+        }
+        assert_task_stays_pending(&handle).await;
+        release_cancel_tx.send(()).unwrap();
+
+        let app = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("headless shutdown should complete after cancellation drains")
+            .expect("headless task should join");
 
         assert!(token.is_cancelled());
         assert!(app.cancellation_tokens.is_empty());
+        assert!(app.shutdown_pending_files.is_empty());
         assert!(app.paused);
     }
 
@@ -747,13 +772,15 @@ mod tests {
         let sent_token = token.clone();
         let sent_id = file_id.clone();
         let send_tx = event_tx.clone();
+        let (release_token_tx, release_token_rx) = oneshot::channel();
+        let (release_cancel_tx, release_cancel_rx) = oneshot::channel();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = release_token_rx.await;
             let _ = token_tx.send(TokenMessage {
                 file_id: sent_id.clone(),
                 token: sent_token,
             });
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = release_cancel_rx.await;
             let _ = send_tx.send(DownloadEvent::FileCancelled {
                 id: sent_id,
                 attempt_id: 0,
@@ -773,11 +800,13 @@ mod tests {
             app
         });
 
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(
-            !handle.is_finished(),
-            "headless shutdown should wait for late token registration"
-        );
+        assert_task_stays_pending(&handle).await;
+        release_token_tx.send(()).unwrap();
+        while !token.is_cancelled() {
+            tokio::task::yield_now().await;
+        }
+        assert_task_stays_pending(&handle).await;
+        release_cancel_tx.send(()).unwrap();
 
         let app = tokio::time::timeout(Duration::from_secs(1), handle)
             .await
@@ -824,13 +853,15 @@ mod tests {
         let sent_token = token.clone();
         let sent_id = file_id.clone();
         let send_tx = event_tx.clone();
+        let (release_token_tx, release_token_rx) = oneshot::channel();
+        let (release_cancel_tx, release_cancel_rx) = oneshot::channel();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = release_token_rx.await;
             let _ = token_tx.send(TokenMessage {
                 file_id: sent_id.clone(),
                 token: sent_token,
             });
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = release_cancel_rx.await;
             let _ = send_tx.send(DownloadEvent::FileCancelled {
                 id: sent_id,
                 attempt_id: 0,
@@ -850,11 +881,13 @@ mod tests {
             app
         });
 
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(
-            !handle.is_finished(),
-            "headless shutdown should wait for late resume-validation tokens"
-        );
+        assert_task_stays_pending(&handle).await;
+        release_token_tx.send(()).unwrap();
+        while !token.is_cancelled() {
+            tokio::task::yield_now().await;
+        }
+        assert_task_stays_pending(&handle).await;
+        release_cancel_tx.send(()).unwrap();
 
         let app = tokio::time::timeout(Duration::from_secs(1), handle)
             .await
