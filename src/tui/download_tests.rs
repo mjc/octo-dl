@@ -76,56 +76,178 @@ fn test_app() -> App {
     App::new(9723, tx, true)
 }
 
-#[test]
-fn verification_progress_buffers_small_updates() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let progress = VerificationProgress::new(tx, "file.bin".into());
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
 
-    progress.on_progress(
-        "file.bin",
-        ProgressDelta {
-            total_bytes_delta: VERIFICATION_PROGRESS_EVENT_BYTES - 1,
-            network_bytes_delta: 0,
-        },
-    );
+    fn dedup_file_ids(values: &[u8]) -> Vec<FileId> {
+        let mut seen = HashSet::new();
+        let mut deduped = Vec::new();
+        for value in values {
+            if seen.insert(*value) {
+                deduped.push(FileId::from(format!("file-{value}.bin")));
+            }
+        }
+        deduped
+    }
 
-    assert!(rx.try_recv().is_err());
+    fn dedup_file_id_set(values: &[u8]) -> HashSet<FileId> {
+        dedup_file_ids(values).into_iter().collect()
+    }
 
-    progress.flush_pending();
+    fn expected_startable_file_ids(
+        pending_queue: &VecDeque<FileId>,
+        resume_priority_set: &HashSet<FileId>,
+        available_file_ids: &HashSet<FileId>,
+        active_downloads: &HashSet<FileId>,
+        capacity: usize,
+    ) -> Vec<FileId> {
+        if capacity == 0 {
+            return Vec::new();
+        }
 
-    let DownloadEvent::VerificationProgress { id, bytes_delta } =
-        rx.try_recv().expect("flush should emit pending progress")
-    else {
-        panic!("expected verification progress event");
-    };
-    assert_eq!(id, FileId::from("file.bin"));
-    assert_eq!(bytes_delta, VERIFICATION_PROGRESS_EVENT_BYTES - 1);
-    assert!(rx.try_recv().is_err());
-}
+        let mut selected_priority = Vec::new();
+        for file_id in pending_queue {
+            if resume_priority_set.contains(file_id)
+                && available_file_ids.contains(file_id)
+                && !active_downloads.contains(file_id)
+            {
+                selected_priority.push(file_id.clone());
+                if selected_priority.len() == capacity {
+                    return selected_priority;
+                }
+            }
+        }
+        if !selected_priority.is_empty() {
+            return selected_priority;
+        }
+        if resume_priority_set
+            .iter()
+            .any(|file_id| !active_downloads.contains(file_id))
+        {
+            return Vec::new();
+        }
 
-#[test]
-fn verification_progress_emits_at_batch_threshold() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let progress = VerificationProgress::new(tx, "file.bin".into());
+        let mut selected = Vec::new();
+        for file_id in pending_queue {
+            if available_file_ids.contains(file_id) && !active_downloads.contains(file_id) {
+                selected.push(file_id.clone());
+                if selected.len() == capacity {
+                    break;
+                }
+            }
+        }
+        selected
+    }
 
-    progress.on_progress(
-        "file.bin",
-        ProgressDelta {
-            total_bytes_delta: VERIFICATION_PROGRESS_EVENT_BYTES,
-            network_bytes_delta: 0,
-        },
-    );
+    proptest! {
+        #[test]
+        fn select_startable_file_ids_matches_resume_priority_contract(
+            pending in proptest::collection::vec(0u8..20, 0..12),
+            resume_priority in proptest::collection::vec(0u8..20, 0..12),
+            available in proptest::collection::vec(0u8..20, 0..12),
+            active in proptest::collection::vec(0u8..20, 0..12),
+            capacity in 0usize..8,
+        ) {
+            let pending_queue = VecDeque::from(dedup_file_ids(&pending));
+            let resume_priority_set = dedup_file_id_set(&resume_priority);
+            let available_set = dedup_file_id_set(&available);
+            let active_set = dedup_file_id_set(&active);
 
-    let DownloadEvent::VerificationProgress { id, bytes_delta } =
-        rx.try_recv().expect("threshold should emit progress")
-    else {
-        panic!("expected verification progress event");
-    };
-    assert_eq!(id, FileId::from("file.bin"));
-    assert_eq!(bytes_delta, VERIFICATION_PROGRESS_EVENT_BYTES);
+            let selected = select_startable_file_ids(
+                &pending_queue,
+                &resume_priority_set,
+                &available_set,
+                &active_set,
+                capacity,
+            );
+            let expected = expected_startable_file_ids(
+                &pending_queue,
+                &resume_priority_set,
+                &available_set,
+                &active_set,
+                capacity,
+            );
 
-    progress.flush_pending();
-    assert!(rx.try_recv().is_err());
+            prop_assert_eq!(selected, expected);
+        }
+
+        #[test]
+        fn verification_progress_emits_positive_events_that_sum_to_input(
+            deltas in proptest::collection::vec(0u64..(VERIFICATION_PROGRESS_EVENT_BYTES * 2), 0..20),
+        ) {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let progress = VerificationProgress::new(tx, "file.bin".into());
+            let expected_total = deltas.iter().copied().sum::<u64>();
+
+            for total_bytes_delta in &deltas {
+                progress.on_progress(
+                    "file.bin",
+                    ProgressDelta {
+                        total_bytes_delta: *total_bytes_delta,
+                        network_bytes_delta: 0,
+                    },
+                );
+            }
+            progress.flush_pending();
+
+            let mut actual_total = 0u64;
+            let mut events = 0usize;
+            while let Ok(event) = rx.try_recv() {
+                let DownloadEvent::VerificationProgress { id, bytes_delta } = event else {
+                    prop_assert!(false, "unexpected event emitted");
+                    continue;
+                };
+                prop_assert_eq!(id, FileId::from("file.bin"));
+                prop_assert!(bytes_delta > 0);
+                actual_total = actual_total.saturating_add(bytes_delta);
+                events = events.saturating_add(1);
+            }
+
+            prop_assert_eq!(actual_total, expected_total);
+            if expected_total == 0 {
+                prop_assert_eq!(events, 0);
+            }
+        }
+
+        #[test]
+        fn progress_deltas_are_clamped_to_file_size(
+            file_size in 1u64..2_000_001,
+            deltas in proptest::collection::vec(0u64..2_000_001, 0..20),
+        ) {
+            let mut app = test_app();
+            app.ensure_core_file(
+                &"test.bin".to_string().into(),
+                "https://mega.nz/file/test",
+                "test.bin",
+                file_size,
+                crate::core::FileAccounting::CurrentRun,
+            );
+
+            app.handle_download_event(DownloadEvent::FileStart {
+                id: "test.bin".to_string().into(),
+                size: file_size,
+                attempt_id: 0,
+            });
+
+            for delta in &deltas {
+                app.handle_download_event(DownloadEvent::Progress {
+                    id: "test.bin".into(),
+                    delta: ProgressDelta {
+                        total_bytes_delta: *delta,
+                        network_bytes_delta: *delta,
+                    },
+                    attempt_id: 0,
+                });
+            }
+
+            let expected_downloaded = deltas.iter().copied().sum::<u64>().min(file_size);
+            let file = app.files.iter().find(|f| f.id == "test.bin").unwrap();
+            prop_assert_eq!(file.downloaded, expected_downloaded);
+            prop_assert!(file.downloaded <= file.size);
+            prop_assert_eq!(app.total_downloaded, expected_downloaded);
+        }
+    }
 }
 
 #[test]
@@ -573,50 +695,6 @@ fn expand_dlc_path_leaves_non_filesystem_inputs_unchanged() {
         expand_dlc_path("/tmp/archive.dlc").unwrap(),
         "/tmp/archive.dlc".to_string()
     );
-}
-
-#[test]
-fn progress_deltas_do_not_exceed_file_size() {
-    let mut app = test_app();
-    let file_size: u64 = 1_000_000;
-    app.ensure_core_file(
-        &"test.bin".to_string().into(),
-        "https://mega.nz/file/test",
-        "test.bin",
-        file_size,
-        crate::core::FileAccounting::CurrentRun,
-    );
-
-    app.handle_download_event(DownloadEvent::FileStart {
-        id: "test.bin".to_string().into(),
-        size: file_size,
-        attempt_id: 0,
-    });
-
-    let deltas = [100_000u64, 250_000, 350_000, 200_000, 100_000];
-    for d in deltas {
-        app.handle_download_event(DownloadEvent::Progress {
-            id: "test.bin".into(),
-            delta: ProgressDelta {
-                total_bytes_delta: d,
-                network_bytes_delta: d,
-            },
-            attempt_id: 0,
-        });
-    }
-
-    let file = app.files.iter().find(|f| f.id == "test.bin").unwrap();
-    assert_eq!(
-        file.downloaded, file_size,
-        "downloading rows may reach full byte progress before completion"
-    );
-    assert!(
-        file.downloaded <= file.size,
-        "downloaded ({}) must not exceed size ({})",
-        file.downloaded,
-        file.size,
-    );
-    assert_eq!(app.total_downloaded, file_size);
 }
 
 #[test]
