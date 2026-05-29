@@ -15,61 +15,93 @@ fn file_status_variants() {
     assert_ne!(FileStatus::Complete, FileStatus::Missing);
 }
 
-#[test]
-fn classify_partial_clamps_verified_resume_bytes_to_part_size() {
-    let local = classify_observed_local_file(
-        ObservedLocalFile {
-            final_size: None,
-            part_size: Some(128),
-            part_allocated_bytes: None,
-            has_sidecar: true,
-            verified_resume_bytes: 256,
-        },
-        512,
-        false,
-    );
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
 
-    assert_eq!(local.status, FileStatus::Partial);
-    assert_eq!(local.existing_partial_bytes, 128);
-    assert_eq!(local.verified_resume_bytes, 128);
-}
+    proptest! {
+        #[test]
+        fn classify_force_overwrite_always_reports_missing(
+            final_size in proptest::option::of(0u64..1_000_001),
+            part_size in proptest::option::of(0u64..1_000_001),
+            part_allocated_bytes in proptest::option::of(0u64..2_000_001),
+            has_sidecar in any::<bool>(),
+            verified_resume_bytes in 0u64..2_000_001,
+            expected_size in 0u64..1_000_001,
+        ) {
+            let local = classify_observed_local_file(
+                ObservedLocalFile {
+                    final_size,
+                    part_size,
+                    part_allocated_bytes,
+                    has_sidecar,
+                    verified_resume_bytes,
+                },
+                expected_size,
+                true,
+            );
 
-#[test]
-fn classify_partial_reports_exact_sized_part_as_existing_bytes_without_sidecar() {
-    let local = classify_observed_local_file(
-        ObservedLocalFile {
-            final_size: None,
-            part_size: Some(512),
-            part_allocated_bytes: None,
-            has_sidecar: false,
-            verified_resume_bytes: 0,
-        },
-        512,
-        false,
-    );
+            prop_assert_eq!(local, InspectedLocalFile::default());
+        }
 
-    assert_eq!(local.status, FileStatus::Partial);
-    assert_eq!(local.existing_partial_bytes, 512);
-    assert_eq!(local.verified_resume_bytes, 0);
-}
+        #[test]
+        fn classify_matching_final_size_is_complete_when_not_force_overwrite(
+            part_size in proptest::option::of(0u64..1_000_001),
+            part_allocated_bytes in proptest::option::of(0u64..2_000_001),
+            has_sidecar in any::<bool>(),
+            verified_resume_bytes in 0u64..2_000_001,
+            expected_size in 0u64..1_000_001,
+        ) {
+            let local = classify_observed_local_file(
+                ObservedLocalFile {
+                    final_size: Some(expected_size),
+                    part_size,
+                    part_allocated_bytes,
+                    has_sidecar,
+                    verified_resume_bytes,
+                },
+                expected_size,
+                false,
+            );
 
-#[test]
-fn classify_partial_reports_oversized_part_as_expected_existing_bytes_without_sidecar() {
-    let local = classify_observed_local_file(
-        ObservedLocalFile {
-            final_size: None,
-            part_size: Some(2_048),
-            part_allocated_bytes: None,
-            has_sidecar: false,
-            verified_resume_bytes: 0,
-        },
-        1_024,
-        false,
-    );
+            prop_assert_eq!(local.status, FileStatus::Complete);
+            prop_assert_eq!(local.existing_partial_bytes, 0);
+            prop_assert!(!local.has_resume_sidecar);
+            prop_assert_eq!(local.verified_resume_bytes, 0);
+        }
 
-    assert_eq!(local.status, FileStatus::Partial);
-    assert_eq!(local.existing_partial_bytes, 1_024);
-    assert_eq!(local.verified_resume_bytes, 0);
+        #[test]
+        fn classify_partial_clamps_bytes_and_preserves_sidecar_flag(
+            part_size in 0u64..1_000_001,
+            expected_size in 0u64..1_000_001,
+            part_allocated_bytes in proptest::option::of(0u64..2_000_001),
+            has_sidecar in any::<bool>(),
+            verified_resume_bytes in 0u64..2_000_001,
+        ) {
+            let local = classify_observed_local_file(
+                ObservedLocalFile {
+                    final_size: None,
+                    part_size: Some(part_size),
+                    part_allocated_bytes,
+                    has_sidecar,
+                    verified_resume_bytes,
+                },
+                expected_size,
+                false,
+            );
+
+            let verified_clamped = verified_resume_bytes.min(part_size).min(expected_size);
+            prop_assert_eq!(local.status, FileStatus::Partial);
+            prop_assert_eq!(local.has_resume_sidecar, has_sidecar);
+            prop_assert_eq!(local.verified_resume_bytes, verified_clamped);
+            prop_assert!(local.existing_partial_bytes >= verified_clamped);
+            prop_assert!(local.existing_partial_bytes <= part_size.min(expected_size));
+
+            if part_allocated_bytes.is_none() && !has_sidecar {
+                prop_assert_eq!(local.existing_partial_bytes, part_size.min(expected_size));
+            }
+        }
+    }
 }
 
 #[tokio::test]

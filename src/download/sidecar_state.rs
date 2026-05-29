@@ -159,87 +159,48 @@ mod tests {
         persist_revalidated_sidecar, trust_resume_candidate,
     };
     use crate::fs::{FileSystem, TokioFileSystem};
+    use proptest::prelude::*;
 
-    #[test]
-    fn resume_tracker_updates_verified_chunks_incrementally() {
-        let mut tracker = ResumeTracker::new(
-            300_000,
-            [9_u8; 8],
-            vec![Some([1_u8; 16]), None, Some([3_u8; 16])],
-        );
-
-        let initial = tracker.snapshot();
-        assert_eq!(
-            initial.verified_chunks,
-            vec![
-                VerifiedChunkRecord {
-                    index: 0,
-                    mac: [1_u8; 16]
-                },
-                VerifiedChunkRecord {
-                    index: 2,
-                    mac: [3_u8; 16]
-                }
-            ]
-        );
-
-        assert!(tracker.mark_verified(1, [2_u8; 16]));
-        assert!(!tracker.mark_verified(1, [2_u8; 16]));
-
-        let updated = tracker.snapshot();
-        assert_eq!(
-            updated.verified_chunks,
-            vec![
-                VerifiedChunkRecord {
-                    index: 0,
-                    mac: [1_u8; 16]
-                },
-                VerifiedChunkRecord {
-                    index: 1,
-                    mac: [2_u8; 16]
-                },
-                VerifiedChunkRecord {
-                    index: 2,
-                    mac: [3_u8; 16]
-                }
-            ]
-        );
+    fn expected_verified_chunks(chunk_macs: &[Option<[u8; 16]>]) -> Vec<VerifiedChunkRecord> {
+        chunk_macs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, mac)| {
+                mac.map(|mac| VerifiedChunkRecord {
+                    index: u32::try_from(index).unwrap(),
+                    mac,
+                })
+            })
+            .collect()
     }
 
-    #[test]
-    fn resume_tracker_replaces_existing_verified_chunk_without_duplication() {
-        let mut tracker = ResumeTracker::new(300_000, [9_u8; 8], vec![Some([1_u8; 16]), None]);
+    proptest! {
+        #[test]
+        fn resume_tracker_snapshot_matches_latest_verified_state(
+            initial in proptest::collection::vec(proptest::option::of(any::<[u8; 16]>()), 0..16),
+            updates in proptest::collection::vec((0usize..32, any::<[u8; 16]>()), 0..32),
+        ) {
+            let mut tracker = ResumeTracker::new(300_000, [9_u8; 8], initial.clone());
+            let mut expected = initial;
 
-        assert!(tracker.mark_verified(0, [7_u8; 16]));
+            for (raw_index, mac) in updates {
+                let changed = if let Some(slot) = expected.get_mut(raw_index) {
+                    let changed = slot.as_ref() != Some(&mac);
+                    if changed {
+                        *slot = Some(mac);
+                    }
+                    changed
+                } else {
+                    false
+                };
+                prop_assert_eq!(tracker.mark_verified(raw_index as u32, mac), changed);
+            }
 
-        let snapshot = tracker.snapshot();
-        assert_eq!(
-            snapshot.verified_chunks,
-            vec![VerifiedChunkRecord {
-                index: 0,
-                mac: [7_u8; 16]
-            }]
-        );
-    }
-
-    #[test]
-    fn resume_tracker_keeps_sorted_order_for_out_of_order_insertions() {
-        let mut tracker = ResumeTracker::new(300_000, [9_u8; 8], vec![None; 3]);
-
-        assert!(tracker.mark_verified(2, [3_u8; 16]));
-        assert!(tracker.mark_verified(0, [1_u8; 16]));
-        assert!(tracker.mark_verified(1, [2_u8; 16]));
-        assert!(tracker.mark_verified(2, [4_u8; 16]));
-
-        let snapshot = tracker.snapshot();
-        assert_eq!(
-            snapshot
-                .verified_chunks
-                .iter()
-                .map(|record| (record.index, record.mac))
-                .collect::<Vec<_>>(),
-            vec![(0, [1_u8; 16]), (1, [2_u8; 16]), (2, [4_u8; 16]),]
-        );
+            let snapshot = tracker.snapshot();
+            prop_assert_eq!(snapshot.file_size, 300_000);
+            prop_assert_eq!(snapshot.expected_condensed_mac, [9_u8; 8]);
+            prop_assert_eq!(snapshot.verified_chunks, expected_verified_chunks(&expected));
+        }
     }
 
     #[test]
@@ -250,23 +211,47 @@ mod tests {
         assert!(tracker.snapshot().verified_chunks.is_empty());
     }
 
-    #[test]
-    fn trust_resume_candidate_tracks_bytes_once_per_chunk() {
-        let mut validation = ResumeValidation::empty(3);
-        let candidate = TrustedResumeChunkCandidate {
-            index: 1,
-            length: 65_536,
-            expected_mac: [7_u8; 16],
-        };
+    proptest! {
+        #[test]
+        fn trust_resume_candidate_counts_each_chunk_once(
+            chunk_count in 1usize..16,
+            candidates in proptest::collection::vec((0usize..32, 0u64..1_000_001, any::<[u8; 16]>()), 0..32),
+        ) {
+            let mut validation = ResumeValidation::empty(chunk_count);
+            let mut expected_chunks = vec![None; chunk_count];
+            let mut expected_count = 0usize;
+            let mut expected_bytes = 0u64;
 
-        assert!(trust_resume_candidate(&mut validation, candidate));
-        assert!(!trust_resume_candidate(&mut validation, candidate));
+            for (raw_index, length, expected_mac) in candidates {
+                let index = raw_index % chunk_count;
+                let changed = if expected_chunks[index].is_none() {
+                    expected_chunks[index] = Some(expected_mac);
+                    expected_count = expected_count.saturating_add(1);
+                    expected_bytes = expected_bytes.saturating_add(length);
+                    true
+                } else {
+                    false
+                };
 
-        assert_eq!(validation.trusted_chunks[1], Some([7_u8; 16]));
-        assert_eq!(validation.trusted_count, 1);
-        assert_eq!(validation.trusted_bytes, 65_536);
-        assert!(!validation.sidecar_loaded);
-        assert_eq!(validation.source, None);
+                prop_assert_eq!(
+                    trust_resume_candidate(
+                        &mut validation,
+                        TrustedResumeChunkCandidate {
+                            index,
+                            length,
+                            expected_mac,
+                        }
+                    ),
+                    changed
+                );
+            }
+
+            prop_assert_eq!(validation.trusted_chunks, expected_chunks);
+            prop_assert_eq!(validation.trusted_count, expected_count);
+            prop_assert_eq!(validation.trusted_bytes, expected_bytes);
+            prop_assert!(!validation.sidecar_loaded);
+            prop_assert_eq!(validation.source, None);
+        }
     }
 
     #[tokio::test]

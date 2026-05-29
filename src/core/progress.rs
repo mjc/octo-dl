@@ -139,24 +139,100 @@ fn throughput_weight(elapsed: Duration, decay: Duration) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{ProgressDelta, RateEstimator};
+    use proptest::prelude::*;
     use std::time::{Duration, Instant};
 
-    #[test]
-    fn progress_delta_tracks_network_separately() {
-        let delta = ProgressDelta {
-            total_bytes_delta: 300,
-            network_bytes_delta: 120,
-        };
-        assert_eq!(delta.total_bytes_delta, 300);
-        assert_eq!(delta.network_bytes_delta, 120);
-    }
+    proptest! {
+        #[test]
+        fn progress_delta_round_trips_fields(total_bytes_delta in any::<u64>(), network_bytes_delta in any::<u64>()) {
+            let delta = ProgressDelta {
+                total_bytes_delta,
+                network_bytes_delta,
+            };
+            prop_assert_eq!(delta.total_bytes_delta, total_bytes_delta);
+            prop_assert_eq!(delta.network_bytes_delta, network_bytes_delta);
+        }
 
-    #[test]
-    fn rate_estimator_uses_only_recorded_total() {
-        let mut rate = RateEstimator::default();
-        let start = Instant::now();
-        rate.reset(0, start);
-        rate.record(100, start + Duration::from_secs(2));
-        assert!(rate.bytes_per_sec(start + Duration::from_secs(2)) > 0);
+        #[test]
+        fn throughput_weight_stays_in_unit_interval(
+            decay_secs in 1u64..1_001,
+            elapsed_secs in 0u64..10_001,
+        ) {
+            let weight =
+                super::throughput_weight(Duration::from_secs(elapsed_secs), Duration::from_secs(decay_secs));
+            prop_assert!(weight.is_finite());
+            prop_assert!(weight >= 0.0);
+            prop_assert!(weight <= 1.0);
+        }
+
+        #[test]
+        fn throughput_weight_decreases_with_elapsed(
+            decay_secs in 1u64..1_001,
+            first_secs in 0u64..5_001,
+            extra_secs in 0u64..5_001,
+        ) {
+            let decay = Duration::from_secs(decay_secs);
+            let first = super::throughput_weight(Duration::from_secs(first_secs), decay);
+            let second = super::throughput_weight(Duration::from_secs(first_secs + extra_secs), decay);
+            prop_assert!(second <= first);
+        }
+
+        #[test]
+        fn rate_estimator_reports_zero_before_min_sample_span(
+            total in any::<u64>(),
+            millis in 0u64..1_000,
+        ) {
+            let mut rate = RateEstimator::default();
+            let start = Instant::now();
+            rate.reset(total, start);
+            prop_assert_eq!(rate.bytes_per_sec(start + Duration::from_millis(millis)), 0);
+        }
+
+        #[test]
+        fn rate_estimator_reports_positive_after_forward_progress(
+            start_total in 0u64..1_000_001,
+            delta in 1u64..1_000_001,
+            secs in 1u64..121,
+        ) {
+            let mut rate = RateEstimator::default();
+            let start = Instant::now();
+            let now = start + Duration::from_secs(secs);
+            rate.reset(start_total, start);
+            rate.record(start_total + delta, now);
+            prop_assert!(rate.bytes_per_sec(now) > 0);
+        }
+
+        #[test]
+        fn rate_estimator_resets_when_total_goes_backwards(
+            start_total in 1u64..1_000_001,
+            lower_total in 0u64..1_000_001,
+            secs in 1u64..121,
+        ) {
+            prop_assume!(lower_total < start_total);
+            let mut rate = RateEstimator::default();
+            let start = Instant::now();
+            let now = start + Duration::from_secs(secs);
+            rate.reset(start_total, start);
+            rate.record(lower_total, now);
+            prop_assert_eq!(rate.bytes_per_sec(now + Duration::from_secs(1)), 0);
+        }
+
+        #[test]
+        fn rate_estimator_resets_when_time_goes_backwards(
+            delta in 1u64..1_000_001,
+            initial_secs in 2u64..121,
+            earlier_secs in 0u64..120,
+        ) {
+            prop_assume!(earlier_secs < initial_secs);
+            let mut rate = RateEstimator::default();
+            let start = Instant::now();
+            let first = start + Duration::from_secs(initial_secs);
+            let earlier = start + Duration::from_secs(earlier_secs);
+            rate.reset(0, start);
+            rate.record(delta, first);
+            prop_assert!(rate.bytes_per_sec(first) > 0);
+            rate.record(delta.saturating_add(1), earlier);
+            prop_assert_eq!(rate.bytes_per_sec(earlier + Duration::from_secs(1)), 0);
+        }
     }
 }
