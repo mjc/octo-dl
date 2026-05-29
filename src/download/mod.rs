@@ -20,6 +20,7 @@ mod sidecar_writer;
 #[cfg(test)]
 mod test_support;
 mod transfer;
+mod transfer_prepare;
 mod verify;
 
 pub use self::callbacks::{DownloadProgress, NoProgress};
