@@ -163,3 +163,35 @@ async fn revalidate_candidates_from_part_honors_pre_cancelled_token() {
 
     assert!(matches!(error, Error::Cancelled));
 }
+
+#[tokio::test]
+async fn revalidate_candidates_from_part_ignores_out_of_range_candidate_indexes() {
+    let fs = MockFileSystem::new();
+    let part_path = Path::new("virtual.part");
+    let file_size = 300_000_u64;
+    let data = test_incompressible_plaintext(usize_from_u64(file_size));
+    fs.add_bytes(part_path, data.clone());
+    let boundaries = mega::mega_chunk_boundaries(file_size);
+    let first = boundaries[0];
+    let mac = mega::compute_mega_chunk_mac(chunk_data(&data, &first), &TEST_AES_KEY, &TEST_AES_IV);
+    let sidecar = sidecar_for_chunk(file_size, [9_u8; 8], first.index, mac);
+
+    let validation = revalidate_candidates_from_part(
+        &fs,
+        validation_input(&boundaries, part_path, &sidecar, None),
+        vec![TrustedResumeChunkCandidate {
+            index: boundaries.len(),
+            length: first.length,
+            expected_mac: mac,
+        }],
+        first.length,
+        Some(first.length),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(validation.trusted_count, 0);
+    assert_eq!(validation.trusted_bytes, 0);
+    assert_eq!(validation.source, None);
+}

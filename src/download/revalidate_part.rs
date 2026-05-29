@@ -87,7 +87,11 @@ pub(super) async fn revalidate_candidates_from_part<F: FileSystem>(
         if cancellation_token.is_some_and(|token| token.is_cancelled()) {
             return Err(Error::Cancelled);
         }
-        if validation.trusted_chunks[candidate.index].is_some() {
+        if validation
+            .trusted_chunks
+            .get(candidate.index)
+            .is_some_and(Option::is_some)
+        {
             continue;
         }
         if revalidate_candidate_from_part(fs, &input, candidate, &mut buffer, cancellation_token)
