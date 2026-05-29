@@ -1,8 +1,7 @@
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use super::super::{ResumeSidecar, load_sidecar};
+use super::super::{ResumeSidecar, load_sidecar, wait_for_persist_event};
 use super::{
     ChunkVerifiedState, DownloadCallbackState, DownloadProgress, LazySidecarWriter, NoProgress,
     ProgressCallbackState, ResumeTracker, ResumeValidationStatusProgress, SidecarWriterShutdown,
@@ -71,27 +70,6 @@ fn resume_validation_status_progress_suppresses_regular_progress() {
 
 #[tokio::test]
 async fn chunk_verified_persists_sidecar_after_each_chunk() {
-    async fn wait_for_sidecar_chunks(sidecar_path: &Path, expected_chunks: usize) -> ResumeSidecar {
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
-        loop {
-            if let Ok(Some(sidecar)) = tokio::time::timeout(
-                tokio::time::Duration::from_millis(25),
-                load_sidecar(sidecar_path),
-            )
-            .await
-            {
-                if sidecar.verified_chunks.len() == expected_chunks {
-                    return sidecar;
-                }
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "sidecar never reached {expected_chunks} verified chunks"
-            );
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
-    }
-
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("file.bin");
     let file_path = file_path.to_string_lossy().into_owned();
@@ -103,20 +81,28 @@ async fn chunk_verified_persists_sidecar_after_each_chunk() {
         .await
         .unwrap();
 
+    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path.clone());
+    let persist_events = writer.persist_event_listener();
     let verified = ChunkVerifiedState::new(
         ResumeTracker::new(file_size, [9_u8; 8], vec![None; boundaries.len()]),
-        LazySidecarWriter::new(sidecar_path.clone(), part_path.clone()),
+        writer,
     );
 
     verified.mark_verified(boundaries[0].index, [1_u8; 16]);
-    let first = wait_for_sidecar_chunks(&sidecar_path, 1).await;
+    assert!(wait_for_persist_event(persist_events.clone()).await);
+    let first = load_sidecar(&sidecar_path)
+        .await
+        .expect("first verified chunk should be persisted");
     assert_eq!(first.verified_chunks.len(), 1);
     assert_eq!(first.verified_chunks[0].index, boundaries[0].index);
     assert_eq!(first.verified_chunks[0].mac, [1_u8; 16]);
     assert!(first.part_fingerprint.is_some());
 
     verified.mark_verified(boundaries[1].index, [2_u8; 16]);
-    let second = wait_for_sidecar_chunks(&sidecar_path, 2).await;
+    assert!(wait_for_persist_event(persist_events).await);
+    let second = load_sidecar(&sidecar_path)
+        .await
+        .expect("second verified chunk should be persisted");
     assert_eq!(second.verified_chunks.len(), 2);
     assert_eq!(second.verified_chunks[0].index, boundaries[0].index);
     assert_eq!(second.verified_chunks[0].mac, [1_u8; 16]);
