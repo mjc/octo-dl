@@ -64,8 +64,26 @@ fn html_escape_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::{collection::vec, prelude::*};
 
     const ICON_SVG: &str = include_str!("assets/icon.svg");
+
+    fn htmlish_string() -> impl Strategy<Value = String> {
+        vec(
+            prop_oneof![
+                Just('&'),
+                Just('"'),
+                Just('<'),
+                Just('>'),
+                proptest::char::range(' ', '~')
+                    .prop_filter("exclude duplicated special chars", |ch| {
+                        !matches!(ch, '&' | '"' | '<' | '>')
+                    }),
+            ],
+            0..32,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
+    }
 
     #[test]
     fn bookmarklet_mentions_fallback_host_and_api_key_header() {
@@ -108,5 +126,53 @@ mod tests {
     #[test]
     fn icon_svg_is_nonempty() {
         assert!(ICON_SVG.starts_with("<svg "));
+    }
+
+    proptest! {
+        #[test]
+        fn html_escape_attr_rewrites_all_raw_html_metacharacters(value in htmlish_string()) {
+            let escaped = html_escape_attr(&value);
+            let without_entities = escaped
+                .replace("&amp;", "")
+                .replace("&quot;", "")
+                .replace("&lt;", "")
+                .replace("&gt;", "");
+
+            prop_assert!(!without_entities.contains('&'));
+            prop_assert!(!without_entities.contains('"'));
+            prop_assert!(!without_entities.contains('<'));
+            prop_assert!(!without_entities.contains('>'));
+        }
+
+        #[test]
+        fn html_escape_text_rewrites_text_html_metacharacters(value in htmlish_string()) {
+            let escaped = html_escape_text(&value);
+            let without_entities = escaped
+                .replace("&amp;", "")
+                .replace("&lt;", "")
+                .replace("&gt;", "");
+
+            prop_assert!(!without_entities.contains('&'));
+            prop_assert!(!without_entities.contains('<'));
+            prop_assert!(!without_entities.contains('>'));
+        }
+
+        #[test]
+        fn bookmarklet_html_embeds_escaped_inputs_without_placeholders(
+            fallback_origin in htmlish_string(),
+            fallback_host in htmlish_string(),
+            api_key_header in htmlish_string(),
+        ) {
+            let html = bookmarklet_html(&fallback_origin, &fallback_host, &api_key_header);
+            let escaped_href = html_escape_attr(&bookmarklet_href(&fallback_origin, &api_key_header));
+            let escaped_host = html_escape_text(&fallback_host);
+            let expected_href = format!(r#"href="{}""#, escaped_href);
+            let expected_host = format!("<p>Configured to use <code>{}</code></p>", escaped_host);
+
+            prop_assert!(html.contains(&expected_href));
+            prop_assert!(html.contains(&expected_host));
+            prop_assert!(!html.contains("__BOOKMARKLET_HREF__"));
+            prop_assert!(!html.contains("__FALLBACK_HOST__"));
+        }
     }
 }
