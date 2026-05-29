@@ -400,4 +400,104 @@ mod tests {
         let urls = extract_urls(&encoded);
         assert_eq!(urls, vec!["https://mega.nz/file/abc#key123"]);
     }
+
+    mod property_tests {
+        use super::*;
+        use proptest::{prelude::*, string::string_regex};
+
+        fn scheme() -> impl Strategy<Value = &'static str> {
+            prop_oneof![Just("https"), Just("http")]
+        }
+
+        fn fragment() -> impl Strategy<Value = String> {
+            string_regex("[A-Za-z0-9_-]{1,16}").expect("valid fragment regex")
+        }
+
+        fn canonical_file_url(scheme: &str, node_id: &str, node_key: &str) -> String {
+            format!("{scheme}://mega.nz/file/{node_id}#{node_key}")
+        }
+
+        fn canonical_folder_url(scheme: &str, node_id: &str, node_key: &str) -> String {
+            format!("{scheme}://mega.nz/folder/{node_id}#{node_key}")
+        }
+
+        proptest! {
+            #[test]
+            fn normalize_mega_url_normalizes_legacy_file_urls(
+                scheme in scheme(),
+                node_id in fragment(),
+                node_key in fragment(),
+            ) {
+                let legacy = format!("{scheme}://mega.nz/#!{node_id}!{node_key}");
+                prop_assert_eq!(
+                    normalize_mega_url(&legacy),
+                    Some(canonical_file_url(scheme, &node_id, &node_key)),
+                );
+            }
+
+            #[test]
+            fn normalize_mega_url_normalizes_legacy_folder_urls(
+                scheme in scheme(),
+                node_id in fragment(),
+                node_key in fragment(),
+            ) {
+                let legacy = format!("{scheme}://mega.nz/#F!{node_id}!{node_key}");
+                prop_assert_eq!(
+                    normalize_mega_url(&legacy),
+                    Some(canonical_folder_url(scheme, &node_id, &node_key)),
+                );
+            }
+
+            #[test]
+            fn extract_urls_deduplicates_plain_and_encoded_forms(
+                scheme in scheme(),
+                node_id in fragment(),
+                node_key in fragment(),
+            ) {
+                let legacy = format!("{scheme}://mega.nz/#!{node_id}!{node_key}");
+                let canonical = canonical_file_url(scheme, &node_id, &node_key);
+                let encoded = STANDARD.encode(&legacy);
+                let input = format!("{legacy}\n{canonical}\n{encoded}");
+
+                prop_assert_eq!(extract_urls(&input), vec![canonical]);
+            }
+
+            #[test]
+            fn extract_urls_decodes_up_to_three_rounds(
+                scheme in scheme(),
+                node_id in fragment(),
+                node_key in fragment(),
+            ) {
+                let legacy = format!("{scheme}://mega.nz/#!{node_id}!{node_key}");
+                let expected = canonical_file_url(scheme, &node_id, &node_key);
+                let once = STANDARD.encode(&legacy);
+                let twice = STANDARD.encode(&once);
+                let thrice = STANDARD.encode(&twice);
+                let quadruple = STANDARD.encode(&thrice);
+
+                prop_assert_eq!(extract_urls(&thrice), vec![expected.clone()]);
+                prop_assert!(!extract_urls(&quadruple).contains(&expected));
+            }
+
+            #[test]
+            fn is_dlc_path_accepts_case_insensitive_suffix(
+                stem in fragment(),
+                extension in prop_oneof![Just("dlc"), Just("DLC"), Just("DlC"), Just("dLc")],
+            ) {
+                let path = format!("{stem}.{extension}");
+                prop_assert!(is_dlc_path(&path));
+            }
+
+            #[test]
+            fn is_dlc_path_rejects_other_extensions(
+                stem in fragment(),
+                extension in string_regex("[A-Za-z0-9]{1,6}")
+                    .expect("valid extension regex")
+                    .prop_filter("extension must not be dlc", |ext| !ext.eq_ignore_ascii_case("dlc")),
+            ) {
+                let path = format!("{stem}.{extension}");
+                prop_assert!(!is_dlc_path(&path));
+            }
+        }
+    }
 }
