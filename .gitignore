@@ -4,7 +4,7 @@
 
 # Profiling artifacts
 perf*.data
-*.old
+perf*.data.old
 flamegraph*.svg
 strace.log
 debug.log

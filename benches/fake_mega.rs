@@ -45,9 +45,10 @@ impl BenchHarnessOptions {
     }
 
     fn bench_options(&self) -> BenchOptions {
+        let defaults = BenchOptions::default();
         BenchOptions {
             root_dir: self.base_output_dir.join(format!("run-{}", Uuid::new_v4())),
-            file_name: BenchOptions::default().file_name,
+            file_name: defaults.file_name,
             size_bytes: self.size_bytes,
             seed: self.seed,
             chunks_per_file: self.chunks_per_file,

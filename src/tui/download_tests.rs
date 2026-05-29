@@ -101,6 +101,24 @@ fn test_app() -> App {
     App::new(9723, tx, true)
 }
 
+#[test]
+fn expand_dlc_path_expands_tilde_prefix() {
+    let home = dirs::home_dir().expect("home dir should exist for test");
+    let expanded = expand_dlc_path("~/Downloads/example.dlc").unwrap();
+
+    assert_eq!(
+        expanded,
+        format!("{}/Downloads/example.dlc", home.to_string_lossy())
+    );
+}
+
+#[test]
+fn expand_dlc_path_leaves_absolute_paths_unchanged() {
+    let path = "/tmp/example.dlc";
+
+    assert_eq!(expand_dlc_path(path).unwrap(), path);
+}
+
 mod property_tests {
     use super::*;
     use proptest::prelude::*;

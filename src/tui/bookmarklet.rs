@@ -145,9 +145,7 @@ mod tests {
         );
 
         assert!(html.contains("<code>__BOOKMARKLET_HREF__</code>"));
-        assert!(html.contains(
-            "https://proxy.host/__FALLBACK_HOST__"
-        ));
+        assert!(html.contains("https://proxy.host/__FALLBACK_HOST__"));
         assert!(html.contains("&quot;__FALLBACK_HOST__&quot;:&quot;__BOOKMARKLET_HREF__&quot;"));
         assert!(!html.contains(r#"href="__BOOKMARKLET_HREF__""#));
         assert!(!html.contains("<code>__FALLBACK_HOST__</code>"));

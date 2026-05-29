@@ -252,7 +252,11 @@ pub async fn run_bench(options: &BenchOptions) -> Result<BenchResult> {
 }
 
 pub async fn run_single_connection_bench(options: &BenchOptions) -> Result<BenchResult> {
-    run_bench(options).await
+    let mut single_connection = options.clone();
+    single_connection.chunks_per_file = 1;
+    single_connection.server_worker_threads = 1;
+    single_connection.mega_chunks_per_request = 1;
+    run_bench(&single_connection).await
 }
 
 pub async fn create_fake_mega_fixture(

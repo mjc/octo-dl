@@ -67,6 +67,7 @@ tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 parking_lot = "0.12"
 futures-util = "0.3"
 tokio-tungstenite = "0.28.0"
+unicode-width = "0.2.0"
 # sha2 with target-specific asm optimizations (not available on Windows)
 [target.'cfg(all(any(target_arch = "x86_64", target_arch = "x86"), not(target_os = "windows")))'.dependencies]
 sha2 = { version = "0.10.8", features = ["asm"] }
@@ -95,6 +96,8 @@ codegen-units = 1
 # surface the failure as a normal error instead of aborting the whole process.
 panic = "unwind"
 strip = true
+# Intentional: keep overflow checks in optimized builds so corrupted accounting
+# or resume state fails loudly instead of silently wrapping.
 overflow-checks = true
 
 [profile.profiling]
