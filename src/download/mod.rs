@@ -9,11 +9,11 @@ mod package_identity;
 mod resume_reverify;
 mod resume_state;
 mod resume_tracker;
+mod resume_validation;
 mod revalidate;
 mod revalidate_part;
 mod session;
 mod sidecar;
-mod sidecar_state;
 mod sidecar_store;
 mod sidecar_writer;
 #[cfg(test)]

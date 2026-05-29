@@ -4,8 +4,8 @@ use crate::fs::FileSystem;
 use super::callbacks::DownloadProgress;
 use super::downloader::Downloader;
 use super::resume_state::ResumeReverify;
+use super::resume_validation::persist_revalidated_sidecar;
 use super::sidecar::{part_path, sidecar_path};
-use super::sidecar_state::persist_revalidated_sidecar;
 use super::verify::expected_mac;
 
 impl<F: FileSystem> Downloader<F> {
