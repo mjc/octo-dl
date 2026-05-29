@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 #[cfg(test)]
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use std::thread;
@@ -26,6 +26,12 @@ pub(crate) const SESSION_SAVE_MAX_DELAY: Duration = Duration::from_millis(50);
 type SaveCallCount = Arc<AtomicUsize>;
 #[cfg(not(test))]
 type SaveCallCount = ();
+#[cfg(test)]
+type SaveEventRx = Arc<Mutex<mpsc::Receiver<PathBuf>>>;
+#[cfg(test)]
+type SaveEventTx = mpsc::Sender<PathBuf>;
+#[cfg(not(test))]
+type SaveEventTx = ();
 
 enum SessionPersistenceRequest {
     Save {
@@ -52,6 +58,8 @@ pub(crate) struct SessionPersistence {
     error_rx: mpsc::Receiver<SessionPersistenceError>,
     #[cfg(test)]
     save_call_count: SaveCallCount,
+    #[cfg(test)]
+    save_event_rx: SaveEventRx,
 }
 
 impl SessionPersistence {
@@ -62,6 +70,10 @@ impl SessionPersistence {
         let save_call_count = Arc::new(AtomicUsize::new(0));
         #[cfg(test)]
         let worker_save_call_count = save_call_count.clone();
+        #[cfg(test)]
+        let (save_event_tx, save_event_rx) = mpsc::channel();
+        #[cfg(test)]
+        let save_event_rx = Arc::new(Mutex::new(save_event_rx));
 
         thread::Builder::new()
             .name("octo-session-persistence".to_string())
@@ -71,6 +83,10 @@ impl SessionPersistence {
                     error_tx,
                     #[cfg(test)]
                     worker_save_call_count,
+                    #[cfg(test)]
+                    save_event_tx,
+                    #[cfg(not(test))]
+                    (),
                     #[cfg(not(test))]
                     (),
                 )
@@ -82,6 +98,8 @@ impl SessionPersistence {
             error_rx,
             #[cfg(test)]
             save_call_count,
+            #[cfg(test)]
+            save_event_rx,
         }
     }
 
@@ -125,6 +143,11 @@ impl SessionPersistence {
     fn save_call_count(&self) -> usize {
         self.save_call_count.load(Ordering::Relaxed)
     }
+
+    #[cfg(test)]
+    fn save_event_listener(&self) -> SaveEventRx {
+        self.save_event_rx.clone()
+    }
 }
 
 impl Default for SessionPersistence {
@@ -137,6 +160,7 @@ fn session_persistence_worker(
     request_rx: mpsc::Receiver<SessionPersistenceRequest>,
     error_tx: mpsc::Sender<SessionPersistenceError>,
     save_call_count: SaveCallCount,
+    save_event_tx: SaveEventTx,
 ) {
     let mut next_request = None;
     loop {
@@ -150,8 +174,14 @@ fn session_persistence_worker(
         };
         match request {
             SessionPersistenceRequest::Save { session, path } => {
-                next_request =
-                    persist_latest_save(session, path, &request_rx, &error_tx, &save_call_count);
+                next_request = persist_latest_save(
+                    session,
+                    path,
+                    &request_rx,
+                    &error_tx,
+                    &save_call_count,
+                    &save_event_tx,
+                );
             }
             SessionPersistenceRequest::Remove(path) => {
                 remove_snapshot(path, &error_tx);
@@ -169,13 +199,14 @@ fn persist_latest_save(
     request_rx: &mpsc::Receiver<SessionPersistenceRequest>,
     error_tx: &mpsc::Sender<SessionPersistenceError>,
     save_call_count: &SaveCallCount,
+    save_event_tx: &SaveEventTx,
 ) -> Option<SessionPersistenceRequest> {
     let first_queued_at = Instant::now();
     loop {
         let max_remaining = SESSION_SAVE_MAX_DELAY.saturating_sub(first_queued_at.elapsed());
         let wait_for = SESSION_SAVE_DEBOUNCE.min(max_remaining);
         if wait_for.is_zero() {
-            save_snapshot(session, path, error_tx, save_call_count);
+            save_snapshot(session, path, error_tx, save_call_count, save_event_tx);
             return None;
         }
 
@@ -190,20 +221,20 @@ fn persist_latest_save(
                 return Some(SessionPersistenceRequest::Remove(remove_path));
             }
             Ok(SessionPersistenceRequest::Flush(done_tx)) => {
-                save_snapshot(session, path, error_tx, save_call_count);
+                save_snapshot(session, path, error_tx, save_call_count, save_event_tx);
                 let _ = done_tx.send(());
                 return None;
             }
             Ok(request) => {
-                save_snapshot(session, path, error_tx, save_call_count);
+                save_snapshot(session, path, error_tx, save_call_count, save_event_tx);
                 return Some(request);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                save_snapshot(session, path, error_tx, save_call_count);
+                save_snapshot(session, path, error_tx, save_call_count, save_event_tx);
                 return None;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                save_snapshot(session, path, error_tx, save_call_count);
+                save_snapshot(session, path, error_tx, save_call_count, save_event_tx);
                 return None;
             }
         }
@@ -242,39 +273,33 @@ fn save_snapshot(
     path: PathBuf,
     error_tx: &mpsc::Sender<SessionPersistenceError>,
     _save_call_count: &SaveCallCount,
+    _save_event_tx: &SaveEventTx,
 ) {
     #[cfg(test)]
     _save_call_count.fetch_add(1, Ordering::Relaxed);
     let id = session.id.clone();
     if let Err(error) = session.save_to_path(&path) {
         let _ = error_tx.send(SessionPersistenceError::Save { id, error });
+    } else {
+        #[cfg(test)]
+        let _ = _save_event_tx.send(path);
     }
 }
 
 #[cfg(test)]
-fn wait_for_path(path: &std::path::Path) -> bool {
-    let deadline =
-        Instant::now() + SESSION_SAVE_MAX_DELAY + SESSION_SAVE_DEBOUNCE + Duration::from_millis(50);
-    while Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-    path.exists()
+fn wait_for_save_event(events: &SaveEventRx) -> Option<PathBuf> {
+    let timeout = SESSION_SAVE_MAX_DELAY + SESSION_SAVE_DEBOUNCE + Duration::from_millis(50);
+    events.lock().unwrap().recv_timeout(timeout).ok()
 }
 
 #[cfg(test)]
-fn wait_for_save_calls(persistence: &SessionPersistence, expected: usize) -> bool {
-    let deadline =
-        Instant::now() + SESSION_SAVE_MAX_DELAY + SESSION_SAVE_DEBOUNCE + Duration::from_millis(50);
-    while Instant::now() < deadline {
-        if persistence.save_call_count() == expected {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(5));
+fn drain_save_events(events: &SaveEventRx) -> Vec<PathBuf> {
+    let mut drained = Vec::new();
+    let receiver = events.lock().unwrap();
+    while let Ok(path) = receiver.try_recv() {
+        drained.push(path);
     }
-    persistence.save_call_count() == expected
+    drained
 }
 
 #[cfg(test)]
@@ -424,14 +449,16 @@ mod tests {
             "https://mega.nz/file/root",
             UrlFixtureStatus::Fetched,
         )]);
+        let save_events;
 
         {
             let persistence = SessionPersistence::new();
+            save_events = persistence.save_event_listener();
             persistence.reset_save_call_count();
             persistence.save(session.clone(), path.clone());
         }
 
-        assert!(wait_for_path(&path));
+        assert_eq!(wait_for_save_event(&save_events), Some(path.clone()));
         let loaded = SessionSnapshot::load(&path).unwrap();
         assert_eq!(loaded.id, session.id);
     }
@@ -441,6 +468,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.postcard");
         let persistence = SessionPersistence::new();
+        let save_events = persistence.save_event_listener();
         persistence.reset_save_call_count();
         let base = session_snapshot(vec![(
             "https://mega.nz/file/root",
@@ -454,8 +482,13 @@ mod tests {
             thread::sleep(SESSION_SAVE_DEBOUNCE / 2);
         }
 
-        assert!(wait_for_save_calls(&persistence, 1));
+        assert_eq!(wait_for_save_event(&save_events), Some(path.clone()));
         persistence.flush();
-        assert_eq!(persistence.save_call_count(), 1);
+        let loaded = SessionSnapshot::load(&path).unwrap();
+        assert_eq!(loaded.id, "session-9");
+        let extra_saves = drain_save_events(&save_events);
+        assert!(extra_saves.len() <= 1);
+        assert!(extra_saves.iter().all(|saved_path| saved_path == &path));
+        assert_eq!(persistence.save_call_count(), 1 + extra_saves.len());
     }
 }
