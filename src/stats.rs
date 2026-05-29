@@ -280,6 +280,38 @@ impl SessionStatsBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::{collection::vec, option, prelude::*};
+
+    fn file_stats_strategy() -> impl Strategy<Value = FileStats> {
+        (
+            any::<u32>(),
+            any::<u32>(),
+            any::<u32>(),
+            0u64..10_001,
+            any::<u32>(),
+            any::<u32>(),
+            option::of(0u64..10_001),
+        )
+            .prop_map(
+                |(
+                    size,
+                    network_bytes,
+                    reused_bytes,
+                    elapsed_secs,
+                    average_speed,
+                    peak_speed,
+                    ramp_up_ms,
+                )| FileStats {
+                    size: u64::from(size),
+                    network_bytes: u64::from(network_bytes),
+                    reused_bytes: u64::from(reused_bytes),
+                    elapsed: Duration::from_secs(elapsed_secs),
+                    average_speed: u64::from(average_speed),
+                    peak_speed: u64::from(peak_speed),
+                    ramp_up_time: ramp_up_ms.map(Duration::from_millis),
+                },
+            )
+    }
 
     #[test]
     fn session_stats_default() {
@@ -370,5 +402,80 @@ mod tests {
         assert_eq!(stats.reused_bytes, 200);
         assert_eq!(stats.peak_speed, 1000);
         assert!(stats.average_ramp_up.is_some());
+    }
+
+    proptest! {
+        #[test]
+        fn compute_average_speed_matches_integer_division_for_whole_seconds(
+            total_bytes in 0u64..1_000_000_000_000,
+            elapsed_secs in 1u64..10_001,
+        ) {
+            prop_assert_eq!(
+                compute_average_speed(total_bytes, Duration::from_secs(elapsed_secs)),
+                total_bytes / elapsed_secs
+            );
+        }
+
+        #[test]
+        fn session_stats_average_speed_matches_integer_division_for_whole_seconds(
+            network_bytes in 0u64..1_000_000_000_000,
+            elapsed_secs in 1u64..10_001,
+        ) {
+            let stats = SessionStats {
+                files_downloaded: 0,
+                files_skipped: 0,
+                total_bytes: 0,
+                network_bytes,
+                reused_bytes: 0,
+                elapsed: Duration::from_secs(elapsed_secs),
+                peak_speed: 0,
+                average_ramp_up: None,
+            };
+
+            prop_assert_eq!(stats.average_speed(), network_bytes / elapsed_secs);
+        }
+
+        #[test]
+        fn session_stats_builder_aggregates_generated_file_stats_exactly(
+            skipped in any::<u16>(),
+            peak_speed in any::<u64>(),
+            files in vec(file_stats_strategy(), 0..32),
+        ) {
+            let mut builder = SessionStatsBuilder::new();
+            builder.set_skipped(usize::from(skipped));
+            builder.set_peak_speed(peak_speed);
+
+            let mut expected_total_bytes = 0u64;
+            let mut expected_network_bytes = 0u64;
+            let mut expected_reused_bytes = 0u64;
+            let mut ramp_up_total_ms = 0u64;
+            let mut ramp_up_count = 0u64;
+
+            for file in &files {
+                builder.add_download(file);
+                expected_total_bytes += file.size;
+                expected_network_bytes += file.network_bytes;
+                expected_reused_bytes += file.reused_bytes;
+                if let Some(ramp) = file.ramp_up_time {
+                    ramp_up_total_ms += ramp.as_millis().try_into().unwrap_or(u64::MAX);
+                    ramp_up_count += 1;
+                }
+            }
+
+            let stats = builder.build();
+            let expected_average_ramp_up = if ramp_up_count == 0 {
+                None
+            } else {
+                Some(Duration::from_millis(ramp_up_total_ms / ramp_up_count))
+            };
+
+            prop_assert_eq!(stats.files_downloaded, files.len());
+            prop_assert_eq!(stats.files_skipped, usize::from(skipped));
+            prop_assert_eq!(stats.total_bytes, expected_total_bytes);
+            prop_assert_eq!(stats.network_bytes, expected_network_bytes);
+            prop_assert_eq!(stats.reused_bytes, expected_reused_bytes);
+            prop_assert_eq!(stats.peak_speed, peak_speed);
+            prop_assert_eq!(stats.average_ramp_up, expected_average_ramp_up);
+        }
     }
 }
