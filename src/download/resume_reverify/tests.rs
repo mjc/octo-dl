@@ -2,7 +2,6 @@ use std::sync::atomic::Ordering;
 
 use super::super::test_support::*;
 use super::super::{ResumeSidecar, load_sidecar, part_path, save_sidecar_atomic, sidecar_path};
-use super::*;
 use crate::config::DownloadConfig;
 use crate::fs::{FileSystem, TokioFileSystem};
 

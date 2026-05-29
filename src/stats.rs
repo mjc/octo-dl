@@ -330,11 +330,15 @@ mod tests {
 
     #[test]
     fn download_stats_tracker_time_to_80pct() {
-        let tracker = DownloadStatsTracker::new(1000);
+        let tracker = DownloadStatsTracker {
+            start_time: Instant::now() - Duration::from_millis(2),
+            total_bytes: 1000,
+            downloaded: AtomicU64::new(0),
+            peak_speed: AtomicU64::new(0),
+            time_to_80pct_ms: AtomicU64::new(0),
+        };
         // Start with a low speed, then ramp up
         tracker.update_speed(10);
-        // Sleep briefly to ensure elapsed time > 0
-        std::thread::sleep(Duration::from_millis(2));
         // Now hit 80% of the eventual peak (500)
         tracker.update_speed(500);
         // 400 >= 500 * 4 / 5 = 400, so we should record the time
