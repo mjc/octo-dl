@@ -1562,6 +1562,11 @@ impl<F: FileSystem> Downloader<F> {
         if cancellation_token.is_some_and(|token| token.is_cancelled()) {
             return Err(Error::Cancelled);
         }
+        if !candidates.is_empty()
+            && let Some((name, progress)) = input.progress
+        {
+            progress.on_resume_validation_start(name);
+        }
         log::debug!(
             "Resume sidecar for {} needs disk revalidation: candidate_bytes={} allocated_bytes={allocated_bytes:?}",
             input.part_path.display(),
@@ -1789,7 +1794,6 @@ impl<F: FileSystem> Downloader<F> {
         let reuse_resume_state =
             should_reuse_resume_state(self.config.force_overwrite, trust_resume_state);
         let resume_validation = if reuse_resume_state {
-            progress.on_resume_validation_start(path);
             let resume_status_progress = ResumeValidationStatusProgress::new(progress.as_ref());
             self.revalidate_resume_chunks(
                 node,
@@ -2799,12 +2803,18 @@ mod tests {
         network: std::sync::atomic::AtomicU64,
         max_delta: std::sync::atomic::AtomicU64,
         calls: std::sync::atomic::AtomicUsize,
+        validation_starts: std::sync::atomic::AtomicUsize,
         validation_calls: std::sync::atomic::AtomicUsize,
         validation_checked: std::sync::atomic::AtomicU64,
         validation_total: std::sync::atomic::AtomicU64,
     }
 
     impl DownloadProgress for RecordingProgress {
+        fn on_resume_validation_start(&self, _name: &str) {
+            self.validation_starts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
         fn on_resume_validation_progress(&self, _name: &str, checked_bytes: u64, total_bytes: u64) {
             self.validation_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3595,6 +3605,12 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             0
         );
+        assert_eq!(
+            progress
+                .validation_starts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 
     #[tokio::test]
@@ -3646,6 +3662,12 @@ mod tests {
                 .validation_calls
                 .load(std::sync::atomic::Ordering::SeqCst),
             0
+        );
+        assert_eq!(
+            progress
+                .validation_starts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
         );
     }
 
