@@ -1,31 +1,8 @@
 use super::*;
+use crate::download::test_support::{
+    legacy_json_sidecar_for_chunk, sidecar_for_chunk, write_legacy_json_sidecar,
+};
 use crate::download::{legacy_binary_sidecar_path, legacy_json_sidecar_path, sidecar_path};
-
-fn legacy_json_sidecar_for_chunk(
-    file_size: u64,
-    expected_condensed_mac: [u8; 8],
-    index: u32,
-    mac: [u8; 16],
-) -> LegacyJsonResumeSidecar {
-    LegacyJsonResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size,
-        expected_condensed_mac_b64: STANDARD.encode(expected_condensed_mac),
-        verified_chunks: vec![LegacyJsonVerifiedChunkRecord {
-            index,
-            mac_b64: STANDARD.encode(mac),
-        }],
-        part_fingerprint: None,
-    }
-}
-
-async fn write_legacy_json_sidecar(
-    path: &Path,
-    sidecar: &LegacyJsonResumeSidecar,
-) -> io::Result<()> {
-    let data = serde_json::to_vec(sidecar)?;
-    tokio::fs::write(path, data).await
-}
 
 #[tokio::test]
 async fn load_sidecar_falls_back_to_legacy_binary() {
@@ -33,16 +10,7 @@ async fn load_sidecar_falls_back_to_legacy_binary() {
     let base = dir.path().join("file.bin").to_string_lossy().into_owned();
     let postcard_path = sidecar_path(&base);
     let legacy_binary_path = legacy_binary_sidecar_path(&base);
-    let legacy = ResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size: 42,
-        expected_condensed_mac: [7u8; 8],
-        verified_chunks: vec![VerifiedChunkRecord {
-            index: 3,
-            mac: [4u8; 16],
-        }],
-        part_fingerprint: None,
-    };
+    let legacy = sidecar_for_chunk(42, [7u8; 8], 3, [4u8; 16]);
 
     tokio::fs::write(&legacy_binary_path, bincode::serialize(&legacy).unwrap())
         .await
@@ -79,16 +47,7 @@ async fn load_sidecar_prefers_binary_over_legacy_json() {
     let binary_path = sidecar_path(&base);
     let json_path = legacy_json_sidecar_path(&base);
     let legacy = legacy_json_sidecar_for_chunk(42, [1u8; 8], 0, [1u8; 16]);
-    let binary = ResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size: 42,
-        expected_condensed_mac: [2u8; 8],
-        verified_chunks: vec![VerifiedChunkRecord {
-            index: 1,
-            mac: [2u8; 16],
-        }],
-        part_fingerprint: None,
-    };
+    let binary = sidecar_for_chunk(42, [2u8; 8], 1, [2u8; 16]);
 
     write_legacy_json_sidecar(&json_path, &legacy)
         .await
@@ -128,16 +87,7 @@ async fn load_sidecar_falls_back_to_legacy_binary_when_postcard_is_corrupt() {
     let base = dir.path().join("file.bin").to_string_lossy().into_owned();
     let postcard_path = sidecar_path(&base);
     let legacy_binary_path = legacy_binary_sidecar_path(&base);
-    let legacy = ResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size: 42,
-        expected_condensed_mac: [5u8; 8],
-        verified_chunks: vec![VerifiedChunkRecord {
-            index: 6,
-            mac: [7u8; 16],
-        }],
-        part_fingerprint: None,
-    };
+    let legacy = sidecar_for_chunk(42, [5u8; 8], 6, [7u8; 16]);
 
     tokio::fs::write(&postcard_path, b"not-postcard")
         .await
@@ -180,16 +130,7 @@ async fn load_sidecar_rejects_bad_legacy_json_base64_without_allocating_vec_deco
 async fn sidecar_save_writes_binary_not_json() {
     let dir = tempfile::tempdir().unwrap();
     let sidecar_path = dir.path().join("file.bin.part.postcard");
-    let sidecar = ResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size: 42,
-        expected_condensed_mac: [9u8; 8],
-        verified_chunks: vec![VerifiedChunkRecord {
-            index: 0,
-            mac: [1u8; 16],
-        }],
-        part_fingerprint: None,
-    };
+    let sidecar = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
 
     save_sidecar_atomic(&sidecar_path, &sidecar).await.unwrap();
     let data = tokio::fs::read(&sidecar_path).await.unwrap();
