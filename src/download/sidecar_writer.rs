@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Sender};
 
 use crate::fs::FileFingerprint;
 
-use super::ResumeSidecar;
+use super::sidecar_store::ResumeSidecar;
 
 pub(in crate::download) fn sidecar_tmp_path(path: &Path) -> PathBuf {
     path.with_extension("postcard.tmp")

@@ -9,8 +9,9 @@ use crate::error::{Error, Result};
 use crate::fs::FileSystem;
 use crate::stats::FileStats;
 
-use super::revalidate::revalidation_buffer_len;
-use super::{DownloadProgress, Downloader, REVALIDATION_BUFFER_BYTES};
+use super::callbacks::DownloadProgress;
+use super::downloader::Downloader;
+use super::revalidate::{REVALIDATION_BUFFER_BYTES, revalidation_buffer_len};
 
 /// Result of manually checking a completed final file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -7,8 +7,10 @@ use crate::fs::FileSystem;
 use crate::stats::{DownloadStatsTracker, FileStats};
 
 use super::callbacks::ChunkVerifiedState;
+use super::callbacks::DownloadProgress;
+use super::downloader::Downloader;
 use super::sidecar::delete_sidecar;
-use super::{DownloadProgress, Downloader, SidecarWriterShutdown};
+use super::sidecar_writer::SidecarWriterShutdown;
 
 pub(super) struct DownloadFinishContext<'a> {
     pub(super) node: &'a mega::Node,

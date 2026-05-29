@@ -5,7 +5,7 @@ use crate::config::DownloadConfig;
 use crate::error::{Error, Result};
 use crate::fs::{FileSystem, TokioFileSystem};
 
-use super::DownloadProgress;
+use super::callbacks::DownloadProgress;
 use super::collect::{CollectedFiles, DownloadItem, collect_download_items};
 use super::inspect::{
     FileStatus, InspectedLocalFile, inspect_local_file as inspect_local_file_with_fs,

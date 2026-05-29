@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::fs::FileSystem;
 
-use super::{
+use super::sidecar::{
     legacy_binary_sidecar_path, legacy_json_sidecar_path, part_path, resume_sidecar_verified_bytes,
     sidecar_path,
 };

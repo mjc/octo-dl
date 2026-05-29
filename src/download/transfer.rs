@@ -6,7 +6,16 @@ use tokio_util::sync::CancellationToken;
 use crate::fs::FileSystem;
 use crate::stats::FileStats;
 
-use super::*;
+use super::callbacks::{
+    ChunkVerifiedState, DownloadCallbackState, DownloadProgress, ProgressCallbackState,
+    ResumeValidationStatusProgress,
+};
+use super::downloader::{Downloader, should_reuse_resume_state};
+use super::finalize::DownloadFinishContext;
+use super::sidecar::{delete_sidecar, part_path, sidecar_path};
+use super::sidecar_state::{ResumeTracker, ResumeValidation};
+use super::sidecar_writer::LazySidecarWriter;
+use super::verify::expected_mac;
 
 impl<F: FileSystem> Downloader<F> {
     /// Ensures the parent directory exists for a file path.
