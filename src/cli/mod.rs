@@ -584,11 +584,13 @@ fn print_usage() {
     eprintln!("  MEGA_MFA            MEGA MFA code (optional)");
 }
 
-fn get_credentials() -> (String, String, Option<String>) {
-    let email = std::env::var("MEGA_EMAIL").expect("MEGA_EMAIL not set");
-    let password = std::env::var("MEGA_PASSWORD").expect("MEGA_PASSWORD not set");
+fn get_credentials() -> crate::Result<(String, String, Option<String>)> {
+    let email = std::env::var("MEGA_EMAIL")
+        .map_err(|_| crate::Error::Download("MEGA_EMAIL not set".to_string()))?;
+    let password = std::env::var("MEGA_PASSWORD")
+        .map_err(|_| crate::Error::Download("MEGA_PASSWORD not set".to_string()))?;
     let mfa = std::env::var("MEGA_MFA").ok();
-    (email, password, mfa)
+    Ok((email, password, mfa))
 }
 
 // ============================================================================
@@ -630,7 +632,7 @@ pub async fn run() -> crate::Result<()> {
         std::process::exit(1);
     }
 
-    let (email, password, mfa) = get_credentials();
+    let (email, password, mfa) = get_credentials()?;
 
     // Create HTTP client with custom user agent for DLC service
     let http = build_http_client()?;
@@ -794,10 +796,9 @@ pub async fn run() -> crate::Result<()> {
 async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> crate::Result<()> {
     let restart = build_restart_snapshot(&session);
     // Decrypt credentials
-    let (email, password, mfa) = session
-        .credentials
-        .decrypt()
-        .expect("Failed to decrypt session credentials");
+    let (email, password, mfa) = session.credentials.decrypt().ok_or_else(|| {
+        crate::Error::Download("Failed to decrypt session credentials".to_string())
+    })?;
 
     let http = build_http_client()?;
 

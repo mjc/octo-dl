@@ -593,7 +593,7 @@ impl App {
 
         if service_config.api.api_key.is_none() {
             let key = uuid::Uuid::new_v4().simple().to_string();
-            log::info!("Generated API key: {key}");
+            log::info!("Generated new API key");
             service_config.api.api_key = Some(key);
             service_config.save(config_path)?;
             self.api_key.clone_from(&service_config.api.api_key);

@@ -38,33 +38,48 @@ async fn compute_completed_file_mac_from_file(
         return Ok(mega::compute_condensed_mac(file.compat(), file_size, aes_key, aes_iv).await?);
     }
 
-    let mut condensed_mac = mega::MegaCondensedMac::new(aes_key);
-    let mut file = std::fs::File::open(final_path)?;
-    let mut buffer = [0; REVALIDATION_BUFFER_BYTES];
-    for boundary in mega::mega_chunk_boundaries_iter(file_size) {
-        let mut mac = mega::MegaChunkMac::new(aes_key, aes_iv);
-        let mut offset = boundary.offset;
-        let end = boundary.offset.saturating_add(boundary.length);
-        file.seek(std::io::SeekFrom::Start(boundary.offset))?;
-        while offset < end {
-            let read_len = revalidation_buffer_len(end - offset);
-            let read_buffer = &mut buffer[..read_len];
-            file.read_exact(read_buffer)?;
-            mac.update(read_buffer);
-            if let Some((name, progress)) = progress {
-                progress.on_progress(
-                    name,
-                    crate::core::ProgressDelta {
-                        total_bytes_delta: u64::try_from(read_len).unwrap_or(0),
-                        network_bytes_delta: 0,
-                    },
-                );
+    let final_path = final_path.to_path_buf();
+    let aes_key = *aes_key;
+    let aes_iv = *aes_iv;
+    let (condensed_mac, progress_deltas) =
+        tokio::task::spawn_blocking(move || -> Result<([u8; 8], Vec<u64>)> {
+            let mut condensed_mac = mega::MegaCondensedMac::new(&aes_key);
+            let mut file = std::fs::File::open(&final_path)?;
+            let mut buffer = [0; REVALIDATION_BUFFER_BYTES];
+            let mut progress_deltas = Vec::new();
+            for boundary in mega::mega_chunk_boundaries_iter(file_size) {
+                let mut mac = mega::MegaChunkMac::new(&aes_key, &aes_iv);
+                let mut offset = boundary.offset;
+                let end = boundary.offset.saturating_add(boundary.length);
+                file.seek(std::io::SeekFrom::Start(boundary.offset))?;
+                while offset < end {
+                    let read_len = revalidation_buffer_len(end - offset);
+                    let read_buffer = &mut buffer[..read_len];
+                    file.read_exact(read_buffer)?;
+                    mac.update(read_buffer);
+                    progress_deltas.push(u64::try_from(read_len).unwrap_or(0));
+                    offset = offset.saturating_add(u64::try_from(read_len).unwrap_or(0));
+                }
+                condensed_mac.update_chunk_mac(&mac.finalize());
             }
-            offset = offset.saturating_add(u64::try_from(read_len).unwrap_or(0));
+            Ok((condensed_mac.finalize(), progress_deltas))
+        })
+        .await
+        .map_err(|error| Error::Io(std::io::Error::other(error)))??;
+
+    if let Some((name, progress)) = progress {
+        for bytes_delta in progress_deltas {
+            progress.on_progress(
+                name,
+                crate::core::ProgressDelta {
+                    total_bytes_delta: bytes_delta,
+                    network_bytes_delta: 0,
+                },
+            );
         }
-        condensed_mac.update_chunk_mac(&mac.finalize());
     }
-    Ok(condensed_mac.finalize())
+
+    Ok(condensed_mac)
 }
 
 impl<F: FileSystem> Downloader<F> {

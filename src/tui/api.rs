@@ -149,7 +149,10 @@ async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> 
             serde_json::to_string(&serde_json::json!({
                 "x-api-key": key,
             }))
-            .expect("serializing API key header should not fail")
+            .unwrap_or_else(|error| {
+                log::error!("Failed to serialize API key header for bookmarklet: {error}");
+                "{}".to_string()
+            })
         },
     );
 

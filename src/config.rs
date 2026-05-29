@@ -14,6 +14,14 @@ const fn default_mega_chunks_per_request() -> usize {
     2
 }
 
+const fn default_chunks_per_file() -> usize {
+    2
+}
+
+const fn default_concurrent_files() -> usize {
+    4
+}
+
 /// Configuration for download operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DownloadConfig {
@@ -21,15 +29,19 @@ pub struct DownloadConfig {
     #[serde(default = "default_download_path")]
     pub path: Option<String>,
     /// Number of parallel chunks per file download.
+    #[serde(default = "default_chunks_per_file")]
     pub chunks_per_file: usize,
     /// Maximum adjacent MEGA chunks fetched per HTTP request.
     #[serde(default = "default_mega_chunks_per_request")]
     pub mega_chunks_per_request: usize,
     /// Number of concurrent file downloads.
+    #[serde(default = "default_concurrent_files")]
     pub concurrent_files: usize,
     /// Whether to overwrite existing files.
+    #[serde(default)]
     pub force_overwrite: bool,
     /// Whether to clean up `.part` files on recoverable download errors.
+    #[serde(default)]
     pub cleanup_on_error: bool,
 }
 
@@ -362,18 +374,33 @@ impl ServiceConfig {
     ///
     /// Returns an error if the file cannot be written.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        use std::io::Write as _;
+
         let toml_str = toml::to_string(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, &toml_str)
-            .map_err(|error| path_io_error("write config file", path, error))?;
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(|error| path_io_error("write config file", path, error))?;
+            file.write_all(toml_str.as_bytes())
+                .map_err(|error| path_io_error("write config file", path, error))?;
+            file.flush()
+                .map_err(|error| path_io_error("write config file", path, error))?;
             let perms = std::fs::Permissions::from_mode(0o600);
             std::fs::set_permissions(path, perms)
                 .map_err(|error| path_io_error("set config file permissions", path, error))?;
         }
+
+        #[cfg(not(unix))]
+        std::fs::write(path, &toml_str)
+            .map_err(|error| path_io_error("write config file", path, error))?;
 
         Ok(())
     }
@@ -479,6 +506,51 @@ password = "pw"
         assert_eq!(config.download.concurrent_files, 4);
         assert!(!config.credentials.encrypted);
         assert!(config.credentials.mfa.is_empty());
+    }
+
+    #[test]
+    fn partial_download_table_uses_field_defaults() {
+        let toml_str = r#"
+[credentials]
+email = "x@y.com"
+password = "pw"
+
+[download]
+path = "/tmp/downloads"
+"#;
+        let config: ServiceConfig = toml::from_str(toml_str).unwrap();
+
+        assert_eq!(config.download.path.as_deref(), Some("/tmp/downloads"));
+        assert_eq!(config.download.chunks_per_file, 2);
+        assert_eq!(config.download.mega_chunks_per_request, 2);
+        assert_eq!(config.download.concurrent_files, 4);
+        assert!(!config.download.force_overwrite);
+        assert!(!config.download.cleanup_on_error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_writes_config_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = ServiceConfig {
+            credentials: ServiceCredentials {
+                encrypted: false,
+                email: "a@b.com".to_string(),
+                password: "pass".to_string(),
+                mfa: String::new(),
+                saved_session: None,
+            },
+            api: ApiConfig::default(),
+            download: DownloadConfig::default(),
+        };
+
+        config.save(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

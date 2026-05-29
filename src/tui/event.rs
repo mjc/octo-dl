@@ -203,9 +203,9 @@ impl DownloadProgress for TuiProgress {
     }
 
     fn on_resume_reused(&self, name: &str, chunks: usize, bytes: u64) {
-        let _ = self.intern_id(name);
+        let id = self.intern_id(name);
         let _ = self.tx.send(DownloadEvent::ResumeReused {
-            id: FileId::from(name),
+            id,
             chunks,
             bytes,
             attempt_id: 0,
@@ -213,15 +213,16 @@ impl DownloadProgress for TuiProgress {
     }
 
     fn on_file_complete(&self, name: &str, _stats: &FileStats) {
-        let _ = self.tx.send(DownloadEvent::FileComplete {
-            id: FileId::from(name),
-            attempt_id: 0,
-        });
+        let id = self.intern_id(name);
+        let _ = self
+            .tx
+            .send(DownloadEvent::FileComplete { id, attempt_id: 0 });
     }
 
     fn on_error(&self, name: &str, error: &str) {
+        let id = self.intern_id(name);
         let _ = self.tx.send(DownloadEvent::FileError {
-            id: FileId::from(name),
+            id,
             error: error.to_string(),
             attempt_id: 0,
         });
@@ -231,5 +232,52 @@ impl DownloadProgress for TuiProgress {
         let _ = self.tx.send(DownloadEvent::StatusMessage(format!(
             "Partial download detected: {name} ({existing_size}/{expected_size} bytes)"
         )));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_id_ptr_key(file_id: &FileId) -> (usize, usize) {
+        let raw = file_id.as_str().as_bytes();
+        (raw.as_ptr() as usize, raw.len())
+    }
+
+    #[test]
+    fn stable_file_ids_are_reused_for_all_progress_events() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let progress = TuiProgress::new(tx);
+        let stats = FileStats {
+            size: 100,
+            network_bytes: 0,
+            reused_bytes: 0,
+            elapsed: std::time::Duration::ZERO,
+            average_speed: 0,
+            peak_speed: 0,
+            ramp_up_time: None,
+        };
+
+        progress.on_file_start("episode.mkv", 100);
+        let DownloadEvent::FileStart { id: started, .. } = rx.blocking_recv().unwrap() else {
+            panic!("expected FileStart");
+        };
+        progress.on_resume_reused("episode.mkv", 1, 60);
+        let DownloadEvent::ResumeReused { id: reused, .. } = rx.blocking_recv().unwrap() else {
+            panic!("expected ResumeReused");
+        };
+        progress.on_file_complete("episode.mkv", &stats);
+        let DownloadEvent::FileComplete { id: completed, .. } = rx.blocking_recv().unwrap() else {
+            panic!("expected FileComplete");
+        };
+        progress.on_error("episode.mkv", "boom");
+        let DownloadEvent::FileError { id: errored, .. } = rx.blocking_recv().unwrap() else {
+            panic!("expected FileError");
+        };
+
+        let expected = file_id_ptr_key(&started);
+        assert_eq!(file_id_ptr_key(&reused), expected);
+        assert_eq!(file_id_ptr_key(&completed), expected);
+        assert_eq!(file_id_ptr_key(&errored), expected);
     }
 }
