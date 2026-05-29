@@ -147,19 +147,9 @@ async fn run_restart_revalidation_and_manual_reverify_parity_test() {
 
 #[test]
 fn automatic_restart_revalidation_and_manual_reverify_agree_for_matching_sidecar_and_part() {
-    std::thread::Builder::new()
-        .name("resume-parity-test".to_string())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            runtime.block_on(run_restart_revalidation_and_manual_reverify_parity_test());
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    run_with_large_stack_current_thread_runtime("resume-parity-test", || async {
+        run_restart_revalidation_and_manual_reverify_parity_test().await;
+    });
 }
 
 async fn run_manual_reverify_refreshes_sidecar_fingerprint_test() {
@@ -191,19 +181,9 @@ async fn run_manual_reverify_refreshes_sidecar_fingerprint_test() {
 
 #[test]
 fn manual_reverify_refreshes_sidecar_fingerprint_after_disk_revalidation() {
-    std::thread::Builder::new()
-        .name("manual-reverify-fingerprint-test".to_string())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            runtime.block_on(run_manual_reverify_refreshes_sidecar_fingerprint_test());
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    run_with_large_stack_current_thread_runtime("manual-reverify-fingerprint-test", || async {
+        run_manual_reverify_refreshes_sidecar_fingerprint_test().await;
+    });
 }
 
 #[tokio::test]
