@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
-use futures::{StreamExt, stream};
-
 use crate::error::Result;
 use crate::fs::FileSystem;
-use crate::stats::{SessionStats, SessionStatsBuilder};
+use crate::stats::SessionStats;
 
 use super::callbacks::DownloadProgress;
 use super::collect::{DownloadItem, OwnedDownloadItem};
 use super::downloader::Downloader;
+use super::session_run::download_all_items;
 
 impl<F: FileSystem> Downloader<F> {
     /// Downloads all collected files with concurrent downloads.
@@ -26,35 +25,7 @@ impl<F: FileSystem> Downloader<F> {
         progress: &Arc<dyn DownloadProgress>,
         skipped_count: usize,
     ) -> Result<SessionStats> {
-        let mut builder = SessionStatsBuilder::new();
-        builder.set_skipped(skipped_count);
-
-        if files.is_empty() {
-            return Ok(builder.build());
-        }
-
-        let mut peak_speed = 0;
-        let mut downloads = stream::iter(files)
-            .map(|item| async move {
-                self.download_file(item.node, &item.path, progress, false, None)
-                    .await
-            })
-            .buffer_unordered(self.config.concurrent_files);
-
-        while let Some(result) = downloads.next().await {
-            match result {
-                Ok(file_stats) => {
-                    peak_speed = peak_speed.max(file_stats.peak_speed);
-                    builder.add_download(&file_stats);
-                }
-                Err(e) => {
-                    log::error!("Download failed: {e}");
-                }
-            }
-        }
-        builder.set_peak_speed(peak_speed);
-
-        Ok(builder.build())
+        download_all_items(self, files, progress, skipped_count).await
     }
 
     /// Downloads all owned items with concurrent downloads.
@@ -74,35 +45,7 @@ impl<F: FileSystem> Downloader<F> {
         progress: &Arc<dyn DownloadProgress>,
         skipped_count: usize,
     ) -> Result<SessionStats> {
-        let mut builder = SessionStatsBuilder::new();
-        builder.set_skipped(skipped_count);
-
-        if files.is_empty() {
-            return Ok(builder.build());
-        }
-
-        let mut peak_speed = 0;
-        let mut downloads = stream::iter(files)
-            .map(|item| async move {
-                self.download_file(&item.node, &item.path, progress, false, None)
-                    .await
-            })
-            .buffer_unordered(self.config.concurrent_files);
-
-        while let Some(result) = downloads.next().await {
-            match result {
-                Ok(file_stats) => {
-                    peak_speed = peak_speed.max(file_stats.peak_speed);
-                    builder.add_download(&file_stats);
-                }
-                Err(e) => {
-                    log::error!("Download failed: {e}");
-                }
-            }
-        }
-        builder.set_peak_speed(peak_speed);
-
-        Ok(builder.build())
+        download_all_items(self, files, progress, skipped_count).await
     }
 }
 
