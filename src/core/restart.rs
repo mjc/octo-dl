@@ -274,6 +274,7 @@ mod tests {
     };
     use crate::core::{PackageId, model::SessionRunStatus};
     use crate::test_support::write_dummy_legacy_resume_sidecar_for_path;
+    use proptest::{collection::vec, prelude::*};
     use tempfile::tempdir;
 
     fn package_id(raw: &str, source_url: &str) -> PackageId {
@@ -310,6 +311,21 @@ mod tests {
             credentials: SavedCredentials::encrypt("u", "p", None),
         };
         snapshot
+    }
+
+    fn push_snapshot_file(snapshot: &mut SessionSnapshot, path: &str, size: u64) {
+        let source_url = "https://mega.nz/file/test".to_string();
+        let package_id = package_id("pkg", &source_url);
+        snapshot.packages[0].files.push(FileSnapshot {
+            id: path.to_string().into(),
+            package_id,
+            source_url,
+            path: path.to_string(),
+            size,
+            lifecycle: FileLifecycle::Queued,
+            progress: FileProgressState::default(),
+            accounting: FileAccounting::CurrentRun,
+        });
     }
 
     #[test]
@@ -815,5 +831,105 @@ mod tests {
         );
 
         assert_eq!(restart.state.totals.run_completed_bytes, 80);
+    }
+
+    proptest! {
+        #[test]
+        fn resumable_urls_match_remaining_work_oracle(
+            complete_flags in vec(any::<bool>(), 0..8),
+        ) {
+            let mut complete_files = Vec::new();
+            let session = if complete_flags.is_empty() {
+                None
+            } else {
+                let mut snapshot = sample_snapshot();
+                snapshot.packages[0].files.clear();
+                for (idx, is_complete) in complete_flags.iter().copied().enumerate() {
+                    let path = format!("file-{idx}.bin");
+                    push_snapshot_file(&mut snapshot, &path, 100);
+                    if is_complete {
+                        complete_files.push(FilesystemFile {
+                            file_id: path.into(),
+                            size: 100,
+                        });
+                    }
+                }
+                Some(snapshot)
+            };
+
+            let restart = reconcile_restart(
+                session,
+                FilesystemSnapshot {
+                    complete_files,
+                    partial_files: Vec::new(),
+                },
+                vec!["https://mega.nz/file/test".to_string()],
+            );
+
+            let expected = if complete_flags.is_empty() || complete_flags.iter().any(|is_complete| !is_complete) {
+                vec!["https://mega.nz/file/test".to_string()]
+            } else {
+                Vec::new()
+            };
+            prop_assert_eq!(restart.resumable_urls(), expected);
+        }
+
+        #[test]
+        fn restart_partial_progress_uses_sidecar_rule(
+            partial_bytes in 1u64..200,
+            verified_bytes in 0u64..200,
+            has_sidecar in any::<bool>(),
+        ) {
+            let restart = reconcile_restart(
+                Some(sample_snapshot()),
+                FilesystemSnapshot {
+                    complete_files: Vec::new(),
+                    partial_files: vec![PartialFileSnapshot {
+                        file_id: "a.bin".to_string().into(),
+                        bytes: partial_bytes,
+                        has_sidecar,
+                        verified_bytes,
+                    }],
+                },
+                vec!["https://mega.nz/file/test".to_string()],
+            );
+
+            let expected_visible = if has_sidecar {
+                verified_bytes.min(partial_bytes).min(100)
+            } else {
+                partial_bytes.min(100)
+            };
+            let file = &restart.state.files["a.bin"];
+
+            prop_assert_eq!(&file.lifecycle, &FileLifecycle::Queued);
+            prop_assert_eq!(file.accounting, FileAccounting::CurrentRun);
+            prop_assert_eq!(file.progress.visible_completed_bytes, expected_visible);
+            prop_assert_eq!(restart.resume_file_ids, vec!["a.bin".to_string()]);
+        }
+
+        #[test]
+        fn restart_mismatched_complete_sizes_fall_back_to_queue(
+            complete_size in 0u64..200,
+        ) {
+            prop_assume!(complete_size != 100);
+
+            let restart = reconcile_restart(
+                Some(sample_snapshot()),
+                FilesystemSnapshot {
+                    complete_files: vec![FilesystemFile {
+                        file_id: "a.bin".to_string().into(),
+                        size: complete_size,
+                    }],
+                    partial_files: Vec::new(),
+                },
+                vec!["https://mega.nz/file/test".to_string()],
+            );
+
+            let file = &restart.state.files["a.bin"];
+            prop_assert_eq!(&file.lifecycle, &FileLifecycle::Queued);
+            prop_assert_eq!(file.accounting, FileAccounting::CurrentRun);
+            prop_assert_eq!(file.progress.visible_completed_bytes, 0);
+            prop_assert_eq!(restart.resume_file_ids, vec!["a.bin".to_string()]);
+        }
     }
 }
