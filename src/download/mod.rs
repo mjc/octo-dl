@@ -14,6 +14,7 @@ mod revalidate;
 mod revalidate_part;
 mod revalidation_buffer;
 mod session;
+mod session_run;
 mod sidecar;
 mod sidecar_store;
 mod sidecar_writer;
