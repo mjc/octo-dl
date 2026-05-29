@@ -1,4 +1,4 @@
-use super::super::{VerifiedChunkRecord, load_sidecar};
+use super::super::sidecar_store::{VerifiedChunkRecord, load_sidecar};
 use crate::download::test_support::sidecar_for_chunk;
 use crate::download::{part_path, sidecar_path};
 use crate::fs::{FileFingerprint, FileSystem, TokioFileSystem};

@@ -1,13 +1,15 @@
 use std::sync::atomic::Ordering;
 
+use super::super::resume_state::ResumeReuseSource;
 use super::super::resume_validation::ResumeValidation;
-use super::super::test_support::*;
-use super::super::{
-    ResumeReuseSource, ResumeSidecar, VerifiedChunkRecord, load_sidecar, part_path,
-    save_sidecar_atomic, sidecar_path,
+use super::super::sidecar::part_path;
+use super::super::sidecar_store::{
+    ResumeSidecar, VerifiedChunkRecord, load_sidecar, save_sidecar_atomic,
 };
+use super::super::test_support::*;
 use super::persist_revalidated_sidecar;
 use crate::config::DownloadConfig;
+use crate::download::sidecar_path;
 use crate::fs::{FileSystem, TokioFileSystem};
 
 enum StoredFingerprint {

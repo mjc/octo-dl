@@ -225,8 +225,9 @@ where
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use super::super::callbacks::NoProgress;
+    use super::super::sidecar::part_path;
     use super::super::test_support::*;
-    use super::super::{NoProgress, part_path};
     use super::*;
     use crate::fake_mega::{FakeMegaFixture, FakeMegaServer, create_fake_mega_fixture};
 

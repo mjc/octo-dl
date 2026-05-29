@@ -14,7 +14,6 @@ use super::resume_validation::{
     resume_fingerprint_matches, trust_resume_candidate,
 };
 use super::revalidate_part::revalidate_candidates_from_part;
-use super::revalidation_buffer::REVALIDATION_BUFFER_BYTES;
 use super::sidecar_store::load_sidecar;
 
 impl<F: FileSystem> Downloader<F> {

@@ -36,6 +36,4 @@ pub(crate) use self::sidecar::{
     has_resume_sidecar, legacy_binary_sidecar_path, legacy_json_sidecar_path, part_path,
     resume_sidecar_verified_bytes, sidecar_path,
 };
-use self::sidecar_store::*;
-use self::sidecar_writer::*;
 pub use self::verify::CompletedFileVerify;

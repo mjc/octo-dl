@@ -14,6 +14,9 @@ use crate::fake_mega::{FakeMegaFixture, FakeMegaServer, create_fake_mega_fixture
 use crate::fs::{FileFingerprint, FileSystem, TokioFileSystem};
 
 use super::resume_state::CURRENT_RESUME_SIDECAR_VERSION;
+use super::sidecar_store::{
+    LegacyJsonResumeSidecar, LegacyJsonVerifiedChunkRecord, ResumeSidecar, VerifiedChunkRecord,
+};
 use super::*;
 
 pub(super) static TEST_AES_KEY: [u8; 16] = [7u8; 16];
