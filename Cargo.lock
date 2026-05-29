@@ -1664,7 +1664,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "sluice",
  "smallvec",
  "sysinfo",
  "tempfile",
