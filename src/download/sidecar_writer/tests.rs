@@ -1,11 +1,27 @@
 use super::super::{VerifiedChunkRecord, load_sidecar};
-use crate::download::{CURRENT_RESUME_SIDECAR_VERSION, part_path, sidecar_path};
+use crate::download::test_support::sidecar_for_chunk;
+use crate::download::{part_path, sidecar_path};
 use crate::fs::{FileFingerprint, FileSystem, TokioFileSystem};
 
 use super::{
     LazySidecarWriter, ResumeSidecar, SidecarGeneration, SidecarWriterShutdown,
     fingerprint_part_sync,
 };
+
+fn sidecar_with_chunks(file_size: u64, chunks: &[(u32, [u8; 16])]) -> ResumeSidecar {
+    let (&(first_index, first_mac), rest) = chunks
+        .split_first()
+        .expect("sidecar test fixtures require at least one chunk");
+    let mut sidecar = sidecar_for_chunk(file_size, [9u8; 8], first_index, first_mac);
+    sidecar.verified_chunks =
+        rest.iter()
+            .copied()
+            .fold(sidecar.verified_chunks, |mut records, (index, mac)| {
+                records.push(VerifiedChunkRecord { index, mac });
+                records
+            });
+    sidecar
+}
 
 #[tokio::test]
 async fn sidecar_writer_persists_verified_snapshots_in_order() {
@@ -14,29 +30,8 @@ async fn sidecar_writer_persists_verified_snapshots_in_order() {
     let part_path = dir.path().join("file.bin.part");
     tokio::fs::write(&part_path, b"partial").await.unwrap();
     let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path.clone());
-    let first = ResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size: 42,
-        expected_condensed_mac: [9u8; 8],
-        verified_chunks: vec![VerifiedChunkRecord {
-            index: 0,
-            mac: [1u8; 16],
-        }],
-        part_fingerprint: None,
-    };
-    let second = ResumeSidecar {
-        verified_chunks: vec![
-            VerifiedChunkRecord {
-                index: 0,
-                mac: [1u8; 16],
-            },
-            VerifiedChunkRecord {
-                index: 1,
-                mac: [2u8; 16],
-            },
-        ],
-        ..first.clone()
-    };
+    let first = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
+    let second = sidecar_with_chunks(42, &[(0, [1u8; 16]), (1, [2u8; 16])]);
 
     writer.persist_verified_snapshot(SidecarGeneration::new(1), first);
     writer.persist_verified_snapshot(SidecarGeneration::new(2), second.clone());
@@ -56,22 +51,14 @@ async fn sidecar_writer_saves_snapshot_without_fingerprint_when_part_is_missing(
     let sidecar_path = dir.path().join("file.bin.part.postcard");
     let part_path = dir.path().join("file.bin.part");
     let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path.clone());
-    let snapshot = ResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size: 42,
-        expected_condensed_mac: [9u8; 8],
-        verified_chunks: vec![VerifiedChunkRecord {
-            index: 0,
-            mac: [1u8; 16],
-        }],
-        part_fingerprint: Some(FileFingerprint {
-            len: 999,
-            modified_ns: 999,
-            allocated_bytes: Some(999),
-            dev: None,
-            ino: None,
-        }),
-    };
+    let mut snapshot = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
+    snapshot.part_fingerprint = Some(FileFingerprint {
+        len: 999,
+        modified_ns: 999,
+        allocated_bytes: Some(999),
+        dev: None,
+        ino: None,
+    });
 
     writer.persist_verified_snapshot(SidecarGeneration::new(1), snapshot);
     writer.finish(SidecarWriterShutdown::Flush).await;
@@ -88,29 +75,8 @@ async fn sidecar_writer_allows_equal_generation_for_final_flush() {
     let part_path = dir.path().join("file.bin.part");
     tokio::fs::write(&part_path, b"partial").await.unwrap();
     let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path);
-    let first = ResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size: 42,
-        expected_condensed_mac: [9u8; 8],
-        verified_chunks: vec![VerifiedChunkRecord {
-            index: 0,
-            mac: [1u8; 16],
-        }],
-        part_fingerprint: None,
-    };
-    let final_snapshot = ResumeSidecar {
-        verified_chunks: vec![
-            VerifiedChunkRecord {
-                index: 0,
-                mac: [1u8; 16],
-            },
-            VerifiedChunkRecord {
-                index: 1,
-                mac: [2u8; 16],
-            },
-        ],
-        ..first.clone()
-    };
+    let first = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
+    let final_snapshot = sidecar_with_chunks(42, &[(0, [1u8; 16]), (1, [2u8; 16])]);
 
     writer.persist_verified_snapshot(SidecarGeneration::new(2), first);
     writer.persist_final_snapshot(SidecarGeneration::new(2), final_snapshot.clone());
@@ -127,29 +93,8 @@ async fn sidecar_writer_rejects_older_final_snapshot_after_newer_generation() {
     let part_path = dir.path().join("file.bin.part");
     tokio::fs::write(&part_path, b"partial").await.unwrap();
     let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path);
-    let older = ResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size: 42,
-        expected_condensed_mac: [9u8; 8],
-        verified_chunks: vec![VerifiedChunkRecord {
-            index: 0,
-            mac: [1u8; 16],
-        }],
-        part_fingerprint: None,
-    };
-    let newer = ResumeSidecar {
-        verified_chunks: vec![
-            VerifiedChunkRecord {
-                index: 0,
-                mac: [1u8; 16],
-            },
-            VerifiedChunkRecord {
-                index: 1,
-                mac: [2u8; 16],
-            },
-        ],
-        ..older.clone()
-    };
+    let older = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
+    let newer = sidecar_with_chunks(42, &[(0, [1u8; 16]), (1, [2u8; 16])]);
 
     writer.persist_verified_snapshot(SidecarGeneration::new(3), newer.clone());
     writer.persist_final_snapshot(SidecarGeneration::new(2), older);
@@ -168,29 +113,8 @@ async fn sidecar_writer_rejects_older_verified_snapshot_after_newer_generation()
     let sidecar_path = sidecar_path(&file_path);
     tokio::fs::write(&part_path, b"partial").await.unwrap();
     let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path);
-    let first_snapshot = ResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size: 300_000,
-        expected_condensed_mac: [9_u8; 8],
-        verified_chunks: vec![VerifiedChunkRecord {
-            index: 1,
-            mac: [1_u8; 16],
-        }],
-        part_fingerprint: None,
-    };
-    let second_snapshot = ResumeSidecar {
-        verified_chunks: vec![
-            VerifiedChunkRecord {
-                index: 1,
-                mac: [1_u8; 16],
-            },
-            VerifiedChunkRecord {
-                index: 2,
-                mac: [2_u8; 16],
-            },
-        ],
-        ..first_snapshot.clone()
-    };
+    let first_snapshot = sidecar_for_chunk(300_000, [9_u8; 8], 1, [1_u8; 16]);
+    let second_snapshot = sidecar_with_chunks(300_000, &[(1, [1_u8; 16]), (2, [2_u8; 16])]);
 
     writer.persist_verified_snapshot(SidecarGeneration::new(2), second_snapshot);
     writer.persist_verified_snapshot(SidecarGeneration::new(1), first_snapshot);
@@ -217,29 +141,8 @@ async fn sidecar_writer_ignores_persist_requests_after_finish() {
     let part_path = dir.path().join("file.bin.part");
     tokio::fs::write(&part_path, b"partial").await.unwrap();
     let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path);
-    let first = ResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size: 42,
-        expected_condensed_mac: [9u8; 8],
-        verified_chunks: vec![VerifiedChunkRecord {
-            index: 0,
-            mac: [1u8; 16],
-        }],
-        part_fingerprint: None,
-    };
-    let second = ResumeSidecar {
-        verified_chunks: vec![
-            VerifiedChunkRecord {
-                index: 0,
-                mac: [1u8; 16],
-            },
-            VerifiedChunkRecord {
-                index: 1,
-                mac: [2u8; 16],
-            },
-        ],
-        ..first.clone()
-    };
+    let first = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
+    let second = sidecar_with_chunks(42, &[(0, [1u8; 16]), (1, [2u8; 16])]);
 
     writer.persist_verified_snapshot(SidecarGeneration::new(1), first.clone());
     writer.finish(SidecarWriterShutdown::Flush).await;
