@@ -23,17 +23,8 @@ fn finish_interactive_shutdown_if_ready(app: &mut App, shutting_down: &mut bool)
         *shutting_down = true;
         app.drain_token_messages();
         app.skip_all_shutdown_verifications();
-        if !app.begin_shutdown() {
-            app.sync_session_for_shutdown();
-            return true;
-        }
-    }
-
-    if *shutting_down {
-        app.drain_token_messages();
-    }
-
-    if *shutting_down && app.shutdown_pending_files.is_empty() {
+        let _waiting = app.begin_shutdown();
+        app.shutdown_pending_files.clear();
         app.sync_session_for_shutdown();
         return true;
     }
@@ -188,7 +179,9 @@ async fn run_interactive_tui_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{CoreEvent, FileId, FileLifecycle, PackageKey, ResolvedFile, ResolvedPackage};
+    use crate::core::{
+        CoreEvent, FileId, FileLifecycle, PackageKey, ResolvedFile, ResolvedPackage,
+    };
     use crate::tui::app::{FileEntry, FileStatus, VerificationTarget};
     use crate::tui::terminal_support::TerminalPanicHookGuard;
     use parking_lot::Mutex;
@@ -271,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn interactive_quit_waits_for_cancellation_before_syncing_session() {
+    fn interactive_quit_syncs_session_without_waiting_for_cancellation() {
         let dir = tempdir().expect("temp dir should exist");
         let _guard = StateDirectoryGuard::set(dir.path());
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
@@ -319,34 +312,19 @@ mod tests {
         );
 
         let token = tokio_util::sync::CancellationToken::new();
-        app.cancellation_tokens.insert(file_id.clone(), token.clone());
+        app.cancellation_tokens
+            .insert(file_id.clone(), token.clone());
         app.should_quit = true;
         let mut shutting_down = false;
 
-        assert!(!finish_interactive_shutdown_if_ready(
+        assert!(finish_interactive_shutdown_if_ready(
             &mut app,
             &mut shutting_down
         ));
         assert!(shutting_down);
         assert!(app.paused);
         assert!(token.is_cancelled());
-
-        let latest_during_shutdown =
-            crate::core::SessionSnapshot::latest().expect("session should still exist");
-        assert_eq!(
-            latest_during_shutdown
-                .find_file("episode.bin")
-                .expect("file should still exist during shutdown")
-                .progress
-                .visible_completed_bytes,
-            0
-        );
-
-        app.handle_file_cancelled_event(file_id.clone(), 0);
-        assert!(finish_interactive_shutdown_if_ready(
-            &mut app,
-            &mut shutting_down
-        ));
+        assert!(app.shutdown_pending_files.is_empty());
 
         let latest = crate::core::SessionSnapshot::latest().expect("session should be saved");
         let file = latest
@@ -358,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn interactive_quit_waits_for_late_download_token_registration_before_syncing_session() {
+    fn interactive_quit_skips_late_download_token_registration() {
         let dir = tempdir().expect("temp dir should exist");
         let _guard = StateDirectoryGuard::set(dir.path());
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
@@ -408,23 +386,24 @@ mod tests {
         app.should_quit = true;
         let mut shutting_down = false;
 
-        assert!(!finish_interactive_shutdown_if_ready(
+        assert!(finish_interactive_shutdown_if_ready(
             &mut app,
             &mut shutting_down
         ));
         assert!(shutting_down);
         assert!(app.paused);
+        assert!(app.shutdown_pending_files.is_empty());
         assert!(app.cancellation_tokens.is_empty());
 
         let latest_during_shutdown =
-            crate::core::SessionSnapshot::latest().expect("session should still exist");
+            crate::core::SessionSnapshot::latest().expect("session should be saved");
         assert_eq!(
             latest_during_shutdown
                 .find_file("episode.bin")
-                .expect("file should still exist during shutdown")
+                .expect("file should still exist after shutdown")
                 .progress
                 .visible_completed_bytes,
-            0
+            64
         );
     }
 
@@ -519,7 +498,8 @@ mod tests {
             size: 128,
         });
         let token = tokio_util::sync::CancellationToken::new();
-        app.cancellation_tokens.insert(file_id.clone(), token.clone());
+        app.cancellation_tokens
+            .insert(file_id.clone(), token.clone());
 
         app.pause_downloads();
         assert!(token.is_cancelled());
