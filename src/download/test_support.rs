@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -109,6 +110,26 @@ pub(super) fn tokio_downloader() -> Downloader<TokioFileSystem> {
     let http = reqwest::Client::new();
     let client = mega::Client::builder().build(http).unwrap();
     Downloader::new(client, DownloadConfig::default())
+}
+
+pub(super) fn run_with_large_stack_current_thread_runtime<F, Fut>(name: &str, run: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(run());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 pub(super) fn test_plaintext(size: usize) -> Vec<u8> {

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use super::super::NoProgress;
+use super::super::test_support::run_with_large_stack_current_thread_runtime;
 use super::*;
 use crate::config::DownloadConfig;
 use crate::fake_mega::{FakeMegaServer, create_fake_mega_fixture};
@@ -217,18 +218,7 @@ async fn run_complete_existing_file_rejects_same_size_corrupt_final_file_test() 
 
 #[test]
 fn complete_existing_file_rejects_same_size_corrupt_final_file() {
-    std::thread::Builder::new()
-        .name("complete-existing-corrupt-file-test".to_string())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            runtime
-                .block_on(run_complete_existing_file_rejects_same_size_corrupt_final_file_test());
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    run_with_large_stack_current_thread_runtime("complete-existing-corrupt-file-test", || async {
+        run_complete_existing_file_rejects_same_size_corrupt_final_file_test().await;
+    });
 }
