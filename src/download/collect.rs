@@ -1,3 +1,10 @@
+use std::sync::Arc;
+
+use crate::fs::FileSystem;
+
+use super::callbacks::DownloadProgress;
+use super::downloader::Downloader;
+use super::inspect::FileStatus;
 use super::package_identity::single_file_package_path;
 /// A file to be downloaded with its destination path.
 pub struct DownloadItem<'a> {
@@ -113,6 +120,53 @@ pub(crate) fn collect_download_items<'a>(nodes: &'a mega::Nodes) -> Vec<Download
         .collect()
 }
 
+pub(super) async fn collect_files_with_downloader<'a, F: FileSystem>(
+    downloader: &Downloader<F>,
+    nodes: &'a mega::Nodes,
+    progress: &Arc<dyn DownloadProgress>,
+) -> CollectedFiles<'a> {
+    let all_items = collect_download_items(nodes);
+
+    let mut to_download = Vec::new();
+    let mut completed = Vec::new();
+    let mut skipped = 0;
+    let mut partial = 0;
+
+    for item in all_items {
+        let local = downloader
+            .inspect_local_file(&item.path, item.node.size())
+            .await;
+        match local.status {
+            FileStatus::Complete => {
+                skipped += 1;
+                completed.push(item);
+            }
+            FileStatus::Partial => {
+                progress.on_partial_detected(
+                    &item.path,
+                    local.existing_partial_bytes,
+                    item.node.size(),
+                );
+                partial += 1;
+                to_download.push(DownloadItem {
+                    was_partial: true,
+                    ..item
+                });
+            }
+            FileStatus::Missing => {
+                to_download.push(item);
+            }
+        }
+    }
+
+    CollectedFiles {
+        to_download,
+        completed,
+        skipped,
+        partial,
+    }
+}
+
 /// Recursively collects files from a folder node.
 fn collect_files_recursive<'a>(
     nodes: &'a mega::Nodes,
@@ -169,7 +223,12 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::super::test_support::*;
+    use super::super::{NoProgress, part_path};
     use super::*;
+    use crate::fake_mega::{FakeMegaFixture, FakeMegaServer, create_fake_mega_fixture};
 
     #[test]
     fn collected_files_total_size() {
@@ -201,5 +260,118 @@ mod tests {
         });
 
         assert_eq!(path, "a/b/file.bin");
+    }
+
+    #[derive(Default)]
+    struct PartialRecordingProgress {
+        detected: Mutex<Vec<(String, u64, u64)>>,
+    }
+
+    impl DownloadProgress for PartialRecordingProgress {
+        fn on_partial_detected(&self, name: &str, existing_size: u64, expected_size: u64) {
+            self.detected
+                .lock()
+                .unwrap()
+                .push((name.to_string(), existing_size, expected_size));
+        }
+    }
+
+    async fn single_file_nodes(
+        seed: u64,
+    ) -> (
+        tempfile::TempDir,
+        FakeMegaFixture,
+        FakeMegaServer,
+        mega::Nodes,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture_dir = temp.path().join("fixture");
+        let fixture = create_fake_mega_fixture(&fixture_dir, "payload.bin", 262_219, seed)
+            .await
+            .unwrap();
+        let server = FakeMegaServer::spawn(fixture.clone(), 1).unwrap();
+        let client = mega::Client::builder()
+            .origin(server.origin().clone())
+            .build(reqwest::Client::new())
+            .unwrap();
+        let nodes = client
+            .fetch_public_nodes(&fixture.public_url())
+            .await
+            .unwrap();
+        (temp, fixture, server, nodes)
+    }
+
+    #[tokio::test]
+    async fn collect_files_marks_existing_output_complete() {
+        let (_temp, _fixture, server, nodes) = single_file_nodes(51).await;
+        let items = collect_download_items(&nodes);
+        let path = items[0].path.clone();
+        let size = items[0].node.size();
+        let fs = MockFileSystem::new();
+        fs.add_file(&path, size);
+        let downloader = mock_downloader(fs);
+        let progress: Arc<dyn DownloadProgress> = Arc::new(NoProgress);
+
+        let collected = collect_files_with_downloader(&downloader, &nodes, &progress).await;
+
+        assert_eq!(collected.skipped, 1);
+        assert_eq!(collected.partial, 0);
+        assert!(collected.to_download.is_empty());
+        assert_eq!(collected.completed.len(), 1);
+        assert_eq!(collected.completed[0].path, path);
+
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn collect_files_marks_existing_partials_and_reports_detected_bytes() {
+        let (_temp, _fixture, server, nodes) = single_file_nodes(53).await;
+        let items = collect_download_items(&nodes);
+        let path = items[0].path.clone();
+        let size = items[0].node.size();
+        let partial_bytes = size / 3;
+        let fs = MockFileSystem::new();
+        fs.add_file(part_path(&path), partial_bytes);
+        let downloader = mock_downloader(fs);
+        let progress_impl = Arc::new(PartialRecordingProgress::default());
+        let progress: Arc<dyn DownloadProgress> = progress_impl.clone();
+
+        let collected = collect_files_with_downloader(&downloader, &nodes, &progress).await;
+
+        assert_eq!(collected.skipped, 0);
+        assert_eq!(collected.partial, 1);
+        assert_eq!(collected.to_download.len(), 1);
+        assert!(collected.to_download[0].was_partial);
+        assert_eq!(collected.to_download[0].path, path);
+        assert!(collected.completed.is_empty());
+        assert_eq!(
+            progress_impl.detected.lock().unwrap().as_slice(),
+            &[(path, partial_bytes, size)]
+        );
+
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn collect_files_force_overwrite_treats_existing_output_as_missing() {
+        let (_temp, _fixture, server, nodes) = single_file_nodes(59).await;
+        let items = collect_download_items(&nodes);
+        let path = items[0].path.clone();
+        let size = items[0].node.size();
+        let fs = MockFileSystem::new();
+        fs.add_file(&path, size);
+        let downloader = mock_downloader_force(fs);
+        let progress: Arc<dyn DownloadProgress> = Arc::new(NoProgress);
+
+        let collected = collect_files_with_downloader(&downloader, &nodes, &progress).await;
+
+        assert_eq!(collected.skipped, 0);
+        assert_eq!(collected.partial, 0);
+        assert_eq!(collected.to_download.len(), 1);
+        assert!(!collected.to_download[0].was_partial);
+        assert_eq!(collected.to_download[0].path, path);
+        assert!(collected.completed.is_empty());
+
+        server.shutdown().await.unwrap();
     }
 }
