@@ -7,6 +7,7 @@ mod finalize;
 mod inspect;
 mod resume_reverify;
 mod resume_state;
+mod resume_tracker;
 mod revalidate;
 mod revalidate_part;
 mod session;
