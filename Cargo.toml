@@ -14,9 +14,10 @@ path = "src/lib.rs"
 name = "octo"
 path = "src/bin/octo.rs"
 
-[[bin]]
-name = "octo-fake-mega-bench"
-path = "src/bin/octo-fake-mega-bench.rs"
+[[bench]]
+name = "fake_mega"
+path = "benches/fake_mega.rs"
+harness = false
 required-features = ["tui"]
 
 [features]
@@ -81,6 +82,7 @@ sha2 = "0.10.8"
 [dev-dependencies]
 tempfile = "3.24.0"
 proptest = "1.5.0"
+divan = "0.1.21"
 
 [profile.dev]
 split-debuginfo = "unpacked"
