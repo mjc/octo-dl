@@ -75,7 +75,7 @@ impl ResumeTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{VerifiedChunkRecord, VerifiedChunks};
+    use super::super::sidecar_store::{VerifiedChunkRecord, VerifiedChunks};
     use super::ResumeTracker;
     use proptest::prelude::*;
 

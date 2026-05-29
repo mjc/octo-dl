@@ -1,4 +1,4 @@
-use super::super::{
+use super::super::sidecar_store::{
     LegacyJsonResumeSidecar, LegacyJsonVerifiedChunkRecord, ResumeSidecar, VerifiedChunkRecord,
     load_sidecar, save_sidecar_atomic,
 };

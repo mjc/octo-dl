@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use super::super::{load_sidecar, wait_for_persist_event};
+use super::super::sidecar_store::load_sidecar;
+use super::super::sidecar_writer::wait_for_persist_event;
 use super::{
     ChunkVerifiedState, DownloadCallbackState, DownloadProgress, LazySidecarWriter, NoProgress,
     ProgressCallbackState, ResumeTracker, ResumeValidationStatusProgress, SidecarWriterShutdown,
