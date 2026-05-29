@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::DownloadConfig;
 use crate::core::ProgressDelta;
+use crate::fake_mega::{FakeMegaFixture, FakeMegaServer, create_fake_mega_fixture};
 use crate::fs::{FileFingerprint, FileSystem, TokioFileSystem};
 
 use super::*;
@@ -110,6 +111,58 @@ pub(super) fn tokio_downloader() -> Downloader<TokioFileSystem> {
     let http = reqwest::Client::new();
     let client = mega::Client::builder().build(http).unwrap();
     Downloader::new(client, DownloadConfig::default())
+}
+
+pub(super) struct FakeMegaDownloadHarness {
+    _temp: tempfile::TempDir,
+    pub(super) fixture: FakeMegaFixture,
+    pub(super) server: FakeMegaServer,
+    pub(super) downloader: Downloader<TokioFileSystem>,
+    pub(super) nodes: mega::Nodes,
+    pub(super) output_dir: PathBuf,
+}
+
+impl FakeMegaDownloadHarness {
+    pub(super) async fn new(seed: u64, file_size: u64, config: DownloadConfig) -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture_dir = temp.path().join("fixture");
+        let output_dir = temp.path().join("output");
+        let fixture = create_fake_mega_fixture(&fixture_dir, "payload.bin", file_size, seed)
+            .await
+            .unwrap();
+        let server = FakeMegaServer::spawn(fixture.clone(), 1).unwrap();
+        let client = mega::Client::builder()
+            .origin(server.origin().clone())
+            .build(reqwest::Client::new())
+            .unwrap();
+        let nodes = client
+            .fetch_public_nodes(&fixture.public_url())
+            .await
+            .unwrap();
+        let downloader = Downloader::new(client, config);
+        Self {
+            _temp: temp,
+            fixture,
+            server,
+            downloader,
+            nodes,
+            output_dir,
+        }
+    }
+
+    pub(super) fn node(&self) -> &mega::Node {
+        self.nodes
+            .get_node_by_handle(self.fixture.handle())
+            .unwrap()
+    }
+
+    pub(super) fn output_path(&self, relative: impl AsRef<Path>) -> PathBuf {
+        self.output_dir.join(relative)
+    }
+
+    pub(super) async fn shutdown(self) {
+        self.server.shutdown().await.unwrap();
+    }
 }
 
 pub(super) fn run_with_large_stack_current_thread_runtime<F, Fut>(name: &str, run: F)
