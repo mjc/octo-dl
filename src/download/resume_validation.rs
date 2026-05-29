@@ -2,10 +2,7 @@ use std::path::Path;
 
 use super::callbacks::DownloadProgress;
 use super::resume_state::ResumeReuseSource;
-use super::resume_tracker::ResumeTracker;
-use super::sidecar_store::{ResumeSidecar, save_sidecar_atomic};
-use crate::error::{Error, Result};
-use crate::fs::FileSystem;
+use super::sidecar_store::ResumeSidecar;
 
 #[derive(Debug)]
 pub(super) struct ResumeValidation {
@@ -59,35 +56,9 @@ pub(super) fn trust_resume_candidate(
     true
 }
 
-pub(super) async fn persist_revalidated_sidecar<F: FileSystem>(
-    fs: &F,
-    sidecar_path: &Path,
-    part_path: &Path,
-    file_size: u64,
-    expected_condensed_mac: [u8; 8],
-    validation: &ResumeValidation,
-) -> Result<()> {
-    let mut snapshot = ResumeTracker::new(
-        file_size,
-        expected_condensed_mac,
-        validation.trusted_chunks.clone(),
-    )
-    .snapshot();
-    snapshot.part_fingerprint = fs.file_fingerprint(part_path).await;
-    save_sidecar_atomic(sidecar_path, &snapshot)
-        .await
-        .map_err(Error::from)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::*;
-    use super::super::{VerifiedChunkRecord, load_sidecar, sidecar_path};
-    use super::{
-        ResumeReuseSource, ResumeValidation, TrustedResumeChunkCandidate,
-        persist_revalidated_sidecar, trust_resume_candidate,
-    };
-    use crate::fs::{FileSystem, TokioFileSystem};
+    use super::{ResumeValidation, TrustedResumeChunkCandidate, trust_resume_candidate};
     use proptest::prelude::*;
 
     proptest! {
@@ -131,58 +102,5 @@ mod tests {
             prop_assert!(!validation.sidecar_loaded);
             prop_assert_eq!(validation.source, None);
         }
-    }
-
-    #[tokio::test]
-    async fn persist_revalidated_sidecar_writes_verified_chunks_and_current_fingerprint() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_size = 300_000_u64;
-        let expected_condensed_mac = [9_u8; 8];
-        let output_path = dir.path().join("payload.bin");
-        let sidecar_path = sidecar_path(output_path.to_string_lossy().as_ref());
-        let part_path = dir.path().join("payload.bin.part");
-        let part_data = test_incompressible_plaintext(usize_from_u64(file_size));
-        tokio::fs::write(&part_path, &part_data).await.unwrap();
-        let expected_fingerprint = TokioFileSystem::new()
-            .file_fingerprint(&part_path)
-            .await
-            .unwrap();
-        let validation = ResumeValidation {
-            trusted_chunks: vec![Some([1_u8; 16]), None, Some([3_u8; 16])],
-            trusted_count: 2,
-            trusted_bytes: file_size,
-            sidecar_loaded: true,
-            source: Some(ResumeReuseSource::Sidecar),
-        };
-
-        persist_revalidated_sidecar(
-            &TokioFileSystem::new(),
-            &sidecar_path,
-            &part_path,
-            file_size,
-            expected_condensed_mac,
-            &validation,
-        )
-        .await
-        .unwrap();
-
-        let persisted = load_sidecar(&sidecar_path).await.unwrap();
-        assert_eq!(persisted.file_size, file_size);
-        assert_eq!(persisted.expected_condensed_mac, expected_condensed_mac);
-        assert_eq!(
-            persisted.verified_chunks,
-            vec![
-                VerifiedChunkRecord {
-                    index: 0,
-                    mac: [1_u8; 16]
-                },
-                VerifiedChunkRecord {
-                    index: 2,
-                    mac: [3_u8; 16]
-                }
-            ]
-            .into()
-        );
-        assert_eq!(persisted.part_fingerprint, Some(expected_fingerprint));
     }
 }

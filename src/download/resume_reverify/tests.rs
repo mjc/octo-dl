@@ -1,7 +1,12 @@
 use std::sync::atomic::Ordering;
 
+use super::super::resume_validation::ResumeValidation;
 use super::super::test_support::*;
-use super::super::{ResumeSidecar, load_sidecar, part_path, save_sidecar_atomic, sidecar_path};
+use super::super::{
+    ResumeReuseSource, ResumeSidecar, VerifiedChunkRecord, load_sidecar, part_path,
+    save_sidecar_atomic, sidecar_path,
+};
+use super::persist_revalidated_sidecar;
 use crate::config::DownloadConfig;
 use crate::fs::{FileSystem, TokioFileSystem};
 
@@ -129,6 +134,59 @@ async fn run_restart_revalidation_and_manual_reverify_parity_test() {
     );
 
     harness.base.shutdown().await;
+}
+
+#[tokio::test]
+async fn persist_revalidated_sidecar_writes_verified_chunks_and_current_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_size = 300_000_u64;
+    let expected_condensed_mac = [9_u8; 8];
+    let output_path = dir.path().join("payload.bin");
+    let sidecar_path = sidecar_path(output_path.to_string_lossy().as_ref());
+    let part_path = dir.path().join("payload.bin.part");
+    let part_data = test_incompressible_plaintext(usize_from_u64(file_size));
+    tokio::fs::write(&part_path, &part_data).await.unwrap();
+    let expected_fingerprint = TokioFileSystem::new()
+        .file_fingerprint(&part_path)
+        .await
+        .unwrap();
+    let validation = ResumeValidation {
+        trusted_chunks: vec![Some([1_u8; 16]), None, Some([3_u8; 16])],
+        trusted_count: 2,
+        trusted_bytes: file_size,
+        sidecar_loaded: true,
+        source: Some(ResumeReuseSource::Sidecar),
+    };
+
+    persist_revalidated_sidecar(
+        &TokioFileSystem::new(),
+        &sidecar_path,
+        &part_path,
+        file_size,
+        expected_condensed_mac,
+        &validation,
+    )
+    .await
+    .unwrap();
+
+    let persisted = load_sidecar(&sidecar_path).await.unwrap();
+    assert_eq!(persisted.file_size, file_size);
+    assert_eq!(persisted.expected_condensed_mac, expected_condensed_mac);
+    assert_eq!(
+        persisted.verified_chunks,
+        vec![
+            VerifiedChunkRecord {
+                index: 0,
+                mac: [1_u8; 16]
+            },
+            VerifiedChunkRecord {
+                index: 2,
+                mac: [3_u8; 16]
+            }
+        ]
+        .into()
+    );
+    assert_eq!(persisted.part_fingerprint, Some(expected_fingerprint));
 }
 
 #[test]
