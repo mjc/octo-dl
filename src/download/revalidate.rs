@@ -8,11 +8,12 @@ use crate::core::ProgressDelta;
 use crate::error::{Error, Result};
 use crate::fs::{FileFingerprint, FileSystem};
 
-use super::ResumeValidation;
-use super::{
-    CURRENT_RESUME_SIDECAR_VERSION, DownloadProgress, Downloader, ResumeReuseSource,
-    SidecarValidationInput, TrustedResumeChunkCandidate, load_sidecar, trust_resume_candidate,
+use super::callbacks::DownloadProgress;
+use super::downloader::{CURRENT_RESUME_SIDECAR_VERSION, Downloader, ResumeReuseSource};
+use super::sidecar_state::{
+    ResumeValidation, SidecarValidationInput, TrustedResumeChunkCandidate, trust_resume_candidate,
 };
+use super::sidecar_store::load_sidecar;
 
 pub(crate) const REVALIDATION_BUFFER_BYTES: usize = 128 * 1024;
 

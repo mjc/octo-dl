@@ -1,10 +1,12 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::{
-    CURRENT_RESUME_SIDECAR_VERSION, legacy_binary_path_for_sidecar, legacy_json_path_for_sidecar,
-    load_sidecar_sync, postcard_path_for_sidecar,
+use super::downloader::CURRENT_RESUME_SIDECAR_VERSION;
+use super::sidecar_store::{
+    legacy_binary_path_for_sidecar, legacy_json_path_for_sidecar, load_sidecar_sync,
+    postcard_path_for_sidecar,
 };
+use super::sidecar_writer::sidecar_tmp_path;
 
 pub(crate) fn part_path(path: &str) -> PathBuf {
     let mut part = String::with_capacity(path.len() + ".part".len());
@@ -67,7 +69,7 @@ pub(super) async fn delete_sidecar_pair(
     if legacy_json_path != path {
         remove_file_if_exists(legacy_json_path).await?;
     }
-    remove_file_if_exists(&super::sidecar_writer::sidecar_tmp_path(&postcard_path)).await?;
+    remove_file_if_exists(&sidecar_tmp_path(&postcard_path)).await?;
     Ok(())
 }
 

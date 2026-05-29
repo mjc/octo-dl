@@ -1,10 +1,11 @@
 use crate::error::Result;
 use crate::fs::FileSystem;
 
-use super::{
-    DownloadProgress, Downloader, ResumeReverify, expected_mac, part_path,
-    persist_revalidated_sidecar, sidecar_path,
-};
+use super::callbacks::DownloadProgress;
+use super::downloader::{Downloader, ResumeReverify};
+use super::sidecar::{part_path, sidecar_path};
+use super::sidecar_state::persist_revalidated_sidecar;
+use super::verify::expected_mac;
 
 impl<F: FileSystem> Downloader<F> {
     /// Revalidates resumable chunk state for a file without downloading new data.

@@ -6,7 +6,9 @@ use crate::error::Result;
 use crate::fs::FileSystem;
 use crate::stats::{SessionStats, SessionStatsBuilder};
 
-use super::{DownloadItem, DownloadProgress, Downloader, OwnedDownloadItem};
+use super::callbacks::DownloadProgress;
+use super::collect::{DownloadItem, OwnedDownloadItem};
+use super::downloader::Downloader;
 
 impl<F: FileSystem> Downloader<F> {
     /// Downloads all collected files with concurrent downloads.

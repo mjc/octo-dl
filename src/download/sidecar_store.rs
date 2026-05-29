@@ -6,7 +6,8 @@ use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
-use super::CURRENT_RESUME_SIDECAR_VERSION;
+use super::downloader::CURRENT_RESUME_SIDECAR_VERSION;
+use super::sidecar_writer::sidecar_tmp_path;
 use crate::fs::FileFingerprint;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,7 +143,7 @@ fn deserialize_legacy_json_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
 }
 
 pub(super) async fn save_sidecar_atomic(path: &Path, sidecar: &ResumeSidecar) -> io::Result<()> {
-    let tmp = super::sidecar_writer::sidecar_tmp_path(path);
+    let tmp = sidecar_tmp_path(path);
     let data = postcard::to_stdvec(sidecar).map_err(io::Error::other)?;
     let mut file = tokio::fs::File::create(&tmp).await?;
     file.write_all(&data).await?;
