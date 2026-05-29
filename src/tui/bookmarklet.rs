@@ -9,7 +9,8 @@ pub fn bookmarklet_html(
 ) -> String {
     let href = html_escape_attr(&bookmarklet_href(fallback_origin, api_key_header));
     let fallback_host = html_escape_text(fallback_host);
-    r#"<!DOCTYPE html>
+    let mut html = String::from(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -31,13 +32,21 @@ pub fn bookmarklet_html(
 <body>
 <h1>octo-dl bookmarklet</h1>
 <p>Drag this link to your bookmarks bar:</p>
-<a class="bookmarklet" href="__BOOKMARKLET_HREF__">Send to octo-dl</a>
+<a class="bookmarklet" href=""#,
+    );
+    html.push_str(&href);
+    html.push_str(
+        r#"">Send to octo-dl</a>
 <p>Click it on any page to send the page HTML (with selected text as fallback) to octo-dl for download.</p>
-<p>Configured to use <code>__FALLBACK_HOST__</code></p>
+<p>Configured to use <code>"#,
+    );
+    html.push_str(&fallback_host);
+    html.push_str(
+        r#"</code></p>
 </body>
-</html>"#
-    .replace("__BOOKMARKLET_HREF__", &href)
-    .replace("__FALLBACK_HOST__", &fallback_host)
+</html>"#,
+    );
+    html
 }
 
 fn bookmarklet_href(fallback_origin: &str, api_key_header: &str) -> String {
@@ -97,9 +106,8 @@ mod tests {
         assert!(html.contains("&quot;x-api-key&quot;:&quot;secret&quot;"));
         assert!(html.contains("https://proxy.host"));
         assert!(html.contains("HTTP '+r.status"));
-        assert!(!html.contains("__FALLBACK_HOST__"));
-        assert!(!html.contains("__FALLBACK_ORIGIN__"));
-        assert!(!html.contains("__API_KEY_HEADER__"));
+        assert!(!html.contains(r#"href="__BOOKMARKLET_HREF__""#));
+        assert!(!html.contains("<code>__FALLBACK_HOST__</code>"));
     }
 
     #[test]
@@ -126,6 +134,23 @@ mod tests {
     #[test]
     fn icon_svg_is_nonempty() {
         assert!(ICON_SVG.starts_with("<svg "));
+    }
+
+    #[test]
+    fn bookmarklet_treats_placeholder_like_input_as_literal_data() {
+        let html = bookmarklet_html(
+            "https://proxy.host/__FALLBACK_HOST__",
+            "__BOOKMARKLET_HREF__",
+            r#"{"__FALLBACK_HOST__":"__BOOKMARKLET_HREF__"}"#,
+        );
+
+        assert!(html.contains("<code>__BOOKMARKLET_HREF__</code>"));
+        assert!(html.contains(
+            "https://proxy.host/__FALLBACK_HOST__"
+        ));
+        assert!(html.contains("&quot;__FALLBACK_HOST__&quot;:&quot;__BOOKMARKLET_HREF__&quot;"));
+        assert!(!html.contains(r#"href="__BOOKMARKLET_HREF__""#));
+        assert!(!html.contains("<code>__FALLBACK_HOST__</code>"));
     }
 
     proptest! {
@@ -171,8 +196,8 @@ mod tests {
 
             prop_assert!(html.contains(&expected_href));
             prop_assert!(html.contains(&expected_host));
-            prop_assert!(!html.contains("__BOOKMARKLET_HREF__"));
-            prop_assert!(!html.contains("__FALLBACK_HOST__"));
+            prop_assert!(!html.contains(r#"href="__BOOKMARKLET_HREF__""#));
+            prop_assert!(!html.contains("<code>__FALLBACK_HOST__</code>"));
         }
     }
 }
