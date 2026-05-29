@@ -189,17 +189,33 @@ mod tests {
         }
 
         #[test]
-        fn rate_estimator_reports_positive_after_forward_progress(
+        fn rate_estimator_reports_positive_after_at_least_one_byte_per_second(
             start_total in 0u64..1_000_001,
             delta in 1u64..1_000_001,
             secs in 1u64..121,
         ) {
+            prop_assume!(delta >= secs);
             let mut rate = RateEstimator::default();
             let start = Instant::now();
             let now = start + Duration::from_secs(secs);
             rate.reset(start_total, start);
             rate.record(start_total + delta, now);
             prop_assert!(rate.bytes_per_sec(now) > 0);
+        }
+
+        #[test]
+        fn rate_estimator_rounds_sub_byte_per_second_rates_down_to_zero(
+            start_total in 0u64..1_000_001,
+            delta in 1u64..121,
+            secs in 2u64..122,
+        ) {
+            prop_assume!(delta < secs);
+            let mut rate = RateEstimator::default();
+            let start = Instant::now();
+            let now = start + Duration::from_secs(secs);
+            rate.reset(start_total, start);
+            rate.record(start_total + delta, now);
+            prop_assert_eq!(rate.bytes_per_sec(now), 0);
         }
 
         #[test]
