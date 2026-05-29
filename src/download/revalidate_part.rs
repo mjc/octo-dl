@@ -9,9 +9,8 @@ use super::resume_state::ResumeReuseSource;
 use super::resume_validation::{
     ResumeValidation, SidecarValidationInput, TrustedResumeChunkCandidate, trust_resume_candidate,
 };
-use super::revalidate::{
-    REVALIDATION_BUFFER_BYTES, revalidation_buffer_len, should_emit_resume_validation_progress,
-};
+use super::revalidate::should_emit_resume_validation_progress;
+use super::revalidation_buffer::{REVALIDATION_BUFFER_BYTES, revalidation_buffer_len};
 
 pub(super) async fn revalidate_candidate_from_part<F: FileSystem>(
     fs: &F,
