@@ -14,8 +14,8 @@ use super::downloader::Downloader;
 use super::finalize::DownloadFinishContext;
 use super::resume_state::should_reuse_resume_state;
 use super::resume_tracker::ResumeTracker;
+use super::resume_validation::ResumeValidation;
 use super::sidecar::{delete_sidecar, part_path, sidecar_path};
-use super::sidecar_state::ResumeValidation;
 use super::sidecar_writer::LazySidecarWriter;
 use super::verify::expected_mac;
 

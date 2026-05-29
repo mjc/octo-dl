@@ -10,10 +10,10 @@ use crate::fs::{FileFingerprint, FileSystem};
 use super::callbacks::DownloadProgress;
 use super::downloader::Downloader;
 use super::resume_state::{CURRENT_RESUME_SIDECAR_VERSION, ResumeReuseSource};
-use super::revalidate_part::revalidate_candidates_from_part;
-use super::sidecar_state::{
+use super::resume_validation::{
     ResumeValidation, SidecarValidationInput, TrustedResumeChunkCandidate, trust_resume_candidate,
 };
+use super::revalidate_part::revalidate_candidates_from_part;
 use super::sidecar_store::load_sidecar;
 
 pub(crate) const REVALIDATION_BUFFER_BYTES: usize = 128 * 1024;

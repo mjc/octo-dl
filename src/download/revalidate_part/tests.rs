@@ -7,7 +7,7 @@ use crate::error::Error;
 
 use super::super::callbacks::DownloadProgress;
 use super::super::resume_state::ResumeReuseSource;
-use super::super::sidecar_state::{SidecarValidationInput, TrustedResumeChunkCandidate};
+use super::super::resume_validation::{SidecarValidationInput, TrustedResumeChunkCandidate};
 use super::super::sidecar_store::ResumeSidecar;
 use super::super::test_support::*;
 use super::*;

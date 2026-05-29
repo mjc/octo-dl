@@ -6,11 +6,11 @@ use crate::error::{Error, Result};
 use crate::fs::FileSystem;
 
 use super::resume_state::ResumeReuseSource;
+use super::resume_validation::{
+    ResumeValidation, SidecarValidationInput, TrustedResumeChunkCandidate, trust_resume_candidate,
+};
 use super::revalidate::{
     REVALIDATION_BUFFER_BYTES, revalidation_buffer_len, should_emit_resume_validation_progress,
-};
-use super::sidecar_state::{
-    ResumeValidation, SidecarValidationInput, TrustedResumeChunkCandidate, trust_resume_candidate,
 };
 
 pub(super) async fn revalidate_candidate_from_part<F: FileSystem>(
