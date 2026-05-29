@@ -1,5 +1,6 @@
 //! Download statistics types.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -93,7 +94,7 @@ pub struct DownloadStatsTracker {
     total_bytes: u64,
     downloaded: AtomicU64,
     peak_speed: AtomicU64,
-    time_to_80pct_ms: AtomicU64,
+    peak_history: Mutex<Vec<(u64, u64)>>,
 }
 
 impl DownloadStatsTracker {
@@ -105,7 +106,7 @@ impl DownloadStatsTracker {
             total_bytes,
             downloaded: AtomicU64::new(0),
             peak_speed: AtomicU64::new(0),
-            time_to_80pct_ms: AtomicU64::new(0),
+            peak_history: Mutex::new(Vec::new()),
         }
     }
 
@@ -134,18 +135,16 @@ impl DownloadStatsTracker {
     /// Tracks peak speed and time to reach 80% of peak.
     pub fn update_speed(&self, speed: u64) {
         let prev_peak = self.peak_speed.fetch_max(speed, Ordering::Relaxed);
-        let peak = prev_peak.max(speed);
-
-        // Track time to reach 80% of peak
-        if self.time_to_80pct_ms.load(Ordering::Relaxed) == 0 && speed >= peak * 4 / 5 {
-            // u128 -> u64: saturate at MAX for durations > 584 million years
+        if speed > prev_peak {
+            // Record only new peak samples; the earliest sample at >= 80% of the
+            // final peak must also be a running peak.
             let ms = self
                 .start_time
                 .elapsed()
                 .as_millis()
                 .try_into()
                 .unwrap_or(u64::MAX);
-            self.time_to_80pct_ms.store(ms, Ordering::Relaxed);
+            self.peak_history.lock().unwrap().push((speed, ms));
         }
     }
 
@@ -176,8 +175,16 @@ impl DownloadStatsTracker {
     /// Returns the time to reach 80% of peak speed, if achieved.
     #[must_use]
     pub fn time_to_80pct(&self) -> Option<Duration> {
-        std::num::NonZeroU64::new(self.time_to_80pct_ms.load(Ordering::Relaxed))
-            .map(|ms| Duration::from_millis(ms.get()))
+        let peak = self.peak_speed();
+        if peak == 0 {
+            return None;
+        }
+        self.peak_history
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(speed, _)| u128::from(*speed) * 5 >= u128::from(peak) * 4)
+            .map(|(_, ms)| Duration::from_millis(*ms))
     }
 
     /// Converts this tracker into final file statistics.
@@ -367,14 +374,16 @@ mod tests {
             total_bytes: 1000,
             downloaded: AtomicU64::new(0),
             peak_speed: AtomicU64::new(0),
-            time_to_80pct_ms: AtomicU64::new(0),
+            peak_history: Mutex::new(Vec::new()),
         };
-        // Start with a low speed, then ramp up
         tracker.update_speed(10);
-        // Now hit 80% of the eventual peak (500)
+        tracker.update_speed(400);
+        let ramp_up = tracker
+            .time_to_80pct()
+            .expect("400 should reach 80% of peak");
         tracker.update_speed(500);
-        // 400 >= 500 * 4 / 5 = 400, so we should record the time
-        assert!(tracker.time_to_80pct().is_some());
+
+        assert_eq!(tracker.time_to_80pct(), Some(ramp_up));
     }
 
     #[test]

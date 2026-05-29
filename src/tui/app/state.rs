@@ -579,20 +579,14 @@ impl App {
         }
 
         self.pending_core_state_session_persistence = false;
-        let session = session;
         if session.urls.is_empty() && session.packages.is_empty() {
             let path = session.state_path();
             self.install_session(session);
-            if self.session_persist_defer_depth > 0 {
-                self.pending_session_persistence =
-                    Some(super::PendingSessionPersistence::Remove(path));
-            } else {
-                #[cfg(test)]
-                {
-                    self.session_persist_count += 1;
-                }
-                self.session_persistence.remove(path);
+            #[cfg(test)]
+            {
+                self.session_persist_count += 1;
             }
+            self.session_persistence.remove(path);
             return true;
         }
 
