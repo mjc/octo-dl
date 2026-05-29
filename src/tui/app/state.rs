@@ -163,6 +163,9 @@ impl App {
     }
 
     fn apply_core_event_with_policy(&mut self, event: CoreEvent, policy: CoreApplyPolicy) {
+        if let CoreEvent::RestartReconciled { snapshot } = &event {
+            self.startup_resume_pending_files = snapshot.resume_file_ids.iter().cloned().collect();
+        }
         let selected_row_identity = if policy.sync_visible {
             if self.visible_sync_defer_depth > 0 {
                 self.pending_visible_selection

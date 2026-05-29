@@ -40,6 +40,7 @@ impl App {
         self.verification_inflight_files.remove(id);
         self.verification_targets.remove(id);
         self.shutdown_blocking_verifications.remove(id);
+        self.startup_resume_pending_files.remove(id);
         self.reverify_pending_files.remove(id);
     }
 
@@ -311,7 +312,9 @@ impl App {
         self.verification_targets.remove(&id);
         self.shutdown_blocking_verifications.remove(&id);
         self.reset_pending_files.remove(&id);
-        if self.reverify_pending_files.remove(&id) {
+        let preserve_resume_progress = self.reverify_pending_files.remove(&id)
+            || self.startup_resume_pending_files.remove(&id);
+        if preserve_resume_progress {
             self.apply_core_event(CoreEvent::FileResumeStarted {
                 file_id: id.clone(),
                 size,
@@ -732,6 +735,7 @@ impl App {
         };
 
         self.cancel_file_token(id);
+        self.startup_resume_pending_files.remove(id);
         if matches!(context.status, super::FileStatus::Downloading) {
             self.bump_file_attempt_id(id);
         }
@@ -797,6 +801,7 @@ impl App {
 
         for (file_id, source_url, lifecycle, target) in files {
             self.cancel_file_token(&file_id);
+            self.startup_resume_pending_files.remove(&file_id);
             if matches!(lifecycle, crate::core::FileLifecycle::Downloading) {
                 self.bump_file_attempt_id(&file_id);
             }

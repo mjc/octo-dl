@@ -6,7 +6,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    core::{CoreEvent, FileLifecycle, ResolvedFile, ResolvedPackage, SessionRunStatus},
+    core::{
+        CoreEvent, FileLifecycle, FilesystemSnapshot, PartialFileSnapshot, ResolvedFile,
+        ResolvedPackage, SessionRunStatus, reconcile_restart,
+    },
     test_support::{
         FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id, push_file,
         session_snapshot,
@@ -673,7 +676,8 @@ fn file_error_clears_verification_state() {
     resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
     let file_id = mark_verification_inflight(&mut app, "file.bin");
     let token = CancellationToken::new();
-    app.cancellation_tokens.insert(file_id.clone(), token.clone());
+    app.cancellation_tokens
+        .insert(file_id.clone(), token.clone());
     app.track_shutdown_pending_file(&file_id);
 
     app.handle_file_error_event(file_id.clone(), "network failed".to_string(), 0);
@@ -711,7 +715,8 @@ fn file_complete_clears_verification_state() {
     resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
     let file_id = mark_verification_inflight(&mut app, "file.bin");
     let token = CancellationToken::new();
-    app.cancellation_tokens.insert(file_id.clone(), token.clone());
+    app.cancellation_tokens
+        .insert(file_id.clone(), token.clone());
     app.track_shutdown_pending_file(&file_id);
 
     app.handle_file_complete_event(file_id.clone(), 0);
@@ -942,7 +947,11 @@ fn reverify_active_file_bumps_attempt_generation() {
     let (url_tx, mut url_rx) = mpsc::unbounded_channel();
     app.url_tx = url_tx;
     let file_id: crate::core::FileId = "active.bin".to_string().into();
-    resolve_package(&mut app, "https://mega.nz/file/root", &[("active.bin", 100)]);
+    resolve_package(
+        &mut app,
+        "https://mega.nz/file/root",
+        &[("active.bin", 100)],
+    );
     app.apply_core_event(CoreEvent::FileStarted {
         file_id: file_id.clone(),
         size: 100,
@@ -974,7 +983,11 @@ fn stale_old_attempt_progress_is_ignored_during_alt_r_reverify() {
     let (url_tx, _url_rx) = mpsc::unbounded_channel();
     app.url_tx = url_tx;
     let file_id: crate::core::FileId = "active.bin".to_string().into();
-    resolve_package(&mut app, "https://mega.nz/file/root", &[("active.bin", 100)]);
+    resolve_package(
+        &mut app,
+        "https://mega.nz/file/root",
+        &[("active.bin", 100)],
+    );
     app.apply_core_event(CoreEvent::FileStarted {
         file_id: file_id.clone(),
         size: 100,
@@ -996,7 +1009,9 @@ fn stale_old_attempt_progress_is_ignored_during_alt_r_reverify() {
         attempt_id: 0,
     });
 
-    let file = app.visible_file(&file_id).expect("file should remain visible");
+    let file = app
+        .visible_file(&file_id)
+        .expect("file should remain visible");
     assert_eq!(file.downloaded, 0);
     assert!(app.verifying_files.contains(&file_id));
     assert!(app.verification_inflight_files.contains(&file_id));
@@ -1013,7 +1028,11 @@ fn stale_old_attempt_cancel_is_ignored_after_alt_r_resume() {
     let (url_tx, _url_rx) = mpsc::unbounded_channel();
     app.url_tx = url_tx;
     let file_id: crate::core::FileId = "active.bin".to_string().into();
-    resolve_package(&mut app, "https://mega.nz/file/root", &[("active.bin", 100)]);
+    resolve_package(
+        &mut app,
+        "https://mega.nz/file/root",
+        &[("active.bin", 100)],
+    );
     app.apply_core_event(CoreEvent::FileStarted {
         file_id: file_id.clone(),
         size: 100,
@@ -1041,7 +1060,9 @@ fn stale_old_attempt_cancel_is_ignored_after_alt_r_resume() {
         attempt_id: 0,
     });
 
-    let file = app.visible_file(&file_id).expect("file should remain visible");
+    let file = app
+        .visible_file(&file_id)
+        .expect("file should remain visible");
     assert_eq!(file.downloaded, 47);
     assert_eq!(file.status, FileStatus::Downloading);
 }
@@ -2517,6 +2538,47 @@ fn restarting_completed_file_resets_visible_progress_before_new_deltas() {
     assert_eq!(file.downloaded, 0);
     assert_eq!(file.status, FileStatus::Downloading);
     assert_eq!(app.total_downloaded, 0);
+}
+
+#[test]
+fn restarting_partial_file_preserves_visible_progress_before_new_deltas() {
+    let mut app = test_app();
+    let url = "https://mega.nz/file/root".to_string();
+    let mut session = session_snapshot(vec![(&url, UrlFixtureStatus::Pending)]);
+    push_file(&mut session, 0, "file-id", 100, FileFixtureStatus::Pending);
+    let restart = reconcile_restart(
+        Some(session.clone()),
+        FilesystemSnapshot {
+            complete_files: Vec::new(),
+            partial_files: vec![PartialFileSnapshot {
+                file_id: "file-id".to_string().into(),
+                bytes: 45,
+                has_sidecar: false,
+                verified_bytes: 0,
+            }],
+        },
+        vec![url],
+    );
+    app.resume_from_restart(session, &restart);
+
+    let file = app
+        .visible_file(&"file-id".into())
+        .expect("file should be visible");
+    assert_eq!(file.downloaded, 45);
+    assert_eq!(file.status, FileStatus::Queued);
+
+    app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
+        id: "file-id".to_string().into(),
+        size: 100,
+        attempt_id: 0,
+    });
+
+    let file = app
+        .visible_file(&"file-id".into())
+        .expect("file should be visible");
+    assert_eq!(file.downloaded, 45);
+    assert_eq!(file.status, FileStatus::Downloading);
+    assert_eq!(app.total_downloaded, 45);
 }
 
 #[test]

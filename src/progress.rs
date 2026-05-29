@@ -48,4 +48,26 @@ mod tests {
         assert_eq!(tracker.delta(500), 0);
         assert_eq!(tracker.delta(700), 200);
     }
+
+    #[test]
+    fn cumulative_progress_ignores_initial_high_water_callback() {
+        let tracker = CumulativeProgress::with_high_water(1_024);
+        assert_eq!(tracker.delta(1_024), 0);
+    }
+
+    #[test]
+    fn cumulative_progress_reports_network_bytes_after_high_water() {
+        let tracker = CumulativeProgress::with_high_water(1_024);
+        assert_eq!(tracker.delta(1_536), 512);
+    }
+
+    #[test]
+    fn cumulative_progress_ignores_duplicate_or_out_of_order_totals_after_high_water() {
+        let tracker = CumulativeProgress::with_high_water(1_024);
+        assert_eq!(tracker.delta(1_024), 0);
+        assert_eq!(tracker.delta(1_023), 0);
+        assert_eq!(tracker.delta(1_280), 256);
+        assert_eq!(tracker.delta(1_152), 0);
+        assert_eq!(tracker.delta(1_536), 256);
+    }
 }
