@@ -231,7 +231,17 @@ mod tests {
     use super::{
         DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState,
         PackageId, PackageKey, PackageProgressState, PackageStatus, SessionMeta,
+        visible_completed_bytes_for_display,
     };
+    use proptest::{prelude::*, string::string_regex};
+
+    fn package_key_string() -> impl Strategy<Value = String> {
+        string_regex("[A-Za-z0-9_./:-]{1,32}").expect("valid package key regex")
+    }
+
+    fn file_id_string() -> impl Strategy<Value = String> {
+        string_regex("[A-Za-z0-9_./:-]{0,32}").expect("valid file id regex")
+    }
 
     #[test]
     fn package_key_ids_are_stable_across_derivation_paths() {
@@ -324,6 +334,118 @@ mod tests {
             .status(true),
             PackageStatus::Failed
         );
+    }
+
+    proptest! {
+        #[test]
+        fn package_id_derivation_is_stable_for_package_key(package_key in package_key_string()) {
+            let package_key = PackageKey::new(package_key);
+            prop_assert_eq!(
+                PackageId::for_package_key(&package_key),
+                PackageId::parse_or_key(package_key.as_str(), &package_key)
+            );
+        }
+
+        #[test]
+        fn package_id_parse_or_key_prefers_valid_uuid_strings(raw_uuid in any::<[u8; 16]>()) {
+            let raw_uuid = uuid::Uuid::from_bytes(raw_uuid);
+            let raw = raw_uuid.to_string();
+            let package_key = PackageKey::new("folder/example");
+            prop_assert_eq!(
+                PackageId::parse_or_key(&raw, &package_key),
+                PackageId::from(raw_uuid)
+            );
+        }
+
+        #[test]
+        fn file_id_string_and_serde_round_trip(raw in file_id_string()) {
+            let file_id = FileId::from(raw.clone());
+            let json = serde_json::to_string(&file_id).unwrap();
+            let decoded: FileId = serde_json::from_str(&json).unwrap();
+
+            prop_assert_eq!(file_id.as_str(), raw.as_str());
+            prop_assert_eq!(file_id.as_str(), raw.as_str());
+            prop_assert_eq!(decoded.as_str(), file_id.as_str());
+        }
+
+        #[test]
+        fn package_progress_file_count_matches_sum(
+            queued in any::<u16>(),
+            downloading in any::<u16>(),
+            complete in any::<u16>(),
+            failed in any::<u16>(),
+        ) {
+            let progress = PackageProgressState {
+                queued: usize::from(queued),
+                downloading: usize::from(downloading),
+                complete: usize::from(complete),
+                failed: usize::from(failed),
+            };
+
+            prop_assert_eq!(
+                progress.file_count(),
+                usize::from(queued)
+                    + usize::from(downloading)
+                    + usize::from(complete)
+                    + usize::from(failed)
+            );
+        }
+
+        #[test]
+        fn package_progress_status_matches_precedence_oracle(
+            queued in any::<u16>(),
+            downloading in any::<u16>(),
+            complete in any::<u16>(),
+            failed in any::<u16>(),
+            has_error in any::<bool>(),
+        ) {
+            let progress = PackageProgressState {
+                queued: usize::from(queued),
+                downloading: usize::from(downloading),
+                complete: usize::from(complete),
+                failed: usize::from(failed),
+            };
+            let expected = if has_error || failed > 0 {
+                PackageStatus::Failed
+            } else if downloading > 0 {
+                PackageStatus::Downloading
+            } else if complete > 0 && queued > 0 {
+                PackageStatus::Partial
+            } else if complete > 0 && progress.file_count() > 0 {
+                PackageStatus::Complete
+            } else if queued > 0 {
+                PackageStatus::Queued
+            } else {
+                PackageStatus::Pending
+            };
+
+            prop_assert_eq!(progress.status(has_error), expected);
+        }
+
+        #[test]
+        fn visible_completed_bytes_are_clamped_to_file_size(
+            size in any::<u64>(),
+            visible_completed_bytes in any::<u64>(),
+        ) {
+            let file = FileState {
+                id: FileId::from("file.bin"),
+                package_id: PackageId::new_v4(),
+                source_url: "https://example.invalid/file".to_string(),
+                path: "file.bin".to_string(),
+                size,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState {
+                    visible_completed_bytes,
+                    ..FileProgressState::default()
+                },
+                accounting: FileAccounting::CurrentRun,
+            };
+
+            prop_assert_eq!(
+                visible_completed_bytes_for_display(&file),
+                visible_completed_bytes.min(size)
+            );
+        }
     }
 }
 
