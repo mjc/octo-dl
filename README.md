@@ -59,24 +59,32 @@ octo --tui --tui-attach 127.0.0.1:9723
 
 ## Fake MEGA benchmark harness
 
-`octo-fake-mega-bench` benchmarks the MEGA download/decrypt/MAC path against a
-local fake `mega.nz` public link. The current harness:
+The fake-MEGA harness now lives in the regular test/bench workflow:
+
+- integration tests keep the condensed-MAC correctness coverage
+- `benches/fake_mega.rs` benchmarks the MEGA download/decrypt/MAC path against a
+  local fake `mega.nz` public link with `divan`
+
+The benchmark harness:
 
 - serves pre-encrypted ciphertext from memory
 - runs the fake server on its own Tokio runtime
-- lets you control client workers with `--chunks-per-file`
-- lets you control fake-server workers with `--server-worker-threads`
+- lets you control client workers with `OCTO_FAKE_MEGA_CHUNKS_PER_FILE`
+- lets you control fake-server workers with
+  `OCTO_FAKE_MEGA_SERVER_WORKER_THREADS`
 - lets you control adjacent MEGA chunks per request with
-  `--mega-chunks-per-request`
+  `OCTO_FAKE_MEGA_MEGA_CHUNKS_PER_REQUEST`
+- accepts `OCTO_FAKE_MEGA_SIZE_MIB`, `OCTO_FAKE_MEGA_OUTPUT_DIR`,
+  `OCTO_FAKE_MEGA_SEED`, and `OCTO_FAKE_MEGA_KEEP=1` as additional overrides
 
 Example:
 
 ```sh
-cargo run --release --bin octo-fake-mega-bench -- \
-  --size-mib 1024 \
-  --chunks-per-file 4 \
-  --server-worker-threads 4 \
-  --mega-chunks-per-request 8
+OCTO_FAKE_MEGA_SIZE_MIB=1024 \
+OCTO_FAKE_MEGA_CHUNKS_PER_FILE=4 \
+OCTO_FAKE_MEGA_SERVER_WORKER_THREADS=4 \
+OCTO_FAKE_MEGA_MEGA_CHUNKS_PER_REQUEST=8 \
+nix develop -c cargo bench --bench fake_mega
 ```
 
 The table below records 10x averages for the fixed memory-backed harness with
