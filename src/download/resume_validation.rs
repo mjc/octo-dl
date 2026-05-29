@@ -1,8 +1,10 @@
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use super::callbacks::DownloadProgress;
 use super::resume_state::ResumeReuseSource;
 use super::sidecar_store::ResumeSidecar;
+use crate::fs::FileFingerprint;
 
 #[derive(Debug)]
 pub(super) struct ResumeValidation {
@@ -56,12 +58,188 @@ pub(super) fn trust_resume_candidate(
     true
 }
 
+pub(crate) fn should_emit_resume_validation_progress(
+    last_report_at: Instant,
+    now: Instant,
+) -> bool {
+    now.saturating_duration_since(last_report_at) >= Duration::from_secs(30)
+}
+
+pub(crate) fn resume_fingerprint_matches(
+    expected: FileFingerprint,
+    actual: FileFingerprint,
+) -> bool {
+    expected.len == actual.len
+        && (expected.modified_ns == 0 || expected.modified_ns == actual.modified_ns)
+        && expected
+            .allocated_bytes
+            .is_none_or(|allocated| actual.allocated_bytes == Some(allocated))
+        && expected.dev.is_none_or(|dev| actual.dev == Some(dev))
+        && expected.ino.is_none_or(|ino| actual.ino == Some(ino))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ResumeValidation, TrustedResumeChunkCandidate, trust_resume_candidate};
+    use super::{
+        ResumeValidation, TrustedResumeChunkCandidate, resume_fingerprint_matches,
+        should_emit_resume_validation_progress, trust_resume_candidate,
+    };
+    use crate::fs::FileFingerprint;
     use proptest::prelude::*;
+    use std::time::{Duration, Instant};
+
+    fn matching_fingerprint(
+        len: u64,
+        modified_ns: u128,
+        allocated_bytes: Option<u64>,
+    ) -> FileFingerprint {
+        FileFingerprint {
+            len,
+            modified_ns,
+            allocated_bytes,
+            dev: Some(7),
+            ino: Some(11),
+        }
+    }
 
     proptest! {
+        #[test]
+        fn resume_validation_progress_stays_silent_before_threshold(
+            secs in 0u64..30,
+        ) {
+            let start = Instant::now();
+            prop_assert!(!should_emit_resume_validation_progress(
+                start,
+                start + Duration::from_secs(secs),
+            ));
+        }
+
+        #[test]
+        fn resume_validation_progress_emits_at_or_after_threshold(
+            secs in 30u64..300,
+        ) {
+            let start = Instant::now();
+            prop_assert!(should_emit_resume_validation_progress(
+                start,
+                start + Duration::from_secs(secs),
+            ));
+        }
+
+        #[test]
+        fn resume_fingerprint_matches_ignores_missing_allocated_bytes(
+            len in any::<u64>(),
+            actual_allocated_bytes in any::<Option<u64>>(),
+        ) {
+            let expected = matching_fingerprint(len, 123, None);
+            let mut actual = matching_fingerprint(len, 123, Some(512));
+            actual.allocated_bytes = actual_allocated_bytes;
+
+            prop_assert!(resume_fingerprint_matches(expected, actual));
+        }
+
+        #[test]
+        fn resume_fingerprint_matches_ignores_zero_modified_time(
+            len in any::<u64>(),
+            actual_modified_ns in any::<u128>(),
+        ) {
+            let expected = matching_fingerprint(len, 0, Some(512));
+            let mut actual = matching_fingerprint(len, 123, Some(512));
+            actual.modified_ns = actual_modified_ns;
+
+            prop_assert!(resume_fingerprint_matches(expected, actual));
+        }
+
+        #[test]
+        fn resume_fingerprint_matches_rejects_modified_time_mismatch(
+            len in any::<u64>(),
+            modified_ns in 1u128..u128::MAX,
+            delta in 1u128..1024,
+        ) {
+            let expected = matching_fingerprint(len, modified_ns, Some(512));
+            let mut actual = expected;
+            actual.modified_ns = actual.modified_ns.wrapping_add(delta);
+
+            prop_assert!(!resume_fingerprint_matches(expected, actual));
+        }
+
+        #[test]
+        fn resume_fingerprint_matches_rejects_length_mismatch(
+            len in any::<u64>(),
+            delta in 1u64..1024,
+        ) {
+            let expected = matching_fingerprint(len, 123, Some(512));
+            let mut actual = expected;
+            actual.len = actual.len.wrapping_add(delta);
+
+            prop_assert!(!resume_fingerprint_matches(expected, actual));
+        }
+
+        #[test]
+        fn resume_fingerprint_matches_rejects_allocated_bytes_mismatch_when_expected_present(
+            len in any::<u64>(),
+            allocated_bytes in any::<u64>(),
+            delta in 1u64..1024,
+        ) {
+            let expected = matching_fingerprint(len, 123, Some(allocated_bytes));
+            let actual = matching_fingerprint(len, 123, Some(allocated_bytes.wrapping_add(delta)));
+
+            prop_assert!(!resume_fingerprint_matches(expected, actual));
+        }
+
+        #[test]
+        fn resume_fingerprint_matches_ignores_missing_device_in_expected(
+            len in any::<u64>(),
+            actual_dev in any::<Option<u64>>(),
+        ) {
+            let mut expected = matching_fingerprint(len, 123, Some(512));
+            expected.dev = None;
+            let mut actual = matching_fingerprint(len, 123, Some(512));
+            actual.dev = actual_dev;
+
+            prop_assert!(resume_fingerprint_matches(expected, actual));
+        }
+
+        #[test]
+        fn resume_fingerprint_matches_rejects_device_mismatch(
+            len in any::<u64>(),
+            dev in any::<u64>(),
+            delta in 1u64..1024,
+        ) {
+            let expected = matching_fingerprint(len, 123, Some(512));
+            let mut actual = expected;
+            actual.dev = Some(dev.wrapping_add(delta));
+
+            prop_assume!(actual.dev != expected.dev);
+            prop_assert!(!resume_fingerprint_matches(expected, actual));
+        }
+
+        #[test]
+        fn resume_fingerprint_matches_ignores_missing_inode_in_expected(
+            len in any::<u64>(),
+            actual_ino in any::<Option<u64>>(),
+        ) {
+            let mut expected = matching_fingerprint(len, 123, Some(512));
+            expected.ino = None;
+            let mut actual = matching_fingerprint(len, 123, Some(512));
+            actual.ino = actual_ino;
+
+            prop_assert!(resume_fingerprint_matches(expected, actual));
+        }
+
+        #[test]
+        fn resume_fingerprint_matches_rejects_inode_mismatch(
+            len in any::<u64>(),
+            ino in any::<u64>(),
+            delta in 1u64..1024,
+        ) {
+            let expected = matching_fingerprint(len, 123, Some(512));
+            let mut actual = expected;
+            actual.ino = Some(ino.wrapping_add(delta));
+
+            prop_assume!(actual.ino != expected.ino);
+            prop_assert!(!resume_fingerprint_matches(expected, actual));
+        }
+
         #[test]
         fn trust_resume_candidate_counts_each_chunk_once(
             chunk_count in 1usize..16,
