@@ -305,4 +305,93 @@ mod tests {
         let fs = TokioFileSystem::new();
         fs.sync_file(&path).await.unwrap();
     }
+
+    mod property_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn block_on_test<T>(future: impl std::future::Future<Output = T>) -> T {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(future)
+        }
+
+        fn read_window_case() -> impl Strategy<Value = (Vec<u8>, usize, usize)> {
+            proptest::collection::vec(any::<u8>(), 0..4097).prop_flat_map(|data| {
+                let len = data.len();
+                (Just(data), 0usize..=len, 0usize..=len).prop_filter(
+                    "offset + read_len must stay within the file",
+                    move |(_, offset, read_len)| offset.saturating_add(*read_len) <= len,
+                )
+            })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(24))]
+
+            #[test]
+            fn create_file_sets_requested_length(
+                size in 0u64..131_073,
+            ) {
+                let actual_len = block_on_test(async {
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = dir.path().join("create.bin");
+                    let fs = TokioFileSystem::new();
+                    let file = fs.create_file(&path, size).await.unwrap();
+                    drop(file);
+                    tokio::fs::metadata(&path).await.unwrap().len()
+                });
+
+                prop_assert_eq!(actual_len, size);
+            }
+
+            #[test]
+            fn read_exact_at_returns_requested_window(
+                (data, offset, read_len) in read_window_case(),
+            ) {
+                let actual = block_on_test(async {
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = dir.path().join("window.bin");
+                    tokio::fs::write(&path, &data).await.unwrap();
+                    let fs = TokioFileSystem::new();
+                    let mut buf = vec![0u8; read_len];
+                    fs.read_exact_at(&path, offset as u64, &mut buf).await.unwrap();
+                    buf
+                });
+
+                prop_assert_eq!(actual, data[offset..offset + read_len].to_vec());
+            }
+
+            #[test]
+            fn open_part_file_preserve_existing_matches_contract(
+                original in proptest::collection::vec(any::<u8>(), 0..4097),
+                target_size in 0usize..4097,
+                preserve_existing in any::<bool>(),
+            ) {
+                let actual = block_on_test(async {
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = dir.path().join("part.bin");
+                    tokio::fs::write(&path, &original).await.unwrap();
+                    let fs = TokioFileSystem::new();
+                    let file = fs
+                        .open_part_file(&path, target_size as u64, preserve_existing)
+                        .await
+                        .unwrap();
+                    drop(file);
+                    tokio::fs::read(&path).await.unwrap()
+                });
+
+                let expected = if preserve_existing {
+                    let mut expected = original[..original.len().min(target_size)].to_vec();
+                    expected.resize(target_size, 0);
+                    expected
+                } else {
+                    vec![0u8; target_size]
+                };
+                prop_assert_eq!(actual, expected);
+            }
+        }
+    }
 }
