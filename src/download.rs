@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -470,28 +471,59 @@ struct ResumeTracker {
     file_size: u64,
     expected_condensed_mac: [u8; 8],
     chunk_macs: Vec<Option<[u8; 16]>>,
+    verified_chunks: Vec<VerifiedChunkRecord>,
+    verified_positions: Vec<Option<usize>>,
 }
 
 impl ResumeTracker {
-    const fn new(
+    fn new(
         file_size: u64,
         expected_condensed_mac: [u8; 8],
         chunk_macs: Vec<Option<[u8; 16]>>,
     ) -> Self {
+        let mut verified_chunks = Vec::with_capacity(chunk_macs.iter().flatten().count());
+        let mut verified_positions = vec![None; chunk_macs.len()];
+        for (position, mac) in chunk_macs.iter().copied().enumerate() {
+            let Some(mac) = mac else {
+                continue;
+            };
+            let index = u32::try_from(position).expect("verified chunk index fits in u32");
+            verified_positions[position] = Some(verified_chunks.len());
+            verified_chunks.push(VerifiedChunkRecord { index, mac });
+        }
         Self {
             file_size,
             expected_condensed_mac,
             chunk_macs,
+            verified_chunks,
+            verified_positions,
         }
     }
 
     fn mark_verified(&mut self, index: u32, mac: [u8; 16]) -> bool {
-        let Some(slot) = self.chunk_macs.get_mut(index as usize) else {
+        let position = index as usize;
+        let Some(slot) = self.chunk_macs.get_mut(position) else {
             return false;
         };
         let changed = slot.as_ref() != Some(&mac);
+        if !changed {
+            return false;
+        }
         *slot = Some(mac);
-        changed
+        if let Some(verified_position) = self.verified_positions[position] {
+            self.verified_chunks[verified_position].mac = mac;
+        } else {
+            let insert_at = self
+                .verified_chunks
+                .binary_search_by_key(&index, |record| record.index)
+                .unwrap_or_else(|insert_at| insert_at);
+            self.verified_chunks
+                .insert(insert_at, VerifiedChunkRecord { index, mac });
+            for (offset, record) in self.verified_chunks[insert_at..].iter().enumerate() {
+                self.verified_positions[record.index as usize] = Some(insert_at + offset);
+            }
+        }
+        true
     }
 
     fn snapshot(&self) -> ResumeSidecar {
@@ -499,23 +531,10 @@ impl ResumeTracker {
             version: CURRENT_RESUME_SIDECAR_VERSION,
             file_size: self.file_size,
             expected_condensed_mac: self.expected_condensed_mac,
-            verified_chunks: self
-                .chunk_macs
-                .iter()
-                .enumerate()
-                .filter_map(|(index, mac)| {
-                    mac.and_then(|mac| {
-                        Some(VerifiedChunkRecord {
-                            index: u32::try_from(index).ok()?,
-                            mac,
-                        })
-                    })
-                })
-                .collect(),
+            verified_chunks: self.verified_chunks.clone(),
             part_fingerprint: None,
         }
     }
-
 }
 
 #[derive(Debug)]
@@ -786,27 +805,44 @@ fn save_sidecar_atomic_sync(path: &Path, sidecar: &ResumeSidecar) -> io::Result<
     Ok(())
 }
 
-struct LazySidecarWriter {
-    path: PathBuf,
-    part_path: PathBuf,
-    last_persisted_generation: Mutex<Option<u64>>,
+struct SidecarWriteRequest {
+    generation: u64,
+    snapshot: ResumeSidecar,
+    allow_equal: bool,
 }
 
-impl LazySidecarWriter {
+enum SidecarWriterCommand {
+    Persist(SidecarWriteRequest),
+    Finish,
+}
+
+struct SidecarWriterWorker {
+    path: PathBuf,
+    part_path: PathBuf,
+    last_persisted_generation: Option<u64>,
+}
+
+impl SidecarWriterWorker {
     fn new(path: PathBuf, part_path: PathBuf) -> Self {
         Self {
             path,
             part_path,
-            last_persisted_generation: Mutex::new(None),
+            last_persisted_generation: None,
         }
     }
 
-    fn persist_snapshot(&self, generation: u64, mut snapshot: ResumeSidecar, allow_equal: bool) {
-        let mut last_persisted_generation = self.last_persisted_generation.lock().unwrap();
+    fn persist_snapshot(
+        &mut self,
+        generation: u64,
+        mut snapshot: ResumeSidecar,
+        allow_equal: bool,
+    ) {
         let stale = if allow_equal {
-            last_persisted_generation.is_some_and(|last| generation < last)
+            self.last_persisted_generation
+                .is_some_and(|last| generation < last)
         } else {
-            last_persisted_generation.is_some_and(|last| generation <= last)
+            self.last_persisted_generation
+                .is_some_and(|last| generation <= last)
         };
         if stale {
             return;
@@ -819,7 +855,54 @@ impl LazySidecarWriter {
             );
             return;
         }
-        *last_persisted_generation = Some(generation);
+        self.last_persisted_generation = Some(generation);
+    }
+
+    fn run(mut self, rx: mpsc::Receiver<SidecarWriterCommand>) {
+        while let Ok(command) = rx.recv() {
+            match command {
+                SidecarWriterCommand::Persist(request) => {
+                    self.persist_snapshot(request.generation, request.snapshot, request.allow_equal)
+                }
+                SidecarWriterCommand::Finish => break,
+            }
+        }
+    }
+}
+
+struct LazySidecarWriter {
+    tx: Mutex<Option<Sender<SidecarWriterCommand>>>,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl LazySidecarWriter {
+    fn new(path: PathBuf, part_path: PathBuf) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name(format!("sidecar-writer:{}", path.display()))
+            .spawn(move || SidecarWriterWorker::new(path, part_path).run(rx))
+            .expect("spawn sidecar writer thread");
+        Self {
+            tx: Mutex::new(Some(tx)),
+            worker: Mutex::new(Some(worker)),
+        }
+    }
+
+    fn persist_snapshot(&self, generation: u64, snapshot: ResumeSidecar, allow_equal: bool) {
+        let tx = self.tx.lock().unwrap().clone();
+        let Some(tx) = tx else {
+            return;
+        };
+        if tx
+            .send(SidecarWriterCommand::Persist(SidecarWriteRequest {
+                generation,
+                snapshot,
+                allow_equal,
+            }))
+            .is_err()
+        {
+            log::warn!("Failed to queue resume sidecar write");
+        }
     }
 
     fn persist_verified_snapshot(&self, generation: u64, snapshot: ResumeSidecar) {
@@ -830,7 +913,15 @@ impl LazySidecarWriter {
         self.persist_snapshot(generation, snapshot, true);
     }
 
-    async fn finish(&self, _shutdown: SidecarWriterShutdown) {}
+    async fn finish(&self, _shutdown: SidecarWriterShutdown) {
+        if let Some(tx) = self.tx.lock().unwrap().take() {
+            let _ = tx.send(SidecarWriterCommand::Finish);
+        }
+        let worker = self.worker.lock().unwrap().take();
+        if let Some(worker) = worker {
+            let _ = tokio::task::spawn_blocking(move || worker.join()).await;
+        }
+    }
 }
 
 enum SidecarWriterShutdown {
@@ -1103,7 +1194,8 @@ impl<F: FileSystem> Downloader<F> {
         let observed = ObservedLocalFile {
             final_size: self.fs.file_size(Path::new(path)).await,
             part_size: self.fs.file_size(&part_path).await,
-            part_allocated_bytes: part_fingerprint.and_then(|fingerprint| fingerprint.allocated_bytes),
+            part_allocated_bytes: part_fingerprint
+                .and_then(|fingerprint| fingerprint.allocated_bytes),
             has_sidecar: self.fs.file_exists(&binary_sidecar_path).await
                 || self.fs.file_exists(&legacy_binary_sidecar_path).await
                 || self.fs.file_exists(&legacy_sidecar_path).await,
@@ -2134,6 +2226,30 @@ mod tests {
 
     #[tokio::test]
     async fn chunk_verified_persists_sidecar_after_each_chunk() {
+        async fn wait_for_sidecar_chunks(
+            sidecar_path: &Path,
+            expected_chunks: usize,
+        ) -> ResumeSidecar {
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+            loop {
+                if let Ok(Some(sidecar)) = tokio::time::timeout(
+                    tokio::time::Duration::from_millis(25),
+                    load_sidecar(sidecar_path),
+                )
+                .await
+                {
+                    if sidecar.verified_chunks.len() == expected_chunks {
+                        return sidecar;
+                    }
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "sidecar never reached {expected_chunks} verified chunks"
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        }
+
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("file.bin");
         let file_path = file_path.to_string_lossy().into_owned();
@@ -2151,36 +2267,28 @@ mod tests {
         );
 
         verified.mark_verified(boundaries[0].index, [1_u8; 16]);
-        verified
-            .finish_sidecar_writer(SidecarWriterShutdown::Flush)
-            .await;
-
-        let first = load_sidecar(&sidecar_path)
-            .await
-            .expect("first verified chunk should persist sidecar");
+        let first = wait_for_sidecar_chunks(&sidecar_path, 1).await;
         assert_eq!(first.verified_chunks.len(), 1);
         assert_eq!(first.verified_chunks[0].index, boundaries[0].index);
         assert_eq!(first.verified_chunks[0].mac, [1_u8; 16]);
         assert!(first.part_fingerprint.is_some());
 
         verified.mark_verified(boundaries[1].index, [2_u8; 16]);
-        verified
-            .finish_sidecar_writer(SidecarWriterShutdown::Flush)
-            .await;
-
-        let second = load_sidecar(&sidecar_path)
-            .await
-            .expect("second verified chunk should advance sidecar");
+        let second = wait_for_sidecar_chunks(&sidecar_path, 2).await;
         assert_eq!(second.verified_chunks.len(), 2);
         assert_eq!(second.verified_chunks[0].index, boundaries[0].index);
         assert_eq!(second.verified_chunks[0].mac, [1_u8; 16]);
         assert_eq!(second.verified_chunks[1].index, boundaries[1].index);
         assert_eq!(second.verified_chunks[1].mac, [2_u8; 16]);
         assert!(second.part_fingerprint.is_some());
+
+        verified
+            .finish_sidecar_writer(SidecarWriterShutdown::Flush)
+            .await;
     }
 
     #[tokio::test]
-    async fn chunk_verified_persists_sidecar_immediately_without_flush() {
+    async fn chunk_verified_flush_persists_queued_sidecar_updates() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("file.bin");
         let file_path = file_path.to_string_lossy().into_owned();
@@ -2198,26 +2306,19 @@ mod tests {
         );
 
         verified.mark_verified(boundaries[0].index, [1_u8; 16]);
+        verified.mark_verified(boundaries[1].index, [2_u8; 16]);
+        verified
+            .finish_sidecar_writer(SidecarWriterShutdown::Flush)
+            .await;
+
         let first = load_sidecar(&sidecar_path)
             .await
-            .expect("verified chunk should persist sidecar before mark_verified returns");
+            .expect("queued verified chunks should persist when the writer flushes");
         assert_eq!(first.verified_chunks[0].index, boundaries[0].index);
         assert_eq!(first.verified_chunks[0].mac, [1_u8; 16]);
+        assert_eq!(first.verified_chunks[1].index, boundaries[1].index);
+        assert_eq!(first.verified_chunks[1].mac, [2_u8; 16]);
         assert!(first.part_fingerprint.is_some());
-
-        verified.mark_verified(boundaries[1].index, [2_u8; 16]);
-        let second = load_sidecar(&sidecar_path)
-            .await
-            .expect("second verified chunk should immediately advance sidecar");
-        assert_eq!(second.verified_chunks[0].index, boundaries[0].index);
-        assert_eq!(second.verified_chunks[0].mac, [1_u8; 16]);
-        assert_eq!(second.verified_chunks[1].index, boundaries[1].index);
-        assert_eq!(second.verified_chunks[1].mac, [2_u8; 16]);
-        assert!(second.part_fingerprint.is_some());
-
-        verified
-            .finish_sidecar_writer(SidecarWriterShutdown::Abort)
-            .await;
     }
 
     #[tokio::test]
@@ -2255,6 +2356,10 @@ mod tests {
         verified
             .sidecar_writer
             .persist_verified_snapshot(1, first_snapshot);
+        verified
+            .sidecar_writer
+            .finish(SidecarWriterShutdown::Flush)
+            .await;
 
         let loaded = load_sidecar(&sidecar_path)
             .await
@@ -2489,8 +2594,9 @@ mod tests {
                     .enable_all()
                     .build()
                     .unwrap();
-                runtime
-                    .block_on(run_complete_existing_file_rejects_same_size_corrupt_final_file_test());
+                runtime.block_on(
+                    run_complete_existing_file_rejects_same_size_corrupt_final_file_test(),
+                );
             })
             .unwrap()
             .join()
@@ -3644,7 +3750,10 @@ mod tests {
         let first = &boundaries[0];
         let first_data = chunk_data(&data, first);
         let mac = mega::compute_mega_chunk_mac(first_data, &TEST_AES_KEY, &TEST_AES_IV);
-        let mut stale_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        let mut stale_fingerprint = TokioFileSystem::new()
+            .file_fingerprint(&part)
+            .await
+            .unwrap();
         stale_fingerprint.allocated_bytes = stale_fingerprint
             .allocated_bytes
             .map(|allocated| allocated.saturating_add(512))
@@ -3692,7 +3801,10 @@ mod tests {
         let first = &boundaries[0];
         let first_data = chunk_data(&data, first);
         let mac = mega::compute_mega_chunk_mac(first_data, &TEST_AES_KEY, &TEST_AES_IV);
-        let mut stale_fingerprint = TokioFileSystem::new().file_fingerprint(&part).await.unwrap();
+        let mut stale_fingerprint = TokioFileSystem::new()
+            .file_fingerprint(&part)
+            .await
+            .unwrap();
         stale_fingerprint.modified_ns = stale_fingerprint.modified_ns.saturating_add(1);
 
         let mut changed = data.clone();
@@ -4857,6 +4969,7 @@ mod tests {
 
         writer.persist_verified_snapshot(1, first);
         writer.persist_verified_snapshot(2, second.clone());
+        writer.finish(SidecarWriterShutdown::Flush).await;
 
         let loaded = load_sidecar(&sidecar_path).await.unwrap();
         assert_eq!(loaded.verified_chunks, second.verified_chunks);
@@ -4886,14 +4999,294 @@ mod tests {
                 allocated_bytes: Some(999),
                 dev: None,
                 ino: None,
-                }),
+            }),
         };
 
         writer.persist_verified_snapshot(1, snapshot);
+        writer.finish(SidecarWriterShutdown::Flush).await;
 
         let loaded = load_sidecar(&sidecar_path).await.unwrap();
         assert_eq!(loaded.verified_chunks.len(), 1);
         assert_eq!(loaded.part_fingerprint, None);
+    }
+
+    #[tokio::test]
+    async fn sidecar_writer_allows_equal_generation_for_final_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar_path = dir.path().join("file.bin.part.postcard");
+        let part_path = dir.path().join("file.bin.part");
+        tokio::fs::write(&part_path, b"partial").await.unwrap();
+        let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path);
+        let first = ResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size: 42,
+            expected_condensed_mac: [9u8; 8],
+            verified_chunks: vec![VerifiedChunkRecord {
+                index: 0,
+                mac: [1u8; 16],
+            }],
+            part_fingerprint: None,
+        };
+        let final_snapshot = ResumeSidecar {
+            verified_chunks: vec![
+                VerifiedChunkRecord {
+                    index: 0,
+                    mac: [1u8; 16],
+                },
+                VerifiedChunkRecord {
+                    index: 1,
+                    mac: [2u8; 16],
+                },
+            ],
+            ..first.clone()
+        };
+
+        writer.persist_verified_snapshot(2, first);
+        writer.persist_final_snapshot(2, final_snapshot.clone());
+        writer.finish(SidecarWriterShutdown::Flush).await;
+
+        let loaded = load_sidecar(&sidecar_path).await.unwrap();
+        assert_eq!(loaded.verified_chunks, final_snapshot.verified_chunks);
+    }
+
+    #[tokio::test]
+    async fn sidecar_writer_rejects_older_final_snapshot_after_newer_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar_path = dir.path().join("file.bin.part.postcard");
+        let part_path = dir.path().join("file.bin.part");
+        tokio::fs::write(&part_path, b"partial").await.unwrap();
+        let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path);
+        let older = ResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size: 42,
+            expected_condensed_mac: [9u8; 8],
+            verified_chunks: vec![VerifiedChunkRecord {
+                index: 0,
+                mac: [1u8; 16],
+            }],
+            part_fingerprint: None,
+        };
+        let newer = ResumeSidecar {
+            verified_chunks: vec![
+                VerifiedChunkRecord {
+                    index: 0,
+                    mac: [1u8; 16],
+                },
+                VerifiedChunkRecord {
+                    index: 1,
+                    mac: [2u8; 16],
+                },
+            ],
+            ..older.clone()
+        };
+
+        writer.persist_verified_snapshot(3, newer.clone());
+        writer.persist_final_snapshot(2, older);
+        writer.finish(SidecarWriterShutdown::Flush).await;
+
+        let loaded = load_sidecar(&sidecar_path).await.unwrap();
+        assert_eq!(loaded.verified_chunks, newer.verified_chunks);
+    }
+
+    #[tokio::test]
+    async fn sidecar_writer_ignores_persist_requests_after_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar_path = dir.path().join("file.bin.part.postcard");
+        let part_path = dir.path().join("file.bin.part");
+        tokio::fs::write(&part_path, b"partial").await.unwrap();
+        let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path);
+        let first = ResumeSidecar {
+            version: CURRENT_RESUME_SIDECAR_VERSION,
+            file_size: 42,
+            expected_condensed_mac: [9u8; 8],
+            verified_chunks: vec![VerifiedChunkRecord {
+                index: 0,
+                mac: [1u8; 16],
+            }],
+            part_fingerprint: None,
+        };
+        let second = ResumeSidecar {
+            verified_chunks: vec![
+                VerifiedChunkRecord {
+                    index: 0,
+                    mac: [1u8; 16],
+                },
+                VerifiedChunkRecord {
+                    index: 1,
+                    mac: [2u8; 16],
+                },
+            ],
+            ..first.clone()
+        };
+
+        writer.persist_verified_snapshot(1, first.clone());
+        writer.finish(SidecarWriterShutdown::Flush).await;
+        writer.persist_verified_snapshot(2, second);
+
+        let loaded = load_sidecar(&sidecar_path).await.unwrap();
+        assert_eq!(loaded.verified_chunks, first.verified_chunks);
+    }
+
+    #[test]
+    fn resume_tracker_updates_verified_chunks_incrementally() {
+        let mut tracker = ResumeTracker::new(
+            300_000,
+            [9_u8; 8],
+            vec![Some([1_u8; 16]), None, Some([3_u8; 16])],
+        );
+
+        let initial = tracker.snapshot();
+        assert_eq!(
+            initial.verified_chunks,
+            vec![
+                VerifiedChunkRecord {
+                    index: 0,
+                    mac: [1_u8; 16]
+                },
+                VerifiedChunkRecord {
+                    index: 2,
+                    mac: [3_u8; 16]
+                }
+            ]
+        );
+
+        assert!(tracker.mark_verified(1, [2_u8; 16]));
+        assert!(!tracker.mark_verified(1, [2_u8; 16]));
+
+        let updated = tracker.snapshot();
+        assert_eq!(
+            updated.verified_chunks,
+            vec![
+                VerifiedChunkRecord {
+                    index: 0,
+                    mac: [1_u8; 16]
+                },
+                VerifiedChunkRecord {
+                    index: 1,
+                    mac: [2_u8; 16]
+                },
+                VerifiedChunkRecord {
+                    index: 2,
+                    mac: [3_u8; 16]
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_tracker_replaces_existing_verified_chunk_without_duplication() {
+        let mut tracker = ResumeTracker::new(300_000, [9_u8; 8], vec![Some([1_u8; 16]), None]);
+
+        assert!(tracker.mark_verified(0, [7_u8; 16]));
+
+        let snapshot = tracker.snapshot();
+        assert_eq!(
+            snapshot.verified_chunks,
+            vec![VerifiedChunkRecord {
+                index: 0,
+                mac: [7_u8; 16]
+            }]
+        );
+    }
+
+    #[test]
+    fn resume_tracker_keeps_sorted_order_for_out_of_order_insertions() {
+        let mut tracker = ResumeTracker::new(300_000, [9_u8; 8], vec![None; 3]);
+
+        assert!(tracker.mark_verified(2, [3_u8; 16]));
+        assert!(tracker.mark_verified(0, [1_u8; 16]));
+        assert!(tracker.mark_verified(1, [2_u8; 16]));
+        assert!(tracker.mark_verified(2, [4_u8; 16]));
+
+        let snapshot = tracker.snapshot();
+        assert_eq!(
+            snapshot
+                .verified_chunks
+                .iter()
+                .map(|record| (record.index, record.mac))
+                .collect::<Vec<_>>(),
+            vec![(0, [1_u8; 16]), (1, [2_u8; 16]), (2, [4_u8; 16]),]
+        );
+    }
+
+    #[test]
+    fn resume_tracker_rejects_out_of_range_chunk_indexes() {
+        let mut tracker = ResumeTracker::new(300_000, [9_u8; 8], vec![None; 2]);
+
+        assert!(!tracker.mark_verified(5, [1_u8; 16]));
+        assert!(tracker.snapshot().verified_chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn chunk_verified_replaces_existing_sidecar_record_without_duplication() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("file.bin");
+        let file_path = file_path.to_string_lossy().into_owned();
+        let part_path = part_path(&file_path);
+        let sidecar_path = sidecar_path(&file_path);
+        tokio::fs::write(&part_path, vec![0_u8; usize_from_u64(300_000)])
+            .await
+            .unwrap();
+
+        let verified = ChunkVerifiedState::new(
+            ResumeTracker::new(300_000, [9_u8; 8], vec![None; 1]),
+            LazySidecarWriter::new(sidecar_path.clone(), part_path),
+        );
+
+        verified.mark_verified(0, [1_u8; 16]);
+        verified.mark_verified(0, [7_u8; 16]);
+        verified
+            .finish_sidecar_writer(SidecarWriterShutdown::Flush)
+            .await;
+
+        let sidecar = load_sidecar(&sidecar_path).await.unwrap();
+        assert_eq!(
+            sidecar.verified_chunks,
+            vec![VerifiedChunkRecord {
+                index: 0,
+                mac: [7_u8; 16]
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_verified_flush_keeps_sidecar_chunks_sorted_after_out_of_order_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("file.bin");
+        let file_path = file_path.to_string_lossy().into_owned();
+        let part_path = part_path(&file_path);
+        let sidecar_path = sidecar_path(&file_path);
+        let file_size = 3_000_000_u64;
+        let boundaries = mega::mega_chunk_boundaries(file_size);
+        tokio::fs::write(&part_path, vec![0_u8; usize_from_u64(file_size)])
+            .await
+            .unwrap();
+
+        let verified = ChunkVerifiedState::new(
+            ResumeTracker::new(file_size, [9_u8; 8], vec![None; boundaries.len()]),
+            LazySidecarWriter::new(sidecar_path.clone(), part_path),
+        );
+
+        verified.mark_verified(boundaries[2].index, [3_u8; 16]);
+        verified.mark_verified(boundaries[0].index, [1_u8; 16]);
+        verified.mark_verified(boundaries[1].index, [2_u8; 16]);
+        verified
+            .finish_sidecar_writer(SidecarWriterShutdown::Flush)
+            .await;
+
+        let sidecar = load_sidecar(&sidecar_path).await.unwrap();
+        assert_eq!(
+            sidecar
+                .verified_chunks
+                .iter()
+                .map(|record| (record.index, record.mac))
+                .collect::<Vec<_>>(),
+            vec![
+                (boundaries[0].index, [1_u8; 16]),
+                (boundaries[1].index, [2_u8; 16]),
+                (boundaries[2].index, [3_u8; 16]),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -5188,7 +5581,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inspect_local_file_reports_oversized_part_as_expected_existing_bytes_without_sidecar() {
+    async fn inspect_local_file_reports_oversized_part_as_expected_existing_bytes_without_sidecar()
+    {
         let fs = MockFileSystem::new();
         let expected_size = 1_000_000;
         fs.add_file("movie.mkv.part", expected_size + 512);
