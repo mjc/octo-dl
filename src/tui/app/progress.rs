@@ -129,8 +129,7 @@ impl App {
             if matches!(file.accounting, FileAccounting::Preexisting)
                 && matches!(file.lifecycle, FileLifecycle::Complete)
             {
-                preexisting_complete_bytes =
-                    preexisting_complete_bytes.saturating_add(file.size);
+                preexisting_complete_bytes = preexisting_complete_bytes.saturating_add(file.size);
                 preexisting_complete_files = preexisting_complete_files.saturating_add(1);
             }
         }

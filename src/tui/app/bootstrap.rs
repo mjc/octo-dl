@@ -117,6 +117,7 @@ impl App {
             shutdown_blocking_verifications: FileIdSet::default(),
             file_attempt_ids: HashMap::new(),
             reset_pending_files: FileIdSet::default(),
+            startup_resume_pending_files: FileIdSet::default(),
             reverify_pending_files: FileIdSet::default(),
             verifying_files: FileIdSet::default(),
             verification_inflight_files: FileIdSet::default(),
