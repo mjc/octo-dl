@@ -25,12 +25,77 @@ fn legacy_json_sidecar_for_chunk(
     }
 }
 
+fn legacy_json_sidecar_for_indices(file_size: u64, indices: &[u32]) -> LegacyJsonResumeSidecar {
+    LegacyJsonResumeSidecar {
+        version: CURRENT_RESUME_SIDECAR_VERSION,
+        file_size,
+        expected_condensed_mac_b64: STANDARD.encode([9u8; 8]),
+        verified_chunks: indices
+            .iter()
+            .enumerate()
+            .map(|(offset, &index)| LegacyJsonVerifiedChunkRecord {
+                index,
+                mac_b64: STANDARD.encode([offset as u8; 16]),
+            })
+            .collect(),
+        part_fingerprint: None,
+    }
+}
+
+fn binary_sidecar_for_indices(file_size: u64, version: u32, indices: &[u32]) -> ResumeSidecar {
+    ResumeSidecar {
+        version,
+        file_size,
+        expected_condensed_mac: [9u8; 8],
+        verified_chunks: indices
+            .iter()
+            .enumerate()
+            .map(|(offset, &index)| VerifiedChunkRecord {
+                index,
+                mac: [offset as u8; 16],
+            })
+            .collect(),
+        part_fingerprint: None,
+    }
+}
+
 async fn write_legacy_json_sidecar(
     path: &Path,
     sidecar: &LegacyJsonResumeSidecar,
 ) -> io::Result<()> {
     let data = serde_json::to_vec(sidecar)?;
     tokio::fs::write(path, data).await
+}
+
+fn write_postcard_sidecar_sync(path: &Path, sidecar: &ResumeSidecar) -> io::Result<()> {
+    let data = postcard::to_stdvec(sidecar).map_err(io::Error::other)?;
+    std::fs::write(path, data)
+}
+
+fn write_legacy_json_sidecar_sync(
+    path: &Path,
+    sidecar: &LegacyJsonResumeSidecar,
+) -> io::Result<()> {
+    let data = serde_json::to_vec(sidecar)?;
+    std::fs::write(path, data)
+}
+
+fn expected_verified_bytes(file_size: u64, indices: &[u32]) -> u64 {
+    let boundaries = mega::mega_chunk_boundaries(file_size);
+    let mut seen = vec![false; boundaries.len()];
+    indices
+        .iter()
+        .filter_map(|&index| {
+            let index = usize::try_from(index).ok()?;
+            let boundary = boundaries.get(index)?;
+            let seen_slot = seen.get_mut(index)?;
+            if *seen_slot {
+                return None;
+            }
+            *seen_slot = true;
+            Some(boundary.length)
+        })
+        .fold(0u64, |sum, chunk| sum.saturating_add(chunk))
 }
 
 #[tokio::test]
@@ -56,16 +121,7 @@ async fn delete_sidecar_removes_postcard_legacy_binary_and_legacy_json() {
     let binary_path = sidecar_path(&base);
     let legacy_binary_path = legacy_binary_sidecar_path(&base);
     let json_path = legacy_json_sidecar_path(&base);
-    let binary = ResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size: 42,
-        expected_condensed_mac: [2u8; 8],
-        verified_chunks: vec![VerifiedChunkRecord {
-            index: 1,
-            mac: [2u8; 16],
-        }],
-        part_fingerprint: None,
-    };
+    let binary = binary_sidecar_for_indices(42, CURRENT_RESUME_SIDECAR_VERSION, &[1]);
     let legacy = legacy_json_sidecar_for_chunk(42, [1u8; 8], 0, [1u8; 16]);
 
     save_sidecar_atomic(&binary_path, &binary).await.unwrap();
@@ -82,200 +138,58 @@ async fn delete_sidecar_removes_postcard_legacy_binary_and_legacy_json() {
     assert!(!json_path.exists());
 }
 
-#[tokio::test]
-async fn resume_sidecar_verified_bytes_reads_legacy_json_sidecar() {
-    let dir = tempfile::tempdir().unwrap();
-    let base_path = dir.path().join("file.bin");
-    let file_path = base_path.to_string_lossy().into_owned();
-    let file_size = 300_000_u64;
-    let boundaries = mega::mega_chunk_boundaries(file_size);
-    let legacy = LegacyJsonResumeSidecar {
-        verified_chunks: vec![
-            LegacyJsonVerifiedChunkRecord {
-                index: boundaries[0].index,
-                mac_b64: STANDARD.encode([1u8; 16]),
-            },
-            LegacyJsonVerifiedChunkRecord {
-                index: boundaries[1].index,
-                mac_b64: STANDARD.encode([2u8; 16]),
-            },
-        ],
-        ..legacy_json_sidecar_for_chunk(file_size, [9u8; 8], boundaries[0].index, [1u8; 16])
-    };
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
 
-    write_legacy_json_sidecar(&legacy_json_sidecar_path(&file_path), &legacy)
-        .await
-        .unwrap();
+    proptest! {
+        #[test]
+        fn resume_sidecar_verified_bytes_matches_binary_chunk_oracle(
+            file_size in 1u64..3_000_001,
+            indices in proptest::collection::vec(0u32..32, 0..16),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let file_path = dir.path().join("file.bin").to_string_lossy().into_owned();
+            let sidecar = binary_sidecar_for_indices(file_size, CURRENT_RESUME_SIDECAR_VERSION, &indices);
+            write_postcard_sidecar_sync(&sidecar_path(&file_path), &sidecar).unwrap();
 
-    assert_eq!(
-        resume_sidecar_verified_bytes(&file_path),
-        Some(boundaries[0].length + boundaries[1].length)
-    );
-}
+            prop_assert_eq!(
+                resume_sidecar_verified_bytes(&file_path),
+                Some(expected_verified_bytes(file_size, &indices))
+            );
+        }
 
-#[tokio::test]
-async fn resume_sidecar_verified_bytes_dedupes_duplicate_binary_chunk_records() {
-    let dir = tempfile::tempdir().unwrap();
-    let base_path = dir.path().join("file.bin");
-    let file_path = base_path.to_string_lossy().into_owned();
-    let sidecar_path = sidecar_path(&file_path);
-    let file_size = 300_000_u64;
-    let boundaries = mega::mega_chunk_boundaries(file_size);
+        #[test]
+        fn resume_sidecar_verified_bytes_matches_legacy_json_chunk_oracle(
+            file_size in 1u64..3_000_001,
+            indices in proptest::collection::vec(0u32..32, 0..16),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let file_path = dir.path().join("file.bin").to_string_lossy().into_owned();
+            let sidecar = legacy_json_sidecar_for_indices(file_size, &indices);
+            write_legacy_json_sidecar_sync(&legacy_json_sidecar_path(&file_path), &sidecar).unwrap();
 
-    save_sidecar_atomic(
-        &sidecar_path,
-        &ResumeSidecar {
-            version: CURRENT_RESUME_SIDECAR_VERSION,
-            file_size,
-            expected_condensed_mac: [9u8; 8],
-            verified_chunks: vec![
-                VerifiedChunkRecord {
-                    index: boundaries[0].index,
-                    mac: [1u8; 16],
-                },
-                VerifiedChunkRecord {
-                    index: boundaries[0].index,
-                    mac: [2u8; 16],
-                },
-                VerifiedChunkRecord {
-                    index: boundaries[1].index,
-                    mac: [3u8; 16],
-                },
-            ],
-            part_fingerprint: None,
-        },
-    )
-    .await
-    .unwrap();
+            prop_assert_eq!(
+                resume_sidecar_verified_bytes(&file_path),
+                Some(expected_verified_bytes(file_size, &indices))
+            );
+        }
 
-    assert_eq!(
-        resume_sidecar_verified_bytes(&file_path),
-        Some(boundaries[0].length + boundaries[1].length)
-    );
-}
+        #[test]
+        fn resume_sidecar_verified_bytes_returns_none_for_non_current_versions(
+            version in any::<u32>(),
+            file_size in 1u64..3_000_001,
+            indices in proptest::collection::vec(0u32..32, 0..16),
+        ) {
+            prop_assume!(version != CURRENT_RESUME_SIDECAR_VERSION);
+            let dir = tempfile::tempdir().unwrap();
+            let file_path = dir.path().join("file.bin").to_string_lossy().into_owned();
+            let sidecar = binary_sidecar_for_indices(file_size, version, &indices);
+            write_postcard_sidecar_sync(&sidecar_path(&file_path), &sidecar).unwrap();
 
-#[tokio::test]
-async fn resume_sidecar_verified_bytes_dedupes_duplicate_legacy_chunk_records() {
-    let dir = tempfile::tempdir().unwrap();
-    let base_path = dir.path().join("file.bin");
-    let file_path = base_path.to_string_lossy().into_owned();
-    let file_size = 300_000_u64;
-    let boundaries = mega::mega_chunk_boundaries(file_size);
-    let legacy = LegacyJsonResumeSidecar {
-        verified_chunks: vec![
-            LegacyJsonVerifiedChunkRecord {
-                index: boundaries[0].index,
-                mac_b64: STANDARD.encode([1u8; 16]),
-            },
-            LegacyJsonVerifiedChunkRecord {
-                index: boundaries[0].index,
-                mac_b64: STANDARD.encode([2u8; 16]),
-            },
-            LegacyJsonVerifiedChunkRecord {
-                index: boundaries[1].index,
-                mac_b64: STANDARD.encode([3u8; 16]),
-            },
-        ],
-        ..legacy_json_sidecar_for_chunk(file_size, [9u8; 8], boundaries[0].index, [1u8; 16])
-    };
-
-    write_legacy_json_sidecar(&legacy_json_sidecar_path(&file_path), &legacy)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        resume_sidecar_verified_bytes(&file_path),
-        Some(boundaries[0].length + boundaries[1].length)
-    );
-}
-
-#[tokio::test]
-async fn resume_sidecar_verified_bytes_sums_verified_chunk_lengths() {
-    let dir = tempfile::tempdir().unwrap();
-    let base_path = dir.path().join("file.bin");
-    let file_path = base_path.to_string_lossy().into_owned();
-    let sidecar_path = sidecar_path(&file_path);
-    let file_size = 300_000_u64;
-    let boundaries = mega::mega_chunk_boundaries(file_size);
-
-    save_sidecar_atomic(
-        &sidecar_path,
-        &ResumeSidecar {
-            version: CURRENT_RESUME_SIDECAR_VERSION,
-            file_size,
-            expected_condensed_mac: [9u8; 8],
-            verified_chunks: vec![
-                VerifiedChunkRecord {
-                    index: boundaries[0].index,
-                    mac: [1u8; 16],
-                },
-                VerifiedChunkRecord {
-                    index: boundaries[1].index,
-                    mac: [2u8; 16],
-                },
-            ],
-            part_fingerprint: None,
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        resume_sidecar_verified_bytes(&file_path),
-        Some(boundaries[0].length + boundaries[1].length)
-    );
-}
-
-#[tokio::test]
-async fn resume_sidecar_verified_bytes_returns_none_for_legacy_sidecars() {
-    let dir = tempfile::tempdir().unwrap();
-    let base_path = dir.path().join("file.bin");
-    let file_path = base_path.to_string_lossy().into_owned();
-    let sidecar_path = sidecar_path(&file_path);
-
-    save_sidecar_atomic(
-        &sidecar_path,
-        &ResumeSidecar {
-            version: 1,
-            file_size: 300_000,
-            expected_condensed_mac: [9u8; 8],
-            verified_chunks: vec![VerifiedChunkRecord {
-                index: 0,
-                mac: [1u8; 16],
-            }],
-            part_fingerprint: None,
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(resume_sidecar_verified_bytes(&file_path), None);
-}
-
-#[tokio::test]
-async fn resume_sidecar_verified_bytes_treats_unknown_version_as_missing() {
-    let dir = tempfile::tempdir().unwrap();
-    let base_path = dir.path().join("file.bin");
-    let file_path = base_path.to_string_lossy().into_owned();
-    let sidecar_path = sidecar_path(&file_path);
-
-    save_sidecar_atomic(
-        &sidecar_path,
-        &ResumeSidecar {
-            version: 1,
-            file_size: 300_000,
-            expected_condensed_mac: [9u8; 8],
-            verified_chunks: vec![VerifiedChunkRecord {
-                index: 0,
-                mac: [1u8; 16],
-            }],
-            part_fingerprint: None,
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(resume_sidecar_verified_bytes(&file_path), None);
+            prop_assert_eq!(resume_sidecar_verified_bytes(&file_path), None);
+        }
+    }
 }
 
 #[tokio::test]
@@ -352,16 +266,7 @@ async fn delete_sidecar_removes_postcard_tmp_leftovers() {
 async fn sidecar_save_and_delete_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let sidecar_path = dir.path().join("file.bin.part.postcard");
-    let sidecar = ResumeSidecar {
-        version: CURRENT_RESUME_SIDECAR_VERSION,
-        file_size: 42,
-        expected_condensed_mac: [9u8; 8],
-        verified_chunks: vec![VerifiedChunkRecord {
-            index: 0,
-            mac: [1u8; 16],
-        }],
-        part_fingerprint: None,
-    };
+    let sidecar = binary_sidecar_for_indices(42, CURRENT_RESUME_SIDECAR_VERSION, &[0]);
 
     save_sidecar_atomic(&sidecar_path, &sidecar).await.unwrap();
     let loaded = load_sidecar(&sidecar_path).await.unwrap();
