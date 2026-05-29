@@ -92,6 +92,39 @@ impl DownloadConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::{option, prelude::*, string::string_regex};
+
+    fn optional_path() -> impl Strategy<Value = Option<String>> {
+        option::of(string_regex("[A-Za-z0-9_./-]{0,32}").expect("valid path regex"))
+    }
+
+    fn download_config_strategy() -> impl Strategy<Value = DownloadConfig> {
+        (
+            optional_path(),
+            any::<u16>(),
+            any::<u16>(),
+            any::<u16>(),
+            any::<bool>(),
+            any::<bool>(),
+        )
+            .prop_map(
+                |(
+                    path,
+                    chunks_per_file,
+                    mega_chunks_per_request,
+                    concurrent_files,
+                    force_overwrite,
+                    cleanup_on_error,
+                )| DownloadConfig {
+                    path,
+                    chunks_per_file: usize::from(chunks_per_file),
+                    mega_chunks_per_request: usize::from(mega_chunks_per_request),
+                    concurrent_files: usize::from(concurrent_files),
+                    force_overwrite,
+                    cleanup_on_error,
+                },
+            )
+    }
 
     #[test]
     fn default_config() {
@@ -132,6 +165,45 @@ mod tests {
         assert_eq!(deserialized.concurrent_files, config.concurrent_files);
         assert_eq!(deserialized.force_overwrite, config.force_overwrite);
         assert_eq!(deserialized.cleanup_on_error, config.cleanup_on_error);
+    }
+
+    proptest! {
+        #[test]
+        fn builder_methods_set_exact_fields(
+            path in optional_path(),
+            chunks_per_file in any::<u16>(),
+            mega_chunks_per_request in any::<u16>(),
+            concurrent_files in any::<u16>(),
+            force_overwrite in any::<bool>(),
+            cleanup_on_error in any::<bool>(),
+        ) {
+            let config = DownloadConfig {
+                path: path.clone(),
+                ..DownloadConfig::new()
+            }
+            .with_chunks_per_file(usize::from(chunks_per_file))
+            .with_mega_chunks_per_request(usize::from(mega_chunks_per_request))
+            .with_concurrent_files(usize::from(concurrent_files))
+            .with_force_overwrite(force_overwrite)
+            .with_cleanup_on_error(cleanup_on_error);
+
+            prop_assert_eq!(config.path, path);
+            prop_assert_eq!(config.chunks_per_file, usize::from(chunks_per_file));
+            prop_assert_eq!(
+                config.mega_chunks_per_request,
+                usize::from(mega_chunks_per_request)
+            );
+            prop_assert_eq!(config.concurrent_files, usize::from(concurrent_files));
+            prop_assert_eq!(config.force_overwrite, force_overwrite);
+            prop_assert_eq!(config.cleanup_on_error, cleanup_on_error);
+        }
+
+        #[test]
+        fn download_config_toml_round_trips(config in download_config_strategy()) {
+            let toml_str = toml::to_string(&config).unwrap();
+            let deserialized: DownloadConfig = toml::from_str(&toml_str).unwrap();
+            prop_assert_eq!(deserialized, config);
+        }
     }
 }
 
@@ -317,6 +389,11 @@ fn path_io_error(action: &str, path: &Path, error: std::io::Error) -> std::io::E
 #[cfg(test)]
 mod service_config_tests {
     use super::*;
+    use proptest::{prelude::*, string::string_regex};
+
+    fn credential_field() -> impl Strategy<Value = String> {
+        string_regex("[A-Za-z0-9_.:@+/-]{0,32}").expect("valid credential regex")
+    }
 
     #[test]
     fn service_config_round_trip() {
@@ -413,5 +490,64 @@ password = "pw"
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
         assert!(message.contains("read config file"));
         assert!(message.contains(&path.display().to_string()));
+    }
+
+    proptest! {
+        #[test]
+        fn service_credentials_encrypt_decrypt_round_trip(
+            email in credential_field(),
+            password in credential_field(),
+            mfa in credential_field(),
+        ) {
+            let mut creds = ServiceCredentials {
+                encrypted: false,
+                email: email.clone(),
+                password: password.clone(),
+                mfa: mfa.clone(),
+                saved_session: None,
+            };
+
+            prop_assert_eq!(
+                creds.decrypt_if_needed(),
+                Some((email.clone(), password.clone(), mfa.clone()))
+            );
+
+            creds.encrypt_in_place();
+
+            prop_assert!(creds.encrypted);
+            prop_assert_eq!(
+                creds.decrypt_if_needed(),
+                Some((email, password, mfa.clone()))
+            );
+            if mfa.is_empty() {
+                prop_assert!(creds.mfa.is_empty());
+            } else {
+                prop_assert_ne!(creds.mfa, mfa);
+            }
+        }
+
+        #[test]
+        fn encrypt_in_place_is_idempotent(
+            email in credential_field(),
+            password in credential_field(),
+            mfa in credential_field(),
+        ) {
+            let mut creds = ServiceCredentials {
+                encrypted: false,
+                email,
+                password,
+                mfa,
+                saved_session: None,
+            };
+
+            creds.encrypt_in_place();
+            let once = creds.clone();
+            creds.encrypt_in_place();
+
+            prop_assert_eq!(creds.encrypted, once.encrypted);
+            prop_assert_eq!(creds.email, once.email);
+            prop_assert_eq!(creds.password, once.password);
+            prop_assert_eq!(creds.mfa, once.mfa);
+        }
     }
 }
