@@ -8,7 +8,8 @@ use crate::error::{Error, Result};
 use crate::fs::{FileFingerprint, FileSystem};
 
 use super::callbacks::DownloadProgress;
-use super::downloader::{CURRENT_RESUME_SIDECAR_VERSION, Downloader, ResumeReuseSource};
+use super::downloader::Downloader;
+use super::resume_state::{CURRENT_RESUME_SIDECAR_VERSION, ResumeReuseSource};
 use super::revalidate_part::revalidate_candidates_from_part;
 use super::sidecar_state::{
     ResumeValidation, SidecarValidationInput, TrustedResumeChunkCandidate, trust_resume_candidate,

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use super::callbacks::DownloadProgress;
-use super::downloader::{CURRENT_RESUME_SIDECAR_VERSION, ResumeReuseSource};
+use super::resume_state::{CURRENT_RESUME_SIDECAR_VERSION, ResumeReuseSource};
 use super::sidecar_store::{ResumeSidecar, VerifiedChunkRecord, save_sidecar_atomic};
 use crate::error::{Error, Result};
 use crate::fs::FileSystem;
