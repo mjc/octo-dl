@@ -989,10 +989,6 @@ async fn resolve_dlc_urls(
 }
 
 fn expand_dlc_path(url: &str) -> Result<String, String> {
-    if !url.starts_with('~') && !url.starts_with('/') {
-        return Ok(url.to_string());
-    }
-
     if !url.starts_with('~') {
         return Ok(url.to_string());
     }

@@ -19,7 +19,7 @@ const JDOWNLOADER_KEY: &[u8] = &[
 const DLC_SERVICE: &str = "https://service.jdownloader.org/dlcrypt/service.php";
 const MIN_DLC_SIZE: usize = 100;
 const DLC_KEY_LENGTH: usize = 88;
-const MAX_RETRIES: u32 = 3;
+const MAX_RETRY_COUNT: u32 = 3;
 
 /// Shared cache for decryption keys to avoid duplicate service calls
 pub struct DlcKeyCache {
@@ -35,11 +35,18 @@ impl DlcKeyCache {
     }
 
     fn get(&self, key: &str) -> Option<String> {
-        self.cache.lock().unwrap().get(key).cloned()
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .cloned()
     }
 
     pub(crate) fn set(&self, key: String, value: String) {
-        self.cache.lock().unwrap().insert(key, value);
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, value);
     }
 }
 
@@ -64,7 +71,8 @@ pub async fn parse_dlc_file(
     http_client: &reqwest::Client,
     cache: &DlcKeyCache,
 ) -> Result<Vec<String>> {
-    let content = std::fs::read_to_string(path)
+    let content = tokio::fs::read_to_string(path)
+        .await
         .map_err(|e| Error::Dlc(format!("Failed to read file: {e}")))?;
     parse_dlc_data(&content, http_client, cache).await
 }
@@ -126,7 +134,6 @@ pub async fn parse_dlc_data(
     // Extract MEGA links from XML
     let mut urls = extract_mega_links_from_xml(&xml);
     urls.sort();
-    urls.dedup();
 
     if urls.is_empty() {
         return Err(Error::Dlc("No MEGA links found in DLC content".to_string()));
@@ -146,24 +153,24 @@ async fn get_decryption_key(
         return Some(cached);
     }
 
-    for attempt in 0..=MAX_RETRIES {
+    for retry in 0..=MAX_RETRY_COUNT {
         match call_decryption_service(dlc_key, http_client).await {
             Some(key) => {
                 cache.set(dlc_key.to_string(), key.clone());
                 return Some(key);
             }
-            None if attempt < MAX_RETRIES => {
-                let delay = std::time::Duration::from_secs(1 << attempt);
+            None if retry < MAX_RETRY_COUNT => {
+                let delay = std::time::Duration::from_secs(1 << retry);
                 eprintln!(
-                    "DLC service call failed, retrying in {:?}... (attempt {}/{})",
+                    "DLC service call failed, retrying in {:?}... (retry {}/{})",
                     delay,
-                    attempt + 1,
-                    MAX_RETRIES
+                    retry + 1,
+                    MAX_RETRY_COUNT
                 );
                 tokio::time::sleep(delay).await;
             }
             None => {
-                eprintln!("DLC service unreachable after {MAX_RETRIES} attempts");
+                eprintln!("DLC service unreachable after {MAX_RETRY_COUNT} retries");
                 return None;
             }
         }

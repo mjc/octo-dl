@@ -1675,6 +1675,7 @@ dependencies = [
  "toml",
  "tower-http",
  "tui-input",
+ "unicode-width 0.2.0",
  "uuid",
  "whoami",
 ]
