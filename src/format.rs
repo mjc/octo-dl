@@ -153,27 +153,79 @@ mod tests {
 
     mod property_tests {
         use super::*;
-        use proptest::prelude::*;
+        use proptest::{collection::vec, prelude::*};
+
+        fn short_ascii_string() -> impl Strategy<Value = String> {
+            vec(proptest::char::range(' ', '~'), 0..24)
+                .prop_map(|chars| chars.into_iter().collect())
+        }
 
         proptest! {
             #[test]
-            fn format_bytes_never_panics(bytes in 0u64..u64::MAX) {
-                let _ = format_bytes(bytes).to_string();
+            fn push_formatted_bytes_preserves_prefix_and_matches_display(
+                prefix in short_ascii_string(),
+                bytes in any::<u64>(),
+            ) {
+                let mut out = prefix.clone();
+                push_formatted_bytes(&mut out, bytes);
+
+                assert_eq!(out, format!("{prefix}{}", format_bytes(bytes)));
             }
 
             #[test]
-            fn format_bytes_monotonic(a in 0u64..1_000_000_000, b in 1_000_000_000u64..u64::MAX) {
-                let _ = (format_bytes(a).to_string(), format_bytes(b).to_string());
+            fn format_bytes_selects_expected_unit_suffix(bytes in any::<u64>()) {
+                let formatted = format_bytes(bytes).to_string();
+                let suffix = match bytes {
+                    b if b >= GB => " GB",
+                    b if b >= MB => " MB",
+                    b if b >= KB => " KB",
+                    _ => " B",
+                };
+
+                assert!(formatted.ends_with(suffix), "{formatted} should end with {suffix}");
             }
 
             #[test]
-            fn format_duration_never_panics(secs in 0u64..1_000_000) {
-                let _ = format_duration(Duration::from_secs(secs));
+            fn format_bytes_below_kilobyte_stays_exact(bytes in 0u64..KB) {
+                assert_eq!(format_bytes(bytes).to_string(), format!("{bytes} B"));
             }
 
             #[test]
-            fn format_duration_millis_never_panics(millis in 0u64..1_000_000_000) {
-                let _ = format_duration(Duration::from_millis(millis));
+            fn format_duration_sub_minute_matches_tenths(
+                secs in 0u64..60,
+                millis in 0u32..1000,
+            ) {
+                let duration = Duration::from_secs(secs) + Duration::from_millis(u64::from(millis));
+                assert_eq!(
+                    format_duration(duration),
+                    format!("{secs}.{:01}s", millis / 100),
+                );
+            }
+
+            #[test]
+            fn format_duration_minutes_match_expected_pattern(
+                minutes in 1u64..60,
+                seconds in 0u64..60,
+            ) {
+                let duration = Duration::from_secs((minutes * 60) + seconds);
+                assert_eq!(
+                    format_duration(duration),
+                    format!("{minutes}m {seconds:02}s"),
+                );
+            }
+
+            #[test]
+            fn format_duration_hours_match_expected_pattern(
+                hours in 1u64..1000,
+                minutes in 0u64..60,
+                seconds in 0u64..60,
+            ) {
+                let duration =
+                    Duration::from_secs((hours * 3600) + (minutes * 60) + seconds);
+                assert_eq!(
+                    format_duration(duration),
+                    format!("{hours}h {minutes:02}m {seconds:02}s"),
+                );
             }
         }
     }
