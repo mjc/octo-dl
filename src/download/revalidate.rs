@@ -1,41 +1,21 @@
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
 use crate::core::ProgressDelta;
 use crate::error::{Error, Result};
-use crate::fs::{FileFingerprint, FileSystem};
+use crate::fs::FileSystem;
 
 use super::callbacks::DownloadProgress;
 use super::downloader::Downloader;
 use super::resume_state::{CURRENT_RESUME_SIDECAR_VERSION, ResumeReuseSource};
 use super::resume_validation::{
-    ResumeValidation, SidecarValidationInput, TrustedResumeChunkCandidate, trust_resume_candidate,
+    ResumeValidation, SidecarValidationInput, TrustedResumeChunkCandidate,
+    resume_fingerprint_matches, trust_resume_candidate,
 };
 use super::revalidate_part::revalidate_candidates_from_part;
 use super::revalidation_buffer::REVALIDATION_BUFFER_BYTES;
 use super::sidecar_store::load_sidecar;
-
-pub(crate) fn should_emit_resume_validation_progress(
-    last_report_at: Instant,
-    now: Instant,
-) -> bool {
-    now.saturating_duration_since(last_report_at) >= Duration::from_secs(30)
-}
-
-pub(crate) fn resume_fingerprint_matches(
-    expected: FileFingerprint,
-    actual: FileFingerprint,
-) -> bool {
-    expected.len == actual.len
-        && (expected.modified_ns == 0 || expected.modified_ns == actual.modified_ns)
-        && expected
-            .allocated_bytes
-            .is_none_or(|allocated| actual.allocated_bytes == Some(allocated))
-        && expected.dev.is_none_or(|dev| actual.dev == Some(dev))
-        && expected.ino.is_none_or(|ino| actual.ino == Some(ino))
-}
 
 impl<F: FileSystem> Downloader<F> {
     pub(super) async fn revalidate_resume_chunks(
