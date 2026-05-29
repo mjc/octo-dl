@@ -5,7 +5,7 @@ use crate::core::ProgressDelta;
 use crate::progress::CumulativeProgress;
 use crate::stats::{DownloadStatsTracker, FileStats};
 
-use super::sidecar_state::ResumeTracker;
+use super::resume_tracker::ResumeTracker;
 use super::sidecar_writer::{LazySidecarWriter, SidecarGeneration, SidecarWriterShutdown};
 
 /// Trait for receiving download progress updates.
