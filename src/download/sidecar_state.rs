@@ -2,7 +2,9 @@ use std::path::Path;
 
 use super::callbacks::DownloadProgress;
 use super::resume_state::{CURRENT_RESUME_SIDECAR_VERSION, ResumeReuseSource};
-use super::sidecar_store::{ResumeSidecar, VerifiedChunkRecord, save_sidecar_atomic};
+use super::sidecar_store::{
+    ResumeSidecar, VerifiedChunkRecord, VerifiedChunks, save_sidecar_atomic,
+};
 use crate::error::{Error, Result};
 use crate::fs::FileSystem;
 
@@ -11,7 +13,7 @@ pub(super) struct ResumeTracker {
     file_size: u64,
     expected_condensed_mac: [u8; 8],
     chunk_macs: Vec<Option<[u8; 16]>>,
-    verified_chunks: Vec<VerifiedChunkRecord>,
+    verified_chunks: VerifiedChunks,
     verified_positions: Vec<Option<usize>>,
 }
 
@@ -21,7 +23,8 @@ impl ResumeTracker {
         expected_condensed_mac: [u8; 8],
         chunk_macs: Vec<Option<[u8; 16]>>,
     ) -> Self {
-        let mut verified_chunks = Vec::with_capacity(chunk_macs.iter().flatten().count());
+        let mut verified_chunks =
+            VerifiedChunks::with_capacity(chunk_macs.iter().flatten().count());
         let mut verified_positions = vec![None; chunk_macs.len()];
         for (position, mac) in chunk_macs.iter().copied().enumerate() {
             let Some(mac) = mac else {
@@ -152,7 +155,7 @@ pub(super) async fn persist_revalidated_sidecar<F: FileSystem>(
 #[cfg(test)]
 mod tests {
     use super::super::test_support::*;
-    use super::super::{VerifiedChunkRecord, load_sidecar, sidecar_path};
+    use super::super::{VerifiedChunkRecord, VerifiedChunks, load_sidecar, sidecar_path};
     use super::{
         ResumeReuseSource, ResumeTracker, ResumeValidation, TrustedResumeChunkCandidate,
         persist_revalidated_sidecar, trust_resume_candidate,
@@ -160,7 +163,7 @@ mod tests {
     use crate::fs::{FileSystem, TokioFileSystem};
     use proptest::prelude::*;
 
-    fn expected_verified_chunks(chunk_macs: &[Option<[u8; 16]>]) -> Vec<VerifiedChunkRecord> {
+    fn expected_verified_chunks(chunk_macs: &[Option<[u8; 16]>]) -> VerifiedChunks {
         chunk_macs
             .iter()
             .enumerate()
@@ -301,6 +304,7 @@ mod tests {
                     mac: [3_u8; 16]
                 }
             ]
+            .into()
         );
         assert_eq!(persisted.part_fingerprint, Some(expected_fingerprint));
     }

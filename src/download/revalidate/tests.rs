@@ -416,7 +416,8 @@ async fn revalidate_sidecar_trusts_matching_fingerprint_even_with_low_allocation
                 index: second.index,
                 mac: [5u8; 16],
             },
-        ],
+        ]
+        .into(),
         part_fingerprint: None,
     };
     let allocated = first.length.saturating_add(second.length).saturating_sub(1);
@@ -470,7 +471,8 @@ async fn revalidate_sidecar_trusts_multiple_chunks_without_allocated_bytes() {
                 index: second.index,
                 mac: [5u8; 16],
             },
-        ],
+        ]
+        .into(),
         part_fingerprint: Some(fingerprint_with_allocated_bytes(file_size, None)),
     };
     let fs = MockFileSystem::new();
@@ -1281,7 +1283,8 @@ async fn revalidate_sidecar_with_matching_fingerprint_keeps_first_duplicate_chun
                 index: first.index,
                 mac,
             },
-        ],
+        ]
+        .into(),
         part_fingerprint: None,
     };
     let fingerprint = fingerprint_with_allocated_bytes(file_size, Some(first.length));
@@ -1442,7 +1445,8 @@ async fn stale_sidecar_without_matching_metadata_trusts_nothing() {
             verified_chunks: vec![VerifiedChunkRecord {
                 index: 0,
                 mac: [1u8; 16],
-            }],
+            }]
+            .into(),
             part_fingerprint: None,
         },
     )
@@ -1495,7 +1499,8 @@ async fn legacy_v1_sidecar_trusts_nothing() {
             verified_chunks: vec![VerifiedChunkRecord {
                 index: first.index,
                 mac,
-            }],
+            }]
+            .into(),
             part_fingerprint: None,
         },
     )
