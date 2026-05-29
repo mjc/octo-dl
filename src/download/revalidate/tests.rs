@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use super::super::revalidation_buffer::REVALIDATION_BUFFER_BYTES;
 use super::super::test_support::*;
 use super::super::{
     ResumeSidecar, VerifiedChunkRecord, resume_validation_percent, save_sidecar_atomic,

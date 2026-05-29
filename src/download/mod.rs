@@ -12,6 +12,7 @@ mod resume_tracker;
 mod resume_validation;
 mod revalidate;
 mod revalidate_part;
+mod revalidation_buffer;
 mod session;
 mod sidecar;
 mod sidecar_store;

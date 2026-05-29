@@ -14,20 +14,14 @@ use super::resume_validation::{
     ResumeValidation, SidecarValidationInput, TrustedResumeChunkCandidate, trust_resume_candidate,
 };
 use super::revalidate_part::revalidate_candidates_from_part;
+use super::revalidation_buffer::REVALIDATION_BUFFER_BYTES;
 use super::sidecar_store::load_sidecar;
-
-pub(crate) const REVALIDATION_BUFFER_BYTES: usize = 128 * 1024;
 
 pub(crate) fn should_emit_resume_validation_progress(
     last_report_at: Instant,
     now: Instant,
 ) -> bool {
     now.saturating_duration_since(last_report_at) >= Duration::from_secs(30)
-}
-
-pub(super) fn revalidation_buffer_len(remaining: u64) -> usize {
-    usize::try_from(remaining.min(REVALIDATION_BUFFER_BYTES as u64))
-        .unwrap_or(REVALIDATION_BUFFER_BYTES)
 }
 
 pub(crate) fn resume_fingerprint_matches(
