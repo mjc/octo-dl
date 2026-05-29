@@ -49,10 +49,13 @@ pub(super) fn trust_resume_candidate(
     validation: &mut ResumeValidation,
     candidate: TrustedResumeChunkCandidate,
 ) -> bool {
-    if validation.trusted_chunks[candidate.index].is_some() {
+    let Some(chunk) = validation.trusted_chunks.get_mut(candidate.index) else {
+        return false;
+    };
+    if chunk.is_some() {
         return false;
     }
-    validation.trusted_chunks[candidate.index] = Some(candidate.expected_mac);
+    *chunk = Some(candidate.expected_mac);
     validation.trusted_count = validation.trusted_count.saturating_add(1);
     validation.trusted_bytes = validation.trusted_bytes.saturating_add(candidate.length);
     true
@@ -280,5 +283,22 @@ mod tests {
             prop_assert!(!validation.sidecar_loaded);
             prop_assert_eq!(validation.source, None);
         }
+    }
+
+    #[test]
+    fn trust_resume_candidate_rejects_out_of_range_indexes() {
+        let mut validation = ResumeValidation::empty(1);
+
+        assert!(!trust_resume_candidate(
+            &mut validation,
+            TrustedResumeChunkCandidate {
+                index: 1,
+                length: 99,
+                expected_mac: [7_u8; 16],
+            }
+        ));
+        assert_eq!(validation.trusted_chunks, vec![None]);
+        assert_eq!(validation.trusted_count, 0);
+        assert_eq!(validation.trusted_bytes, 0);
     }
 }
