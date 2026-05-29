@@ -13,7 +13,7 @@ use crate::core::ProgressDelta;
 use crate::fake_mega::{FakeMegaFixture, FakeMegaServer, create_fake_mega_fixture};
 use crate::fs::{FileFingerprint, FileSystem, TokioFileSystem};
 
-use super::downloader::CURRENT_RESUME_SIDECAR_VERSION;
+use super::resume_state::CURRENT_RESUME_SIDECAR_VERSION;
 use super::*;
 
 pub(super) static TEST_AES_KEY: [u8; 16] = [7u8; 16];

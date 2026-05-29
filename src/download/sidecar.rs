@@ -1,7 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::downloader::CURRENT_RESUME_SIDECAR_VERSION;
+use super::resume_state::CURRENT_RESUME_SIDECAR_VERSION;
 use super::sidecar_store::{
     legacy_binary_path_for_sidecar, legacy_json_path_for_sidecar, load_sidecar_sync,
     postcard_path_for_sidecar,

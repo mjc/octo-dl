@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::Error;
 
 use super::super::callbacks::DownloadProgress;
-use super::super::downloader::ResumeReuseSource;
+use super::super::resume_state::ResumeReuseSource;
 use super::super::sidecar_state::{SidecarValidationInput, TrustedResumeChunkCandidate};
 use super::super::sidecar_store::ResumeSidecar;
 use super::super::test_support::*;

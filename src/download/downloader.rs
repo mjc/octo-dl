@@ -27,30 +27,6 @@ pub async fn fetch_public_nodes(http: &reqwest::Client, url: &str) -> Result<meg
     client.fetch_public_nodes(url).await.map_err(Error::Mega)
 }
 
-/// Bytes and chunks reused from resumable state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResumeReuse {
-    pub chunks: usize,
-    pub bytes: u64,
-    pub source: ResumeReuseSource,
-}
-
-/// Result of manually checking resumable state without starting a download.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResumeReverify {
-    pub sidecar_loaded: bool,
-    pub chunks: usize,
-    pub bytes: u64,
-}
-
-/// Source of reused chunk state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResumeReuseSource {
-    Sidecar,
-}
-
-pub(super) const CURRENT_RESUME_SIDECAR_VERSION: u32 = 2;
-
 /// Deletes resumable download artifacts for a final output path.
 pub async fn delete_resume_artifacts(path: &str) -> io::Result<()> {
     sidecar::delete_resume_artifacts_for_path(path).await
@@ -59,21 +35,6 @@ pub async fn delete_resume_artifacts(path: &str) -> io::Result<()> {
 /// Deletes the final output and resumable download artifacts for a path.
 pub async fn delete_download_artifacts(path: &str) -> io::Result<()> {
     sidecar::delete_download_artifacts_for_path(path).await
-}
-
-pub(super) const fn should_reuse_resume_state(
-    force_overwrite: bool,
-    trust_resume_state: bool,
-) -> bool {
-    !force_overwrite && trust_resume_state
-}
-
-#[must_use]
-pub(crate) fn resume_validation_percent(checked_bytes: u64, total_bytes: u64) -> u64 {
-    if total_bytes == 0 {
-        return 0;
-    }
-    ((u128::from(checked_bytes.min(total_bytes)) * 100) / u128::from(total_bytes)) as u64
 }
 
 /// Core downloader that handles MEGA file downloads.
@@ -221,13 +182,6 @@ mod tests {
             .await
             .unwrap();
         (temp, fixture, server, nodes)
-    }
-
-    #[test]
-    fn resume_state_is_reused_only_for_session_tracked_files() {
-        assert!(should_reuse_resume_state(false, true));
-        assert!(!should_reuse_resume_state(false, false));
-        assert!(!should_reuse_resume_state(true, true));
     }
 
     #[tokio::test]

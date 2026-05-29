@@ -1,7 +1,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
-use super::super::downloader::CURRENT_RESUME_SIDECAR_VERSION;
+use super::super::resume_state::CURRENT_RESUME_SIDECAR_VERSION;
 use super::super::sidecar_store::{
     LegacyJsonVerifiedChunkRecord, ResumeSidecar, VerifiedChunkRecord,
 };

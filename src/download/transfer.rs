@@ -10,8 +10,9 @@ use super::callbacks::{
     ChunkVerifiedState, DownloadCallbackState, DownloadProgress, ProgressCallbackState,
     ResumeValidationStatusProgress,
 };
-use super::downloader::{Downloader, should_reuse_resume_state};
+use super::downloader::Downloader;
 use super::finalize::DownloadFinishContext;
+use super::resume_state::should_reuse_resume_state;
 use super::sidecar::{delete_sidecar, part_path, sidecar_path};
 use super::sidecar_state::{ResumeTracker, ResumeValidation};
 use super::sidecar_writer::LazySidecarWriter;

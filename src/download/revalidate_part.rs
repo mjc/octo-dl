@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{Error, Result};
 use crate::fs::FileSystem;
 
-use super::downloader::ResumeReuseSource;
+use super::resume_state::ResumeReuseSource;
 use super::revalidate::{
     REVALIDATION_BUFFER_BYTES, revalidation_buffer_len, should_emit_resume_validation_progress,
 };

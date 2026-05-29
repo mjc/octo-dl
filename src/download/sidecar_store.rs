@@ -6,7 +6,7 @@ use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
-use super::downloader::CURRENT_RESUME_SIDECAR_VERSION;
+use super::resume_state::CURRENT_RESUME_SIDECAR_VERSION;
 use super::sidecar_writer::sidecar_tmp_path;
 use crate::fs::FileFingerprint;
 
