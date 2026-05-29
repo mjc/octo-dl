@@ -1691,6 +1691,8 @@ fn deferred_batch_persistence_waits_for_poll_before_writing_snapshot() {
     else {
         panic!("session save should stay queued until poll");
     };
+    // Simulate the debounce window expiring so poll_session_persistence flushes
+    // the queued save without waiting in real time.
     *queued_at = std::time::Instant::now() - super::persistence::SESSION_SAVE_DEBOUNCE;
     app.poll_session_persistence();
     assert_eq!(app.session_persist_count, 1);

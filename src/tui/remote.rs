@@ -77,7 +77,7 @@ async fn run_attached_dashboard_loop(addr: SocketAddr) -> io::Result<()> {
                 &app.status,
                 addr.port(),
             );
-            state.status.clone_from(&app.status);
+            state.status = app.status.clone();
             draw_dashboard(
                 frame,
                 &state,
@@ -113,7 +113,7 @@ async fn run_attached_dashboard_loop(addr: SocketAddr) -> io::Result<()> {
                     &app.status,
                     addr.port(),
                 );
-                state.status.clone_from(&app.status);
+                state.status = app.status.clone();
                 draw_dashboard(
                     frame,
                     &state,
@@ -212,7 +212,7 @@ fn handle_dashboard_reader_message(app: &mut AttachedDashboard, message: Dashboa
         DashboardReaderMessage::Status(status) => {
             app.status = status;
             if let Some(state) = app.state.as_mut() {
-                state.status.clone_from(&app.status);
+                state.status = app.status.clone();
                 state.ui_mode = DashboardUiMode::Attached;
                 state.read_only = true;
             }

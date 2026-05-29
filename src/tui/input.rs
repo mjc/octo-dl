@@ -60,7 +60,6 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('D') => delete_selected_immediately(app),
         KeyCode::Char('d') | KeyCode::Delete => delete_selected(app),
         KeyCode::Char('R') => reset_selected(app),
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::SHIFT) => reset_selected(app),
         KeyCode::Char('r') => retry_selected(app),
         KeyCode::Char('c') => {
             app.popup = Popup::Config;

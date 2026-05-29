@@ -434,15 +434,6 @@ fn package_has_visible_content(
         .is_some_and(|package_projection| !package_projection.files.is_empty())
 }
 
-fn package_has_visible_children(
-    package_projections: &IndexMap<PackageId, PackageProjection<'_>>,
-    package_id: &PackageId,
-) -> bool {
-    package_projections
-        .get(package_id)
-        .is_some_and(|package| !package.files.is_empty())
-}
-
 pub(super) fn visible_rows_for(
     files: &[FileEntry],
     file_ui: &FileUiMap,
@@ -514,8 +505,10 @@ pub(super) fn visible_rows_for(
             continue;
         }
         rows.push(TuiRow::Package(package_id));
+        // The earlier package_has_visible_content filter should already guarantee
+        // children exist; keep this guard to stay resilient to future refactors.
         if package_is_auto_expanded_for(expanded_packages, core_state, &package_id)
-            && package_has_visible_children(&package_projections, &package_id)
+            && package_has_visible_content(&package_projections, &package_id)
         {
             let mut package_files = package_projections
                 .get(&package_id)
