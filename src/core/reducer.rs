@@ -289,23 +289,7 @@ fn reduce_impl(
                 state.url_order.push(package.source_url.clone());
             }
             if package.files.is_empty() {
-                if let Some(collision) = package.collision {
-                    effects.push(CoreEffect::PublishStatusMessage(format!(
-                        "Package {} rejected file {} because it collides with {}",
-                        collision.incoming_package_id,
-                        collision.file_id,
-                        collision.existing_package_id
-                    )));
-                }
-                state
-                    .packages
-                    .retain(|_, existing| existing.key != package.key);
-                remove_unreferenced_source_url(state, &package.source_url);
-                if persist_session {
-                    effects.push(CoreEffect::PersistSession(snapshot_from_state(state)));
-                }
-                effects.push(CoreEffect::PublishViewSnapshot);
-                maybe_debug_assert_invariants(state);
+                handle_empty_package_resolution(state, &package, &mut effects, persist_session);
                 return effects;
             }
             let incoming_package_id = package.id.clone();
@@ -768,6 +752,29 @@ fn reduce_impl(
     effects.push(CoreEffect::PublishViewSnapshot);
     maybe_debug_assert_invariants(state);
     effects
+}
+
+fn handle_empty_package_resolution(
+    state: &mut DownloadState,
+    package: &ResolvedPackage,
+    effects: &mut SmallVec<[CoreEffect; 2]>,
+    persist_session: bool,
+) {
+    if let Some(collision) = package.collision.as_ref() {
+        effects.push(CoreEffect::PublishStatusMessage(format!(
+            "Package {} rejected file {} because it collides with {}",
+            collision.incoming_package_id, collision.file_id, collision.existing_package_id
+        )));
+    }
+    state
+        .packages
+        .retain(|_, existing| existing.key != package.key);
+    remove_unreferenced_source_url(state, &package.source_url);
+    if persist_session {
+        effects.push(CoreEffect::PersistSession(snapshot_from_state(state)));
+    }
+    effects.push(CoreEffect::PublishViewSnapshot);
+    maybe_debug_assert_invariants(state);
 }
 
 pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {

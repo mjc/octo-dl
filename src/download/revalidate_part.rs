@@ -5,10 +5,9 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{Error, Result};
 use crate::fs::FileSystem;
 
-use super::resume_state::ResumeReuseSource;
 use super::resume_validation::{
     ResumeValidation, SidecarValidationInput, TrustedResumeChunkCandidate,
-    should_emit_resume_validation_progress, trust_resume_candidate,
+    mark_sidecar_source_if_trusted, should_emit_resume_validation_progress, trust_resume_candidate,
 };
 use super::revalidation_buffer::{REVALIDATION_BUFFER_BYTES, revalidation_buffer_len};
 
@@ -125,10 +124,7 @@ pub(super) async fn revalidate_candidates_from_part<F: FileSystem>(
         validation.trusted_bytes
     );
 
-    if validation.trusted_count > 0 {
-        validation.source = Some(ResumeReuseSource::Sidecar);
-    }
-
+    mark_sidecar_source_if_trusted(&mut validation);
     Ok(validation)
 }
 
