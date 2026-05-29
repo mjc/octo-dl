@@ -627,13 +627,7 @@ fn reduce_impl(
             if let Some(file) = state.files.get_mut(&file_id) {
                 let before = FileDerivedState::from(&*file);
                 let preserved_verified = file.progress.verified_existing_bytes.min(size);
-                let preserved_visible =
-                    if file.progress.visible_completed_bytes == file.progress.verified_existing_bytes
-                    {
-                        preserved_verified
-                    } else {
-                        0
-                    };
+                let preserved_visible = file.progress.visible_completed_bytes.min(size);
                 file.size = size;
                 file.lifecycle = FileLifecycle::Downloading;
                 file.progress = FileProgressState {
@@ -748,15 +742,12 @@ fn reduce_impl(
                     .verified_existing_bytes
                     .saturating_add(reused_bytes)
                     .min(file.size);
-                file.progress.visible_completed_bytes = file
-                    .progress
-                    .visible_completed_bytes
-                    .max(
-                        file.progress
-                            .verified_existing_bytes
-                            .saturating_add(file.progress.downloaded_network_bytes)
-                            .min(file.size),
-                    );
+                file.progress.visible_completed_bytes = file.progress.visible_completed_bytes.max(
+                    file.progress
+                        .verified_existing_bytes
+                        .saturating_add(file.progress.downloaded_network_bytes)
+                        .min(file.size),
+                );
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
             }
@@ -2710,6 +2701,34 @@ mod tests {
         assert_eq!(file.progress.downloaded_network_bytes, 0);
         assert_eq!(file.progress.visible_completed_bytes, 40);
         assert_eq!(state.totals.run_completed_bytes, 40);
+        assert_eq!(state.totals.displayed_network_bytes, 0);
+    }
+
+    #[test]
+    fn file_resume_started_preserves_visible_partial_bytes_from_restart() {
+        let mut state = sample_state();
+        let file = state.files.get_mut("file.bin").unwrap();
+        file.lifecycle = FileLifecycle::Queued;
+        file.progress = FileProgressState {
+            visible_completed_bytes: 45,
+            ..FileProgressState::default()
+        };
+        rebuild_derived_state(&mut state);
+
+        reduce(
+            &mut state,
+            CoreEvent::FileResumeStarted {
+                file_id: "file.bin".to_string().into(),
+                size: 100,
+            },
+        );
+
+        let file = &state.files["file.bin"];
+        assert_eq!(file.lifecycle, FileLifecycle::Downloading);
+        assert_eq!(file.progress.visible_completed_bytes, 45);
+        assert_eq!(file.progress.verified_existing_bytes, 0);
+        assert_eq!(file.progress.downloaded_network_bytes, 0);
+        assert_eq!(state.totals.run_completed_bytes, 45);
         assert_eq!(state.totals.displayed_network_bytes, 0);
     }
 
