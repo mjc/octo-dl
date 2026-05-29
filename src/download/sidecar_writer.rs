@@ -1,5 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Sender};
 
@@ -35,6 +37,13 @@ fn save_sidecar_atomic_sync(path: &Path, sidecar: &ResumeSidecar) -> io::Result<
     Ok(())
 }
 
+#[cfg(test)]
+type PersistEventRx = Arc<Mutex<mpsc::Receiver<()>>>;
+#[cfg(test)]
+type PersistEventTx = mpsc::Sender<()>;
+#[cfg(not(test))]
+type PersistEventTx = ();
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct SidecarGeneration(u64);
 
@@ -59,14 +68,16 @@ struct SidecarWriterWorker {
     path: PathBuf,
     part_path: PathBuf,
     last_persisted_generation: Option<SidecarGeneration>,
+    persist_event_tx: PersistEventTx,
 }
 
 impl SidecarWriterWorker {
-    fn new(path: PathBuf, part_path: PathBuf) -> Self {
+    fn new(path: PathBuf, part_path: PathBuf, persist_event_tx: PersistEventTx) -> Self {
         Self {
             path,
             part_path,
             last_persisted_generation: None,
+            persist_event_tx,
         }
     }
 
@@ -95,6 +106,8 @@ impl SidecarWriterWorker {
             return;
         }
         self.last_persisted_generation = Some(generation);
+        #[cfg(test)]
+        let _ = self.persist_event_tx.send(());
     }
 
     fn run(mut self, rx: mpsc::Receiver<SidecarWriterCommand>) {
@@ -112,19 +125,42 @@ impl SidecarWriterWorker {
 pub(super) struct LazySidecarWriter {
     tx: Mutex<Option<Sender<SidecarWriterCommand>>>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    #[cfg(test)]
+    persist_event_rx: PersistEventRx,
 }
 
 impl LazySidecarWriter {
     pub(super) fn new(path: PathBuf, part_path: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel();
+        #[cfg(test)]
+        let (persist_event_tx, persist_event_rx) = mpsc::channel();
+        #[cfg(test)]
+        let persist_event_rx = Arc::new(Mutex::new(persist_event_rx));
         let worker = std::thread::Builder::new()
             .name(format!("sidecar-writer:{}", path.display()))
-            .spawn(move || SidecarWriterWorker::new(path, part_path).run(rx))
+            .spawn(move || {
+                SidecarWriterWorker::new(
+                    path,
+                    part_path,
+                    #[cfg(test)]
+                    persist_event_tx,
+                    #[cfg(not(test))]
+                    (),
+                )
+                .run(rx)
+            })
             .expect("spawn sidecar writer thread");
         Self {
             tx: Mutex::new(Some(tx)),
             worker: Mutex::new(Some(worker)),
+            #[cfg(test)]
+            persist_event_rx,
         }
+    }
+
+    #[cfg(test)]
+    pub(in crate::download) fn persist_event_listener(&self) -> PersistEventRx {
+        self.persist_event_rx.clone()
     }
 
     fn persist_snapshot(
@@ -174,6 +210,19 @@ impl LazySidecarWriter {
             let _ = tokio::task::spawn_blocking(move || worker.join()).await;
         }
     }
+}
+
+#[cfg(test)]
+pub(in crate::download) async fn wait_for_persist_event(events: PersistEventRx) -> bool {
+    tokio::task::spawn_blocking(move || {
+        events
+            .lock()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok()
+    })
+    .await
+    .expect("sidecar persist wait should not panic")
 }
 
 pub(super) enum SidecarWriterShutdown {

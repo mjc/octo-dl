@@ -11,28 +11,53 @@ use tokio::sync::mpsc;
 async fn verification_executor_limits_parallel_work_to_four() {
     let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let max_active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
     let items = (0..12).collect::<Vec<_>>();
 
-    for_each_verification_item(items, PACKAGE_REVERIFY_CONCURRENCY, {
-        let active = std::sync::Arc::clone(&active);
-        let max_active = std::sync::Arc::clone(&max_active);
-        move |_| {
+    let verification = tokio::spawn(for_each_verification_item(
+        items,
+        PACKAGE_REVERIFY_CONCURRENCY,
+        {
             let active = std::sync::Arc::clone(&active);
             let max_active = std::sync::Arc::clone(&max_active);
-            async move {
-                let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                max_active.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let released = std::sync::Arc::clone(&released);
+            let release_notify = std::sync::Arc::clone(&release_notify);
+            let entered_tx = entered_tx.clone();
+            move |_| {
+                let active = std::sync::Arc::clone(&active);
+                let max_active = std::sync::Arc::clone(&max_active);
+                let released = std::sync::Arc::clone(&released);
+                let release_notify = std::sync::Arc::clone(&release_notify);
+                let entered_tx = entered_tx.clone();
+                async move {
+                    let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    max_active.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                    entered_tx.send(()).expect("task entry should be observed");
+                    while !released.load(std::sync::atomic::Ordering::SeqCst) {
+                        release_notify.notified().await;
+                    }
+                    active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
             }
-        }
-    })
-    .await;
+        },
+    ));
+
+    for _ in 0..PACKAGE_REVERIFY_CONCURRENCY {
+        entered_rx
+            .recv()
+            .await
+            .expect("concurrent verification tasks should start");
+    }
 
     assert_eq!(
         max_active.load(std::sync::atomic::Ordering::SeqCst),
         PACKAGE_REVERIFY_CONCURRENCY
     );
+    released.store(true, std::sync::atomic::Ordering::SeqCst);
+    release_notify.notify_waiters();
+    verification.await.unwrap();
 }
 
 #[test]

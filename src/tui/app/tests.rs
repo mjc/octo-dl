@@ -1666,7 +1666,12 @@ fn deferred_batch_persistence_waits_for_poll_before_writing_snapshot() {
     );
     assert_eq!(app.session_persist_count, 0);
 
-    std::thread::sleep(super::persistence::SESSION_SAVE_DEBOUNCE);
+    let Some(super::PendingSessionPersistence::SaveCurrent { queued_at }) =
+        app.pending_session_persistence.as_mut()
+    else {
+        panic!("session save should stay queued until poll");
+    };
+    *queued_at = std::time::Instant::now() - super::persistence::SESSION_SAVE_DEBOUNCE;
     app.poll_session_persistence();
     assert_eq!(app.session_persist_count, 1);
     assert!(crate::core::SessionSnapshot::latest().is_none());
