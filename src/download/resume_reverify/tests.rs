@@ -4,7 +4,6 @@ use super::super::test_support::*;
 use super::super::{ResumeSidecar, load_sidecar, part_path, save_sidecar_atomic, sidecar_path};
 use super::*;
 use crate::config::DownloadConfig;
-use crate::fake_mega::{FakeMegaFixture, FakeMegaServer, create_fake_mega_fixture};
 use crate::fs::{FileSystem, TokioFileSystem};
 
 enum StoredFingerprint {
@@ -13,11 +12,7 @@ enum StoredFingerprint {
 }
 
 struct ResumeReverifyHarness {
-    _temp: tempfile::TempDir,
-    fixture: FakeMegaFixture,
-    server: FakeMegaServer,
-    downloader: Downloader,
-    nodes: mega::Nodes,
+    base: FakeMegaDownloadHarness,
     output_path_string: String,
     part_path: std::path::PathBuf,
     sidecar_path: std::path::PathBuf,
@@ -25,33 +20,14 @@ struct ResumeReverifyHarness {
 
 impl ResumeReverifyHarness {
     async fn new(seed: u64, config: DownloadConfig) -> Self {
-        let temp = tempfile::tempdir().unwrap();
-        let fixture_dir = temp.path().join("fixture");
-        let output_dir = temp.path().join("output");
-        let fixture = create_fake_mega_fixture(&fixture_dir, "payload.bin", 300_000, seed)
-            .await
-            .unwrap();
-        let server = FakeMegaServer::spawn(fixture.clone(), 1).unwrap();
-        let client = mega::Client::builder()
-            .origin(server.origin().clone())
-            .build(reqwest::Client::new())
-            .unwrap();
-        let nodes = client
-            .fetch_public_nodes(&fixture.public_url())
-            .await
-            .unwrap();
-        tokio::fs::create_dir_all(&output_dir).await.unwrap();
-        let downloader = Downloader::new(client, config);
-        let output_path = output_dir.join(fixture.file_name());
+        let base = FakeMegaDownloadHarness::new(seed, 300_000, config).await;
+        tokio::fs::create_dir_all(&base.output_dir).await.unwrap();
+        let output_path = base.output_path(base.fixture.file_name());
         let output_path_string = output_path.to_string_lossy().into_owned();
         let part_path = part_path(&output_path_string);
         let sidecar_path = sidecar_path(&output_path_string);
         Self {
-            _temp: temp,
-            fixture,
-            server,
-            downloader,
-            nodes,
+            base,
             output_path_string,
             part_path,
             sidecar_path,
@@ -59,9 +35,7 @@ impl ResumeReverifyHarness {
     }
 
     fn node(&self) -> &mega::Node {
-        self.nodes
-            .get_node_by_handle(self.fixture.handle())
-            .unwrap()
+        self.base.node()
     }
 
     async fn seed_first_verified_chunk(
@@ -71,7 +45,9 @@ impl ResumeReverifyHarness {
         let node = self.node();
         let first = mega::mega_chunk_boundaries(node.size())[0];
         let mut first_chunk = vec![0u8; usize_from_u64(first.length)];
-        self.fixture.fill_plaintext(first.offset, &mut first_chunk);
+        self.base
+            .fixture
+            .fill_plaintext(first.offset, &mut first_chunk);
         tokio::fs::write(&self.part_path, &first_chunk)
             .await
             .unwrap();
@@ -108,30 +84,41 @@ async fn run_restart_revalidation_and_manual_reverify_parity_test() {
             .with_concurrent_files(1),
     )
     .await;
-    let node = harness.node();
-    let boundaries = mega::mega_chunk_boundaries(node.size());
+    let (boundaries, condensed_mac) = {
+        let node = harness.node();
+        (
+            mega::mega_chunk_boundaries(node.size()),
+            *node.condensed_mac().unwrap(),
+        )
+    };
     let (first, _current_fingerprint, sidecar) = harness
         .seed_first_verified_chunk(StoredFingerprint::Current)
         .await;
 
-    let manual = harness
-        .downloader
-        .reverify_resume_file(node, &harness.output_path_string)
-        .await
-        .unwrap();
-    let automatic = harness
-        .downloader
-        .revalidate_resume_chunks(
-            node,
-            &boundaries,
-            &harness.part_path,
-            &harness.sidecar_path,
-            *node.condensed_mac().unwrap(),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+    let (manual, automatic) = {
+        let node = harness.node();
+        let manual = harness
+            .base
+            .downloader
+            .reverify_resume_file(node, &harness.output_path_string)
+            .await
+            .unwrap();
+        let automatic = harness
+            .base
+            .downloader
+            .revalidate_resume_chunks(
+                node,
+                &boundaries,
+                &harness.part_path,
+                &harness.sidecar_path,
+                condensed_mac,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        (manual, automatic)
+    };
 
     assert_eq!(manual.chunks, 1);
     assert_eq!(manual.bytes, first.length);
@@ -142,7 +129,7 @@ async fn run_restart_revalidation_and_manual_reverify_parity_test() {
         Some(sidecar.verified_chunks[0].mac)
     );
 
-    harness.server.shutdown().await.unwrap();
+    harness.base.shutdown().await;
 }
 
 #[test]
@@ -154,16 +141,19 @@ fn automatic_restart_revalidation_and_manual_reverify_agree_for_matching_sidecar
 
 async fn run_manual_reverify_refreshes_sidecar_fingerprint_test() {
     let harness = ResumeReverifyHarness::new(23, DownloadConfig::default()).await;
-    let node = harness.node();
     let (first, current_fingerprint, _sidecar) = harness
         .seed_first_verified_chunk(StoredFingerprint::Stale)
         .await;
 
-    let result = harness
-        .downloader
-        .reverify_resume_file(node, &harness.output_path_string)
-        .await
-        .unwrap();
+    let result = {
+        let node = harness.node();
+        harness
+            .base
+            .downloader
+            .reverify_resume_file(node, &harness.output_path_string)
+            .await
+            .unwrap()
+    };
     assert_eq!(result.chunks, 1);
     assert_eq!(result.bytes, first.length);
 
@@ -176,7 +166,7 @@ async fn run_manual_reverify_refreshes_sidecar_fingerprint_test() {
         "manual reverify should refresh the sidecar fingerprint to the current .part state"
     );
 
-    harness.server.shutdown().await.unwrap();
+    harness.base.shutdown().await;
 }
 
 #[test]
@@ -189,17 +179,20 @@ fn manual_reverify_refreshes_sidecar_fingerprint_after_disk_revalidation() {
 #[tokio::test]
 async fn manual_reverify_with_progress_reports_disk_validation_bytes() {
     let harness = ResumeReverifyHarness::new(31, DownloadConfig::default()).await;
-    let node = harness.node();
     let (first, _current_fingerprint, _sidecar) = harness
         .seed_first_verified_chunk(StoredFingerprint::Stale)
         .await;
 
     let progress = RecordingProgress::default();
-    let result = harness
-        .downloader
-        .reverify_resume_file_with_progress(node, &harness.output_path_string, Some(&progress))
-        .await
-        .unwrap();
+    let result = {
+        let node = harness.node();
+        harness
+            .base
+            .downloader
+            .reverify_resume_file_with_progress(node, &harness.output_path_string, Some(&progress))
+            .await
+            .unwrap()
+    };
 
     assert_eq!(result.chunks, 1);
     assert_eq!(result.bytes, first.length);
@@ -208,5 +201,5 @@ async fn manual_reverify_with_progress_reports_disk_validation_bytes() {
     assert_eq!(progress.total.load(Ordering::SeqCst), first.length);
     assert_eq!(progress.network.load(Ordering::SeqCst), 0);
 
-    harness.server.shutdown().await.unwrap();
+    harness.base.shutdown().await;
 }

@@ -3,13 +3,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use super::super::NoProgress;
-use super::super::test_support::run_with_large_stack_current_thread_runtime;
+use super::super::test_support::*;
 use super::*;
 use crate::config::DownloadConfig;
-use crate::fake_mega::{FakeMegaServer, create_fake_mega_fixture};
-
-static TEST_AES_KEY: [u8; 16] = [7u8; 16];
-static TEST_AES_IV: [u8; 8] = [3u8; 8];
 
 #[derive(Default)]
 struct RecordingProgress {
@@ -31,18 +27,6 @@ impl DownloadProgress for RecordingProgress {
     }
 }
 
-fn test_incompressible_plaintext(size: usize) -> Vec<u8> {
-    let mut state = 0x1234_5678_9abc_def0_u64;
-    (0..size)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state as u8
-        })
-        .collect()
-}
-
 async fn expected_condensed_mac(data: &[u8]) -> [u8; 8] {
     mega::compute_condensed_mac(
         futures::io::Cursor::new(data),
@@ -58,10 +42,6 @@ async fn write_test_file(dir: &tempfile::TempDir, name: &str, data: &[u8]) -> Pa
     let path = dir.path().join(name);
     tokio::fs::write(&path, data).await.unwrap();
     path
-}
-
-fn usize_from_u64(value: u64) -> usize {
-    usize::try_from(value).unwrap()
 }
 
 mod property_tests {
@@ -177,43 +157,33 @@ async fn completed_file_mac_matches_mega_condensed_mac_for_boundary_cases() {
 }
 
 async fn run_complete_existing_file_rejects_same_size_corrupt_final_file_test() {
-    let temp = tempfile::tempdir().unwrap();
-    let fixture_dir = temp.path().join("fixture");
-    let output_dir = temp.path().join("output");
-    let fixture = create_fake_mega_fixture(&fixture_dir, "payload.bin", 300_000, 29)
+    let harness = FakeMegaDownloadHarness::new(29, 300_000, DownloadConfig::default()).await;
+    tokio::fs::create_dir_all(&harness.output_dir)
         .await
         .unwrap();
-    let server = FakeMegaServer::spawn(fixture.clone(), 1).unwrap();
-    let client = mega::Client::builder()
-        .origin(server.origin().clone())
-        .build(reqwest::Client::new())
-        .unwrap();
-    let nodes = client
-        .fetch_public_nodes(&fixture.public_url())
-        .await
-        .unwrap();
-    let node = nodes.get_node_by_handle(fixture.handle()).unwrap();
-    tokio::fs::create_dir_all(&output_dir).await.unwrap();
-    let downloader = Downloader::new(client, DownloadConfig::default());
-    let output_path = output_dir.join(fixture.file_name());
+    let output_path = harness.output_path(harness.fixture.file_name());
     let output_path_string = output_path.to_string_lossy().into_owned();
     let progress: Arc<dyn DownloadProgress> = Arc::new(NoProgress);
-    let mut corrupt = vec![0u8; usize_from_u64(node.size())];
-    fixture.fill_plaintext(0, &mut corrupt);
+    let mut corrupt = vec![0u8; usize_from_u64(harness.node().size())];
+    harness.fixture.fill_plaintext(0, &mut corrupt);
     corrupt[0] ^= 0xff;
     tokio::fs::write(&output_path, &corrupt).await.unwrap();
 
-    let existing = downloader
-        .complete_existing_file(node, &output_path_string, &progress)
-        .await
-        .unwrap();
+    let existing = {
+        let node = harness.node();
+        harness
+            .downloader
+            .complete_existing_file(node, &output_path_string, &progress)
+            .await
+            .unwrap()
+    };
 
     assert!(
         existing.is_none(),
         "same-size corrupted completed files must not be accepted as already complete"
     );
 
-    server.shutdown().await.unwrap();
+    harness.shutdown().await;
 }
 
 #[test]
