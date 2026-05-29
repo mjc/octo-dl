@@ -260,7 +260,7 @@ pub(super) fn sidecar_for_chunk(
         version: CURRENT_RESUME_SIDECAR_VERSION,
         file_size,
         expected_condensed_mac,
-        verified_chunks: vec![VerifiedChunkRecord { index, mac }],
+        verified_chunks: vec![VerifiedChunkRecord { index, mac }].into(),
         part_fingerprint: None,
     }
 }

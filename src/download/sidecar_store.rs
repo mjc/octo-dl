@@ -16,12 +16,74 @@ pub(in crate::download) struct VerifiedChunkRecord {
     pub(in crate::download) mac: [u8; 16],
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(in crate::download) struct VerifiedChunks(Vec<VerifiedChunkRecord>);
+
+impl VerifiedChunks {
+    pub(in crate::download) fn with_capacity(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity))
+    }
+
+    pub(in crate::download) fn insert(&mut self, index: usize, record: VerifiedChunkRecord) {
+        self.0.insert(index, record);
+    }
+
+    pub(in crate::download) fn push(&mut self, record: VerifiedChunkRecord) {
+        self.0.push(record);
+    }
+}
+
+impl std::ops::Deref for VerifiedChunks {
+    type Target = [VerifiedChunkRecord];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_slice()
+    }
+}
+
+impl std::ops::DerefMut for VerifiedChunks {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut_slice()
+    }
+}
+
+impl From<Vec<VerifiedChunkRecord>> for VerifiedChunks {
+    fn from(value: Vec<VerifiedChunkRecord>) -> Self {
+        Self(value)
+    }
+}
+
+impl FromIterator<VerifiedChunkRecord> for VerifiedChunks {
+    fn from_iter<T: IntoIterator<Item = VerifiedChunkRecord>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl IntoIterator for VerifiedChunks {
+    type Item = VerifiedChunkRecord;
+    type IntoIter = std::vec::IntoIter<VerifiedChunkRecord>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a VerifiedChunks {
+    type Item = &'a VerifiedChunkRecord;
+    type IntoIter = std::slice::Iter<'a, VerifiedChunkRecord>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(in crate::download) struct ResumeSidecar {
     pub(in crate::download) version: u32,
     pub(in crate::download) file_size: u64,
     pub(in crate::download) expected_condensed_mac: [u8; 8],
-    pub(in crate::download) verified_chunks: Vec<VerifiedChunkRecord>,
+    pub(in crate::download) verified_chunks: VerifiedChunks,
     #[serde(default)]
     pub(in crate::download) part_fingerprint: Option<FileFingerprint>,
 }
@@ -47,7 +109,7 @@ impl TryFrom<LegacyJsonResumeSidecar> for ResumeSidecar {
 
     fn try_from(legacy: LegacyJsonResumeSidecar) -> std::result::Result<Self, Self::Error> {
         let expected_condensed_mac = decode_array::<8>(&legacy.expected_condensed_mac_b64)?;
-        let mut verified_chunks = Vec::with_capacity(legacy.verified_chunks.len());
+        let mut verified_chunks = VerifiedChunks::with_capacity(legacy.verified_chunks.len());
         for record in legacy.verified_chunks {
             verified_chunks.push(VerifiedChunkRecord {
                 index: record.index,

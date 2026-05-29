@@ -207,7 +207,8 @@ async fn inspect_local_file_clamps_binary_sidecar_verified_bytes_to_part_size() 
                 index: boundaries[1].index,
                 mac: [2u8; 16],
             },
-        ],
+        ]
+        .into(),
         part_fingerprint: None,
     };
     tokio::fs::write(
