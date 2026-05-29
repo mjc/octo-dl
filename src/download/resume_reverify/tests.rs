@@ -175,8 +175,7 @@ fn manual_reverify_refreshes_sidecar_fingerprint_after_disk_revalidation() {
     });
 }
 
-#[tokio::test]
-async fn manual_reverify_with_progress_reports_disk_validation_bytes() {
+async fn run_manual_reverify_with_progress_reports_disk_validation_bytes_test() {
     let harness = ResumeReverifyHarness::new(31, DownloadConfig::default()).await;
     let (first, _current_fingerprint, _sidecar) = harness
         .seed_first_verified_chunk(StoredFingerprint::Stale)
@@ -201,4 +200,11 @@ async fn manual_reverify_with_progress_reports_disk_validation_bytes() {
     assert_eq!(progress.network.load(Ordering::SeqCst), 0);
 
     harness.base.shutdown().await;
+}
+
+#[test]
+fn manual_reverify_with_progress_reports_disk_validation_bytes() {
+    run_with_large_stack_current_thread_runtime("manual-reverify-progress-test", || async {
+        run_manual_reverify_with_progress_reports_disk_validation_bytes_test().await;
+    });
 }

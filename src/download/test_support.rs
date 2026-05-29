@@ -13,6 +13,7 @@ use crate::core::ProgressDelta;
 use crate::fake_mega::{FakeMegaFixture, FakeMegaServer, create_fake_mega_fixture};
 use crate::fs::{FileFingerprint, FileSystem, TokioFileSystem};
 
+use super::downloader::CURRENT_RESUME_SIDECAR_VERSION;
 use super::*;
 
 pub(super) static TEST_AES_KEY: [u8; 16] = [7u8; 16];
@@ -20,6 +21,7 @@ pub(super) static TEST_AES_IV: [u8; 8] = [3u8; 8];
 
 pub(super) struct MockFileSystem {
     files: Mutex<HashMap<PathBuf, u64>>,
+    file_bytes: Mutex<HashMap<PathBuf, Vec<u8>>>,
     fingerprints: Mutex<HashMap<PathBuf, FileFingerprint>>,
 }
 
@@ -27,12 +29,22 @@ impl MockFileSystem {
     pub(super) fn new() -> Self {
         Self {
             files: Mutex::new(HashMap::new()),
+            file_bytes: Mutex::new(HashMap::new()),
             fingerprints: Mutex::new(HashMap::new()),
         }
     }
 
     pub(super) fn add_file(&self, path: impl Into<PathBuf>, size: u64) {
         self.files.lock().unwrap().insert(path.into(), size);
+    }
+
+    pub(super) fn add_bytes(&self, path: impl Into<PathBuf>, bytes: Vec<u8>) {
+        let path = path.into();
+        self.files
+            .lock()
+            .unwrap()
+            .insert(path.clone(), u64::try_from(bytes.len()).unwrap());
+        self.file_bytes.lock().unwrap().insert(path, bytes);
     }
 
     pub(super) fn add_fingerprint(&self, path: impl Into<PathBuf>, fingerprint: FileFingerprint) {
@@ -75,7 +87,19 @@ impl FileSystem for MockFileSystem {
     }
 
     async fn read_exact_at(&self, _path: &Path, _offset: u64, _buf: &mut [u8]) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "mock"))
+        let Some(bytes) = self.file_bytes.lock().unwrap().get(_path).cloned() else {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "mock"));
+        };
+        let start = usize::try_from(_offset)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "mock"))?;
+        let end = start
+            .checked_add(_buf.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "mock"))?;
+        let Some(slice) = bytes.get(start..end) else {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "mock"));
+        };
+        _buf.copy_from_slice(slice);
+        Ok(())
     }
 
     async fn rename_file(&self, _from: &Path, _to: &Path) -> io::Result<()> {
