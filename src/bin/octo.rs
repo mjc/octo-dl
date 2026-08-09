@@ -71,7 +71,7 @@ fn print_usage() {
     eprintln!("  --tui               Launch interactive terminal TUI");
     eprintln!("  --headless          Start headless API service");
     eprintln!("  --tui --tui-attach ADDR");
-    eprintln!("                      Attach a read-only terminal UI to ADDR");
+    eprintln!("                      Attach an interactive terminal UI to ADDR");
     eprintln!("  --ui tui|headless   Equivalent explicit form for mode selection");
     eprintln!("  (default)           CLI download mode when URLs/DLC files are provided");
     eprintln!();
