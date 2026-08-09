@@ -51,7 +51,7 @@ Run a headless service with the loopback remote TUI attach stream:
 octo --headless --tui-listen 127.0.0.1:9723
 ```
 
-Attach a read-only terminal UI to a running service:
+Attach an interactive terminal UI to a running service:
 
 ```sh
 octo --tui --tui-attach 127.0.0.1:9723

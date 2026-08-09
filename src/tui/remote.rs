@@ -73,7 +73,7 @@ async fn run_attached_dashboard_loop(addr: SocketAddr) -> io::Result<()> {
         } else {
             let mut state = DownloadDashboardState::empty(
                 DashboardUiMode::Attached,
-                true,
+                false,
                 &app.status,
                 addr.port(),
             );
@@ -90,7 +90,7 @@ async fn run_attached_dashboard_loop(addr: SocketAddr) -> io::Result<()> {
     loop {
         tokio::select! {
             () = &mut shutdown => app.should_quit = true,
-            Some(event) = input.recv() => handle_attached_input(&mut app, event),
+            Some(event) = input.recv() => handle_attached_input(&mut app, event, addr),
             Some(message) = dashboard_rx.recv() => handle_dashboard_reader_message(&mut app, message),
         }
 
@@ -109,7 +109,7 @@ async fn run_attached_dashboard_loop(addr: SocketAddr) -> io::Result<()> {
             } else {
                 let mut state = DownloadDashboardState::empty(
                     DashboardUiMode::Attached,
-                    true,
+                    false,
                     &app.status,
                     addr.port(),
                 );
@@ -177,7 +177,7 @@ async fn dashboard_reader_session(
             continue;
         };
         state.ui_mode = DashboardUiMode::Attached;
-        state.read_only = true;
+        state.read_only = false;
         tx.send(DashboardReaderMessage::State(state))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "dashboard receiver closed"))?;
     }
@@ -214,13 +214,13 @@ fn handle_dashboard_reader_message(app: &mut AttachedDashboard, message: Dashboa
             if let Some(state) = app.state.as_mut() {
                 state.status = app.status.clone();
                 state.ui_mode = DashboardUiMode::Attached;
-                state.read_only = true;
+                state.read_only = false;
             }
         }
     }
 }
 
-fn handle_attached_input(app: &mut AttachedDashboard, event: Event) {
+fn handle_attached_input(app: &mut AttachedDashboard, event: Event, addr: SocketAddr) {
     let Event::Key(KeyEvent {
         code, modifiers, ..
     }) = event
@@ -233,6 +233,11 @@ fn handle_attached_input(app: &mut AttachedDashboard, event: Event) {
     }
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        KeyCode::Char('p') => spawn_remote_action(addr, "pause", None, app),
+        KeyCode::Char('d') | KeyCode::Delete => {
+            spawn_remote_action(addr, "delete", selected_id(app), app);
+        }
+        KeyCode::Char('r') => spawn_remote_action(addr, "retry", selected_id(app), app),
         KeyCode::Up | KeyCode::Char('k') => app.select_delta(-1),
         KeyCode::Down | KeyCode::Char('j') => app.select_delta(1),
         KeyCode::PageUp => app.select_delta(-10),
@@ -255,6 +260,39 @@ fn handle_attached_input(app: &mut AttachedDashboard, event: Event) {
         }
         _ => {}
     }
+}
+
+fn selected_id(app: &AttachedDashboard) -> Option<String> {
+    let row = app.state.as_ref()?.rows.get(app.list_state.selected()?)?;
+    match row {
+        super::dashboard::DashboardRow::Package { package_id } => Some(package_id.clone()),
+        super::dashboard::DashboardRow::File { file_id, .. } => Some(file_id.clone()),
+    }
+}
+
+fn spawn_remote_action(
+    addr: SocketAddr,
+    action: &'static str,
+    id: Option<String>,
+    app: &mut AttachedDashboard,
+) {
+    if action != "pause" && id.is_none() {
+        app.status = "Select a row first".to_string();
+        return;
+    }
+    app.status = format!("Sending {action}");
+    let url = format!("http://{addr}/api/{action}");
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        let request = client.post(url);
+        let result = match id {
+            Some(id) => request.json(&serde_json::json!({ "id": id })).send().await,
+            None => request.send().await,
+        };
+        if let Err(error) = result {
+            log::error!("remote TUI action failed: {error}");
+        }
+    });
 }
 
 #[cfg(test)]
