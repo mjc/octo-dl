@@ -197,6 +197,10 @@ pub fn reconcile_restart(
                 progress: file.progress.clone(),
                 accounting: file.accounting,
             };
+            if matches!(file.lifecycle, FileLifecycle::Complete) {
+                files.insert(file.id.clone(), file);
+                continue;
+            }
             let observed = crate::download::ObservedLocalFile {
                 final_size: complete_map.get(&file.id).copied(),
                 part_size: partial_map.get(&file.id).map(|partial| partial.bytes),
@@ -702,11 +706,11 @@ mod tests {
     }
 
     #[test]
-    fn restart_missing_completed_file_is_requeued_instead_of_staying_complete() {
+    fn restart_missing_completed_file_stays_complete() {
         let mut snapshot = sample_snapshot();
         let file = snapshot.find_file_mut("a.bin").unwrap();
         file.lifecycle = FileLifecycle::Complete;
-        file.accounting = FileAccounting::Preexisting;
+        file.accounting = FileAccounting::CurrentRun;
         file.progress = FileProgressState {
             visible_completed_bytes: 100,
             ..FileProgressState::default()
@@ -719,9 +723,10 @@ mod tests {
         );
 
         let file = &restart.state.files["a.bin"];
-        assert_eq!(file.lifecycle, FileLifecycle::Queued);
+        assert_eq!(file.lifecycle, FileLifecycle::Complete);
         assert_eq!(file.accounting, FileAccounting::CurrentRun);
-        assert_eq!(restart.resume_file_ids, vec!["a.bin".to_string()]);
+        assert_eq!(file.progress.visible_completed_bytes, 100);
+        assert!(restart.resume_file_ids.is_empty());
         assert!(restart.preexisting_complete_file_ids.is_empty());
     }
 
@@ -743,7 +748,7 @@ mod tests {
         );
 
         let file = &restart.state.files["a.bin"];
-        assert_eq!(file.progress, FileProgressState::default());
+        assert_eq!(file.progress.visible_completed_bytes, 100);
     }
 
     #[test]
@@ -763,10 +768,7 @@ mod tests {
             vec!["https://mega.nz/file/test".to_string()],
         );
 
-        assert_eq!(
-            restart.resumable_urls(),
-            vec!["https://mega.nz/file/test".to_string()]
-        );
+        assert!(restart.resumable_urls().is_empty());
     }
 
     #[test]
@@ -774,7 +776,7 @@ mod tests {
         let mut snapshot = sample_snapshot();
         let file = snapshot.find_file_mut("a.bin").unwrap();
         file.lifecycle = FileLifecycle::Complete;
-        file.accounting = FileAccounting::Preexisting;
+        file.accounting = FileAccounting::CurrentRun;
         file.progress = FileProgressState {
             visible_completed_bytes: 100,
             ..FileProgressState::default()
@@ -787,8 +789,8 @@ mod tests {
         );
 
         assert_eq!(restart.state.totals.run_file_total, 1);
-        assert_eq!(restart.state.totals.run_file_completed, 0);
-        assert_eq!(restart.state.totals.run_completed_bytes, 0);
+        assert_eq!(restart.state.totals.run_file_completed, 1);
+        assert_eq!(restart.state.totals.run_completed_bytes, 100);
     }
 
     #[test]

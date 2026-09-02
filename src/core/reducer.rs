@@ -413,50 +413,59 @@ fn reduce_impl(
             recompute_session_status(state);
         }
         CoreEvent::FileQueued { file_id } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id) {
-                let before = FileDerivedState::from(&*file);
-                file.lifecycle = FileLifecycle::Queued;
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
-            }
+            let delta = state
+                .files
+                .get_mut(&file_id)
+                .filter(|file| !matches!(file.lifecycle, FileLifecycle::Complete))
+                .map(|file| {
+                    let before = FileDerivedState::from(&*file);
+                    file.lifecycle = FileLifecycle::Queued;
+                    let after = FileDerivedState::from(&*file);
+                    (before, after)
+                });
             if let Some((before, after)) = delta {
                 apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileStarted { file_id, size } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id) {
-                let before = FileDerivedState::from(&*file);
-                file.size = size;
-                file.lifecycle = FileLifecycle::Downloading;
-                file.progress = FileProgressState::default();
-                file.accounting = FileAccounting::CurrentRun;
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
-            }
+            let delta = state
+                .files
+                .get_mut(&file_id)
+                .filter(|file| !matches!(file.lifecycle, FileLifecycle::Complete))
+                .map(|file| {
+                    let before = FileDerivedState::from(&*file);
+                    file.size = size;
+                    file.lifecycle = FileLifecycle::Downloading;
+                    file.progress = FileProgressState::default();
+                    file.accounting = FileAccounting::CurrentRun;
+                    let after = FileDerivedState::from(&*file);
+                    (before, after)
+                });
             if let Some((before, after)) = delta {
                 apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileResumeStarted { file_id, size } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id) {
-                let before = FileDerivedState::from(&*file);
-                let preserved_verified = file.progress.verified_existing_bytes.min(size);
-                let preserved_visible = file.progress.visible_completed_bytes.min(size);
-                file.size = size;
-                file.lifecycle = FileLifecycle::Downloading;
-                file.progress = FileProgressState {
-                    verified_existing_bytes: preserved_verified,
-                    downloaded_network_bytes: 0,
-                    visible_completed_bytes: preserved_visible,
-                    ..FileProgressState::default()
-                };
-                file.accounting = FileAccounting::CurrentRun;
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
-            }
+            let delta = state
+                .files
+                .get_mut(&file_id)
+                .filter(|file| !matches!(file.lifecycle, FileLifecycle::Complete))
+                .map(|file| {
+                    let before = FileDerivedState::from(&*file);
+                    let preserved_verified = file.progress.verified_existing_bytes.min(size);
+                    let preserved_visible = file.progress.visible_completed_bytes.min(size);
+                    file.size = size;
+                    file.lifecycle = FileLifecycle::Downloading;
+                    file.progress = FileProgressState {
+                        verified_existing_bytes: preserved_verified,
+                        downloaded_network_bytes: 0,
+                        visible_completed_bytes: preserved_visible,
+                        ..FileProgressState::default()
+                    };
+                    file.accounting = FileAccounting::CurrentRun;
+                    let after = FileDerivedState::from(&*file);
+                    (before, after)
+                });
             if let Some((before, after)) = delta {
                 apply_file_change(state, &file_id, before, after);
             }
@@ -649,6 +658,9 @@ fn reduce_impl(
             if let Some(file) = state.files.shift_remove(&file_id) {
                 let before = FileDerivedState::from(&file);
                 let source_url = file.source_url.clone();
+                let path = file.path.clone();
+                effects.push(CoreEffect::DeleteOutputArtifacts { path: path.clone() });
+                effects.push(CoreEffect::DeleteResumeArtifacts { path });
                 remove_totals_contribution(state, before);
                 remove_package_progress(state, before.package_id, before.lifecycle_bucket);
                 if !state.package_has_files(&before.package_id) {
@@ -666,6 +678,9 @@ fn reduce_impl(
                     if file.package_id == package_id {
                         let before = FileDerivedState::from(&file);
                         removed_source_urls.insert(file.source_url.clone());
+                        let path = file.path.clone();
+                        effects.push(CoreEffect::DeleteOutputArtifacts { path: path.clone() });
+                        effects.push(CoreEffect::DeleteResumeArtifacts { path });
                         remove_totals_contribution(state, before);
                     } else {
                         remaining_files.insert(file_id, file);
@@ -2304,7 +2319,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_forgets_file_without_cleanup_effects() {
+    fn delete_removes_file_artifacts() {
         let mut state = sample_state();
         let effects = reduce(
             &mut state,
@@ -2312,14 +2327,18 @@ mod tests {
                 file_id: "file.bin".to_string().into(),
             },
         );
-        assert!(!effects.iter().any(|effect| matches!(
+        assert!(effects.iter().any(|effect| matches!(
             effect,
-            CoreEffect::DeleteOutputArtifacts { .. } | CoreEffect::DeleteResumeArtifacts { .. }
+            CoreEffect::DeleteOutputArtifacts { path } if path == "file.bin"
+        )));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            CoreEffect::DeleteResumeArtifacts { path } if path == "file.bin"
         )));
     }
 
     #[test]
-    fn deleting_completed_file_keeps_artifacts() {
+    fn deleting_completed_file_removes_artifacts() {
         let mut state = sample_state();
         reduce(
             &mut state,
@@ -2335,10 +2354,50 @@ mod tests {
             },
         );
 
-        assert!(!effects.iter().any(|effect| matches!(
+        assert!(effects.iter().any(|effect| matches!(
             effect,
-            CoreEffect::DeleteOutputArtifacts { .. } | CoreEffect::DeleteResumeArtifacts { .. }
+            CoreEffect::DeleteOutputArtifacts { path } if path == "file.bin"
         )));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            CoreEffect::DeleteResumeArtifacts { path } if path == "file.bin"
+        )));
+    }
+
+    #[test]
+    fn stale_download_events_cannot_demote_completed_file() {
+        let mut state = sample_state();
+        reduce(
+            &mut state,
+            CoreEvent::FileCompleted {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+
+        reduce(
+            &mut state,
+            CoreEvent::FileQueued {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+        reduce(
+            &mut state,
+            CoreEvent::FileStarted {
+                file_id: "file.bin".to_string().into(),
+                size: 100,
+            },
+        );
+        reduce(
+            &mut state,
+            CoreEvent::FileResumeStarted {
+                file_id: "file.bin".to_string().into(),
+                size: 100,
+            },
+        );
+
+        let file = &state.files["file.bin"];
+        assert_eq!(file.lifecycle, FileLifecycle::Complete);
+        assert_eq!(file.progress.visible_completed_bytes, 100);
     }
 
     #[test]

@@ -21,9 +21,9 @@ chunks, octo-dl scans the existing `.part` file by MEGA chunk boundaries and
 writes a fresh sidecar for any full chunks it can salvage. `--force` ignores
 resume state and starts fresh.
 
-Explicit delete in the TUI or API removes the queued/downloading/error
-entry and deletes `{output}.part` plus `{output}.part.meta.json`. It does not
-delete completed output files.
+Explicit delete in the TUI or API removes the entry and deletes the output plus
+all resume artifacts. Reset is the only operation that requeues a completed
+file.
 
 `cleanup_on_error = true` removes resume artifacts after recoverable download
 errors. It does not remove them for normal cancellation/pause. Final condensed

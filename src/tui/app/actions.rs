@@ -236,6 +236,14 @@ impl App {
     }
 
     fn register_queued_file(&mut self, file: &QueuedFile) -> bool {
+        if self
+            .core_state
+            .files
+            .get(&file.id)
+            .is_some_and(|existing| matches!(existing.lifecycle, FileLifecycle::Complete))
+        {
+            return false;
+        }
         let package_display_name = file
             .origin
             .package_display_name
@@ -566,6 +574,12 @@ impl App {
 
     pub(crate) fn perform_delete_file_action(&mut self, id: &FileId) {
         let is_core_backed = self.core_state.files.contains_key(id);
+        let overlay_artifact_path = (!is_core_backed && !self.is_session_url(id.as_str()))
+            .then(|| {
+                self.visible_file_context(id)
+                    .map(|context| context.artifact_path)
+            })
+            .flatten();
         self.cancel_file_token(id);
         self.resolve_shutdown_pending_file(id);
         self.file_attempt_ids.remove(id);
@@ -585,6 +599,10 @@ impl App {
         } else {
             self.forget_visible_file(id);
             self.sync_visible_files();
+            if let Some(path) = overlay_artifact_path {
+                super::super::download::schedule_output_artifact_delete(path.clone());
+                super::super::download::schedule_resume_artifact_delete(path);
+            }
         }
         let _ = self
             .mutate_session_and_save(|session| SessionAdapter::remove_file(session, id.as_str()));

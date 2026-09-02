@@ -749,7 +749,7 @@ fn handle_main_input_shift_d_deletes_without_confirmation() {
 }
 
 #[test]
-fn handle_main_input_shift_d_keeps_completed_file_artifact() {
+fn handle_main_input_shift_d_removes_completed_file_artifact() {
     let dir = tempdir().unwrap();
     let final_path = dir.path().join("shift-delete-complete.bin");
     let final_path_string = final_path.to_string_lossy();
@@ -776,9 +776,9 @@ fn handle_main_input_shift_d_keeps_completed_file_artifact() {
     assert_eq!(app.popup, Popup::None);
     assert_eq!(app.pending_confirmation, None);
     assert!(app.files.is_empty());
-    assert!(final_path.exists());
-    assert!(part_path.exists());
-    assert!(sidecar_path.exists());
+    assert!(!final_path.exists());
+    assert!(!part_path.exists());
+    assert!(!sidecar_path.exists());
 }
 
 #[test]
@@ -1189,7 +1189,7 @@ fn handle_main_input_alt_r_on_package_verifies_all_files_by_kind() {
 }
 
 #[test]
-fn handle_main_input_delete_keeps_completed_file_artifact() {
+fn handle_main_input_delete_removes_completed_file_artifact() {
     let dir = tempdir().unwrap();
     let final_path = dir.path().join("complete.bin");
     let final_path_string = final_path.to_string_lossy();
@@ -1219,9 +1219,9 @@ fn handle_main_input_delete_keeps_completed_file_artifact() {
     confirm(&mut app);
 
     assert!(app.files.is_empty());
-    assert!(final_path.exists());
-    assert!(part_path.exists());
-    assert!(sidecar_path.exists());
+    assert!(!final_path.exists());
+    assert!(!part_path.exists());
+    assert!(!sidecar_path.exists());
 }
 
 #[test]

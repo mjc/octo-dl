@@ -584,7 +584,7 @@ fn submitted_url_bootstraps_session_for_shutdown_persistence() {
 }
 
 #[test]
-fn resume_session_missing_completed_file_is_requeued_and_shown_as_queued() {
+fn resume_session_missing_completed_file_stays_complete_and_is_not_requeued() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
     let _cwd = CurrentDirGuard::set(dir.path());
@@ -612,27 +612,16 @@ fn resume_session_missing_completed_file_is_requeued_and_shown_as_queued() {
         .iter()
         .find(|file| file.id == "completed.mkv")
         .expect("completed file should stay visible");
-    assert_eq!(completed.status, FileStatus::Queued);
-    assert_eq!(completed.downloaded, 0);
-    assert_eq!(
-        app.tracked_urls(),
-        ["https://mega.nz/file/completed".to_string()].as_slice()
-    );
+    assert_eq!(completed.status, FileStatus::Complete);
+    assert_eq!(completed.downloaded, 128);
+    assert!(app.tracked_urls().is_empty());
 
     let mut url_rx = app.url_rx.take().expect("url_rx should exist");
-    assert_eq!(
-        url_rx.try_recv().unwrap(),
-        DownloadRequest::ResumeFileIds {
-            source_url: "https://mega.nz/file/completed".to_string(),
-            file_ids: vec!["completed.mkv".to_string().into()],
-            attempt_ids: std::collections::HashMap::new(),
-        }
-    );
     assert!(url_rx.try_recv().is_err());
 }
 
 #[test]
-fn resume_session_missing_completed_file_does_not_report_completed_startup_progress() {
+fn resume_session_missing_completed_file_preserves_preexisting_startup_accounting() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
     let _cwd = CurrentDirGuard::set(dir.path());
@@ -655,8 +644,8 @@ fn resume_session_missing_completed_file_does_not_report_completed_startup_progr
 
     app.resume_latest_session();
 
-    assert_eq!(app.files_completed, 0);
-    assert_eq!(app.total_downloaded, 0);
+    assert_eq!(app.files_completed, 1);
+    assert_eq!(app.total_downloaded, 128);
 }
 
 #[test]
@@ -827,7 +816,7 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
 }
 
 #[test]
-fn ui_delete_file_keeps_completed_artifact_on_disk() {
+fn ui_delete_file_removes_completed_artifacts_from_disk() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("completed.bin");
     let part_path = dir.path().join("completed.bin.part");
@@ -853,13 +842,13 @@ fn ui_delete_file_keeps_completed_artifact_on_disk() {
     ));
 
     assert!(app.files.is_empty());
-    assert!(file_path.exists());
-    assert!(part_path.exists());
-    assert!(sidecar_path.exists());
+    assert!(!file_path.exists());
+    assert!(!part_path.exists());
+    assert!(!sidecar_path.exists());
 }
 
 #[test]
-fn ui_delete_core_backed_completed_file_leaves_filesystem_artifacts() {
+fn ui_delete_core_backed_completed_file_removes_filesystem_artifacts() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("core-backed.bin");
     let part_path = dir.path().join("core-backed.bin.part");
@@ -895,13 +884,13 @@ fn ui_delete_core_backed_completed_file_leaves_filesystem_artifacts() {
 
     app.handle_ui_action(UiAction::DeleteFile(file_id.into()));
 
-    assert!(file_path.exists());
-    assert!(part_path.exists());
-    assert!(sidecar_path.exists());
+    assert!(!file_path.exists());
+    assert!(!part_path.exists());
+    assert!(!sidecar_path.exists());
 }
 
 #[test]
-fn ui_delete_completed_package_leaves_filesystem_artifacts() {
+fn ui_delete_completed_package_removes_filesystem_artifacts() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("pkg-complete.bin");
     let part_path = dir.path().join("pkg-complete.bin.part");
@@ -940,9 +929,9 @@ fn ui_delete_completed_package_leaves_filesystem_artifacts() {
 
     app.handle_ui_action(UiAction::DeletePackage(package_id));
 
-    assert!(file_path.exists());
-    assert!(part_path.exists());
-    assert!(sidecar_path.exists());
+    assert!(!file_path.exists());
+    assert!(!part_path.exists());
+    assert!(!sidecar_path.exists());
     assert!(app.files.is_empty());
 }
 

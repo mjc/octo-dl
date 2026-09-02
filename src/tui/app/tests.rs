@@ -14,7 +14,12 @@ use crate::{
         FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id, push_file,
         session_snapshot,
     },
-    tui::{DashboardUiMode, app::VerificationTarget, event::DownloadEvent, visible::TuiRow},
+    tui::{
+        DashboardUiMode,
+        app::VerificationTarget,
+        event::{DownloadEvent, QueuedFile},
+        visible::TuiRow,
+    },
 };
 
 fn test_app() -> App {
@@ -1299,6 +1304,34 @@ fn file_queued_without_explicit_package_id_reuses_existing_package_for_url() {
 }
 
 #[test]
+fn file_queued_does_not_demote_completed_file() {
+    let mut app = test_app();
+    let source_url = "https://mega.nz/folder/root";
+    app.core_state.url_order.push(source_url.to_string());
+    resolve_package(&mut app, source_url, &[("episode-1.mkv", 128)]);
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: "episode-1.mkv".to_string().into(),
+    });
+
+    app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
+        id: "episode-1.mkv".to_string().into(),
+        size: 128,
+        accounting: crate::core::FileAccounting::CurrentRun,
+        origin: crate::tui::event::FileOrigin {
+            package_id: None,
+            package_display_name: None,
+            source_url: source_url.to_string(),
+            submitted_url: source_url.to_string(),
+        },
+    }));
+
+    assert_eq!(
+        app.core_state.files["episode-1.mkv"].lifecycle,
+        FileLifecycle::Complete
+    );
+}
+
+#[test]
 fn session_adapter_register_queued_file_uses_resolved_source_url_for_package_identity() {
     let mut session = session_snapshot(vec![("bundle.dlc", UrlFixtureStatus::Fetched)]);
 
@@ -2538,7 +2571,7 @@ fn downloading_file_can_reach_full_progress_before_complete_event() {
 }
 
 #[test]
-fn restarting_completed_file_resets_visible_progress_before_new_deltas() {
+fn stale_start_does_not_demote_completed_file() {
     let mut app = test_app();
     let url = "https://mega.nz/file/root";
     app.ensure_core_file(
@@ -2562,9 +2595,9 @@ fn restarting_completed_file_resets_visible_progress_before_new_deltas() {
     let file = app
         .visible_file(&"file-id".into())
         .expect("file should be visible");
-    assert_eq!(file.downloaded, 0);
-    assert_eq!(file.status, FileStatus::Downloading);
-    assert_eq!(app.total_downloaded, 0);
+    assert_eq!(file.downloaded, 100);
+    assert_eq!(file.status, FileStatus::Complete);
+    assert_eq!(app.total_downloaded, 100);
 }
 
 #[test]
