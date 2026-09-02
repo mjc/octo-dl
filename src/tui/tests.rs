@@ -23,6 +23,22 @@ use tokio::sync::{mpsc, watch};
 
 use super::app::{FileStatus, Popup, UiAction};
 
+#[test]
+fn attach_api_key_reads_explicit_service_config_without_creating_state() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        "[credentials]\nemail = \"\"\npassword = \"\"\n\n[api]\napi_key = \"secret\"\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        attach_api_key(Some(&config_path)).unwrap().as_deref(),
+        Some("secret")
+    );
+}
+
 fn resolve_active_test_file(app: &mut App, source_url: &str, file_id: &str, path: String) {
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
