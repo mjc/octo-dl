@@ -80,6 +80,8 @@ fn print_usage() {
     eprintln!("  --host <HOST>       Bind address for API server when enabled");
     eprintln!("  --config <PATH>     Config file override for TUI/headless mode");
     eprintln!("                      (default: ./config.toml when present)");
+    eprintln!("                      Also supplies the API key for --tui-attach");
+    eprintln!("  OCTO_API_KEY[_FILE]  API key override for --tui-attach");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
     eprintln!("Run 'octo --tui --help' or 'octo --help' for mode-specific options.");
@@ -93,6 +95,8 @@ fn print_tui_usage() {
     eprintln!("  --host <HOST>       Bind address for the API server when enabled");
     eprintln!("  --tui-listen ADDR   Publish remote TUI attach stream on loopback ADDR");
     eprintln!("  --config <PATH>     Config file override");
+    eprintln!("                      Also supplies the API key for --tui-attach");
+    eprintln!("  OCTO_API_KEY[_FILE]  API key override for --tui-attach");
     eprintln!("  -h, --help          Show this help");
 }
 
@@ -366,7 +370,9 @@ async fn main() -> octo_dl::Result<()> {
                 eprintln!("Error: {error}");
                 std::process::exit(1);
             });
-            return octo_dl::tui::run_attach(addr)
+            let api_key = octo_dl::tui::attach_api_key(options.config_path.as_deref())
+                .map_err(octo_dl::Error::Io)?;
+            return octo_dl::tui::run_attach(addr, api_key)
                 .await
                 .map_err(octo_dl::Error::Io);
         }

@@ -296,7 +296,7 @@ pub struct ApiConfig {
     pub host: String,
     #[serde(default = "default_api_port")]
     pub port: u16,
-    /// Optional API key for authenticating API requests (e.g., /api/parse).
+    /// Optional API key for authenticating API and remote-TUI requests.
     #[serde(default)]
     pub api_key: Option<String>,
 }

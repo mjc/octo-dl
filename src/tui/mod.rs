@@ -16,13 +16,14 @@ mod visible;
 
 use std::io;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 use self::api::DEFAULT_API_PORT;
 use self::app::App;
 pub use self::dashboard::{DashboardUiMode, DownloadDashboardState};
 use self::event::DownloadEvent;
+use crate::ServiceConfig;
 
 // ---------------------------------------------------------------------------
 // Public entry points
@@ -144,8 +145,37 @@ pub async fn run_api_only(
     Ok(())
 }
 
-pub async fn run_attach(addr: SocketAddr) -> io::Result<()> {
-    remote::run_attached_dashboard(addr).await
+/// Attach an interactive terminal UI to a running service.
+///
+/// # Errors
+///
+/// Returns an error if terminal setup or remote communication fails.
+pub async fn run_attach(addr: SocketAddr, api_key: Option<String>) -> io::Result<()> {
+    remote::run_attached_dashboard(addr, api_key).await
+}
+
+/// Resolve the credentials used by an attached TUI without creating or
+/// modifying the service configuration.
+pub fn attach_api_key(config_path: Option<&Path>) -> io::Result<Option<String>> {
+    if let Some(key) = std::env::var_os("OCTO_API_KEY").and_then(|value| {
+        let value = value.to_string_lossy().trim().to_string();
+        (!value.is_empty()).then_some(value)
+    }) {
+        return Ok(Some(key));
+    }
+
+    if let Some(path) = std::env::var_os("OCTO_API_KEY_FILE") {
+        let key = std::fs::read_to_string(&path)?.trim().to_string();
+        return Ok((!key.is_empty()).then_some(key));
+    }
+
+    let path = config_path.map(PathBuf::from).or_else(|| {
+        let path = PathBuf::from("config.toml");
+        path.exists().then_some(path)
+    });
+    path.map_or(Ok(None), |path| {
+        ServiceConfig::load(&path).map(|config| config.api.api_key)
+    })
 }
 
 pub fn parse_loopback_addr(value: &str) -> Result<SocketAddr, String> {

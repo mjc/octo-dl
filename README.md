@@ -54,8 +54,14 @@ octo --headless --tui-listen 127.0.0.1:9723
 Attach an interactive terminal UI to a running service:
 
 ```sh
-octo --tui --tui-attach 127.0.0.1:9723
+octo --tui --tui-attach 127.0.0.1:9723 --config /var/lib/octo-dl/config.toml
 ```
+
+The attached TUI reads the service API key from the config file. Set
+`OCTO_API_KEY` or `OCTO_API_KEY_FILE` instead when the client cannot read the
+service config. Authenticated attach supports pause, delete, retry, reverify,
+and explicit reset; reset is the only remote action that can make a completed
+download eligible for downloading again.
 
 ## Fake MEGA benchmark harness
 

@@ -14,8 +14,8 @@ use crate::format_bytes;
 use crate::tui::app::Popup;
 use crate::tui::dashboard::{
     DashboardChrome, DashboardFileRow, DashboardFileStatus, DashboardPackageRow, DashboardRow,
-    DownloadDashboardState, aggregate_transfer_label as dashboard_transfer_label, clamp_selection,
-    file_detail as dashboard_file_detail,
+    DashboardUiMode, DownloadDashboardState, aggregate_transfer_label as dashboard_transfer_label,
+    clamp_selection, file_detail as dashboard_file_detail,
 };
 
 pub(super) fn draw_dashboard_file_list(
@@ -470,6 +470,16 @@ pub(super) fn controls_label_from_snapshot(
         }
     } else if state.popup != Popup::None {
         "esc:close"
+    } else if state.ui_mode == DashboardUiMode::Attached {
+        if width >= 80 {
+            "up/down:select  p:pause  d:del  r:retry  alt-r:verify  R:reset  q:quit"
+        } else if width >= 52 {
+            "up/down:select  p:pause  d:del  r:retry  R:reset  q:quit"
+        } else if width >= 32 {
+            "up/down:select  p:pause  d:del  r:retry  q:quit"
+        } else {
+            "p:pause  d:del  r:retry  q:quit"
+        }
     } else if width >= 100 {
         "a:add  up/down:select  enter:open  s:sort  d:del  r:retry  alt-r:verify  R:reset  c:cfg  q:quit"
     } else if width >= 86 {

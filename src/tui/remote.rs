@@ -6,6 +6,8 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use futures_util::StreamExt as _;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{HeaderMap, HeaderValue};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::dashboard::{
@@ -40,16 +42,16 @@ pub fn socket_host(addr: SocketAddr) -> String {
     addr.ip().to_string()
 }
 
-pub async fn run_attached_dashboard(addr: SocketAddr) -> io::Result<()> {
+pub async fn run_attached_dashboard(addr: SocketAddr, api_key: Option<String>) -> io::Result<()> {
     let panic_hook_guard = TerminalPanicHookGuard::install();
     let guard = TerminalGuard::new()?;
-    let result = run_attached_dashboard_loop(addr).await;
+    let result = run_attached_dashboard_loop(addr, api_key).await;
     drop(panic_hook_guard);
     drop(guard);
     result
 }
 
-async fn run_attached_dashboard_loop(addr: SocketAddr) -> io::Result<()> {
+async fn run_attached_dashboard_loop(addr: SocketAddr, api_key: Option<String>) -> io::Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -59,7 +61,7 @@ async fn run_attached_dashboard_loop(addr: SocketAddr) -> io::Result<()> {
         ..AttachedDashboard::default()
     };
     let mut input = terminal_input_channel();
-    let mut dashboard_rx = spawn_dashboard_reader(addr);
+    let (dashboard_tx, mut dashboard_rx) = spawn_dashboard_reader(addr, api_key.clone());
     let shutdown = wait_for_shutdown_signal();
     tokio::pin!(shutdown);
     terminal.draw(|frame| {
@@ -90,7 +92,13 @@ async fn run_attached_dashboard_loop(addr: SocketAddr) -> io::Result<()> {
     loop {
         tokio::select! {
             () = &mut shutdown => app.should_quit = true,
-            Some(event) = input.recv() => handle_attached_input(&mut app, event, addr),
+            Some(event) = input.recv() => handle_attached_input(
+                &mut app,
+                event,
+                addr,
+                api_key.clone(),
+                dashboard_tx.clone(),
+            ),
             Some(message) = dashboard_rx.recv() => handle_dashboard_reader_message(&mut app, message),
         }
 
@@ -130,8 +138,13 @@ async fn run_attached_dashboard_loop(addr: SocketAddr) -> io::Result<()> {
 
 fn spawn_dashboard_reader(
     addr: SocketAddr,
-) -> tokio::sync::mpsc::UnboundedReceiver<DashboardReaderMessage> {
+    api_key: Option<String>,
+) -> (
+    tokio::sync::mpsc::UnboundedSender<DashboardReaderMessage>,
+    tokio::sync::mpsc::UnboundedReceiver<DashboardReaderMessage>,
+) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let reader_tx = tx.clone();
     tokio::spawn(async move {
         let ws_url = format!("ws://{addr}/api/dashboard");
         loop {
@@ -143,7 +156,7 @@ fn spawn_dashboard_reader(
             {
                 break;
             }
-            match dashboard_reader_session(&ws_url, &tx).await {
+            match dashboard_reader_session(&ws_url, api_key.as_deref(), &tx).await {
                 Ok(()) => {}
                 Err(error) => {
                     if tx
@@ -159,14 +172,19 @@ fn spawn_dashboard_reader(
             tokio::time::sleep(DASHBOARD_RECONNECT_DELAY).await;
         }
     });
-    rx
+    (reader_tx, rx)
 }
 
 async fn dashboard_reader_session(
     ws_url: &str,
+    api_key: Option<&str>,
     tx: &tokio::sync::mpsc::UnboundedSender<DashboardReaderMessage>,
 ) -> io::Result<()> {
-    let (mut socket, _) = connect_async(ws_url)
+    let mut request = ws_url
+        .into_client_request()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    request.headers_mut().extend(api_headers(api_key)?);
+    let (mut socket, _) = connect_async(request)
         .await
         .map_err(|error| io::Error::other(error.to_string()))?;
     let _ = tx.send(DashboardReaderMessage::Status("Connected".to_string()));
@@ -177,7 +195,6 @@ async fn dashboard_reader_session(
             continue;
         };
         state.ui_mode = DashboardUiMode::Attached;
-        state.read_only = false;
         tx.send(DashboardReaderMessage::State(state))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "dashboard receiver closed"))?;
     }
@@ -214,13 +231,18 @@ fn handle_dashboard_reader_message(app: &mut AttachedDashboard, message: Dashboa
             if let Some(state) = app.state.as_mut() {
                 state.status = app.status.clone();
                 state.ui_mode = DashboardUiMode::Attached;
-                state.read_only = false;
             }
         }
     }
 }
 
-fn handle_attached_input(app: &mut AttachedDashboard, event: Event, addr: SocketAddr) {
+fn handle_attached_input(
+    app: &mut AttachedDashboard,
+    event: Event,
+    addr: SocketAddr,
+    api_key: Option<String>,
+    status_tx: tokio::sync::mpsc::UnboundedSender<DashboardReaderMessage>,
+) {
     let Event::Key(KeyEvent {
         code, modifiers, ..
     }) = event
@@ -233,11 +255,19 @@ fn handle_attached_input(app: &mut AttachedDashboard, event: Event, addr: Socket
     }
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
-        KeyCode::Char('p') => spawn_remote_action(addr, "pause", None, app),
+        KeyCode::Char('p') => spawn_remote_action(addr, "pause", None, api_key, app, status_tx),
         KeyCode::Char('d') | KeyCode::Delete => {
-            spawn_remote_action(addr, "delete", selected_id(app), app);
+            spawn_remote_action(addr, "delete", selected_id(app), api_key, app, status_tx);
         }
-        KeyCode::Char('r') => spawn_remote_action(addr, "retry", selected_id(app), app),
+        KeyCode::Char('r') if modifiers.contains(KeyModifiers::ALT) => {
+            spawn_remote_action(addr, "reverify", selected_id(app), api_key, app, status_tx);
+        }
+        KeyCode::Char('r') => {
+            spawn_remote_action(addr, "retry", selected_id(app), api_key, app, status_tx);
+        }
+        KeyCode::Char('R') => {
+            spawn_remote_action(addr, "reset", selected_id(app), api_key, app, status_tx);
+        }
         KeyCode::Up | KeyCode::Char('k') => app.select_delta(-1),
         KeyCode::Down | KeyCode::Char('j') => app.select_delta(1),
         KeyCode::PageUp => app.select_delta(-10),
@@ -274,7 +304,9 @@ fn spawn_remote_action(
     addr: SocketAddr,
     action: &'static str,
     id: Option<String>,
+    api_key: Option<String>,
     app: &mut AttachedDashboard,
+    status_tx: tokio::sync::mpsc::UnboundedSender<DashboardReaderMessage>,
 ) {
     if action != "pause" && id.is_none() {
         app.status = "Select a row first".to_string();
@@ -284,15 +316,36 @@ fn spawn_remote_action(
     let url = format!("http://{addr}/api/{action}");
     tokio::spawn(async move {
         let client = reqwest::Client::new();
-        let request = client.post(url);
+        let request = api_key.as_deref().map_or_else(
+            || client.post(&url),
+            |key| client.post(&url).header("x-api-key", key),
+        );
         let result = match id {
             Some(id) => request.json(&serde_json::json!({ "id": id })).send().await,
             None => request.send().await,
         };
-        if let Err(error) = result {
-            log::error!("remote TUI action failed: {error}");
-        }
+        let status = match result {
+            Ok(response) if response.status().is_success() => {
+                format!("{action} accepted")
+            }
+            Ok(response) => format!("{action} failed: HTTP {}", response.status()),
+            Err(error) => {
+                log::error!("remote TUI action failed: {error}");
+                format!("{action} failed: {error}")
+            }
+        };
+        let _ = status_tx.send(DashboardReaderMessage::Status(status));
     });
+}
+
+fn api_headers(api_key: Option<&str>) -> io::Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    if let Some(api_key) = api_key {
+        let value = HeaderValue::from_str(api_key)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+        headers.insert("x-api-key", value);
+    }
+    Ok(headers)
 }
 
 #[cfg(test)]
@@ -306,6 +359,12 @@ mod tests {
         assert!(parse_loopback_addr("[::1]:9723").is_ok());
         assert!(parse_loopback_addr("0.0.0.0:9723").is_err());
         assert!(parse_loopback_addr("192.168.1.10:9723").is_err());
+    }
+
+    #[test]
+    fn api_headers_include_the_attach_api_key() {
+        let headers = api_headers(Some("secret")).expect("valid API key should make a header");
+        assert_eq!(headers.get("x-api-key").unwrap(), "secret");
     }
 
     #[test]

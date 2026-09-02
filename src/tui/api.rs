@@ -2,11 +2,10 @@
 //!
 //! # Security Notice
 //!
-//! This API server has **no authentication** and accepts requests from any origin (CORS: `*`).
-//! It should only be used:
-//! - On `localhost` / `127.0.0.1` for local-only access
-//! - Behind Tailscale or similar VPN for trusted network access
-//! - **Never** exposed directly to the public internet
+//! Requests are authenticated with the configured API key when one is set.
+//! The health and bookmarklet pages remain public; URL submission, dashboard
+//! streaming, and interactive control routes require `X-API-Key` (or a Bearer
+//! token). CORS is otherwise open so the bookmarklet can submit from a browser.
 //!
 //! The server accepts arbitrary HTML content and URL lists from clients. While request bodies
 //! are limited to 10MB, this is not a substitute for authentication. For production deployments,
@@ -170,8 +169,13 @@ async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> 
 /// GET /api/dashboard — websocket stream of application state updates for attached TUI clients.
 async fn api_dashboard_ws(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
+
     match (state.remote_tui_stream, state.shared.as_ref()) {
         (false, _) => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -208,8 +212,13 @@ async fn dashboard_socket(
 /// POST /api/login — submit login credentials to the shared runtime.
 async fn api_login(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     axum::Json(payload): axum::Json<LoginRequest>,
 ) -> impl IntoResponse {
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
+
     send_ui_action(
         &state,
         UiAction::Login {
@@ -221,15 +230,24 @@ async fn api_login(
 }
 
 /// POST /api/pause — toggle pause state.
-async fn api_pause(State(state): State<ApiState>) -> impl IntoResponse {
+async fn api_pause(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
+
     send_ui_action(&state, UiAction::TogglePause)
 }
 
 /// POST /api/delete — delete a file by name.
 async fn api_delete(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     axum::Json(payload): axum::Json<DeleteRequest>,
 ) -> impl IntoResponse {
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
+
     match resolve_package_id(&state, payload.id.as_deref(), payload.name.as_deref()) {
         Ok(Some(id)) => return send_ui_action(&state, UiAction::DeletePackage(id)),
         Ok(None) => {}
@@ -244,8 +262,13 @@ async fn api_delete(
 /// POST /api/retry — retry a failed file.
 async fn api_retry(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     axum::Json(payload): axum::Json<RetryRequest>,
 ) -> impl IntoResponse {
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
+
     match resolve_package_id(&state, payload.id.as_deref(), payload.name.as_deref()) {
         Ok(Some(id)) => return send_ui_action(&state, UiAction::RetryPackage(id)),
         Ok(None) => {}
@@ -257,11 +280,58 @@ async fn api_retry(
     }
 }
 
+/// POST /api/reset — explicitly reset a file or package for a fresh download.
+async fn api_reset(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    axum::Json(payload): axum::Json<RetryRequest>,
+) -> impl IntoResponse {
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
+
+    match resolve_package_id(&state, payload.id.as_deref(), payload.name.as_deref()) {
+        Ok(Some(id)) => return send_ui_action(&state, UiAction::ResetPackage(id)),
+        Ok(None) => {}
+        Err(response) => return *response,
+    }
+    match resolve_file_id(&state, payload.id, payload.name) {
+        Ok(id) => send_ui_action(&state, UiAction::ResetFile(id)),
+        Err(response) => *response,
+    }
+}
+
+/// POST /api/reverify — explicitly verify a file or package without resetting it.
+async fn api_reverify(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    axum::Json(payload): axum::Json<RetryRequest>,
+) -> impl IntoResponse {
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
+
+    match resolve_package_id(&state, payload.id.as_deref(), payload.name.as_deref()) {
+        Ok(Some(id)) => return send_ui_action(&state, UiAction::ReverifyPackage(id)),
+        Ok(None) => {}
+        Err(response) => return *response,
+    }
+    match resolve_file_id(&state, payload.id, payload.name) {
+        Ok(id) => send_ui_action(&state, UiAction::ReverifyFile(id)),
+        Err(response) => *response,
+    }
+}
+
 /// POST /api/config — update download configuration.
 async fn api_config(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     axum::Json(payload): axum::Json<ConfigUpdateRequest>,
 ) -> impl IntoResponse {
+    if let Some(response) = require_api_key(&state, &headers) {
+        return response;
+    }
+
     send_ui_action(
         &state,
         UiAction::UpdateConfig {
@@ -283,8 +353,8 @@ async fn api_config(
 ///
 /// # Security
 ///
-/// This server has no authentication. Only bind to `localhost` or use behind
-/// a trusted network (e.g., Tailscale). Never expose directly to the internet.
+/// When `api_key` is set, every state-changing route and the dashboard stream
+/// require it. Only health and bookmarklet discovery are public.
 ///
 /// # Errors
 ///
@@ -325,6 +395,8 @@ pub async fn run_api_server(
             .route("/api/pause", post(api_pause))
             .route("/api/delete", post(api_delete))
             .route("/api/retry", post(api_retry))
+            .route("/api/reset", post(api_reset))
+            .route("/api/reverify", post(api_reverify))
             .route("/api/config", post(api_config));
     }
 

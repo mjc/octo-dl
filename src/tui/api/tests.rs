@@ -418,6 +418,7 @@ async fn retry_api_dispatches_package_action_for_package_id() {
 
     let _ = api_retry(
         State(state),
+        HeaderMap::new(),
         axum::Json(RetryRequest {
             id: Some(package_id_str.clone()),
             name: None,
@@ -430,6 +431,48 @@ async fn retry_api_dispatches_package_action_for_package_id() {
         UiAction::RetryPackage(id) => assert_eq!(id.to_string(), package_id_str),
         other => panic!("unexpected UI action: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn control_api_rejects_missing_api_key_before_dispatching() {
+    let (mut state, mut rx) =
+        state_with_snapshot_options(r#"{"files":[]}"#, None, Some("secret".to_string()));
+    state.remote_tui_stream = true;
+
+    let response = api_pause(State(state), HeaderMap::new())
+        .await
+        .into_response();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn reset_api_dispatches_file_action_with_api_key() {
+    let (state, mut rx) = state_with_snapshot_options(
+        r#"{"files":[{"id":"file-id","name":"file.mkv"}]}"#,
+        None,
+        Some("secret".to_string()),
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert("x-api-key", HeaderValue::from_static("secret"));
+
+    let response = api_reset(
+        State(state),
+        headers,
+        axum::Json(RetryRequest {
+            id: Some("file-id".to_string()),
+            name: None,
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(matches!(
+        rx.try_recv().expect("reset action should be sent"),
+        UiAction::ResetFile(id) if id == "file-id"
+    ));
 }
 
 #[tokio::test]
