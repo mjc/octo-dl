@@ -24,6 +24,22 @@ mod transfer;
 mod transfer_prepare;
 mod verify;
 
+/// Returns unused glibc heap pages to the OS after a large transfer.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) fn trim_allocator() {
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> std::ffi::c_int;
+    }
+
+    // `malloc_trim` is thread-safe and only releases unused allocator pages.
+    unsafe {
+        let _ = malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+pub(crate) const fn trim_allocator() {}
+
 pub use self::callbacks::{DownloadProgress, NoProgress};
 pub use self::collect::{CollectedFiles, DownloadItem, OwnedDownloadItem};
 pub use self::downloader::{

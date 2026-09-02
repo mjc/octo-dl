@@ -104,21 +104,24 @@ impl<F: FileSystem> Downloader<F> {
                 .await
                 .map_err(crate::error::Error::Mega)
         };
-        self.finish_download_result(
-            DownloadFinishContext {
-                node,
-                path,
-                part_path: &pp,
-                sidecar_path: &sp,
-                reused_bytes: prepared.trusted_bytes,
-                stats: &prepared.callback_state.progress.stats,
-                chunk_verified: &prepared.callback_state.chunk_verified,
-                progress,
-                name: path,
-            },
-            download_result,
-        )
-        .await
+        let result = self
+            .finish_download_result(
+                DownloadFinishContext {
+                    node,
+                    path,
+                    part_path: &pp,
+                    sidecar_path: &sp,
+                    reused_bytes: prepared.trusted_bytes,
+                    stats: &prepared.callback_state.progress.stats,
+                    chunk_verified: &prepared.callback_state.chunk_verified,
+                    progress,
+                    name: path,
+                },
+                download_result,
+            )
+            .await;
+        super::trim_allocator();
+        result
     }
 }
 
