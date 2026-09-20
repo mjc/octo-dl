@@ -12,8 +12,8 @@ use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 
 use self::dashboard::{
     compact_label, controls_label_from_snapshot, dashboard_aggregate_progress_label,
-    dashboard_status_line, draw_dashboard_file_list, focused_url_input_view, package_status_style,
-    text_width, truncate_end,
+    dashboard_status_line, draw_dashboard_file_list, fit_status_segments, focused_url_input_view,
+    package_status_style, status_spans, text_width, truncate_end,
 };
 use super::app::{App, FileEntry, FileStatus, Popup};
 use super::dashboard::{DashboardChrome, DashboardUiMode, DownloadDashboardState, clamp_selection};
@@ -369,6 +369,9 @@ fn render_file_row_app(
     content_width: usize,
     selected: bool,
 ) {
+    if content_width < 5 {
+        return;
+    }
     let Some(file) = app
         .visible_file_positions
         .get(file_id)
@@ -397,7 +400,10 @@ fn render_file_row_app(
     };
     let detail = FileDetail::new(app, file, &status);
     let prefix_width = 5;
-    let detail_width = detail.width().min(content_width / 2);
+    let detail_width = detail
+        .width()
+        .min(content_width / 2)
+        .min(content_width.saturating_sub(prefix_width));
     let owned_display_name;
     let display_name = if let Some(prefix_label) = prefix_label {
         owned_display_name = prefixed_file_label(&prefix_label, &file.name);
@@ -453,6 +459,9 @@ fn render_package_row_app(
     content_width: usize,
     selected: bool,
 ) {
+    if content_width < 5 {
+        return;
+    }
     let Some(package) = app.core_state.packages.get(&package_id) else {
         return;
     };
@@ -479,7 +488,9 @@ fn render_package_row_app(
         speed_label: stats.activity_label(package_status),
     };
     let prefix_width = 5;
-    let detail_width = detail.width(content_width / 2);
+    let detail_width = detail
+        .width(content_width / 2)
+        .min(content_width.saturating_sub(prefix_width));
     let name = PackageName::new(&package.display_name, stats.folder_label());
     let slots = RowSlots::new(content_width, prefix_width, detail_width, name.width());
     let mut row_style = Style::default().fg(color);
@@ -517,6 +528,7 @@ impl RowSlots {
             .saturating_sub(detail_width)
             .saturating_sub(1);
         let name_width = natural_name_width.min(name_limit);
+        let detail_width = detail_width.min(content_width.saturating_sub(prefix_width));
         let filler_width = content_width
             .saturating_sub(prefix_width)
             .saturating_sub(name_width)
@@ -647,13 +659,14 @@ fn render_truncated_text(
 
     let mut written = 0_usize;
     for ch in value.chars() {
-        if written >= prefix_width {
-            break;
-        }
         let mut buf = [0_u8; 4];
         let text = ch.encode_utf8(&mut buf);
+        let character_width = text_width(text);
+        if written.saturating_add(character_width) > prefix_width {
+            break;
+        }
         render_text(frame, x, y, text, style);
-        written += text_width(text);
+        written += character_width;
     }
     render_text(frame, x, y, "\u{2026}", style);
 }
@@ -1208,7 +1221,7 @@ fn aggregate_progress_label_app(app: &App, pct: u16, width: u16) -> String {
         "{pct}%  {}/{} files  {bytes}  {transfer}",
         app.files_completed, app.files_total
     );
-    if full.chars().count() <= usize::from(width.saturating_sub(2)) {
+    if text_width(&full) <= usize::from(width.saturating_sub(2)) {
         return full;
     }
     let mut compact = String::with_capacity(20 + transfer.len());
@@ -1217,7 +1230,7 @@ fn aggregate_progress_label_app(app: &App, pct: u16, width: u16) -> String {
         "{pct}%  {}/{}  {transfer}",
         app.files_completed, app.files_total
     );
-    if compact.chars().count() <= usize::from(width.saturating_sub(2)) {
+    if text_width(&compact) <= usize::from(width.saturating_sub(2)) {
         return compact;
     }
     let mut shortest = String::with_capacity(6 + transfer.len());
@@ -1286,57 +1299,32 @@ fn dashboard_status_line_app(app: &App, width: u16, selected: Option<usize>) -> 
     let width = usize::from(width);
 
     if width <= 16 && error_count > 0 {
-        return vec![Span::styled(
-            failed_count_label_app(error_count),
-            Style::default().fg(Color::Red),
-        )];
+        let failure = failed_count_label_app(error_count);
+        return status_spans(fit_status_segments(None, None, Some(&failure), width));
     }
     if width <= 32 && downloading > 0 {
         let activity = compact_activity_label_app(downloading, queued);
         let failure = (error_count > 0).then(|| failed_count_label_app(error_count));
-        if let Some(failure) = failure {
-            return vec![
-                Span::styled(activity, Style::default().fg(Color::Cyan)),
-                Span::styled(" | ", Style::default().fg(Color::DarkGray)),
-                Span::styled(failure, Style::default().fg(Color::Red)),
-            ];
-        }
-        return vec![Span::styled(activity, Style::default().fg(Color::Cyan))];
+        return status_spans(fit_status_segments(
+            None,
+            Some(&activity),
+            failure.as_deref(),
+            width,
+        ));
     }
 
-    let mut parts = Vec::new();
-    if app.authenticated {
-        parts.push(Span::styled(
-            "Logged in \u{2713}",
-            Style::default().fg(Color::Green),
-        ));
-    } else if app.login.logging_in {
-        parts.push(Span::styled(
-            "Logging in...",
-            Style::default().fg(Color::Yellow),
-        ));
-    }
     let status = effective_status_app(app);
-    if !status.is_empty() {
-        if !parts.is_empty() {
-            parts.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-        }
-        parts.push(Span::styled(
-            truncate_end(&status, width.saturating_sub(12)),
-            Style::default().fg(Color::Cyan),
-        ));
-    }
-    if error_count > 0 {
-        if !parts.is_empty() {
-            parts.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-        }
-        let error_text = selected_error.unwrap_or_else(|| failed_count_label_app(error_count));
-        parts.push(Span::styled(
-            truncate_end(&error_text, width.saturating_sub(12)),
-            Style::default().fg(Color::Red),
-        ));
-    }
-    parts
+    let authenticated = if app.authenticated {
+        Some("Logged in \u{2713}")
+    } else if app.login.logging_in {
+        Some("Logging in...")
+    } else {
+        None
+    };
+    let error_text = (error_count > 0)
+        .then(|| selected_error.unwrap_or_else(|| failed_count_label_app(error_count)));
+    let segments = fit_status_segments(authenticated, Some(&status), error_text.as_deref(), width);
+    status_spans(segments)
 }
 
 fn selected_error_message_app(app: &App, index: usize) -> Option<String> {
@@ -1680,6 +1668,116 @@ mod tests {
     }
 
     #[test]
+    fn truncated_text_never_overflows_when_the_next_character_is_wide() {
+        let rendered = render_single_line(2, |frame, x| {
+            render_truncated_text(frame, x, 0, "表x", 2, Style::default());
+        });
+
+        assert_eq!(rendered, "… ");
+    }
+
+    #[test]
+    fn compact_local_status_fits_width_and_keeps_failure_visible() {
+        let mut app = test_app();
+        for index in 0..10 {
+            app.files.push(FileEntry {
+                id: crate::core::FileId::from(format!("downloading-{index}")),
+                name: format!("downloading-{index}"),
+                size: 1,
+                downloaded: 0,
+                status: FileStatus::Downloading,
+            });
+            app.files.push(FileEntry {
+                id: crate::core::FileId::from(format!("queued-{index}")),
+                name: format!("queued-{index}"),
+                size: 1,
+                downloaded: 0,
+                status: FileStatus::Queued,
+            });
+            app.files.push(FileEntry {
+                id: crate::core::FileId::from(format!("failed-{index}")),
+                name: format!("failed-{index}"),
+                size: 1,
+                downloaded: 0,
+                status: FileStatus::Error("failure".to_string()),
+            });
+        }
+
+        for width in [16, 20, 28, 32] {
+            let spans = dashboard_status_line_app(&app, width, None);
+            let rendered = spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            let rendered_width = spans
+                .iter()
+                .map(|span| text_width(span.content.as_ref()))
+                .sum::<usize>();
+
+            assert!(
+                rendered_width <= usize::from(width),
+                "rendered status: {rendered:?}"
+            );
+            assert!(rendered.contains("failed"), "rendered status: {rendered:?}");
+        }
+    }
+
+    #[test]
+    fn narrow_local_rows_preserve_the_right_border() {
+        let mut app = test_app();
+        let file_id = crate::core::FileId::from("file");
+        app.files.push(FileEntry {
+            id: file_id.clone(),
+            name: "file".to_string(),
+            size: 1,
+            downloaded: 0,
+            status: FileStatus::Queued,
+        });
+        app.visible_file_positions.insert(file_id.clone(), 0);
+        for content_width in 5..=8 {
+            let backend = TestBackend::new((content_width + 2) as u16, 3);
+            let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    frame.render_widget(Block::default().borders(Borders::ALL), area);
+                    render_file_row_app(frame, &app, true, &file_id, 1, 1, content_width, false);
+                })
+                .expect("row should draw");
+
+            assert_eq!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell(((content_width + 1) as u16, 1))
+                    .unwrap()
+                    .symbol(),
+                "│",
+                "content width {content_width} overwrote the right border"
+            );
+        }
+    }
+
+    #[test]
+    fn password_masking_uses_characters_not_utf8_bytes() {
+        let mut app = test_app();
+        app.popup = Popup::Login;
+        app.login.set_credentials(
+            "user@example.com".to_string(),
+            "密码".to_string(),
+            String::new(),
+        );
+
+        let rendered = render_text_with_size(&mut app, 80, 20);
+        let stars = rendered
+            .chars()
+            .filter(|character| *character == '*')
+            .count();
+
+        assert_eq!(stars, 2);
+    }
+
+    #[test]
     fn file_detail_renders_active_verify_speed_and_complete_states() {
         let active = FileDetail::Active {
             downloaded: 40,
@@ -1820,7 +1918,7 @@ mod tests {
     fn row_slots_saturate_when_content_is_too_narrow() {
         let slots = RowSlots::new(8, 5, 12, 80);
 
-        assert_eq!(slots.detail_width, 12);
+        assert_eq!(slots.detail_width, 3);
         assert_eq!(slots.name_width, 0);
         assert_eq!(slots.filler_width, 0);
     }

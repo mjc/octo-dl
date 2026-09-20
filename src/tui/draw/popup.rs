@@ -43,7 +43,7 @@ pub(super) fn draw_login_popup(frame: &mut ratatui::Frame, app: &App) {
         };
 
         let display_value = if *masked && !value.is_empty() {
-            "*".repeat(value.len())
+            mask_password(value)
         } else {
             (*value).to_string()
         };
@@ -72,6 +72,10 @@ pub(super) fn draw_login_popup(frame: &mut ratatui::Frame, app: &App) {
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(help, chunks[3]);
     }
+}
+
+fn mask_password(value: &str) -> String {
+    value.chars().map(|_| '*').collect()
 }
 
 pub(super) fn draw_config_popup(frame: &mut ratatui::Frame, app: &App) {

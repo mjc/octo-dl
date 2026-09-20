@@ -201,11 +201,13 @@ pub(crate) fn build_file_sort_key(
     }
 }
 
+#[cfg(test)]
 enum FileSortProjection<'a> {
     Borrowed(&'a CachedFileSortKey),
     Owned(CachedFileSortKey),
 }
 
+#[cfg(test)]
 impl FileSortProjection<'_> {
     fn key(&self) -> &CachedFileSortKey {
         match self {
@@ -215,6 +217,7 @@ impl FileSortProjection<'_> {
     }
 }
 
+#[cfg(test)]
 fn sorted_file_indices_with_keys(
     files: &[FileEntry],
     file_ui: &FileUiMap,
@@ -270,63 +273,74 @@ fn sorted_file_indices_with_keys(
     indices
 }
 
-fn sorted_overlay_file_ids_with_keys(
-    file_ui: &FileUiMap,
-    overlay_files: &IndexMap<FileId, TransientRow>,
-) -> Vec<FileId> {
-    let overlay_file_ids = overlay_files.keys().cloned().collect::<Vec<_>>();
-    let group_labels = overlay_file_ids
-        .iter()
-        .map(|id| {
-            overlay_files
-                .get(id)
-                .and_then(TransientRow::source_url)
-                .unwrap_or(id.as_str())
-        })
-        .collect::<Vec<_>>();
-    let sort_projections = overlay_file_ids
-        .iter()
-        .map(|id| {
-            file_ui
-                .get(id)
-                .and_then(|state| state.sort_key.as_ref())
-                .map_or_else(
-                    || {
-                        let file = overlay_files
-                            .get(id)
-                            .expect("overlay id should have matching row");
-                        FileSortProjection::Owned(build_file_sort_key(
-                            &file.file().name,
-                            &file.file().status,
-                            usize::MAX,
-                            file.source_url().unwrap_or(id.as_str()),
-                        ))
-                    },
-                    FileSortProjection::Borrowed,
-                )
-        })
-        .collect::<Vec<_>>();
-    let mut indices: Vec<_> = (0..overlay_file_ids.len()).collect();
-    indices.sort_unstable_by(|&left, &right| {
-        group_labels[left]
-            .cmp(group_labels[right])
-            .then_with(|| {
-                sort_projections[left]
-                    .key()
-                    .status_rank
-                    .cmp(&sort_projections[right].key().status_rank)
-            })
+fn file_percent(file: &FileEntry) -> u64 {
+    if file.size == 0 {
+        0
+    } else {
+        file.downloaded
+            .min(file.size)
+            .saturating_mul(100)
+            .saturating_div(file.size)
+    }
+}
+
+fn compare_file_entries(
+    left: &FileEntry,
+    right: &FileEntry,
+    left_queue: usize,
+    right_queue: usize,
+    sort: &SortState,
+) -> Ordering {
+    let ordering = match sort.key {
+        SortKey::Queue => left_queue.cmp(&right_queue),
+        SortKey::Status => file_status_rank(&left.status).cmp(&file_status_rank(&right.status)),
+        SortKey::Name => cmp_natural_sort_keys(
+            &NaturalSortKey::new(&left.name),
+            &NaturalSortKey::new(&right.name),
+        )
+        .then_with(|| left.id.cmp(&right.id)),
+        SortKey::Percent => file_percent(left)
+            .cmp(&file_percent(right))
             .then_with(|| {
                 cmp_natural_sort_keys(
-                    &sort_projections[left].key().natural_name,
-                    &sort_projections[right].key().natural_name,
+                    &NaturalSortKey::new(&left.name),
+                    &NaturalSortKey::new(&right.name),
                 )
             })
-            .then_with(|| overlay_file_ids[left].cmp(&overlay_file_ids[right]))
+            .then_with(|| left.id.cmp(&right.id)),
+    };
+    match sort.direction {
+        SortDirection::Asc => ordering,
+        SortDirection::Desc => ordering.reverse(),
+    }
+}
+
+fn sorted_file_indices_for_sort(files: &[FileEntry], sort: &SortState) -> Vec<usize> {
+    let mut indices = (0..files.len()).collect::<Vec<_>>();
+    indices.sort_by(|&left, &right| {
+        compare_file_entries(&files[left], &files[right], left, right, sort)
+    });
+    indices
+}
+
+fn sorted_overlay_file_ids_for_sort(
+    overlay_files: &IndexMap<FileId, TransientRow>,
+    sort: &SortState,
+) -> Vec<FileId> {
+    let entries = overlay_files.iter().collect::<Vec<_>>();
+    let mut indices = (0..entries.len()).collect::<Vec<_>>();
+    indices.sort_by(|&left, &right| {
+        compare_file_entries(
+            entries[left].1.file(),
+            entries[right].1.file(),
+            left,
+            right,
+            sort,
+        )
     });
     indices
         .into_iter()
-        .map(|index| overlay_file_ids[index].clone())
+        .map(|index| entries[index].0.clone())
         .collect()
 }
 
@@ -446,7 +460,7 @@ pub(super) fn visible_rows_for(
     VISIBLE_ROWS_FOR_CALLS.with(|count| count.set(count.get().saturating_add(1)));
     let package_projections = package_projections(files, file_ui, core_state);
     if core_state.packages.is_empty() {
-        return sorted_file_indices_with_keys(files, file_ui, overlay_files)
+        return sorted_file_indices_for_sort(files, sort)
             .into_iter()
             .map(|index| TuiRow::File {
                 package_id: None,
@@ -510,16 +524,22 @@ pub(super) fn visible_rows_for(
         if package_is_auto_expanded_for(expanded_packages, core_state, &package_id)
             && package_has_visible_content(&package_projections, &package_id)
         {
-            let mut package_files = package_projections
-                .get(&package_id)
-                .map(|package| package.files.clone())
-                .unwrap_or_default();
+            let Some(package) = package_projections.get(&package_id) else {
+                continue;
+            };
+            let mut package_files = package.files.clone();
             package_files.sort_by(|left, right| {
-                let ordering = file_status_rank(&left.status).cmp(&file_status_rank(&right.status));
-                match sort.direction {
-                    SortDirection::Asc => ordering,
-                    SortDirection::Desc => ordering.reverse(),
-                }
+                let left_queue = package
+                    .files
+                    .iter()
+                    .position(|file| file.id == left.id)
+                    .unwrap_or(usize::MAX);
+                let right_queue = package
+                    .files
+                    .iter()
+                    .position(|file| file.id == right.id)
+                    .unwrap_or(usize::MAX);
+                compare_file_entries(left, right, left_queue, right_queue, sort)
             });
             rows.extend(package_files.into_iter().map(|file| TuiRow::File {
                 package_id: Some(package_id),
@@ -529,7 +549,7 @@ pub(super) fn visible_rows_for(
     }
 
     rows.extend(
-        sorted_overlay_file_ids_with_keys(file_ui, overlay_files)
+        sorted_overlay_file_ids_for_sort(overlay_files, sort)
             .into_iter()
             .filter_map(|file_id| {
                 let overlay = overlay_files.get(&file_id)?;
@@ -578,6 +598,7 @@ fn compare_digit_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indexmap::IndexMap;
 
     #[test]
     fn natural_cmp_orders_digit_runs_without_lexical_surprises() {
@@ -640,5 +661,109 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ordered, vec!["file-2.mkv", "file-02.mkv", "file-10.mkv"]);
+    }
+
+    fn file(id: &str, name: &str, size: u64, downloaded: u64, status: FileStatus) -> FileEntry {
+        FileEntry {
+            id: id.into(),
+            name: name.to_string(),
+            size,
+            downloaded,
+            status,
+        }
+    }
+
+    fn file_ids(rows: &[TuiRow]) -> Vec<&str> {
+        rows.iter()
+            .filter_map(|row| match row {
+                TuiRow::File { file_id, .. } => Some(file_id.as_str()),
+                TuiRow::Package(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ungrouped_files_honor_name_and_direction_sorting() {
+        let files = vec![
+            file("z", "z-complete", 100, 100, FileStatus::Complete),
+            file("a", "a-queued", 100, 0, FileStatus::Queued),
+        ];
+        let core = DownloadState::default();
+        let file_ui = FileUiMap::default();
+        let overlays = IndexMap::new();
+
+        let ascending = visible_rows_for(
+            &files,
+            &file_ui,
+            &core,
+            &overlays,
+            &ExpandedPackages::default(),
+            &SortState {
+                key: SortKey::Name,
+                direction: SortDirection::Asc,
+                active_field: 0,
+            },
+        );
+        let descending = visible_rows_for(
+            &files,
+            &file_ui,
+            &core,
+            &overlays,
+            &ExpandedPackages::default(),
+            &SortState {
+                key: SortKey::Name,
+                direction: SortDirection::Desc,
+                active_field: 0,
+            },
+        );
+
+        assert_eq!(file_ids(&ascending), vec!["a", "z"]);
+        assert_eq!(file_ids(&descending), vec!["z", "a"]);
+    }
+
+    #[test]
+    fn expanded_children_honor_name_sorting_instead_of_fixed_status_order() {
+        let package_id = crate::test_support::package_id("pkg", "https://example.test/package");
+        let mut core = DownloadState::default();
+        let package = crate::core::PackageState {
+            id: package_id,
+            key: crate::core::PackageKey::new("https://example.test/package".to_string()),
+            display_name: "Package".to_string(),
+            progress: Default::default(),
+            error: None,
+        };
+        core.packages.insert(package_id, package);
+        let files = vec![
+            file("complete", "a-complete", 100, 100, FileStatus::Complete),
+            file("queued", "z-queued", 100, 0, FileStatus::Queued),
+        ];
+        let file_ui = files
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id.clone(),
+                    crate::tui::app::FileUiState {
+                        package_id: Some(package_id),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let mut expanded = ExpandedPackages::default();
+        expanded.insert(package_id);
+        let rows = visible_rows_for(
+            &files,
+            &file_ui,
+            &core,
+            &IndexMap::new(),
+            &expanded,
+            &SortState {
+                key: SortKey::Name,
+                direction: SortDirection::Asc,
+                active_field: 0,
+            },
+        );
+
+        assert_eq!(file_ids(&rows), vec!["complete", "queued"]);
     }
 }

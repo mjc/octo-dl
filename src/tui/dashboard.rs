@@ -1972,7 +1972,7 @@ mod tests {
 
     #[test]
     fn borrowed_dashboard_postcard_computes_package_stats_once_per_package() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         resolve_test_package(
             &mut app,
@@ -1994,7 +1994,7 @@ mod tests {
 
     #[test]
     fn borrowed_dashboard_postcard_does_not_embed_core_package_uuid_text() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         resolve_test_package(
             &mut app,
@@ -2022,7 +2022,7 @@ mod tests {
 
     #[test]
     fn borrowed_dashboard_postcard_preserves_package_file_id_order() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         let package_id = package_id("pkg", "https://mega.nz/folder/pkg");
         resolve_test_package(
@@ -2058,7 +2058,7 @@ mod tests {
 
     #[test]
     fn borrowed_dashboard_postcard_preserves_text_and_empty_package_ids() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         app.upsert_overlay_file(
             crate::tui::app::FileEntry {
@@ -2130,7 +2130,7 @@ mod tests {
 
     #[test]
     fn borrowed_dashboard_json_matches_owned_core_package_projection() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         app.status = "busy".to_string();
         app.paused = true;
@@ -2159,7 +2159,7 @@ mod tests {
 
     #[test]
     fn borrowed_dashboard_json_matches_owned_legacy_overlay_error_projection() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         app.show_overlay_error(&"overlay.bin".into(), "folder/overlay.bin", "boom");
         app.status = "failed".to_string();
@@ -2170,7 +2170,7 @@ mod tests {
 
     #[test]
     fn borrowed_dashboard_json_matches_owned_verification_projection() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         resolve_test_package(
             &mut app,
@@ -2189,7 +2189,7 @@ mod tests {
 
     #[test]
     fn borrowed_dashboard_json_matches_owned_expanded_row_projection() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         let package_id = package_id("pkg", "https://mega.nz/folder/pkg");
         resolve_test_package(
@@ -2206,7 +2206,7 @@ mod tests {
 
     #[test]
     fn borrowed_dashboard_json_matches_owned_without_visible_row_cache() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         app.files.push(super::super::app::FileEntry {
             id: "loose.bin".into(),
@@ -2222,7 +2222,7 @@ mod tests {
 
     #[test]
     fn dashboard_projection_uses_core_package_totals() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
@@ -2259,7 +2259,7 @@ mod tests {
 
     #[test]
     fn dashboard_projection_allows_full_progress_before_complete_status() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
@@ -2299,7 +2299,7 @@ mod tests {
 
     #[test]
     fn dashboard_projection_uses_inflight_verification_for_verify_status() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         app.files.push(super::super::app::FileEntry {
             id: "file.bin".to_string().into(),
@@ -2331,7 +2331,7 @@ mod tests {
 
     #[test]
     fn dashboard_package_ignores_stale_inflight_without_target() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         app.apply_core_event(CoreEvent::PackageResolved {
             package: ResolvedPackage {
@@ -2359,7 +2359,7 @@ mod tests {
 
     #[test]
     fn dashboard_projection_hides_empty_failed_packages() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         let package_id = package_id("failed", "https://mega.nz/folder/failed");
         app.core_state.packages.insert(
@@ -2383,7 +2383,7 @@ mod tests {
 
     #[test]
     fn dashboard_snapshot_serializes_error_file_status() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(64);
         let mut app = App::new(9723, tx, true);
         app.files.push(super::super::app::FileEntry {
             id: "file.bin".to_string().into(),

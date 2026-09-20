@@ -75,6 +75,11 @@ pub(super) fn draw_dashboard_file_list(
                     render_dashboard_package_row(
                         frame,
                         package,
+                        package.file_ids.iter().any(|file_id| {
+                            files_by_id.get(file_id).is_some_and(|file| {
+                                matches!(file.status, DashboardFileStatus::Verifying)
+                            })
+                        }),
                         inner.x,
                         y,
                         content_width,
@@ -111,6 +116,9 @@ fn render_dashboard_file_row(
     content_width: usize,
     selected: bool,
 ) {
+    if content_width < 5 {
+        return;
+    }
     let color = match &file.status {
         DashboardFileStatus::Downloading => Color::Yellow,
         DashboardFileStatus::Verifying => Color::Blue,
@@ -131,7 +139,9 @@ fn render_dashboard_file_row(
     };
     let prefix_width = 5;
     let detail = dashboard_file_detail(file);
-    let detail_width = text_width(&detail).min(content_width / 2);
+    let detail_width = text_width(&detail)
+        .min(content_width / 2)
+        .min(content_width.saturating_sub(prefix_width));
     let detail = truncate_end(&detail, detail_width);
     let display_name = if include_package {
         file.package_label.as_deref().map_or_else(
@@ -172,25 +182,33 @@ fn render_dashboard_file_row(
 fn render_dashboard_package_row(
     frame: &mut Frame,
     package: &DashboardPackageRow,
+    verifying: bool,
     x: u16,
     y: u16,
     content_width: usize,
     selected: bool,
 ) {
+    if content_width < 5 {
+        return;
+    }
     let (icon, color) = package_status_style(package.status, package.percent);
     let marker = if package.present_files > 1 {
         if package.expanded { "-" } else { "+" }
     } else {
         " "
     };
-    let speed_label = if matches!(package.status, PackageStatus::Downloading) {
+    let speed_label = if verifying {
+        "verify"
+    } else if matches!(package.status, PackageStatus::Downloading) {
         "active"
     } else {
         ""
     };
     let detail = dashboard_package_detail(package, speed_label, content_width);
     let prefix_width = 5;
-    let detail_width = text_width(&detail).min(content_width / 2);
+    let detail_width = text_width(&detail)
+        .min(content_width / 2)
+        .min(content_width.saturating_sub(prefix_width));
     let detail = truncate_end(&detail, detail_width);
     let detail_width = text_width(&detail);
     let name = truncate_end(
@@ -282,6 +300,92 @@ fn dashboard_package_detail(
     truncate_end(&compact, content_width / 2)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StatusSegmentKind {
+    Authenticated,
+    Status,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StatusSegment {
+    pub(super) kind: StatusSegmentKind,
+    pub(super) text: String,
+}
+
+pub(super) fn fit_status_segments(
+    authenticated: Option<&str>,
+    status: Option<&str>,
+    error: Option<&str>,
+    width: usize,
+) -> Vec<StatusSegment> {
+    let mut segments = Vec::new();
+    if let Some(text) = authenticated.filter(|text| !text.is_empty()) {
+        segments.push((StatusSegmentKind::Authenticated, text));
+    }
+    if let Some(text) = status.filter(|text| !text.is_empty()) {
+        segments.push((StatusSegmentKind::Status, text));
+    }
+    if let Some(text) = error.filter(|text| !text.is_empty()) {
+        segments.push((StatusSegmentKind::Error, text));
+    }
+    if segments.is_empty() || width == 0 {
+        return Vec::new();
+    }
+
+    let separator_width = 3_usize.saturating_mul(segments.len().saturating_sub(1));
+    let mut remaining = width.saturating_sub(separator_width);
+    let mut budgets = vec![0; segments.len()];
+    let error_index = segments
+        .iter()
+        .position(|(kind, _)| matches!(kind, StatusSegmentKind::Error));
+    let final_index = error_index.unwrap_or(segments.len());
+
+    if let Some(index) = error_index {
+        budgets[index] = text_width(segments[index].1).min(remaining);
+        remaining = remaining.saturating_sub(budgets[index]);
+    }
+
+    for index in 0..final_index {
+        let slots = final_index - index;
+        let budget = text_width(segments[index].1).min(remaining / slots.max(1));
+        budgets[index] = budget;
+        remaining = remaining.saturating_sub(budget);
+    }
+    if error_index.is_none() && final_index > 0 {
+        budgets[final_index - 1] = budgets[final_index - 1].saturating_add(remaining);
+    }
+
+    segments
+        .into_iter()
+        .zip(budgets)
+        .filter_map(|((kind, text), budget)| {
+            let text = truncate_end(text, budget);
+            (!text.is_empty()).then_some(StatusSegment { kind, text })
+        })
+        .collect()
+}
+
+pub(super) fn status_spans(segments: Vec<StatusSegment>) -> Vec<Span<'static>> {
+    segments
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, segment)| {
+            let separator =
+                (index > 0).then(|| Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+            let color = match segment.kind {
+                StatusSegmentKind::Authenticated => Color::Green,
+                StatusSegmentKind::Status => Color::Cyan,
+                StatusSegmentKind::Error => Color::Red,
+            };
+            separator.into_iter().chain(std::iter::once(Span::styled(
+                segment.text,
+                Style::default().fg(color),
+            )))
+        })
+        .collect()
+}
+
 fn display_dashboard_package_name(package: &DashboardPackageRow) -> String {
     if !package.display_name.starts_with("http://") && !package.display_name.starts_with("https://")
     {
@@ -336,57 +440,32 @@ pub(super) fn dashboard_status_line(
     let width = usize::from(width);
 
     if width <= 16 && error_count > 0 {
-        return vec![Span::styled(
-            failed_count_label(error_count),
-            Style::default().fg(Color::Red),
-        )];
+        let failure = failed_count_label(error_count);
+        return status_spans(fit_status_segments(None, None, Some(&failure), width));
     }
 
     if width <= 32 && downloading > 0 {
         let activity = compact_activity_label(downloading, queued);
         let failure = (error_count > 0).then(|| failed_count_label(error_count));
-        if let Some(failure) = failure {
-            return vec![
-                Span::styled(activity, Style::default().fg(Color::Cyan)),
-                Span::styled(" | ", Style::default().fg(Color::DarkGray)),
-                Span::styled(failure, Style::default().fg(Color::Red)),
-            ];
-        }
-        return vec![Span::styled(activity, Style::default().fg(Color::Cyan))];
+        return status_spans(fit_status_segments(
+            None,
+            Some(&activity),
+            failure.as_deref(),
+            width,
+        ));
     }
 
-    let mut parts = Vec::new();
-    if state.authenticated {
-        parts.push(Span::styled(
-            "Logged in \u{2713}",
-            Style::default().fg(Color::Green),
-        ));
+    let authenticated = if state.authenticated {
+        Some("Logged in \u{2713}")
     } else if state.logging_in {
-        parts.push(Span::styled(
-            "Logging in...",
-            Style::default().fg(Color::Yellow),
-        ));
-    }
-    if !status.is_empty() {
-        if !parts.is_empty() {
-            parts.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-        }
-        parts.push(Span::styled(
-            truncate_end(&status, width.saturating_sub(12)),
-            Style::default().fg(Color::Cyan),
-        ));
-    }
-    if error_count > 0 {
-        if !parts.is_empty() {
-            parts.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-        }
-        let error_text = selected_error.unwrap_or_else(|| failed_count_label(error_count));
-        parts.push(Span::styled(
-            truncate_end(&error_text, width.saturating_sub(12)),
-            Style::default().fg(Color::Red),
-        ));
-    }
-    parts
+        Some("Logging in...")
+    } else {
+        None
+    };
+    let error_text = (error_count > 0)
+        .then(|| selected_error.unwrap_or_else(|| failed_count_label(error_count)));
+    let segments = fit_status_segments(authenticated, Some(&status), error_text.as_deref(), width);
+    status_spans(segments)
 }
 
 fn selected_error_message(state: &DownloadDashboardState, index: usize) -> Option<String> {
@@ -515,7 +594,7 @@ pub(super) fn dashboard_aggregate_progress_label(
         "{pct}%  {}/{} files  {bytes}  {transfer}",
         state.totals.files_completed, state.totals.files_total
     );
-    if full.chars().count() <= usize::from(width.saturating_sub(2)) {
+    if text_width(&full) <= usize::from(width.saturating_sub(2)) {
         return full;
     }
     let mut compact = String::with_capacity(20 + transfer.len());
@@ -524,7 +603,7 @@ pub(super) fn dashboard_aggregate_progress_label(
         "{pct}%  {}/{}  {transfer}",
         state.totals.files_completed, state.totals.files_total
     );
-    if compact.chars().count() <= usize::from(width.saturating_sub(2)) {
+    if text_width(&compact) <= usize::from(width.saturating_sub(2)) {
         return compact;
     }
     let mut shortest = String::with_capacity(6 + transfer.len());
@@ -546,16 +625,37 @@ pub(super) fn focused_url_input_view(
         return (String::new(), Some(0));
     }
 
-    let char_count = value.chars().count();
-    let cursor = cursor.min(char_count);
-    if char_count <= visible_width {
-        return (value.to_string(), Some(cursor as u16));
+    let chars = value.chars().collect::<Vec<_>>();
+    let cursor = cursor.min(chars.len());
+    let mut start = cursor;
+    let mut before_width = 0_usize;
+    while start > 0 {
+        let character_width = UnicodeWidthChar::width(chars[start - 1]).unwrap_or(0);
+        if before_width.saturating_add(character_width) > visible_width {
+            break;
+        }
+        start -= 1;
+        before_width = before_width.saturating_add(character_width);
     }
 
-    let start = cursor.saturating_sub(visible_width);
+    let mut end = cursor;
+    let mut total_width = before_width;
+    while end < chars.len() {
+        let character_width = UnicodeWidthChar::width(chars[end]).unwrap_or(0);
+        if total_width.saturating_add(character_width) > visible_width {
+            break;
+        }
+        end += 1;
+        total_width = total_width.saturating_add(character_width);
+    }
+    let visible = chars[start..end].iter().collect::<String>();
+    let cursor_width = chars[start..cursor]
+        .iter()
+        .map(|character| UnicodeWidthChar::width(*character).unwrap_or(0))
+        .sum::<usize>();
     (
-        value.chars().skip(start).take(visible_width).collect(),
-        Some((cursor - start) as u16),
+        visible,
+        Some(u16::try_from(cursor_width).unwrap_or(u16::MAX)),
     )
 }
 
@@ -662,7 +762,16 @@ pub(super) fn text_width(value: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{text_width, truncate_end};
+    use super::{
+        DashboardFileRow, DashboardFileStatus, DashboardPackageRow, DashboardRow,
+        DownloadDashboardState, draw_dashboard_file_list, focused_url_input_view, text_width,
+        truncate_end,
+    };
+    use crate::core::PackageStatus;
+    use crate::tui::dashboard::DashboardUiMode;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::widgets::{Block, Borders, ListState};
 
     #[test]
     fn text_width_uses_unicode_display_width() {
@@ -675,5 +784,234 @@ mod tests {
         assert_eq!(truncate_end("表x", 2), "…");
         assert_eq!(truncate_end("ab表cd", 4), "ab…");
         assert_eq!(text_width(&truncate_end("a表cd", 4)), 4);
+    }
+
+    #[test]
+    fn focused_url_input_view_never_exceeds_display_width_for_wide_characters() {
+        let (visible, cursor) = focused_url_input_view("表a表", 3, 4);
+
+        assert!(text_width(&visible) <= 3);
+        assert!(usize::from(cursor.expect("cursor should be visible")) <= 3);
+    }
+
+    #[test]
+    fn dashboard_status_line_fits_all_spans_inside_available_width() {
+        let mut state = DownloadDashboardState::empty(DashboardUiMode::Attached, true, "", 9723);
+        state.authenticated = true;
+        state.status = "Processing a very long status message".to_string();
+        state.files = vec![DashboardFileRow {
+            id: "failed".to_string(),
+            package_id: String::new(),
+            name: "failed".to_string(),
+            size: 1,
+            downloaded: 0,
+            speed: 0,
+            status: DashboardFileStatus::Error {
+                message: "connection reset by peer".to_string(),
+            },
+            package_label: None,
+        }];
+        state.rows = vec![DashboardRow::File {
+            package_id: String::new(),
+            file_id: "failed".to_string(),
+        }];
+
+        let spans = super::super::dashboard_status_line(&state, 40, Some(0));
+        let width = spans
+            .iter()
+            .map(|span| text_width(span.content.as_ref()))
+            .sum::<usize>();
+
+        assert!(width <= 40);
+    }
+
+    #[test]
+    fn compact_dashboard_status_fits_width_and_keeps_failure_visible() {
+        let mut state = DownloadDashboardState::empty(DashboardUiMode::Attached, true, "", 9723);
+        for index in 0..10 {
+            state.files.push(DashboardFileRow {
+                id: format!("downloading-{index}"),
+                package_id: String::new(),
+                name: format!("downloading-{index}"),
+                size: 1,
+                downloaded: 0,
+                speed: 0,
+                status: DashboardFileStatus::Downloading,
+                package_label: None,
+            });
+            state.files.push(DashboardFileRow {
+                id: format!("queued-{index}"),
+                package_id: String::new(),
+                name: format!("queued-{index}"),
+                size: 1,
+                downloaded: 0,
+                speed: 0,
+                status: DashboardFileStatus::Queued,
+                package_label: None,
+            });
+            state.files.push(DashboardFileRow {
+                id: format!("failed-{index}"),
+                package_id: String::new(),
+                name: format!("failed-{index}"),
+                size: 1,
+                downloaded: 0,
+                speed: 0,
+                status: DashboardFileStatus::Error {
+                    message: "failure".to_string(),
+                },
+                package_label: None,
+            });
+        }
+
+        for width in [16, 20, 28, 32] {
+            let spans = super::super::dashboard_status_line(&state, width, None);
+            let rendered = spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            let rendered_width = spans
+                .iter()
+                .map(|span| text_width(span.content.as_ref()))
+                .sum::<usize>();
+
+            assert!(
+                rendered_width <= usize::from(width),
+                "rendered status: {rendered:?}"
+            );
+            assert!(rendered.contains("failed"), "rendered status: {rendered:?}");
+        }
+    }
+
+    #[test]
+    fn narrow_dashboard_file_rows_preserve_the_right_border() {
+        let file = DashboardFileRow {
+            id: "file".to_string(),
+            package_id: String::new(),
+            name: "file".to_string(),
+            size: 1,
+            downloaded: 0,
+            speed: 0,
+            status: DashboardFileStatus::Queued,
+            package_label: None,
+        };
+
+        for content_width in 5..=8 {
+            let backend = TestBackend::new((content_width + 2) as u16, 3);
+            let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    frame.render_widget(Block::default().borders(Borders::ALL), area);
+                    super::render_dashboard_file_row(
+                        frame,
+                        &file,
+                        false,
+                        1,
+                        1,
+                        content_width,
+                        false,
+                    );
+                })
+                .expect("row should draw");
+
+            assert_eq!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell(((content_width + 1) as u16, 1))
+                    .unwrap()
+                    .symbol(),
+                "│",
+                "content width {content_width} overwrote the right border"
+            );
+        }
+    }
+
+    #[test]
+    fn narrow_dashboard_rows_preserve_the_right_border() {
+        let state = DownloadDashboardState {
+            packages: vec![],
+            files: vec![DashboardFileRow {
+                id: "file".to_string(),
+                package_id: String::new(),
+                name: "file".to_string(),
+                size: 1,
+                downloaded: 0,
+                speed: 0,
+                status: DashboardFileStatus::Queued,
+                package_label: None,
+            }],
+            rows: vec![DashboardRow::File {
+                package_id: String::new(),
+                file_id: "file".to_string(),
+            }],
+            ..DownloadDashboardState::empty(DashboardUiMode::Attached, true, "", 9723)
+        };
+        let backend = TestBackend::new(5, 3);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        terminal
+            .draw(|frame| {
+                draw_dashboard_file_list(frame, &state, &mut list_state, frame.area());
+            })
+            .expect("dashboard should draw");
+
+        assert_eq!(
+            terminal.backend().buffer().cell((4, 1)).unwrap().symbol(),
+            "│"
+        );
+    }
+
+    #[test]
+    fn verifying_package_rows_render_verify_instead_of_active() {
+        let state = DownloadDashboardState {
+            packages: vec![DashboardPackageRow {
+                id: "pkg".to_string(),
+                source_url: "https://example.test".to_string(),
+                display_name: "Package".to_string(),
+                status: PackageStatus::Downloading,
+                file_ids: vec!["file".to_string()],
+                present_files: 1,
+                completed_files: 0,
+                downloaded_bytes: 10,
+                total_bytes: 100,
+                percent: 10,
+                expanded: false,
+                folder_label: None,
+                error: None,
+            }],
+            files: vec![DashboardFileRow {
+                id: "file".to_string(),
+                package_id: "pkg".to_string(),
+                name: "file".to_string(),
+                size: 100,
+                downloaded: 10,
+                speed: 0,
+                status: DashboardFileStatus::Verifying,
+                package_label: None,
+            }],
+            rows: vec![DashboardRow::Package {
+                package_id: "pkg".to_string(),
+            }],
+            ..DownloadDashboardState::empty(DashboardUiMode::Attached, true, "", 9723)
+        };
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).expect("terminal should initialize");
+        let mut list_state = ListState::default();
+        terminal
+            .draw(|frame| {
+                draw_dashboard_file_list(frame, &state, &mut list_state, frame.area());
+            })
+            .expect("dashboard should draw");
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("verify"));
+        assert!(!rendered.contains("active"));
     }
 }
