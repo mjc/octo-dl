@@ -865,7 +865,7 @@ fn ui_delete_file_removes_completed_artifacts_from_disk() {
 }
 
 #[test]
-fn ui_delete_core_backed_completed_file_removes_filesystem_artifacts() {
+fn ui_delete_core_backed_completed_file_leaves_filesystem_artifacts() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("core-backed.bin");
     let part_path = dir.path().join("core-backed.bin.part");
@@ -901,13 +901,13 @@ fn ui_delete_core_backed_completed_file_removes_filesystem_artifacts() {
 
     app.handle_ui_action(UiAction::DeleteFile(file_id.into()));
 
-    assert!(!file_path.exists());
-    assert!(!part_path.exists());
-    assert!(!sidecar_path.exists());
+    assert!(file_path.exists());
+    assert!(part_path.exists());
+    assert!(sidecar_path.exists());
 }
 
 #[test]
-fn ui_delete_completed_package_removes_filesystem_artifacts() {
+fn ui_delete_completed_package_leaves_filesystem_artifacts() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("pkg-complete.bin");
     let part_path = dir.path().join("pkg-complete.bin.part");
@@ -946,9 +946,9 @@ fn ui_delete_completed_package_removes_filesystem_artifacts() {
 
     app.handle_ui_action(UiAction::DeletePackage(package_id));
 
-    assert!(!file_path.exists());
-    assert!(!part_path.exists());
-    assert!(!sidecar_path.exists());
+    assert!(file_path.exists());
+    assert!(part_path.exists());
+    assert!(sidecar_path.exists());
     assert!(app.files.is_empty());
 }
 

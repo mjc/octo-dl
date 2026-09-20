@@ -1567,6 +1567,7 @@ fn file_queued_does_not_demote_completed_file() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "episode-1.mkv".to_string().into(),
+        attempt_id: 0,
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: crate::tui::event::FileOrigin {
