@@ -10,6 +10,7 @@ mod tests;
 
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
+use rustc_hash::FxHashSet;
 use tokio::sync::{mpsc, watch};
 
 use crate::{
@@ -23,6 +24,7 @@ use super::{
     App, DownloadEvent, ExpandedPackages, FileIdMap, FileIdSet, FileUiMap, NoCredentialsFallback,
     Popup, SharedAppState, SharedStateChannels, UiAction, VisibleFilePositions,
 };
+use crate::tui::event::DownloadEventSender;
 use crate::tui::event::DownloadRequest;
 
 const AUTO_LOGIN_IDLE_DELAY: Duration = Duration::from_millis(750);
@@ -43,8 +45,16 @@ fn state_dir_service_config_path() -> PathBuf {
 
 fn default_service_config_path() -> PathBuf {
     env::current_dir()
-        .map(|dir| dir.join("config.toml"))
+        .map(|dir| lexical_user_path(dir).join("config.toml"))
         .unwrap_or_else(|_| state_dir_service_config_path())
+}
+
+fn lexical_user_path(path: PathBuf) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if let Ok(path) = path.strip_prefix("/private") {
+        return PathBuf::from("/").join(path);
+    }
+    path
 }
 
 fn distinct_fallback_service_config_path(primary: &Path) -> Option<PathBuf> {
@@ -53,14 +63,13 @@ fn distinct_fallback_service_config_path(primary: &Path) -> Option<PathBuf> {
 }
 
 impl App {
-    pub fn new(
-        api_port: u16,
-        event_tx: mpsc::UnboundedSender<DownloadEvent>,
-        quit_enabled: bool,
-    ) -> Self {
-        let (url_tx, url_rx) = mpsc::unbounded_channel::<DownloadRequest>();
+    pub fn new<E>(api_port: u16, event_tx: E, quit_enabled: bool) -> Self
+    where
+        E: Into<DownloadEventSender>,
+    {
+        let (url_tx, url_rx) = mpsc::channel::<DownloadRequest>(64);
         let (pause_tx, pause_rx) = watch::channel(false);
-        let (token_tx, token_rx) = mpsc::unbounded_channel::<super::TokenMessage>();
+        let (token_tx, token_rx) = mpsc::channel::<super::TokenMessage>(256);
         Self {
             popup: super::Popup::None,
             pending_confirmation: None,
@@ -83,8 +92,10 @@ impl App {
             dashboard_binary_cache: bytes::Bytes::new(),
             visible_file_positions: VisibleFilePositions::default(),
             overlay_files: IndexMap::new(),
+            deleted_url_tombstones: FxHashSet::default(),
             file_ui: FileUiMap::default(),
             queued_file_effects: IndexMap::new(),
+            pending_url_submissions: rustc_hash::FxHashSet::default(),
             file_list_state: ListState::default(),
             expanded_packages: ExpandedPackages::default(),
             sort: super::SortState::new(),
@@ -103,7 +114,7 @@ impl App {
             status: String::new(),
             paused: false,
             config: super::ConfigState::new(),
-            event_tx,
+            event_tx: event_tx.into(),
             url_tx,
             url_rx: Some(url_rx),
             pause_tx,
@@ -149,16 +160,20 @@ impl App {
         }
     }
 
-    pub(crate) fn new_with_optional_service_config(
-        event_tx: mpsc::UnboundedSender<DownloadEvent>,
+    pub(crate) fn new_with_optional_service_config<E>(
+        event_tx: E,
         quit_enabled: bool,
         config_path: Option<&Path>,
         default_api_port: u16,
-    ) -> io::Result<(Self, String, u16)> {
+    ) -> io::Result<(Self, String, u16)>
+    where
+        E: Into<DownloadEventSender>,
+    {
         if let Some(path) = config_path {
+            let path = absolute_config_path(path)?;
             let mut app = Self::new(0, event_tx, quit_enabled);
-            app.persist_config_path = Some(path.to_path_buf());
-            let (host, port) = app.apply_service_config(path)?;
+            app.persist_config_path = Some(path.clone());
+            let (host, port) = app.apply_service_config(&path)?;
             app.api_port = port;
             return Ok((app, host, port));
         }
@@ -291,7 +306,7 @@ impl App {
         enabled: bool,
         ui_mode: DashboardUiMode,
     ) -> SharedStateChannels {
-        let (action_tx, action_rx) = mpsc::unbounded_channel::<UiAction>();
+        let (action_tx, action_rx) = mpsc::channel::<UiAction>(64);
         let initial_state = enabled
             .then(|| bytes::Bytes::from(self.borrowed_dashboard_postcard(ui_mode, false)))
             .unwrap_or_default();
@@ -307,31 +322,24 @@ impl App {
         }
     }
 
-    pub(crate) fn spawn_api_server(
+    pub(crate) async fn start_api_server(
         &self,
         host: String,
         port: u16,
         bookmarklet_host: Option<String>,
         shared_state: Option<SharedAppState>,
         remote_tui_stream: bool,
-    ) {
-        let api_tx = self.event_tx.clone();
-        let api_key = self.api_key.clone();
-        tokio::spawn(async move {
-            if let Err(e) = super::super::api::run_api_server(
-                api_tx,
-                &host,
-                port,
-                bookmarklet_host.as_deref(),
-                shared_state,
-                remote_tui_stream,
-                api_key,
-            )
-            .await
-            {
-                log::error!("API server error: {e}");
-            }
-        });
+    ) -> io::Result<super::super::api::ApiServerHandle> {
+        super::super::api::start_api_server(
+            self.event_tx.clone(),
+            &host,
+            port,
+            bookmarklet_host.as_deref(),
+            shared_state,
+            remote_tui_stream,
+            self.api_key.clone(),
+        )
+        .await
     }
 
     pub(crate) fn begin_login(&mut self) {
@@ -625,4 +633,12 @@ impl App {
         service_config.download = self.config.config.clone();
         service_config.save(config_path)
     }
+}
+
+fn absolute_config_path(path: &Path) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    Ok(std::env::current_dir()?.join(path))
 }

@@ -63,7 +63,7 @@ impl App {
             return Some(VisibleFileContext {
                 id: overlay.file().id.clone(),
                 status: overlay.file().status.clone(),
-                source_url: None,
+                source_url: overlay.source_url().map(str::to_string),
                 artifact_path: overlay.file().name.clone(),
                 size: overlay.file().size,
             });
@@ -97,6 +97,25 @@ impl App {
 
     pub(crate) fn show_ui_error_only(&mut self, name: &str, error: &str) {
         self.show_overlay_error(&FileId::from(name), name, error);
+    }
+
+    pub(crate) fn show_url_error(&mut self, url: &str, error: &str) {
+        let selected_row_identity = self.selected_row();
+        let file_id = FileId::from(url);
+        self.overlay_files.insert(
+            file_id.clone(),
+            TransientRow::UrlError {
+                file: FileEntry {
+                    id: file_id,
+                    name: url.to_string(),
+                    size: 0,
+                    downloaded: 0,
+                    status: FileStatus::Error(error.to_string()),
+                },
+                source_url: url.to_string(),
+            },
+        );
+        self.sync_visible_files_preserving(selected_row_identity);
     }
 }
 

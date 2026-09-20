@@ -1,4 +1,5 @@
 use super::*;
+use crate::tui::event::DownloadEventSender;
 use crate::{
     core::{
         CoreEvent, FileLifecycle, PackageSnapshot, PackageState, ResolvedFile, ResolvedPackage,
@@ -76,7 +77,7 @@ fn resume_session_requeues_urls() {
     ]);
     session.save().unwrap();
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
 
     app.resume_latest_session();
@@ -131,7 +132,7 @@ fn resume_session_clears_empty_failed_package_errors_and_requeues_urls() {
     )]);
     session.save().unwrap();
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
 
     app.resume_latest_session();
@@ -195,7 +196,7 @@ fn resume_session_restores_email_password_without_restoring_mfa() {
         crate::core::SavedCredentials::encrypt("saved@example.com", "saved-pass", Some("654321"));
     session.save().unwrap();
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
 
     app.resume_latest_session();
@@ -218,7 +219,7 @@ fn resume_session_does_not_override_existing_login_credentials() {
         crate::core::SavedCredentials::encrypt("stale@example.com", "stale-pass", Some("654321"));
     session.save().unwrap();
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
     assert!(app.login.set_credentials(
         "config@example.com".to_string(),
@@ -260,7 +261,7 @@ fn resume_session_restores_files_and_only_requeues_remaining_urls() {
     std::fs::write("completed.mkv", vec![0_u8; 128]).unwrap();
     session.save().unwrap();
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
 
     app.resume_latest_session();
@@ -330,7 +331,7 @@ fn resume_session_requeues_package_url_once_for_multiple_pending_files() {
     );
     session.save().unwrap();
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
 
     app.resume_latest_session();
@@ -400,7 +401,7 @@ fn resume_session_requeues_each_source_url_for_merged_package() {
     ];
     session.save().unwrap();
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
 
     app.resume_latest_session();
@@ -464,7 +465,7 @@ fn resume_session_restores_retryable_errors_as_queued() {
     );
     session.save().unwrap();
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
 
     app.resume_latest_session();
@@ -507,7 +508,7 @@ fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
         FileFixtureStatus::Pending,
     );
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
     app.files = vec![
         app::FileEntry {
@@ -544,7 +545,7 @@ fn sync_session_on_shutdown_keeps_completed_files_in_incomplete_sessions() {
 fn ui_add_urls_enqueues_each_unique_url_once() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
     let mut url_rx = app.url_rx.take().expect("url_rx should exist");
 
@@ -582,7 +583,7 @@ fn submitted_url_bootstraps_session_for_shutdown_persistence() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
 
     app.submit_url("https://mega.nz/file/pending".to_string());
@@ -618,7 +619,7 @@ fn resume_session_missing_completed_file_stays_complete_and_is_not_requeued() {
     );
     session.save().unwrap();
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
 
     app.resume_latest_session();
@@ -655,7 +656,7 @@ fn resume_session_missing_completed_file_preserves_preexisting_startup_accountin
     );
     session.save().unwrap();
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
 
     app.resume_latest_session();
@@ -684,7 +685,7 @@ fn resume_session_partial_without_sidecar_surfaces_existing_bytes_on_startup() {
     );
     session.save().unwrap();
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
 
     app.resume_latest_session();
@@ -701,9 +702,9 @@ fn resume_session_partial_without_sidecar_surfaces_existing_bytes_on_startup() {
 
 #[test]
 fn ui_retry_file_recomputes_totals() {
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
-    let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = tokio::sync::mpsc::channel(64);
     app.url_tx = url_tx;
     app.apply_core_event(CoreEvent::PackageResolved {
         package: ResolvedPackage {
@@ -767,9 +768,9 @@ fn ui_retry_file_recomputes_totals() {
 fn ui_retry_empty_failed_package_requeues_source_url() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
-    let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = tokio::sync::mpsc::channel(64);
     app.url_tx = url_tx;
 
     let source_url = "https://mega.nz/folder/retry".to_string();
@@ -840,7 +841,7 @@ fn ui_delete_file_removes_completed_artifacts_from_disk() {
     std::fs::write(&part_path, b"partial").unwrap();
     let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
     app.upsert_overlay_file(
         app::FileEntry {
@@ -872,7 +873,7 @@ fn ui_delete_core_backed_completed_file_removes_filesystem_artifacts() {
     std::fs::write(&part_path, b"partial").unwrap();
     let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
     let file_id = file_path.to_string_lossy().into_owned();
     app.apply_core_event(CoreEvent::PackageResolved {
@@ -914,7 +915,7 @@ fn ui_delete_completed_package_removes_filesystem_artifacts() {
     std::fs::write(&part_path, b"partial").unwrap();
     let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
     let file_id = file_path.to_string_lossy().into_owned();
     let package_id = package_id(
@@ -960,7 +961,7 @@ fn deleted_file_completion_event_is_ignored_and_leaves_artifacts() {
     std::fs::write(&part_path, b"partial").unwrap();
     let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
     let file_id = file_path.to_string_lossy().into_owned();
     app.apply_core_event(CoreEvent::PackageResolved {
@@ -1013,7 +1014,7 @@ fn deleted_file_stays_deleted_after_cancel_then_completion_events() {
     std::fs::write(&part_path, b"partial").unwrap();
     let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
     let file_id = file_path.to_string_lossy().into_owned();
     app.apply_core_event(CoreEvent::PackageResolved {
@@ -1072,7 +1073,7 @@ fn deleted_file_error_event_is_ignored_and_leaves_artifacts() {
     std::fs::write(&part_path, b"partial").unwrap();
     let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
     let file_id = file_path.to_string_lossy().into_owned();
     app.apply_core_event(CoreEvent::PackageResolved {
@@ -1126,9 +1127,9 @@ fn ui_reset_file_resets_progress_and_requeues_url() {
     std::fs::write(&part_path, b"partial").unwrap();
     let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
-    let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = tokio::sync::mpsc::channel(64);
     app.url_tx = url_tx;
     resolve_active_test_file(
         &mut app,
@@ -1156,7 +1157,7 @@ fn ui_reset_file_resets_progress_and_requeues_url() {
 
 #[test]
 fn reset_file_ignores_late_completion_until_new_attempt_starts() {
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
     resolve_active_test_file(
         &mut app,
@@ -1177,7 +1178,7 @@ fn reset_file_ignores_late_completion_until_new_attempt_starts() {
 
 #[test]
 fn reset_file_ignores_late_error_until_new_attempt_starts() {
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
     resolve_active_test_file(
         &mut app,
@@ -1199,7 +1200,7 @@ fn reset_file_ignores_late_error_until_new_attempt_starts() {
 
 #[test]
 fn reset_file_accepts_new_terminal_events_after_restart() {
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
     resolve_active_test_file(
         &mut app,
@@ -1252,10 +1253,10 @@ fn save_rejects_duplicate_file_entries_by_path() {
 
 struct ScenarioHarness {
     app: App,
-    download_tx: mpsc::UnboundedSender<DownloadEvent>,
-    download_rx: mpsc::UnboundedReceiver<DownloadEvent>,
-    _action_tx: mpsc::UnboundedSender<UiAction>,
-    action_rx: mpsc::UnboundedReceiver<UiAction>,
+    download_tx: mpsc::Sender<DownloadEvent>,
+    download_rx: mpsc::Receiver<DownloadEvent>,
+    _action_tx: mpsc::Sender<UiAction>,
+    action_rx: mpsc::Receiver<UiAction>,
     _state_tx: watch::Sender<bytes::Bytes>,
     sys: System,
     pid: Option<sysinfo::Pid>,
@@ -1275,10 +1276,10 @@ struct ScenarioSnapshot {
 
 impl ScenarioHarness {
     fn new(width: u16, height: u16) -> Self {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let app = App::new(9723, event_tx, true);
-        let (download_tx, download_rx) = mpsc::unbounded_channel();
-        let (action_tx, action_rx) = mpsc::unbounded_channel();
+        let (download_tx, download_rx) = mpsc::channel(64);
+        let (action_tx, action_rx) = mpsc::channel(64);
         let (state_tx, _state_rx) = watch::channel(bytes::Bytes::new());
 
         Self {
@@ -1306,7 +1307,7 @@ impl ScenarioHarness {
 
     fn inject_download(&self, event: DownloadEvent) {
         self.download_tx
-            .send(event)
+            .try_send(event)
             .expect("download event should send");
     }
 
@@ -1438,6 +1439,7 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
 
     harness.inject_download(DownloadEvent::FileQueued(QueuedFile {
         id: "a.bin".to_string().into(),
+        attempt_id: 0,
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: crate::tui::event::FileOrigin {

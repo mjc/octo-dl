@@ -1,4 +1,5 @@
 use super::*;
+use crate::tui::event::DownloadEventSender;
 use std::time::{Duration, Instant};
 
 use tempfile::tempdir;
@@ -17,7 +18,7 @@ use crate::{
     tui::{
         DashboardUiMode,
         app::VerificationTarget,
-        event::{DownloadEvent, QueuedFile},
+        event::{DownloadEvent, FileOrigin, QueuedFile},
         visible::TuiRow,
     },
 };
@@ -25,7 +26,7 @@ use crate::{
 fn test_app() -> App {
     let path = tempdir().expect("test state directory should exist").keep();
     std::mem::forget(StateDirectoryGuard::set(&path));
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(64);
     App::new(9723, tx, true)
 }
 
@@ -97,6 +98,76 @@ fn config_field_toggle_bool() {
     assert_ne!(config.config.force_overwrite, initial);
     config.config.force_overwrite = !config.config.force_overwrite;
     assert_eq!(config.config.force_overwrite, initial);
+}
+
+#[test]
+fn config_update_is_explicitly_next_run_and_survives_core_events() {
+    let mut app = test_app();
+    app.install_session(session_snapshot(vec![(
+        "https://mega.nz/file/config",
+        UrlFixtureStatus::Pending,
+    )]));
+    app.download_task_running = true;
+
+    app.handle_ui_action(UiAction::UpdateConfig {
+        chunks_per_file: Some(9),
+        mega_chunks_per_request: None,
+        concurrent_files: Some(3),
+        force_overwrite: Some(true),
+        cleanup_on_error: None,
+    });
+
+    let expected = crate::DownloadConfig {
+        chunks_per_file: 9,
+        concurrent_files: 3,
+        force_overwrite: true,
+        ..app.config.config.clone()
+    };
+    assert_eq!(app.config.config, expected);
+    assert_eq!(
+        app.session.as_ref().expect("session should remain").config,
+        expected
+    );
+    assert_eq!(app.core_state.session_meta.config, expected);
+    assert_eq!(
+        app.status,
+        "Configuration saved; applies to the next download task (current downloads unchanged)"
+    );
+
+    app.apply_core_event(CoreEvent::Tick {
+        now: Instant::now(),
+    });
+
+    assert_eq!(app.core_state.session_meta.config, expected);
+    assert_eq!(
+        app.session.as_ref().expect("session should remain").config,
+        expected
+    );
+}
+
+#[test]
+fn config_update_persists_accepted_values_to_service_config() {
+    let dir = tempdir().expect("state directory should exist");
+    let _guard = StateDirectoryGuard::set(dir.path());
+    let config_path = dir.path().join("config.toml");
+    let (tx, _rx) = mpsc::channel(64);
+    let mut app = App::new(9723, tx, true);
+    app.persist_config_path = Some(config_path.clone());
+
+    app.handle_ui_action(UiAction::UpdateConfig {
+        chunks_per_file: Some(11),
+        mega_chunks_per_request: Some(7),
+        concurrent_files: Some(2),
+        force_overwrite: Some(true),
+        cleanup_on_error: Some(true),
+    });
+
+    let saved = crate::ServiceConfig::load(&config_path).expect("config should be saved");
+    assert_eq!(saved.download.chunks_per_file, 11);
+    assert_eq!(saved.download.mega_chunks_per_request, 7);
+    assert_eq!(saved.download.concurrent_files, 2);
+    assert!(saved.download.force_overwrite);
+    assert!(saved.download.cleanup_on_error);
 }
 
 #[test]
@@ -402,6 +473,38 @@ fn progress_event_updates_visible_file_without_full_visible_sync() {
         .expect("file should remain visible");
     assert_eq!(file.downloaded, 40);
     assert!(matches!(file.status, FileStatus::Downloading));
+}
+
+#[test]
+fn visible_row_cache_reorders_when_progress_changes_percent_sorting() {
+    let mut app = test_app();
+    let package_a = resolve_package(&mut app, "https://mega.nz/folder/a", &[("a.bin", 100)]);
+    let package_b = resolve_package(&mut app, "https://mega.nz/folder/b", &[("b.bin", 100)]);
+    app.sort.key = SortKey::Percent;
+    app.sort.direction = SortDirection::Asc;
+    app.ensure_visible_rows_cache();
+
+    app.files
+        .iter_mut()
+        .find(|file| file.id == "a.bin")
+        .expect("a.bin should be visible")
+        .downloaded = 80;
+    app.files
+        .iter_mut()
+        .find(|file| file.id == "b.bin")
+        .expect("b.bin should be visible")
+        .downloaded = 20;
+
+    let package_order = app
+        .visible_rows()
+        .into_iter()
+        .filter_map(|row| match row {
+            TuiRow::Package(id) => Some(id),
+            TuiRow::File { .. } => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(package_order, vec![package_b, package_a]);
 }
 
 #[test]
@@ -861,7 +964,7 @@ fn delete_package_clears_shutdown_pending_state_for_all_files() {
 #[test]
 fn reverify_package_with_only_never_started_files_is_noop() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     let package_id = resolve_package(
         &mut app,
@@ -880,7 +983,7 @@ fn reverify_package_with_only_never_started_files_is_noop() {
 #[test]
 fn reverify_package_clears_stale_verify_state_for_never_started_files() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     let package_id = resolve_package(
         &mut app,
@@ -934,7 +1037,7 @@ fn verification_progress_requires_explicit_target() {
 #[test]
 fn reverify_package_includes_failed_file_with_partial_progress() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     let source_url = "https://mega.nz/folder/root";
     let package_id = resolve_package(&mut app, source_url, &[("failed.bin", 100)]);
@@ -956,20 +1059,24 @@ fn reverify_package_includes_failed_file_with_partial_progress() {
 
     assert!(app.verifying_files.contains("failed.bin"));
     assert!(app.verification_inflight_files.contains("failed.bin"));
-    assert_eq!(
-        url_rx.try_recv().unwrap(),
-        crate::tui::event::DownloadRequest::ReverifyFileIds {
-            source_url: source_url.to_string(),
-            file_ids: vec!["failed.bin".to_string().into()],
-        }
-    );
+    let request = url_rx.try_recv().unwrap();
+    assert!(matches!(
+        request,
+        crate::tui::event::DownloadRequest::ReverifyFileIdsWithOperations {
+            source_url: ref request_url,
+            file_ids: ref file_ids,
+            operation_ids: ref operation_ids,
+        } if request_url == source_url
+            && file_ids == &vec![crate::core::FileId::from("failed.bin")]
+            && operation_ids.contains_key(&crate::core::FileId::from("failed.bin"))
+    ));
     assert!(url_rx.try_recv().is_err());
 }
 
 #[test]
 fn reverify_active_file_bumps_attempt_generation() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     let file_id: crate::core::FileId = "active.bin".to_string().into();
     resolve_package(
@@ -992,20 +1099,164 @@ fn reverify_active_file_bumps_attempt_generation() {
 
     assert_eq!(app.file_attempt_ids.get(&file_id), Some(&1));
     assert!(app.verifying_files.contains(&file_id));
-    assert_eq!(
-        url_rx.try_recv().unwrap(),
-        crate::tui::event::DownloadRequest::ReverifyFileIds {
-            source_url: "https://mega.nz/file/root".to_string(),
-            file_ids: vec![file_id],
-        }
-    );
+    let request = url_rx.try_recv().unwrap();
+    assert!(matches!(
+        request,
+        crate::tui::event::DownloadRequest::ReverifyFileIdsWithOperations {
+            ref source_url,
+            ref file_ids,
+            ref operation_ids,
+        } if source_url == "https://mega.nz/file/root"
+            && file_ids == &vec![file_id.clone()]
+            && operation_ids.contains_key(&file_id)
+    ));
     assert!(url_rx.try_recv().is_err());
+}
+
+#[test]
+fn full_request_queue_keeps_file_download_ids_pending_until_admitted() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::channel(1);
+    url_tx
+        .try_send(crate::tui::event::DownloadRequest::SyncPendingOrder {
+            file_ids: Vec::new(),
+        })
+        .expect("queue filler should be admitted");
+    app.url_tx = url_tx;
+
+    let source_url = "https://mega.nz/folder/saturated";
+    resolve_package(&mut app, source_url, &[("episode.mkv", 128)]);
+    app.apply_core_event(CoreEvent::FileResetRequested {
+        file_id: "episode.mkv".to_string().into(),
+    });
+
+    assert_eq!(
+        app.queued_file_effects.get(source_url),
+        Some(&vec![crate::core::FileId::from("episode.mkv")])
+    );
+    assert!(app.status.contains("request queue is full"));
+
+    let _ = url_rx.try_recv().expect("queue filler should be removable");
+    app.apply_core_event(CoreEvent::Tick {
+        now: Instant::now(),
+    });
+
+    assert!(!app.queued_file_effects.contains_key(source_url));
+    assert!(matches!(
+        url_rx.try_recv().expect("pending request should be retried"),
+        crate::tui::event::DownloadRequest::ResumeFileIds {
+            source_url: ref request_url,
+            ref file_ids,
+            ..
+        } if request_url == source_url
+            && file_ids == &vec![crate::core::FileId::from("episode.mkv")]
+    ));
+}
+
+#[test]
+fn full_request_queue_surfaces_url_backpressure_without_losing_tracked_url() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::channel(1);
+    url_tx
+        .try_send(crate::tui::event::DownloadRequest::SyncPendingOrder {
+            file_ids: Vec::new(),
+        })
+        .expect("queue filler should be admitted");
+    app.url_tx = url_tx;
+
+    let url = "https://mega.nz/folder/url-saturated".to_string();
+    app.submit_url(url.clone());
+
+    assert_eq!(app.tracked_urls(), [url.clone()].as_slice());
+    assert!(app.overlay_files.contains_key(url.as_str()));
+    assert_eq!(
+        app.status,
+        "URL submission is waiting: request queue is full"
+    );
+    assert!(app.pending_url_submissions.contains(&url));
+
+    let _ = url_rx.try_recv().expect("queue filler should be removable");
+    app.apply_core_event(CoreEvent::Tick {
+        now: Instant::now(),
+    });
+    assert!(!app.queued_file_effects.contains_key(url.as_str()));
+    assert!(!app.pending_url_submissions.contains(&url));
+    assert!(matches!(
+        url_rx.try_recv().expect("URL request should be retried"),
+        crate::tui::event::DownloadRequest::SubmitUrl { url: request_url }
+            if request_url == url
+    ));
+}
+
+#[test]
+fn full_request_queue_rejects_reverify_before_mutating_file_state() {
+    let mut app = test_app();
+    let file_id = crate::core::FileId::from("episode.mkv");
+    resolve_package(
+        &mut app,
+        "https://mega.nz/folder/reverify-saturated",
+        &[("episode.mkv", 128)],
+    );
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: file_id.clone(),
+        size: 128,
+    });
+    app.apply_core_event(CoreEvent::FileProgress {
+        file_id: file_id.clone(),
+        total_bytes_delta: 32,
+        network_bytes_delta: 32,
+    });
+    let (url_tx, _url_rx) = mpsc::channel(1);
+    url_tx
+        .try_send(crate::tui::event::DownloadRequest::SyncPendingOrder {
+            file_ids: Vec::new(),
+        })
+        .expect("queue filler should be admitted");
+    app.url_tx = url_tx;
+
+    app.perform_reverify_file_action(&file_id);
+
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert!(!app.file_attempt_ids.contains_key(&file_id));
+    assert_eq!(app.status, "Verification is waiting: request queue is full");
+}
+
+#[test]
+fn full_request_queue_retries_pending_order_sync_on_the_next_core_tick() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::channel(1);
+    url_tx
+        .try_send(crate::tui::event::DownloadRequest::SyncPendingOrder {
+            file_ids: Vec::new(),
+        })
+        .expect("queue filler should be admitted");
+    app.url_tx = url_tx;
+    app.download_task_running = true;
+
+    resolve_package(
+        &mut app,
+        "https://mega.nz/folder/order-saturated",
+        &[("episode.mkv", 128)],
+    );
+    assert!(app.status.contains("request queue is full"));
+
+    let _ = url_rx.try_recv().expect("queue filler should be removable");
+    app.apply_core_event(CoreEvent::Tick {
+        now: Instant::now(),
+    });
+
+    assert!(matches!(
+        url_rx.try_recv().expect("pending order should be retried"),
+        crate::tui::event::DownloadRequest::SyncPendingOrder { file_ids }
+            if file_ids == vec![crate::core::FileId::from("episode.mkv")]
+    ));
 }
 
 #[test]
 fn stale_old_attempt_progress_is_ignored_during_alt_r_reverify() {
     let mut app = test_app();
-    let (url_tx, _url_rx) = mpsc::unbounded_channel();
+    let (url_tx, _url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     let file_id: crate::core::FileId = "active.bin".to_string().into();
     resolve_package(
@@ -1050,7 +1301,7 @@ fn stale_old_attempt_progress_is_ignored_during_alt_r_reverify() {
 #[test]
 fn stale_old_attempt_cancel_is_ignored_after_alt_r_resume() {
     let mut app = test_app();
-    let (url_tx, _url_rx) = mpsc::unbounded_channel();
+    let (url_tx, _url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     let file_id: crate::core::FileId = "active.bin".to_string().into();
     resolve_package(
@@ -1265,6 +1516,7 @@ fn file_queued_without_explicit_package_id_reuses_existing_package_for_url() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "episode-1.mkv".to_string().into(),
+        attempt_id: 0,
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: crate::tui::event::FileOrigin {
@@ -1440,6 +1692,7 @@ fn file_queued_retires_submitted_url_alias_after_resolution() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "episode-1.mkv".to_string().into(),
+        attempt_id: 0,
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: crate::tui::event::FileOrigin {
@@ -1590,7 +1843,7 @@ fn empty_package_resolution_stays_gone_after_shutdown_restart() {
     assert!(app.core_state.url_order.is_empty());
     assert!(crate::core::SessionSnapshot::latest().is_none());
 
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut resumed = App::new(0, event_tx, true);
     resumed.resume_latest_session();
 
@@ -2166,7 +2419,7 @@ fn deferred_core_persistence_allows_session_remove_to_override_batch_snapshot() 
 #[test]
 fn pending_order_sync_is_immediate_outside_batch() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     app.download_task_running = true;
     crate::core::model::reset_pending_file_ids_call_count();
@@ -2190,7 +2443,7 @@ fn pending_order_sync_is_immediate_outside_batch() {
 #[test]
 fn pending_order_sync_collapses_for_nested_batches() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     app.download_task_running = true;
     crate::core::model::reset_pending_file_ids_call_count();
@@ -2244,7 +2497,7 @@ fn pending_order_sync_collapses_for_nested_batches() {
 #[test]
 fn pending_order_sync_skips_noop_batches() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     app.download_task_running = true;
     resolve_package(
@@ -2336,6 +2589,19 @@ fn login_failure_status_adds_single_context_prefix() {
 }
 
 #[test]
+fn failed_login_clears_in_flight_guard_for_retry() {
+    let mut app = test_app();
+    let (_client_tx, client_rx) = tokio::sync::oneshot::channel();
+    app.client_rx = Some(client_rx);
+    app.login.logging_in = true;
+
+    app.complete_login(false, Some("invalid credentials".to_string()), None, false);
+
+    assert!(!app.login.logging_in);
+    assert!(app.client_rx.is_none());
+}
+
+#[test]
 fn visible_rows_hide_empty_failed_packages() {
     let mut app = test_app();
     let package_id = package_id("failed", "https://mega.nz/folder/failed");
@@ -2351,6 +2617,243 @@ fn visible_rows_hide_empty_failed_packages() {
     );
 
     assert!(app.visible_rows().is_empty());
+}
+
+#[test]
+fn late_queued_file_after_individual_delete_cannot_resurrect_sibling_source_file() {
+    let mut app = test_app();
+    let source_url = "https://mega.nz/folder/shared-source";
+    resolve_package(
+        &mut app,
+        source_url,
+        &[("deleted.bin", 128), ("kept.bin", 256)],
+    );
+
+    let deleted_id: crate::core::FileId = "deleted.bin".into();
+    app.perform_delete_file_action(&deleted_id);
+    assert!(!app.core_state.files.contains_key(&deleted_id));
+
+    app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
+        id: deleted_id.clone(),
+        attempt_id: 0,
+        size: 128,
+        accounting: crate::core::FileAccounting::CurrentRun,
+        origin: FileOrigin {
+            package_id: Some(crate::test_support::package_id(source_url, source_url)),
+            package_display_name: Some(source_url.to_string()),
+            source_url: source_url.to_string(),
+            submitted_url: source_url.to_string(),
+        },
+    }));
+
+    assert!(!app.core_state.files.contains_key(&deleted_id));
+    assert!(!app.files.iter().any(|file| file.id == deleted_id));
+}
+
+#[test]
+fn queued_file_with_new_attempt_can_readd_path_after_delete() {
+    let mut app = test_app();
+    let source_url = "https://mega.nz/folder/readd";
+    resolve_package(&mut app, source_url, &[("episode.mkv", 128)]);
+
+    let file_id: crate::core::FileId = "episode.mkv".into();
+    app.perform_delete_file_action(&file_id);
+    assert_eq!(app.file_attempt_ids.get(&file_id), Some(&1));
+    app.submit_url(source_url.to_string());
+
+    app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
+        id: file_id.clone(),
+        attempt_id: 1,
+        size: 128,
+        accounting: crate::core::FileAccounting::CurrentRun,
+        origin: FileOrigin {
+            package_id: Some(crate::test_support::package_id(source_url, source_url)),
+            package_display_name: Some(source_url.to_string()),
+            source_url: source_url.to_string(),
+            submitted_url: source_url.to_string(),
+        },
+    }));
+
+    assert!(app.core_state.files.contains_key(&file_id));
+    assert!(app.files.iter().any(|file| file.id == file_id));
+}
+
+#[test]
+fn stale_resume_validation_progress_operation_is_ignored_after_new_attempt() {
+    let mut app = test_app();
+    resolve_package(
+        &mut app,
+        "https://mega.nz/file/resume-progress",
+        &[("file.bin", 100)],
+    );
+    let file_id: crate::core::FileId = "file.bin".into();
+    app.file_attempt_ids.insert(file_id.clone(), 1);
+    mark_verification_inflight(&mut app, "file.bin");
+
+    app.handle_download_event(DownloadEvent::VerificationProgressForOperation {
+        id: file_id.clone(),
+        operation_id: crate::tui::event::VerificationOperationId::new(0),
+        bytes_delta: 40,
+    });
+    assert_eq!(
+        app.core_state.files[&file_id]
+            .progress
+            .visible_completed_bytes,
+        0
+    );
+
+    app.handle_download_event(DownloadEvent::VerificationProgressForOperation {
+        id: file_id.clone(),
+        operation_id: crate::tui::event::VerificationOperationId::new(1),
+        bytes_delta: 40,
+    });
+    assert_eq!(
+        app.core_state.files[&file_id]
+            .progress
+            .visible_completed_bytes,
+        40
+    );
+}
+
+#[test]
+fn collection_resume_validation_progress_uses_current_attempt_and_rejects_stale_progress() {
+    let mut app = test_app();
+    resolve_package(
+        &mut app,
+        "https://mega.nz/file/collection-progress",
+        &[("file.bin", 100)],
+    );
+    let file_id: crate::core::FileId = "file.bin".into();
+
+    app.handle_download_event(DownloadEvent::ResumeValidationStarted {
+        id: file_id.clone(),
+        attempt_id: 0,
+    });
+    app.handle_download_event(DownloadEvent::VerificationProgressForOperation {
+        id: file_id.clone(),
+        operation_id: crate::tui::event::VerificationOperationId::new(0),
+        bytes_delta: 25,
+    });
+    assert_eq!(
+        app.core_state.files[&file_id]
+            .progress
+            .visible_completed_bytes,
+        25
+    );
+
+    app.file_attempt_ids.insert(file_id.clone(), 1);
+    app.handle_download_event(DownloadEvent::ResumeValidationStarted {
+        id: file_id.clone(),
+        attempt_id: 1,
+    });
+    app.handle_download_event(DownloadEvent::VerificationProgressForOperation {
+        id: file_id.clone(),
+        operation_id: crate::tui::event::VerificationOperationId::new(0),
+        bytes_delta: 10,
+    });
+    assert_eq!(
+        app.core_state.files[&file_id]
+            .progress
+            .visible_completed_bytes,
+        0,
+        "progress from the previous collection attempt must be ignored"
+    );
+
+    app.handle_download_event(DownloadEvent::VerificationProgressForOperation {
+        id: file_id.clone(),
+        operation_id: crate::tui::event::VerificationOperationId::new(1),
+        bytes_delta: 10,
+    });
+    assert_eq!(
+        app.core_state.files[&file_id]
+            .progress
+            .visible_completed_bytes,
+        10
+    );
+}
+
+#[test]
+fn stale_completed_verification_after_reset_cannot_complete_new_attempt() {
+    let mut app = test_app();
+    resolve_package(
+        &mut app,
+        "https://mega.nz/file/reset-verification",
+        &[("reset.bin", 128)],
+    );
+    let file_id: crate::core::FileId = "reset.bin".into();
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: file_id.clone(),
+    });
+    mark_verification_inflight(&mut app, "reset.bin");
+
+    app.perform_reset_file_action(&file_id);
+    app.handle_download_event(DownloadEvent::CompletedFileVerified {
+        id: file_id.clone(),
+        bytes: 128,
+    });
+
+    assert_eq!(
+        app.core_state.files[&file_id].lifecycle,
+        FileLifecycle::Queued
+    );
+    assert!(app.reset_pending_files.contains(&file_id));
+}
+
+#[test]
+fn typed_stale_verification_operation_is_rejected_after_reset() {
+    let mut app = test_app();
+    resolve_package(
+        &mut app,
+        "https://mega.nz/file/typed-reset-verification",
+        &[("typed-reset.bin", 128)],
+    );
+    let file_id: crate::core::FileId = "typed-reset.bin".into();
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: file_id.clone(),
+    });
+
+    app.perform_reverify_file_action(&file_id);
+    let old_operation = crate::tui::event::VerificationOperationId::new(
+        *app.file_attempt_ids
+            .get(&file_id)
+            .expect("reverify should establish an operation generation"),
+    );
+    app.perform_reset_file_action(&file_id);
+    app.handle_download_event(DownloadEvent::CompletedFileVerifiedForOperation {
+        id: file_id.clone(),
+        operation_id: old_operation,
+        bytes: 128,
+    });
+
+    assert_eq!(
+        app.core_state.files[&file_id].lifecycle,
+        FileLifecycle::Queued
+    );
+    assert!(app.reset_pending_files.contains(&file_id));
+}
+
+#[test]
+fn file_scoped_verification_failure_becomes_visible_retryable_failure() {
+    let mut app = test_app();
+    resolve_package(
+        &mut app,
+        "https://mega.nz/file/verify-error",
+        &[("verify.bin", 128)],
+    );
+    let file_id = mark_verification_inflight(&mut app, "verify.bin");
+
+    app.handle_scope_error_event("verify.bin".to_string(), "invalid resume data".to_string());
+
+    assert!(matches!(
+        app.core_state.files[&file_id].lifecycle,
+        FileLifecycle::Failed { .. }
+    ));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert!(
+        app.files
+            .iter()
+            .any(|file| file.id == file_id && matches!(file.status, FileStatus::Error(_)))
+    );
 }
 
 #[test]
@@ -2463,6 +2966,7 @@ fn deleting_url_level_error_removes_session_url_and_ignores_late_events() {
     );
 
     app.handle_download_event(crate::tui::event::DownloadEvent::UrlResolved { url: url.clone() });
+    app.handle_download_event(crate::tui::event::DownloadEvent::UrlQueued { url: url.clone() });
     app.handle_download_event(crate::tui::event::DownloadEvent::ScopeError {
         scope: url.clone(),
         error: "late folder error".to_string(),
@@ -2476,6 +2980,64 @@ fn deleting_url_level_error_removes_session_url_and_ignores_late_events() {
             .iter()
             .all(|package| package.display_name != url)
     );
+}
+
+#[test]
+fn deleting_backpressured_url_cancels_its_pending_request() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::channel(1);
+    url_tx
+        .try_send(crate::tui::event::DownloadRequest::SyncPendingOrder {
+            file_ids: Vec::new(),
+        })
+        .expect("queue filler should be admitted");
+    app.url_tx = url_tx;
+
+    let url = "https://mega.nz/folder/deleted-under-backpressure".to_string();
+    app.submit_url(url.clone());
+    assert!(app.pending_url_submissions.contains(&url));
+
+    app.handle_ui_action(UiAction::DeleteFile(url.clone().into()));
+    assert!(!app.pending_url_submissions.contains(&url));
+
+    let _ = url_rx.try_recv().expect("queue filler should be removable");
+    app.retry_pending_requests();
+    assert!(url_rx.try_recv().is_err());
+}
+
+#[test]
+fn deleting_backpressured_file_cancels_its_pending_request() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::channel(1);
+    url_tx
+        .try_send(crate::tui::event::DownloadRequest::SyncPendingOrder {
+            file_ids: Vec::new(),
+        })
+        .expect("queue filler should be admitted");
+    app.url_tx = url_tx;
+
+    let source_url = "https://mega.nz/folder/deleted-file-under-backpressure";
+    let file_id = crate::core::FileId::from("deleted-episode.mkv");
+    resolve_package(&mut app, source_url, &[("deleted-episode.mkv", 128)]);
+    app.apply_core_event(CoreEvent::FileResetRequested {
+        file_id: file_id.clone(),
+    });
+    assert!(
+        app.queued_file_effects
+            .values()
+            .any(|file_ids| file_ids.contains(&file_id))
+    );
+
+    app.handle_ui_action(UiAction::DeleteFile(file_id.clone()));
+    assert!(
+        !app.queued_file_effects
+            .values()
+            .any(|file_ids| file_ids.contains(&file_id))
+    );
+
+    let _ = url_rx.try_recv().expect("queue filler should be removable");
+    app.retry_pending_requests();
+    assert!(url_rx.try_recv().is_err());
 }
 
 #[test]
@@ -3069,6 +3631,7 @@ fn expanded_package_orders_files_failed_downloading_queued_complete() {
         file_id: "error.bin".to_string().into(),
         message: "boom".to_string(),
     });
+    app.sort.key = SortKey::Status;
 
     assert_eq!(
         app.visible_rows(),
@@ -3234,21 +3797,22 @@ fn drain_download_events_collapses_visible_syncs_for_batched_files() {
     let mut app = test_app();
     crate::core::reducer::reset_snapshot_from_state_call_count();
     crate::core::model::reset_pending_file_ids_call_count();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     app.download_task_running = true;
     app.core_state
         .url_order
         .push("https://mega.nz/folder/resolved".to_string());
-    let (_download_tx, mut download_rx) = mpsc::unbounded_channel();
+    let (_download_tx, mut download_rx) = mpsc::channel(64);
     for (name, size) in [
         ("episode-1.mkv", 128),
         ("episode-2.mkv", 256),
         ("episode-3.mkv", 512),
     ] {
         _download_tx
-            .send(DownloadEvent::FileQueued(QueuedFile {
+            .try_send(DownloadEvent::FileQueued(QueuedFile {
                 id: name.to_string().into(),
+                attempt_id: 0,
                 size,
                 accounting: crate::core::FileAccounting::CurrentRun,
                 origin: crate::tui::event::FileOrigin {

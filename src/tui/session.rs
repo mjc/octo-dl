@@ -107,10 +107,6 @@ impl SessionAdapter {
     }
 
     pub(super) fn sync_for_shutdown(session: &mut SessionSnapshot, visible: &HashSet<String>) {
-        if session.status == SessionRunStatus::Completed {
-            return;
-        }
-
         for package in &mut session.packages {
             package.files.retain(|file| {
                 visible.contains(file.path.as_str()) || visible.contains(file.id.as_str())
@@ -326,4 +322,31 @@ fn remove_orphaned_urls(session: &mut SessionSnapshot, candidate_urls: &HashSet<
         !candidate_urls.contains(&entry.url) || referenced_urls.contains(&entry.url)
     });
     rebuild_packages(session);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn completed_session_with_pending_url_becomes_paused() {
+        let mut session = SessionSnapshot {
+            version: 6,
+            id: "session".to_string(),
+            created: Utc::now(),
+            status: SessionRunStatus::Completed,
+            config: crate::config::DownloadConfig::default(),
+            credentials: crate::core::SavedCredentials::encrypt("", "", None),
+            urls: vec![SessionUrlSnapshot {
+                url: "https://example.test/new".to_string(),
+                error: None,
+            }],
+            packages: Vec::new(),
+        };
+
+        SessionAdapter::sync_for_shutdown(&mut session, &HashSet::new());
+
+        assert_eq!(session.status, SessionRunStatus::Paused);
+    }
 }

@@ -34,7 +34,7 @@ fn apply_service_config_reports_download_directory_path() {
         .save(&config_path)
         .expect("config should be writable");
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(64);
     let mut app = App::new(9723, tx, true);
     let error = app
         .apply_service_config(&config_path)
@@ -47,6 +47,26 @@ fn apply_service_config_reports_download_directory_path() {
 }
 
 #[test]
+fn explicit_relative_config_path_remains_rooted_after_download_directory_change() {
+    let root = tempdir().expect("root directory should exist");
+    let downloads = tempdir().expect("download directory should exist");
+    let _cwd = CurrentDirGuard::set(root.path());
+    let config_path = root.path().join("config.toml");
+    let mut config = ServiceConfig::load_or_create(&config_path).expect("config should exist");
+    config.download.path = Some(downloads.path().display().to_string());
+    config.save(&config_path).expect("config should save");
+
+    let (tx, _rx) = mpsc::channel(64);
+    let relative_path = std::path::Path::new("config.toml");
+    let _app = App::new_with_optional_service_config(tx, true, Some(relative_path), 9723)
+        .expect("app should initialize");
+
+    let saved = ServiceConfig::load(&config_path).expect("original config should remain readable");
+    assert!(saved.api.api_key.is_some());
+    assert!(!downloads.path().join("config.toml").exists());
+}
+
+#[test]
 fn persist_login_credentials_creates_default_config_file() {
     let dir = tempdir().expect("temp dir should exist");
     let _guard = StateDirectoryGuard::set(dir.path());
@@ -56,7 +76,7 @@ fn persist_login_credentials_creates_default_config_file() {
     config.download.path = Some(dir.path().join("downloads").to_string_lossy().into_owned());
     config.save(&config_path).expect("config should save");
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(64);
     let (mut app, _host, _port) =
         App::new_with_optional_service_config(tx, true, None, 9723).expect("app should initialize");
     assert!(app.login.set_credentials(
@@ -96,11 +116,12 @@ fn new_without_explicit_config_loads_default_saved_credentials() {
         mfa: "654321".to_string(),
         saved_session: None,
     };
+    config.download.path = Some(dir.path().join("downloads").display().to_string());
     config.download.path = Some(dir.path().join("downloads").to_string_lossy().into_owned());
     config.credentials.encrypt_in_place();
     config.save(&config_path).expect("config should save");
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(64);
     let (app, _host, _port) =
         App::new_with_optional_service_config(tx, true, None, 9723).expect("app should initialize");
 
@@ -117,7 +138,7 @@ fn new_without_explicit_config_loads_default_saved_credentials() {
 fn interactive_startup_defers_auto_login_until_terminal_draws() {
     let dir = tempdir().expect("state dir should exist");
     let _guard = StateDirectoryGuard::set(dir.path());
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(64);
     let mut app = App::new(9723, tx, true);
     assert!(app.login.set_credentials(
         "saved@example.com".to_string(),
@@ -145,10 +166,11 @@ fn persist_login_credentials_preserves_existing_credentials_when_only_session_ch
         mfa: String::new(),
         saved_session: None,
     };
+    config.download.path = Some(dir.path().join("downloads").display().to_string());
     config.credentials.encrypt_in_place();
     config.save(&config_path).expect("config should save");
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(64);
     let (mut app, _host, _port) =
         App::new_with_optional_service_config(tx, true, None, 9723).expect("app should initialize");
     app.saved_mega_session = Some(SavedMegaSession::encrypt(
@@ -193,10 +215,11 @@ fn new_without_explicit_config_loads_saved_mega_session() {
             "serialized-session",
         )),
     };
+    config.download.path = Some(dir.path().join("downloads").display().to_string());
     config.credentials.encrypt_in_place();
     config.save(&config_path).expect("config should save");
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(64);
     let (app, _host, _port) =
         App::new_with_optional_service_config(tx, true, None, 9723).expect("app should initialize");
 
@@ -211,7 +234,7 @@ fn new_without_explicit_config_loads_saved_mega_session() {
 
 #[test]
 fn deferred_auto_login_waits_for_idle_before_showing_popup() {
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(64);
     let mut app = App::new(9723, tx, true);
 
     app.schedule_auto_login(NoCredentialsFallback::ShowPopup);
@@ -226,7 +249,7 @@ fn deferred_auto_login_waits_for_idle_before_showing_popup() {
 
 #[test]
 fn disabled_shared_state_skips_initial_dashboard_snapshot() {
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(64);
     let app = App::new(9723, tx, true);
 
     let SharedStateChannels {
@@ -276,7 +299,7 @@ fn implicit_cwd_template_falls_back_to_state_config_credentials() {
         .save(&cwd_config_path)
         .expect("cwd config should save");
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(64);
     let (app, _host, _port) =
         App::new_with_optional_service_config(tx, true, None, 9723).expect("app should initialize");
 

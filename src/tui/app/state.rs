@@ -14,6 +14,9 @@ use super::persistence::{SESSION_SAVE_DEBOUNCE, SessionPersistenceError};
 use super::{App, FileStatus, SessionAdapter};
 use crate::tui::event::DownloadRequest;
 
+// File IDs are filesystem-derived and cannot contain NUL, so this remains an
+// internal-only marker in the existing pending-effect map. It is removed
+// before a ResumeFileIds request is constructed.
 fn core_event_requires_visible_sync(event: &CoreEvent) -> bool {
     !matches!(
         event,
@@ -37,6 +40,13 @@ fn core_event_requires_pending_sync(event: &CoreEvent) -> bool {
             | CoreEvent::FileMoveRequested { .. }
             | CoreEvent::RestartReconciled { .. }
     )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RequestDispatchOutcome {
+    Accepted,
+    Backpressured(DownloadRequest),
+    Closed(DownloadRequest),
 }
 
 #[derive(Clone, Copy)]
@@ -65,6 +75,34 @@ impl CoreApplyPolicy {
 }
 
 impl App {
+    pub(crate) fn try_dispatch_request(&self, request: DownloadRequest) -> RequestDispatchOutcome {
+        match self.url_tx.try_send(request) {
+            Ok(()) => RequestDispatchOutcome::Accepted,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(request)) => {
+                RequestDispatchOutcome::Backpressured(request)
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(request)) => {
+                RequestDispatchOutcome::Closed(request)
+            }
+        }
+    }
+
+    pub(crate) fn report_request_dispatch_failure(
+        &mut self,
+        outcome: &RequestDispatchOutcome,
+        action: &str,
+    ) {
+        self.status = match outcome {
+            RequestDispatchOutcome::Accepted => return,
+            RequestDispatchOutcome::Backpressured(_) => {
+                format!("{action} is waiting: request queue is full")
+            }
+            RequestDispatchOutcome::Closed(_) => {
+                format!("{action} unavailable: download worker is stopped")
+            }
+        };
+    }
+
     pub(crate) fn visible_file(&self, file_id: &FileId) -> Option<&crate::tui::app::FileEntry> {
         let &visible_index = self.visible_file_positions.get(file_id)?;
         self.files.get(visible_index)
@@ -199,15 +237,20 @@ impl App {
     }
 
     fn apply_core_effects(&mut self, effects: CoreEffects, should_sync_pending: bool) {
+        self.flush_pending_url_submissions();
         let mut queued_file_map = std::mem::take(&mut self.queued_file_effects);
-        queued_file_map.clear();
         for effect in effects {
             match effect {
                 CoreEffect::PersistSession(snapshot) => {
                     let _ = self.persist_core_session_snapshot(snapshot);
                 }
                 CoreEffect::EnqueueUrlResolution { url } => {
-                    let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
+                    let outcome =
+                        self.try_dispatch_request(DownloadRequest::SubmitUrl { url: url.clone() });
+                    if !matches!(outcome, RequestDispatchOutcome::Accepted) {
+                        self.pending_url_submissions.insert(url);
+                        self.report_request_dispatch_failure(&outcome, "URL submission");
+                    }
                 }
                 CoreEffect::DeleteOutputArtifacts { path } => {
                     super::super::download::schedule_output_artifact_delete(path);
@@ -241,12 +284,39 @@ impl App {
         self.sync_scheduler_pending_order(should_sync_pending);
     }
 
+    fn flush_pending_url_submissions(&mut self) {
+        let pending = self
+            .pending_url_submissions
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for url in pending {
+            match self.try_dispatch_request(DownloadRequest::SubmitUrl { url: url.clone() }) {
+                RequestDispatchOutcome::Accepted => {
+                    self.pending_url_submissions.remove(&url);
+                }
+                outcome => {
+                    self.report_request_dispatch_failure(&outcome, "URL submission");
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Retry requests retained after bounded-queue backpressure.
+    pub(crate) fn retry_pending_requests(&mut self) {
+        self.apply_core_effects(CoreEffects::new(), false);
+    }
+
     fn enqueue_batched_file_downloads(
         &mut self,
         queued_file_map: &mut IndexMap<String, Vec<FileId>>,
     ) {
         for (source_url, file_ids) in queued_file_map.iter_mut() {
             if file_ids.is_empty() {
+                continue;
+            }
+            if self.pending_url_submissions.contains(source_url) {
                 continue;
             }
             let attempt_ids = file_ids
@@ -259,16 +329,22 @@ impl App {
                         .map(|attempt_id| (file_id.clone(), attempt_id))
                 })
                 .collect();
-            let _ = self.url_tx.send(DownloadRequest::ResumeFileIds {
+            let outcome = self.try_dispatch_request(DownloadRequest::ResumeFileIds {
                 source_url: source_url.clone(),
-                file_ids: std::mem::take(file_ids),
+                file_ids: file_ids.clone(),
                 attempt_ids,
             });
+            if matches!(outcome, RequestDispatchOutcome::Accepted) {
+                file_ids.clear();
+            } else {
+                self.report_request_dispatch_failure(&outcome, "File download");
+            }
         }
+        queued_file_map.retain(|_, file_ids| !file_ids.is_empty());
     }
 
     fn sync_scheduler_pending_order(&mut self, should_sync_pending: bool) {
-        if !should_sync_pending {
+        if !should_sync_pending && !self.pending_scheduler_pending_order_sync {
             return;
         }
         if self.scheduler_pending_sync_defer_depth > 0 {
@@ -280,9 +356,18 @@ impl App {
 
     pub(super) fn flush_scheduler_pending_order(&mut self) {
         if self.download_task_running {
-            let _ = self.url_tx.send(DownloadRequest::SyncPendingOrder {
+            let outcome = self.try_dispatch_request(DownloadRequest::SyncPendingOrder {
                 file_ids: self.core_state.pending_file_ids(),
             });
+            match outcome {
+                RequestDispatchOutcome::Accepted => {
+                    self.pending_scheduler_pending_order_sync = false;
+                }
+                outcome => {
+                    self.pending_scheduler_pending_order_sync = true;
+                    self.report_request_dispatch_failure(&outcome, "Pending-order sync");
+                }
+            }
         }
     }
 
@@ -434,7 +519,12 @@ impl App {
                 .any(|file| file.source_url == *url);
             if !has_files_for_url {
                 self.queue_url_placeholder(url.clone());
-                let _ = self.url_tx.send(DownloadRequest::SubmitUrl { url });
+                let outcome =
+                    self.try_dispatch_request(DownloadRequest::SubmitUrl { url: url.clone() });
+                if !matches!(outcome, RequestDispatchOutcome::Accepted) {
+                    self.pending_url_submissions.insert(url.clone());
+                    self.report_request_dispatch_failure(&outcome, "URL resume");
+                }
             }
         }
         self.save_session(session);

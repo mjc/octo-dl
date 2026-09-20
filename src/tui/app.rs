@@ -39,15 +39,19 @@ use crate::core::{
 };
 use crate::tui::dashboard::DashboardUiMode;
 
+pub(crate) use self::actions::RetryTarget;
 use self::persistence::SessionPersistence;
 pub(crate) use self::progress::FileUiState;
 use self::progress::TransferRate;
+pub(crate) use self::types::{
+    ConfigActivation, ConfigPersistence, ConfigUpdateOutcome, ConfigUpdateRejection,
+    SharedStateChannels, TransientRow, VisibleFileContext,
+};
 pub use self::types::{
     ConfigField, ConfigState, ConfirmAction, FileEntry, FileStatus, LoginState,
     NoCredentialsFallback, Popup, QuitPolicy, SharedAppState, SortDirection, SortKey, SortState,
     UiAction,
 };
-pub(crate) use self::types::{SharedStateChannels, TransientRow, VisibleFileContext};
 
 use super::event::DownloadRequest;
 use super::event::{DownloadEvent, QueuedFile, TokenMessage};
@@ -69,6 +73,7 @@ struct VisibleRowsCacheKey {
     expanded_hash: u64,
     sort_key: u8,
     sort_direction: u8,
+    content_hash: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -220,8 +225,12 @@ pub struct App {
     dashboard_binary_cache: Bytes,
     pub(crate) visible_file_positions: VisibleFilePositions,
     pub(crate) overlay_files: IndexMap<FileId, TransientRow>,
+    /// URL submissions removed by the user; late resolver events must not
+    /// recreate their transient rows.
+    pub(crate) deleted_url_tombstones: FxHashSet<String>,
     pub(crate) file_ui: FileUiMap,
     pub(crate) queued_file_effects: IndexMap<String, Vec<FileId>>,
+    pub(crate) pending_url_submissions: rustc_hash::FxHashSet<String>,
     pub file_list_state: ListState,
     pub expanded_packages: ExpandedPackages,
     pub sort: SortState,
@@ -244,19 +253,19 @@ pub struct App {
     // Config
     pub config: ConfigState,
     // Channels
-    pub event_tx: mpsc::UnboundedSender<DownloadEvent>,
+    pub event_tx: super::event::DownloadEventSender,
     /// Always valid — URLs buffer in the channel until the download task starts.
-    pub url_tx: mpsc::UnboundedSender<DownloadRequest>,
+    pub url_tx: mpsc::Sender<DownloadRequest>,
     /// Taken by `start_download_task` to give the receiver to the download task.
-    pub(super) url_rx: Option<mpsc::UnboundedReceiver<DownloadRequest>>,
+    pub(super) url_rx: Option<mpsc::Receiver<DownloadRequest>>,
     /// Broadcasts pause state changes to the background download task.
     pub pause_tx: watch::Sender<bool>,
     /// Taken by `start_download_task` to give the receiver to the download task.
     pub(super) pause_rx: Option<watch::Receiver<bool>>,
     /// Always valid — tokens arrive once the download task is running.
-    pub token_rx: mpsc::UnboundedReceiver<TokenMessage>,
+    pub token_rx: mpsc::Receiver<TokenMessage>,
     /// Taken by `start_download_task` to give the sender to the download task.
-    pub(super) token_tx: Option<mpsc::UnboundedSender<TokenMessage>>,
+    pub(super) token_tx: Option<mpsc::Sender<TokenMessage>>,
     /// Receives the authenticated client from the login task.
     pub client_rx: Option<tokio::sync::oneshot::Receiver<(mega::Client, reqwest::Client)>>,
     pub(super) download_task_running: bool,
@@ -341,15 +350,46 @@ impl App {
     fn visible_rows_cache_key(&self) -> VisibleRowsCacheKey {
         let mut expanded = self.expanded_packages.iter().copied().collect::<Vec<_>>();
         expanded.sort_unstable();
-        let mut hasher = DefaultHasher::new();
-        expanded.hash(&mut hasher);
+        let mut expanded_hasher = DefaultHasher::new();
+        expanded.hash(&mut expanded_hasher);
+        let expanded_hash = expanded_hasher.finish();
+        let mut content_hasher = DefaultHasher::new();
+        for file in &self.files {
+            file.id.hash(&mut content_hasher);
+            file.name.hash(&mut content_hasher);
+            file.size.hash(&mut content_hasher);
+            file.downloaded.hash(&mut content_hasher);
+            match &file.status {
+                FileStatus::Queued => 0_u8.hash(&mut content_hasher),
+                FileStatus::Downloading => 1_u8.hash(&mut content_hasher),
+                FileStatus::Complete => 2_u8.hash(&mut content_hasher),
+                FileStatus::Error(message) => {
+                    3_u8.hash(&mut content_hasher);
+                    message.hash(&mut content_hasher);
+                }
+            }
+        }
+        for (package_id, package) in &self.core_state.packages {
+            package_id.hash(&mut content_hasher);
+            package.display_name.hash(&mut content_hasher);
+            package.error.hash(&mut content_hasher);
+            match package.status() {
+                crate::core::PackageStatus::Downloading => 0_u8.hash(&mut content_hasher),
+                crate::core::PackageStatus::Failed => 1_u8.hash(&mut content_hasher),
+                crate::core::PackageStatus::Queued => 2_u8.hash(&mut content_hasher),
+                crate::core::PackageStatus::Partial => 3_u8.hash(&mut content_hasher),
+                crate::core::PackageStatus::Complete => 4_u8.hash(&mut content_hasher),
+                crate::core::PackageStatus::Pending => 5_u8.hash(&mut content_hasher),
+            }
+        }
+        let content_hash = content_hasher.finish();
 
         VisibleRowsCacheKey {
             files_len: self.files.len(),
             core_files_len: self.core_state.files.len(),
             core_packages_len: self.core_state.packages.len(),
             overlay_files_len: self.overlay_files.len(),
-            expanded_hash: hasher.finish(),
+            expanded_hash,
             sort_key: match self.sort.key {
                 SortKey::Queue => 0,
                 SortKey::Status => 1,
@@ -360,6 +400,7 @@ impl App {
                 SortDirection::Asc => 0,
                 SortDirection::Desc => 1,
             },
+            content_hash,
         }
     }
 
