@@ -6,22 +6,50 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use futures_util::StreamExt as _;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::{HeaderMap, HeaderValue};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        Error as WebSocketError, Message,
+        client::IntoClientRequest,
+        http::{HeaderMap, HeaderValue, Request},
+    },
+};
 
 use super::dashboard::{
     AttachedDashboard, DashboardChrome, DashboardUiMode, DownloadDashboardState,
 };
 use super::draw::draw_dashboard;
 use super::terminal::wait_for_shutdown_signal;
-use super::terminal_support::{TerminalGuard, TerminalPanicHookGuard, terminal_input_channel};
+use super::terminal_support::{
+    TerminalGuard, TerminalInputError, TerminalPanicHookGuard, finish_terminal_lifecycle,
+    terminal_input_channel,
+};
+use tokio_util::sync::CancellationToken;
 
 const DASHBOARD_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const DASHBOARD_READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
 enum DashboardReaderMessage {
     State(DownloadDashboardState),
     Status(String),
+    Fatal {
+        kind: io::ErrorKind,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttachConfig {
+    pub api_key: Option<String>,
+}
+
+impl AttachConfig {
+    #[must_use]
+    pub fn from_api_key(api_key: Option<String>) -> Self {
+        Self { api_key }
+    }
 }
 
 #[must_use]
@@ -42,16 +70,15 @@ pub fn socket_host(addr: SocketAddr) -> String {
     addr.ip().to_string()
 }
 
-pub async fn run_attached_dashboard(addr: SocketAddr, api_key: Option<String>) -> io::Result<()> {
+pub async fn run_attached_dashboard(addr: SocketAddr, config: AttachConfig) -> io::Result<()> {
     let panic_hook_guard = TerminalPanicHookGuard::install();
     let guard = TerminalGuard::new()?;
-    let result = run_attached_dashboard_loop(addr, api_key).await;
+    let result = run_attached_dashboard_loop(addr, config).await;
     drop(panic_hook_guard);
-    drop(guard);
-    result
+    finish_terminal_lifecycle(result, guard)
 }
 
-async fn run_attached_dashboard_loop(addr: SocketAddr, api_key: Option<String>) -> io::Result<()> {
+async fn run_attached_dashboard_loop(addr: SocketAddr, config: AttachConfig) -> io::Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -61,51 +88,12 @@ async fn run_attached_dashboard_loop(addr: SocketAddr, api_key: Option<String>) 
         ..AttachedDashboard::default()
     };
     let mut input = terminal_input_channel();
-    let (dashboard_tx, mut dashboard_rx) = spawn_dashboard_reader(addr, api_key.clone());
-    let shutdown = wait_for_shutdown_signal();
-    tokio::pin!(shutdown);
-    terminal.draw(|frame| {
-        if let Some(state) = &app.state {
-            draw_dashboard(
-                frame,
-                state,
-                &DashboardChrome::read_only(),
-                &mut app.list_state,
-            );
-        } else {
-            let mut state = DownloadDashboardState::empty(
-                DashboardUiMode::Attached,
-                false,
-                &app.status,
-                addr.port(),
-            );
-            state.status = app.status.clone();
-            draw_dashboard(
-                frame,
-                &state,
-                &DashboardChrome::read_only(),
-                &mut app.list_state,
-            );
-        }
-    })?;
-
-    loop {
-        tokio::select! {
-            () = &mut shutdown => app.should_quit = true,
-            Some(event) = input.recv() => handle_attached_input(
-                &mut app,
-                event,
-                addr,
-                api_key.clone(),
-                dashboard_tx.clone(),
-            ),
-            Some(message) = dashboard_rx.recv() => handle_dashboard_reader_message(&mut app, message),
-        }
-
-        if app.should_quit {
-            break;
-        }
-
+    let attach_api_key = config.api_key.clone();
+    let mut dashboard_reader = spawn_dashboard_reader(addr, config);
+    let loop_result = async {
+        let mut dashboard_error = None;
+        let shutdown = wait_for_shutdown_signal();
+        tokio::pin!(shutdown);
         terminal.draw(|frame| {
             if let Some(state) = &app.state {
                 draw_dashboard(
@@ -117,7 +105,7 @@ async fn run_attached_dashboard_loop(addr: SocketAddr, api_key: Option<String>) 
             } else {
                 let mut state = DownloadDashboardState::empty(
                     DashboardUiMode::Attached,
-                    false,
+                    true,
                     &app.status,
                     addr.port(),
                 );
@@ -130,24 +118,121 @@ async fn run_attached_dashboard_loop(addr: SocketAddr, api_key: Option<String>) 
                 );
             }
         })?;
-    }
 
-    terminal.show_cursor()?;
-    Ok(())
+        loop {
+            tokio::select! {
+                () = &mut shutdown => app.should_quit = true,
+                input_result = input.recv_result() => {
+                    if let Err(error) = handle_attached_input_result(
+                        &mut app,
+                        input_result,
+                        addr,
+                        attach_api_key.clone(),
+                        dashboard_reader.status_tx.clone(),
+                    ) {
+                        dashboard_error = Some(error);
+                    }
+                }
+                message = dashboard_reader.receiver.recv() => match message {
+                    Some(DashboardReaderMessage::Fatal { kind, message }) => {
+                        app.status = message.clone();
+                        dashboard_error = Some(io::Error::new(kind, message));
+                        app.should_quit = true;
+                    }
+                    Some(message) => handle_dashboard_reader_message(&mut app, message),
+                    None => {
+                        let error = io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "dashboard reader stopped unexpectedly",
+                        );
+                        app.status = error.to_string();
+                        dashboard_error = Some(error);
+                        app.should_quit = true;
+                    }
+                },
+            }
+
+            if app.should_quit {
+                break;
+            }
+
+            terminal.draw(|frame| {
+                if let Some(state) = &app.state {
+                    draw_dashboard(
+                        frame,
+                        state,
+                        &DashboardChrome::read_only(),
+                        &mut app.list_state,
+                    );
+                } else {
+                    let mut state = DownloadDashboardState::empty(
+                        DashboardUiMode::Attached,
+                        true,
+                        &app.status,
+                        addr.port(),
+                    );
+                    state.status = app.status.clone();
+                    draw_dashboard(
+                        frame,
+                        &state,
+                        &DashboardChrome::read_only(),
+                        &mut app.list_state,
+                    );
+                }
+            })?;
+        }
+
+        terminal.show_cursor()?;
+        dashboard_error.map_or(Ok(()), Err)
+    }
+    .await;
+
+    let reader_result = dashboard_reader.shutdown().await;
+    match (loop_result, reader_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(loop_error), Err(reader_error)) => Err(io::Error::other(format!(
+            "{loop_error}; dashboard reader cleanup failed: {reader_error}"
+        ))),
+    }
 }
 
-fn spawn_dashboard_reader(
-    addr: SocketAddr,
-    api_key: Option<String>,
-) -> (
-    tokio::sync::mpsc::UnboundedSender<DashboardReaderMessage>,
-    tokio::sync::mpsc::UnboundedReceiver<DashboardReaderMessage>,
-) {
+struct DashboardReader {
+    receiver: tokio::sync::mpsc::UnboundedReceiver<DashboardReaderMessage>,
+    status_tx: tokio::sync::mpsc::UnboundedSender<DashboardReaderMessage>,
+    cancel: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl DashboardReader {
+    async fn shutdown(self) -> io::Result<()> {
+        self.cancel.cancel();
+        let mut task = self.task;
+        match timeout(DASHBOARD_READER_SHUTDOWN_TIMEOUT, &mut task).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(io::Error::other(format!(
+                "dashboard reader task failed: {error}"
+            ))),
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "dashboard reader did not shut down before the deadline",
+                ))
+            }
+        }
+    }
+}
+
+fn spawn_dashboard_reader(addr: SocketAddr, config: AttachConfig) -> DashboardReader {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let reader_tx = tx.clone();
-    tokio::spawn(async move {
+    let status_tx = tx.clone();
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
         let ws_url = format!("ws://{addr}/api/dashboard");
-        loop {
+        while !task_cancel.is_cancelled() {
             if tx
                 .send(DashboardReaderMessage::Status(format!(
                     "Connecting to {addr}"
@@ -156,8 +241,15 @@ fn spawn_dashboard_reader(
             {
                 break;
             }
-            match dashboard_reader_session(&ws_url, api_key.as_deref(), &tx).await {
+            match dashboard_reader_session(&ws_url, &config, &tx, &task_cancel).await {
                 Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    let _ = tx.send(DashboardReaderMessage::Fatal {
+                        kind: error.kind(),
+                        message: error.to_string(),
+                    });
+                    break;
+                }
                 Err(error) => {
                     if tx
                         .send(DashboardReaderMessage::Status(format!(
@@ -169,27 +261,41 @@ fn spawn_dashboard_reader(
                     }
                 }
             }
-            tokio::time::sleep(DASHBOARD_RECONNECT_DELAY).await;
+            tokio::select! {
+                _ = task_cancel.cancelled() => break,
+                _ = tokio::time::sleep(DASHBOARD_RECONNECT_DELAY) => {}
+            }
         }
     });
-    (reader_tx, rx)
+    DashboardReader {
+        receiver: rx,
+        status_tx,
+        cancel,
+        task,
+    }
 }
 
 async fn dashboard_reader_session(
     ws_url: &str,
-    api_key: Option<&str>,
+    config: &AttachConfig,
     tx: &tokio::sync::mpsc::UnboundedSender<DashboardReaderMessage>,
+    cancel: &CancellationToken,
 ) -> io::Result<()> {
-    let mut request = ws_url
-        .into_client_request()
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    request.headers_mut().extend(api_headers(api_key)?);
-    let (mut socket, _) = connect_async(request)
-        .await
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    let request = dashboard_request(ws_url, config)?;
+    let (mut socket, _) = tokio::select! {
+        _ = cancel.cancelled() => return Ok(()),
+        result = connect_async(request) => result
+            .map_err(|error| dashboard_connection_error(error, config.api_key.is_some()))?,
+    };
     let _ = tx.send(DashboardReaderMessage::Status("Connected".to_string()));
 
-    while let Some(message) = socket.next().await {
+    loop {
+        let Some(message) = (tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            message = socket.next() => message,
+        }) else {
+            break;
+        };
         let message = message.map_err(|error| io::Error::other(error.to_string()))?;
         let Some(mut state) = dashboard_state_from_message(message)? else {
             continue;
@@ -202,6 +308,57 @@ async fn dashboard_reader_session(
         io::ErrorKind::UnexpectedEof,
         "dashboard websocket closed",
     ))
+}
+
+fn handle_attached_input_result(
+    app: &mut AttachedDashboard,
+    result: Result<Event, TerminalInputError>,
+    addr: SocketAddr,
+    api_key: Option<String>,
+    status_tx: tokio::sync::mpsc::UnboundedSender<DashboardReaderMessage>,
+) -> io::Result<()> {
+    match result {
+        Ok(event) => {
+            handle_attached_input(app, event, addr, api_key, status_tx);
+            Ok(())
+        }
+        Err(error) => {
+            let error = error.into_io_error();
+            app.status = format!("Attached dashboard input failed: {error}");
+            app.should_quit = true;
+            Err(error)
+        }
+    }
+}
+
+fn dashboard_request(ws_url: &str, config: &AttachConfig) -> io::Result<Request<()>> {
+    let mut request = ws_url
+        .into_client_request()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    if let Some(api_key) = config.api_key.as_deref() {
+        let header = HeaderValue::from_str(api_key).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid API key for dashboard attach: {error}"),
+            )
+        })?;
+        request.headers_mut().insert("x-api-key", header);
+    }
+    Ok(request)
+}
+
+fn dashboard_connection_error(error: WebSocketError, api_key_supplied: bool) -> io::Error {
+    if let WebSocketError::Http(response) = &error
+        && matches!(response.status().as_u16(), 401 | 403)
+    {
+        let message = if api_key_supplied {
+            "dashboard authentication failed: the supplied API key was rejected"
+        } else {
+            "dashboard authentication required; supply --api-key or configure api.api_key"
+        };
+        return io::Error::new(io::ErrorKind::PermissionDenied, message);
+    }
+    io::Error::other(error.to_string())
 }
 
 fn dashboard_state_from_message(message: Message) -> io::Result<Option<DownloadDashboardState>> {
@@ -232,6 +389,10 @@ fn handle_dashboard_reader_message(app: &mut AttachedDashboard, message: Dashboa
                 state.status = app.status.clone();
                 state.ui_mode = DashboardUiMode::Attached;
             }
+        }
+        DashboardReaderMessage::Fatal { message, .. } => {
+            app.status = message;
+            app.should_quit = true;
         }
     }
 }

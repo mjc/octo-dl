@@ -530,7 +530,7 @@ fn parse_args() -> CliConfig {
                 std::process::exit(0);
             }
             // Skip global flags handled by the unified binary
-            "--host" | "--config" | "--ui" | "--tui-listen" | "--tui-attach" => {
+            "--host" | "--config" | "--ui" | "--tui-listen" | "--tui-attach" | "--api-key" => {
                 let _ = args.next(); // consume the value
             }
             "--tui" | "--headless" => {}

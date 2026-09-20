@@ -3,15 +3,18 @@ use super::super::dashboard::{
     DashboardFileRow, DashboardFileStatus, DashboardPackageRow, DashboardUiMode,
     DownloadDashboardState,
 };
-use super::super::event::DownloadEvent;
+use super::super::event::{DownloadEvent, DownloadEventSender};
 use super::helpers::{self, infer_host, require_api_key};
 use super::selection;
 use super::*;
 use crate::test_support::package_id;
+use axum::body::to_bytes;
 use axum::http::{HeaderValue, StatusCode};
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::net::TcpListener;
 use tempfile::tempdir;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 #[derive(Deserialize)]
 struct TestSnapshotFile {
@@ -36,8 +39,8 @@ struct TestSnapshotState {
     packages: Vec<TestSnapshotPackage>,
 }
 
-fn state_without_shared() -> (ApiState, mpsc::UnboundedReceiver<DownloadEvent>) {
-    let (tx, rx) = mpsc::unbounded_channel();
+fn state_without_shared() -> (ApiState, mpsc::Receiver<DownloadEvent>) {
+    let (tx, rx) = DownloadEventSender::channel();
     (
         ApiState {
             tx,
@@ -51,8 +54,35 @@ fn state_without_shared() -> (ApiState, mpsc::UnboundedReceiver<DownloadEvent>) 
     )
 }
 
-fn state_with_snapshot(snapshot: &str) -> (ApiState, mpsc::UnboundedReceiver<UiAction>) {
+fn state_with_snapshot(snapshot: &str) -> (ApiState, mpsc::Receiver<UiAction>) {
     state_with_snapshot_options(snapshot, None, None)
+}
+
+fn state_with_snapshot_and_sender(
+    snapshot: &str,
+) -> (
+    ApiState,
+    mpsc::Receiver<UiAction>,
+    watch::Sender<bytes::Bytes>,
+) {
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
+    let (action_tx, action_rx) = mpsc::channel(64);
+    let (state_tx, state_rx) = watch::channel(snapshot_bytes_from_json(snapshot));
+    (
+        ApiState {
+            tx: event_tx,
+            host: "127.0.0.1".to_string(),
+            shared: Some(SharedAppState {
+                action_tx,
+                state_rx,
+            }),
+            remote_tui_stream: false,
+            bookmarklet_host: None,
+            api_key: None,
+        },
+        action_rx,
+        state_tx,
+    )
 }
 
 fn state_with_dashboard(
@@ -60,9 +90,9 @@ fn state_with_dashboard(
     packages: Vec<DashboardPackageRow>,
     bookmarklet_host: Option<String>,
     api_key: Option<String>,
-) -> (ApiState, mpsc::UnboundedReceiver<UiAction>) {
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let (action_tx, action_rx) = mpsc::unbounded_channel();
+) -> (ApiState, mpsc::Receiver<UiAction>) {
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
+    let (action_tx, action_rx) = mpsc::channel(64);
     let mut state = DownloadDashboardState::empty(DashboardUiMode::Tui, false, "", 9723);
     state.files = files;
     state.packages = packages;
@@ -87,9 +117,7 @@ fn state_with_dashboard(
     )
 }
 
-fn state_with_file_rows(
-    files: Vec<(String, String)>,
-) -> (ApiState, mpsc::UnboundedReceiver<UiAction>) {
+fn state_with_file_rows(files: Vec<(String, String)>) -> (ApiState, mpsc::Receiver<UiAction>) {
     state_with_dashboard(
         files
             .into_iter()
@@ -112,7 +140,7 @@ fn state_with_file_rows(
 
 fn state_with_package_rows(
     packages: Vec<(String, String, String)>,
-) -> (ApiState, mpsc::UnboundedReceiver<UiAction>) {
+) -> (ApiState, mpsc::Receiver<UiAction>) {
     state_with_dashboard(
         Vec::new(),
         packages
@@ -142,9 +170,9 @@ fn state_with_snapshot_options(
     snapshot: &str,
     bookmarklet_host: Option<String>,
     api_key: Option<String>,
-) -> (ApiState, mpsc::UnboundedReceiver<UiAction>) {
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let (action_tx, action_rx) = mpsc::unbounded_channel();
+) -> (ApiState, mpsc::Receiver<UiAction>) {
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
+    let (action_tx, action_rx) = mpsc::channel(64);
     let snapshot_bytes = snapshot_bytes_from_json(snapshot);
     let (_state_tx, state_rx) = watch::channel(snapshot_bytes);
     (
@@ -346,6 +374,51 @@ fn dispatch_urls_without_shared_state_sends_download_event() {
 }
 
 #[test]
+fn dispatch_urls_without_shared_state_reports_a_full_event_queue() {
+    let (tx, mut rx) = DownloadEventSender::channel_with_capacity(1);
+    let state = ApiState {
+        tx,
+        host: "127.0.0.1".to_string(),
+        shared: None,
+        remote_tui_stream: false,
+        bookmarklet_host: None,
+        api_key: None,
+    };
+    state
+        .tx
+        .send(DownloadEvent::StatusMessage("occupy queue".to_string()))
+        .expect("test event should occupy the queue");
+
+    assert_eq!(
+        helpers::dispatch_urls(&state, vec!["https://mega.nz/file/full#key".to_string()]),
+        helpers::DispatchOutcome::Unavailable
+    );
+    assert!(matches!(
+        rx.try_recv().expect("occupying event should remain queued"),
+        DownloadEvent::StatusMessage(message) if message == "occupy queue"
+    ));
+}
+
+#[test]
+fn dispatch_urls_without_shared_state_reports_a_closed_event_queue() {
+    let (tx, rx) = DownloadEventSender::channel_with_capacity(1);
+    drop(rx);
+    let state = ApiState {
+        tx,
+        host: "127.0.0.1".to_string(),
+        shared: None,
+        remote_tui_stream: false,
+        bookmarklet_host: None,
+        api_key: None,
+    };
+
+    assert_eq!(
+        helpers::dispatch_urls(&state, vec!["https://mega.nz/file/closed#key".to_string()]),
+        helpers::DispatchOutcome::Unavailable
+    );
+}
+
+#[test]
 fn dispatch_urls_with_shared_state_sends_ui_action() {
     let (state, mut rx) = state_with_snapshot(r#"{"files":[]}"#);
     let urls = vec!["https://mega.nz/folder/abc#key".to_string()];
@@ -476,6 +549,54 @@ async fn reset_api_dispatches_file_action_with_api_key() {
 }
 
 #[tokio::test]
+async fn delete_rejects_a_name_shared_by_a_package_and_file() {
+    let package_id_str = package_id("pkg", "https://mega.nz/folder/pkg").to_string();
+    let (state, mut rx) = state_with_dashboard(
+        vec![DashboardFileRow {
+            id: "file-id".to_string(),
+            package_id: package_id_str.clone(),
+            name: "same-name".to_string(),
+            size: 1,
+            downloaded: 0,
+            speed: 0,
+            status: DashboardFileStatus::Queued,
+            package_label: Some("same-name".to_string()),
+        }],
+        vec![DashboardPackageRow {
+            id: package_id_str,
+            source_url: "https://mega.nz/folder/pkg".to_string(),
+            display_name: "same-name".to_string(),
+            status: crate::core::PackageStatus::Pending,
+            file_ids: vec!["file-id".to_string()],
+            present_files: 1,
+            completed_files: 0,
+            downloaded_bytes: 0,
+            total_bytes: 1,
+            percent: 0,
+            expanded: false,
+            folder_label: None,
+            error: None,
+        }],
+        None,
+        None,
+    );
+
+    let response = api_delete(
+        State(state),
+        HeaderMap::new(),
+        axum::Json(DeleteRequest {
+            id: None,
+            name: Some("same-name".to_string()),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn dashboard_url_submission_still_requires_configured_api_key() {
     let (state, mut rx) = state_with_snapshot_options(
         r#"{"files":[]}"#,
@@ -495,6 +616,155 @@ async fn dashboard_url_submission_still_requires_configured_api_key() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn mutation_routes_require_the_configured_api_key() {
+    let (state, mut action_rx) = state_with_snapshot_options(
+        r#"{"files":[]}"#,
+        Some("127.0.0.1".to_string()),
+        Some("secret".to_string()),
+    );
+    let port = TcpListener::bind("127.0.0.1:0")
+        .expect("test port should be available")
+        .local_addr()
+        .expect("test listener should have an address")
+        .port();
+    let server = tokio::spawn(run_api_server(
+        state.tx.clone(),
+        "127.0.0.1",
+        port,
+        Some("127.0.0.1"),
+        state.shared.clone(),
+        false,
+        state.api_key.clone(),
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/api/pause"))
+        .send()
+        .await
+        .expect("API server should accept the request");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(action_rx.try_recv().is_err());
+    server.abort();
+}
+
+#[test]
+fn sending_an_action_to_a_closed_runtime_reports_unavailability() {
+    let (state, action_rx) = state_with_snapshot(r#"{"files":[]}"#);
+    drop(action_rx);
+
+    let response = helpers::send_ui_action(&state, UiAction::TogglePause);
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn dashboard_websocket_answers_ping_without_waiting_for_state_change() {
+    let (state, _action_rx, _state_tx) = state_with_snapshot_and_sender(r#"{"files":[]}"#);
+    let port = TcpListener::bind("127.0.0.1:0")
+        .expect("test port should be available")
+        .local_addr()
+        .expect("test listener should have an address")
+        .port();
+    let server = tokio::spawn(run_api_server(
+        state.tx.clone(),
+        "127.0.0.1",
+        port,
+        Some("127.0.0.1"),
+        state.shared.clone(),
+        true,
+        state.api_key.clone(),
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/api/dashboard"))
+            .await
+            .expect("dashboard websocket should connect");
+    let _initial_snapshot = socket
+        .next()
+        .await
+        .expect("server should send an initial snapshot")
+        .expect("initial snapshot should be valid");
+
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Ping(
+            vec![1, 2, 3].into(),
+        ))
+        .await
+        .expect("client should send ping");
+    let pong = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Pong(payload))) => {
+                    break payload;
+                }
+                Some(_) => {}
+                None => panic!("dashboard websocket closed before pong"),
+            }
+        }
+    })
+    .await
+    .expect("server should answer ping while state is unchanged");
+
+    assert_eq!(pong.as_ref(), &[1, 2, 3]);
+    server.abort();
+}
+
+#[tokio::test]
+async fn api_startup_returns_bind_error_before_main_loop() {
+    let occupied = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
+
+    let result = start_api_server(
+        event_tx,
+        "127.0.0.1",
+        occupied
+            .local_addr()
+            .expect("listener should have an address")
+            .port(),
+        None,
+        None,
+        false,
+        None,
+    )
+    .await;
+
+    let error = match result {
+        Ok(_) => panic!("startup should fail while the port is occupied"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+}
+
+#[tokio::test]
+async fn api_shutdown_releases_port_before_owner_returns() {
+    let address = TcpListener::bind("127.0.0.1:0")
+        .expect("test listener should bind")
+        .local_addr()
+        .expect("listener should have an address");
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
+    let server = start_api_server(
+        event_tx,
+        "127.0.0.1",
+        address.port(),
+        None,
+        None,
+        false,
+        None,
+    )
+    .await
+    .expect("API server should start");
+
+    server
+        .shutdown()
+        .await
+        .expect("API server should stop cleanly");
+    TcpListener::bind(address).expect("owner should be able to rebind after shutdown");
 }
 
 #[tokio::test]
@@ -632,6 +902,48 @@ fn require_api_key_rejects_missing_or_wrong_key() {
     headers.insert("x-api-key", HeaderValue::from_static("wrong"));
     let wrong = require_api_key(&state, &headers).expect("wrong key should reject");
     assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn bookmarklet_discloses_configured_api_key_for_client_bootstrap() {
+    let (state, _rx) = state_with_dashboard(Vec::new(), Vec::new(), None, Some("secret".into()));
+
+    let response = bookmarklet_page(State(state), HeaderMap::new())
+        .await
+        .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body should be readable");
+    assert!(String::from_utf8_lossy(&body).contains("secret"));
+}
+
+#[tokio::test]
+async fn bookmarklet_uses_the_origin_visible_to_the_browser() {
+    let (state, _rx) = state_with_dashboard(
+        Vec::new(),
+        Vec::new(),
+        Some("trusted.example:9723".into()),
+        None,
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-forwarded-host",
+        HeaderValue::from_static("attacker.example"),
+    );
+    headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+
+    let response = bookmarklet_page(State(state), headers)
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body should be readable");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("https://attacker.example"));
+    assert!(!body.contains("trusted.example:9723"));
 }
 
 #[test]

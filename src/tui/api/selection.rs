@@ -6,6 +6,80 @@ use crate::tui::dashboard::DownloadDashboardState;
 
 use super::ApiState;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ActionTarget {
+    Package(PackageId),
+    File(FileId),
+}
+
+pub(super) fn resolve_action_target(
+    state: &ApiState,
+    id: Option<&str>,
+    name: Option<&str>,
+) -> Result<ActionTarget, Box<axum::response::Response>> {
+    let Some(selector) = id.or(name) else {
+        return Err(Box::new(
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({"error": "missing id or name"})),
+            )
+                .into_response(),
+        ));
+    };
+
+    let snapshot = snapshot_state(state)?;
+    let package_matches: Vec<_> = snapshot
+        .packages
+        .iter()
+        .filter(|package| {
+            id.is_some_and(|id| package.id == id)
+                || name.is_some_and(|name| package.display_name == name)
+        })
+        .collect();
+    let file_matches: Vec<_> = snapshot
+        .files
+        .iter()
+        .filter(|file| {
+            id.is_some_and(|id| file.id == id) || name.is_some_and(|name| file.name == name)
+        })
+        .collect();
+
+    match (package_matches.as_slice(), file_matches.as_slice()) {
+        ([package], []) => PackageId::from_str(&package.id)
+            .map(ActionTarget::Package)
+            .map_err(|_| invalid_package_id_response()),
+        ([], [file]) => Ok(ActionTarget::File(file.id.clone().into())),
+        ([], []) => Err(Box::new(
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({
+                    "error": format!("no package or file found for {selector}")
+                })),
+            )
+                .into_response(),
+        )),
+        _ => Err(Box::new(
+            (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({
+                    "error": "ambiguous selector; use an id"
+                })),
+            )
+                .into_response(),
+        )),
+    }
+}
+
+fn invalid_package_id_response() -> Box<axum::response::Response> {
+    Box::new(
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({"error": "invalid package id in app state"})),
+        )
+            .into_response(),
+    )
+}
+
 fn snapshot_state(
     state: &ApiState,
 ) -> Result<DownloadDashboardState, Box<axum::response::Response>> {
@@ -41,9 +115,7 @@ pub(super) fn resolve_package_id(
         return Ok(None);
     };
 
-    let Ok(snapshot) = snapshot_state(state) else {
-        return Ok(None);
-    };
+    let snapshot = snapshot_state(state)?;
 
     let matches: Vec<_> = snapshot
         .packages

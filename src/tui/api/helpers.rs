@@ -8,41 +8,79 @@ use super::super::app::UiAction;
 use super::super::event::DownloadEvent;
 use super::ApiState;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DispatchOutcome {
+    Accepted,
+    Noop,
+    Unavailable,
+}
+
+impl DispatchOutcome {
+    pub(super) fn error_response(self) -> Option<axum::response::Response> {
+        match self {
+            Self::Unavailable => Some(
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(serde_json::json!({
+                        "error": "interactive runtime unavailable"
+                    })),
+                )
+                    .into_response(),
+            ),
+            Self::Accepted | Self::Noop => None,
+        }
+    }
+}
+
 /// Sends a `UiAction` to the event loop, returning 503 if shared state is absent.
 pub(super) fn send_ui_action(state: &ApiState, action: UiAction) -> axum::response::Response {
-    state.shared.as_ref().map_or_else(
-        || {
-            (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "interactive state not enabled",
-            )
-                .into_response()
-        },
-        |shared| {
-            let _ = shared.action_tx.send(action);
-            axum::Json(serde_json::json!({"ok": true})).into_response()
-        },
-    )
+    let outcome = state
+        .shared
+        .as_ref()
+        .map_or(DispatchOutcome::Unavailable, |shared| {
+            shared
+                .action_tx
+                .try_send(action)
+                .map_or(DispatchOutcome::Unavailable, |_| DispatchOutcome::Accepted)
+        });
+
+    outcome.error_response().unwrap_or_else(|| {
+        let status = match outcome {
+            DispatchOutcome::Accepted => "accepted",
+            DispatchOutcome::Noop => "noop",
+            DispatchOutcome::Unavailable => unreachable!("unavailable has an error response"),
+        };
+        axum::Json(serde_json::json!({"status": status})).into_response()
+    })
 }
 
 /// Dispatches extracted URLs — via `UiAction` if shared state is available,
 /// otherwise directly as a `DownloadEvent`.
-pub(super) fn dispatch_urls(state: &ApiState, urls: Vec<String>) {
+pub(super) fn dispatch_urls(state: &ApiState, urls: Vec<String>) -> DispatchOutcome {
     if urls.is_empty() {
-        return;
+        return DispatchOutcome::Noop;
     }
     if let Some(ref shared) = state.shared {
-        let _ = shared.action_tx.send(UiAction::AddUrls(urls));
+        shared
+            .action_tx
+            .try_send(UiAction::AddUrls(urls))
+            .map_or(DispatchOutcome::Unavailable, |_| DispatchOutcome::Accepted)
     } else {
-        let _ = state.tx.send(DownloadEvent::UrlsReceived { urls });
+        state
+            .tx
+            .send(DownloadEvent::UrlsReceived { urls })
+            .map_or(DispatchOutcome::Unavailable, |_| DispatchOutcome::Accepted)
     }
 }
 
-pub(super) fn extract_and_dispatch_urls(state: &ApiState, text: &str) -> (Vec<String>, usize) {
+pub(super) fn extract_and_dispatch_urls(
+    state: &ApiState,
+    text: &str,
+) -> (Vec<String>, usize, DispatchOutcome) {
     let urls = extract_urls(text);
     let count = urls.len();
-    dispatch_urls(state, urls.clone());
-    (urls, count)
+    let outcome = dispatch_urls(state, urls.clone());
+    (urls, count, outcome)
 }
 
 pub(super) fn extract_urls_from_parse_payload(page: &str, fallback: &str) -> Vec<String> {

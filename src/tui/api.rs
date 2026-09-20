@@ -17,6 +17,8 @@ mod selection;
 #[cfg(test)]
 mod tests;
 
+use std::io;
+
 use axum::Router;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, State};
@@ -24,19 +26,73 @@ use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tokio::time::{Duration, timeout};
 use tower_http::cors::{Any, CorsLayer};
 
 use self::helpers::{infer_host, infer_origin, require_api_key, send_ui_action};
-use self::selection::{resolve_file_id, resolve_package_id};
+use self::selection::{ActionTarget, resolve_action_target};
 use super::app::{SharedAppState, UiAction};
 use super::bookmarklet;
-use super::event::DownloadEvent;
+use super::event::DownloadEventSender;
 pub const DEFAULT_API_PORT: u16 = 9723;
+const API_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(crate) struct ApiServerHandle {
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<io::Result<()>>>,
+}
+
+impl ApiServerHandle {
+    pub(crate) async fn shutdown(mut self) -> io::Result<()> {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+
+        let Some(task) = self.task.take() else {
+            return Ok(());
+        };
+        let mut task = task;
+        match timeout(API_SHUTDOWN_TIMEOUT, &mut task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(io::Error::other(format!(
+                "API server task failed while shutting down: {error}"
+            ))),
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "API server did not shut down before the deadline",
+                ))
+            }
+        }
+    }
+
+    pub(crate) async fn wait(&mut self) -> io::Result<()> {
+        let Some(task) = self.task.take() else {
+            return Ok(());
+        };
+        task.await
+            .map_err(|error| io::Error::other(format!("API server task failed: {error}")))?
+    }
+}
+
+impl Drop for ApiServerHandle {
+    fn drop(&mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct ApiState {
-    tx: mpsc::UnboundedSender<DownloadEvent>,
+    tx: DownloadEventSender,
     host: String,
     shared: Option<SharedAppState>,
     remote_tui_stream: bool,
@@ -120,7 +176,11 @@ async fn api_post_urls(
         return response;
     }
 
-    let (urls, count) = helpers::extract_and_dispatch_urls(&state, &payload.text);
+    let (urls, count, outcome) = helpers::extract_and_dispatch_urls(&state, &payload.text);
+    if let Some(response) = outcome.error_response() {
+        return response;
+    }
+
     axum::Json(UrlResponse { added: urls, count }).into_response()
 }
 
@@ -135,7 +195,10 @@ async fn api_parse_page(
 
     let urls = helpers::extract_urls_from_parse_payload(&payload.page, &payload.fallback);
     let count = urls.len();
-    helpers::dispatch_urls(&state, urls.clone());
+    if let Some(response) = helpers::dispatch_urls(&state, urls.clone()).error_response() {
+        return response;
+    }
+
     axum::Json(UrlResponse { added: urls, count }).into_response()
 }
 
@@ -160,6 +223,7 @@ async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> 
         &fallback_host,
         &api_key_header,
     ))
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -198,15 +262,42 @@ async fn dashboard_socket(
     mut socket: WebSocket,
     mut rx: tokio::sync::watch::Receiver<bytes::Bytes>,
 ) {
+    if send_dashboard_snapshot(&mut socket, &rx).await.is_err() {
+        return;
+    }
+
     loop {
-        let snapshot = rx.borrow().clone();
-        if socket.send(WsMessage::Binary(snapshot)).await.is_err() {
-            break;
-        }
-        if rx.changed().await.is_err() {
-            break;
+        tokio::select! {
+            changed = rx.changed() => {
+                if changed.is_err() || send_dashboard_snapshot(&mut socket, &rx).await.is_err() {
+                    break;
+                }
+            }
+            message = socket.recv() => {
+                match message {
+                    Some(Ok(WsMessage::Ping(payload))) => {
+                        if socket.send(WsMessage::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(WsMessage::Close(frame))) => {
+                        let _ = socket.send(WsMessage::Close(frame)).await;
+                        break;
+                    }
+                    Some(Ok(WsMessage::Pong(_))) | Some(Ok(WsMessage::Text(_))) | Some(Ok(WsMessage::Binary(_))) => {}
+                    Some(Err(_)) | None => break,
+                }
+            }
         }
     }
+}
+
+async fn send_dashboard_snapshot(
+    socket: &mut WebSocket,
+    rx: &tokio::sync::watch::Receiver<bytes::Bytes>,
+) -> Result<(), axum::Error> {
+    let snapshot = rx.borrow().clone();
+    socket.send(WsMessage::Binary(snapshot)).await
 }
 
 /// POST /api/login — submit login credentials to the shared runtime.
@@ -247,14 +338,9 @@ async fn api_delete(
     if let Some(response) = require_api_key(&state, &headers) {
         return response;
     }
-
-    match resolve_package_id(&state, payload.id.as_deref(), payload.name.as_deref()) {
-        Ok(Some(id)) => return send_ui_action(&state, UiAction::DeletePackage(id)),
-        Ok(None) => {}
-        Err(response) => return *response,
-    }
-    match resolve_file_id(&state, payload.id, payload.name) {
-        Ok(id) => send_ui_action(&state, UiAction::DeleteFile(id)),
+    match resolve_action_target(&state, payload.id.as_deref(), payload.name.as_deref()) {
+        Ok(ActionTarget::Package(id)) => send_ui_action(&state, UiAction::DeletePackage(id)),
+        Ok(ActionTarget::File(id)) => send_ui_action(&state, UiAction::DeleteFile(id)),
         Err(response) => *response,
     }
 }
@@ -268,14 +354,9 @@ async fn api_retry(
     if let Some(response) = require_api_key(&state, &headers) {
         return response;
     }
-
-    match resolve_package_id(&state, payload.id.as_deref(), payload.name.as_deref()) {
-        Ok(Some(id)) => return send_ui_action(&state, UiAction::RetryPackage(id)),
-        Ok(None) => {}
-        Err(response) => return *response,
-    }
-    match resolve_file_id(&state, payload.id, payload.name) {
-        Ok(id) => send_ui_action(&state, UiAction::RetryFile(id)),
+    match resolve_action_target(&state, payload.id.as_deref(), payload.name.as_deref()) {
+        Ok(ActionTarget::Package(id)) => send_ui_action(&state, UiAction::RetryPackage(id)),
+        Ok(ActionTarget::File(id)) => send_ui_action(&state, UiAction::RetryFile(id)),
         Err(response) => *response,
     }
 }
@@ -290,13 +371,9 @@ async fn api_reset(
         return response;
     }
 
-    match resolve_package_id(&state, payload.id.as_deref(), payload.name.as_deref()) {
-        Ok(Some(id)) => return send_ui_action(&state, UiAction::ResetPackage(id)),
-        Ok(None) => {}
-        Err(response) => return *response,
-    }
-    match resolve_file_id(&state, payload.id, payload.name) {
-        Ok(id) => send_ui_action(&state, UiAction::ResetFile(id)),
+    match resolve_action_target(&state, payload.id.as_deref(), payload.name.as_deref()) {
+        Ok(ActionTarget::Package(id)) => send_ui_action(&state, UiAction::ResetPackage(id)),
+        Ok(ActionTarget::File(id)) => send_ui_action(&state, UiAction::ResetFile(id)),
         Err(response) => *response,
     }
 }
@@ -311,13 +388,9 @@ async fn api_reverify(
         return response;
     }
 
-    match resolve_package_id(&state, payload.id.as_deref(), payload.name.as_deref()) {
-        Ok(Some(id)) => return send_ui_action(&state, UiAction::ReverifyPackage(id)),
-        Ok(None) => {}
-        Err(response) => return *response,
-    }
-    match resolve_file_id(&state, payload.id, payload.name) {
-        Ok(id) => send_ui_action(&state, UiAction::ReverifyFile(id)),
+    match resolve_action_target(&state, payload.id.as_deref(), payload.name.as_deref()) {
+        Ok(ActionTarget::Package(id)) => send_ui_action(&state, UiAction::ReverifyPackage(id)),
+        Ok(ActionTarget::File(id)) => send_ui_action(&state, UiAction::ReverifyFile(id)),
         Err(response) => *response,
     }
 }
@@ -348,35 +421,7 @@ async fn api_config(
 // Server setup
 // ---------------------------------------------------------------------------
 
-/// Starts the HTTP API server for receiving URLs, bookmarklet requests,
-/// and optional remote TUI attach connections.
-///
-/// # Security
-///
-/// When `api_key` is set, every state-changing route and the dashboard stream
-/// require it. Only health and bookmarklet discovery are public.
-///
-/// # Errors
-///
-/// Returns an error if the server cannot bind to the specified address.
-pub async fn run_api_server(
-    tx: mpsc::UnboundedSender<DownloadEvent>,
-    host: &str,
-    port: u16,
-    bookmarklet_host: Option<&str>,
-    shared: Option<SharedAppState>,
-    remote_tui_stream: bool,
-    api_key: Option<String>,
-) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = ApiState {
-        tx,
-        host: host.to_string(),
-        shared,
-        remote_tui_stream,
-        bookmarklet_host: bookmarklet_host.map(str::to_string),
-        api_key,
-    };
-
+fn api_router(state: ApiState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -404,13 +449,74 @@ pub async fn run_api_server(
         app = app.route("/api/dashboard", get(api_dashboard_ws));
     }
 
-    let app = app
-        .layer(cors)
+    app.layer(cors)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB limit
-        .with_state(state);
+        .with_state(state)
+}
+
+/// Binds and starts the HTTP API server.
+///
+/// Binding is completed before this function returns, so callers can report
+/// address-in-use and other startup failures before entering their main loop.
+pub(crate) async fn start_api_server(
+    tx: DownloadEventSender,
+    host: &str,
+    port: u16,
+    bookmarklet_host: Option<&str>,
+    shared: Option<SharedAppState>,
+    remote_tui_stream: bool,
+    api_key: Option<String>,
+) -> io::Result<ApiServerHandle> {
+    let state = ApiState {
+        tx,
+        host: host.to_string(),
+        shared,
+        remote_tui_stream,
+        bookmarklet_host: bookmarklet_host.map(str::to_string),
+        api_key,
+    };
 
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
-    axum::serve(listener, app).await?;
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, api_router(state))
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
 
+    Ok(ApiServerHandle {
+        shutdown_tx: Some(shutdown_tx),
+        task: Some(task),
+    })
+}
+
+/// Runs the HTTP API server until it is externally terminated.
+///
+/// # Errors
+///
+/// Returns an error if the server cannot bind or if the server task fails.
+pub async fn run_api_server(
+    tx: DownloadEventSender,
+    host: &str,
+    port: u16,
+    bookmarklet_host: Option<&str>,
+    shared: Option<SharedAppState>,
+    remote_tui_stream: bool,
+    api_key: Option<String>,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    start_api_server(
+        tx,
+        host,
+        port,
+        bookmarklet_host,
+        shared,
+        remote_tui_stream,
+        api_key,
+    )
+    .await?
+    .wait()
+    .await?;
     Ok(())
 }

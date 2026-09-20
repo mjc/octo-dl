@@ -14,15 +14,47 @@ mod terminal;
 mod terminal_support;
 mod visible;
 
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use tokio::sync::mpsc;
 
+use self::api::ApiServerHandle;
 use self::api::DEFAULT_API_PORT;
 use self::app::App;
 pub use self::dashboard::{DashboardUiMode, DownloadDashboardState};
-use self::event::DownloadEvent;
+use self::event::DownloadEventSender;
+pub use self::remote::AttachConfig;
+
+async fn run_with_api_server<F>(mut server: Option<ApiServerHandle>, run: F) -> io::Result<()>
+where
+    F: Future<Output = io::Result<()>>,
+{
+    let Some(mut server_handle) = server.take() else {
+        return run.await;
+    };
+
+    tokio::pin!(run);
+    tokio::select! {
+        result = &mut run => {
+            let shutdown = server_handle.shutdown().await;
+            match (result, shutdown) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+                (Err(run_error), Err(shutdown_error)) => Err(io::Error::other(format!(
+                    "{run_error}; API server shutdown failed: {shutdown_error}"
+                ))),
+            }
+        }
+        server_result = server_handle.wait() => {
+            match server_result {
+                Ok(()) => Err(io::Error::other("API server stopped unexpectedly")),
+                Err(error) => Err(error),
+            }
+        }
+    }
+}
+
 use crate::ServiceConfig;
 
 // ---------------------------------------------------------------------------
@@ -46,7 +78,7 @@ pub async fn run(
     config_path: Option<&Path>,
     tui_listen: Option<SocketAddr>,
 ) -> io::Result<()> {
-    let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
+    let (download_tx, mut download_rx) = DownloadEventSender::channel();
 
     let (mut app, api_bind_host, api_port) =
         App::new_with_optional_service_config(download_tx, true, config_path, DEFAULT_API_PORT)?;
@@ -59,29 +91,40 @@ pub async fn run(
     } = app.shared_state_channels(api_enabled, DashboardUiMode::Tui);
 
     // Start the API server (if enabled)
-    if let Some(listen) = tui_listen {
+    let api_server = if let Some(listen) = tui_listen {
         let host = remote::socket_host(listen);
         app.api_port = listen.port();
-        app.spawn_api_server(
-            host.clone(),
-            listen.port(),
-            Some(host.clone()),
-            shared_state,
-            true,
-        );
+        Some(
+            app.start_api_server(
+                host.clone(),
+                listen.port(),
+                Some(host.clone()),
+                shared_state,
+                true,
+            )
+            .await?,
+        )
     } else if let Some(explicit_host) = api_host {
         let host = explicit_host.unwrap_or(api_bind_host);
-        app.spawn_api_server(host.clone(), api_port, Some(host), shared_state, false);
-    }
+        Some(
+            app.start_api_server(host.clone(), api_port, Some(host), shared_state, false)
+                .await?,
+        )
+    } else {
+        None
+    };
 
     app.prepare_interactive_startup();
 
-    terminal::run_interactive_tui(
-        &mut app,
-        &mut download_rx,
-        &mut action_rx,
-        &state_tx,
-        api_enabled,
+    run_with_api_server(
+        api_server,
+        terminal::run_interactive_tui(
+            &mut app,
+            &mut download_rx,
+            &mut action_rx,
+            &state_tx,
+            api_enabled,
+        ),
     )
     .await
 }
@@ -100,7 +143,7 @@ pub async fn run_api_only(
     config_path: Option<&Path>,
     tui_listen: Option<SocketAddr>,
 ) -> io::Result<()> {
-    let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
+    let (download_tx, mut download_rx) = DownloadEventSender::channel();
     let (mut app, api_host, api_port) =
         App::new_with_optional_service_config(download_tx, true, config_path, DEFAULT_API_PORT)?;
     app.prepare_headless_startup()?;
@@ -111,38 +154,47 @@ pub async fn run_api_only(
     } = app.shared_state_channels(true, DashboardUiMode::Headless);
 
     // Start the API server (with optional remote TUI publishing)
-    if let Some(listen) = tui_listen {
+    let api_server = if let Some(listen) = tui_listen {
         let host = remote::socket_host(listen);
         app.api_port = listen.port();
         log::info!(
             "Starting API server with remote TUI stream on {host}:{}",
             listen.port()
         );
-        app.spawn_api_server(
-            host.clone(),
-            listen.port(),
-            Some(host.clone()),
-            shared_state,
-            true,
-        );
+        Some(
+            app.start_api_server(
+                host.clone(),
+                listen.port(),
+                Some(host.clone()),
+                shared_state,
+                true,
+            )
+            .await?,
+        )
     } else {
         let host = explicit_api_host.flatten().unwrap_or(api_host);
         log::info!("Starting API server on {host}:{api_port}");
-        app.spawn_api_server(host.clone(), api_port, Some(host), shared_state, false);
-    }
+        Some(
+            app.start_api_server(host.clone(), api_port, Some(host), shared_state, false)
+                .await?,
+        )
+    };
 
     log::info!("Entering headless event loop");
-    app.run_headless_until_shutdown(
-        &mut download_rx,
-        &mut action_rx,
-        Some(&state_tx),
-        terminal::wait_for_shutdown_signal(),
-    )
-    .await;
+    run_with_api_server(api_server, async {
+        app.run_headless_until_shutdown(
+            &mut download_rx,
+            &mut action_rx,
+            Some(&state_tx),
+            terminal::wait_for_shutdown_signal(),
+        )
+        .await;
 
-    app.sync_session_for_shutdown();
-    log::info!("Shutdown complete");
-    Ok(())
+        app.sync_session_for_shutdown();
+        log::info!("Shutdown complete");
+        Ok(())
+    })
+    .await
 }
 
 /// Attach an interactive terminal UI to a running service.
@@ -150,8 +202,8 @@ pub async fn run_api_only(
 /// # Errors
 ///
 /// Returns an error if terminal setup or remote communication fails.
-pub async fn run_attach(addr: SocketAddr, api_key: Option<String>) -> io::Result<()> {
-    remote::run_attached_dashboard(addr, api_key).await
+pub async fn run_attach(addr: SocketAddr, config: AttachConfig) -> io::Result<()> {
+    remote::run_attached_dashboard(addr, config).await
 }
 
 /// Resolve the credentials used by an attached TUI without creating or

@@ -12,6 +12,7 @@ const FLAGS_WITH_VALUES: &[&str] = &[
     "--ui",
     "--tui-listen",
     "--tui-attach",
+    "--api-key",
     "-j",
     "--chunks",
     "-p",
@@ -29,6 +30,7 @@ struct RuntimeOptions {
     ui: Option<UiMode>,
     tui_listen: Option<String>,
     tui_attach: Option<String>,
+    api_key: Option<String>,
     host: String,
     host_explicit: bool,
     config_path: Option<PathBuf>,
@@ -40,6 +42,7 @@ impl Default for RuntimeOptions {
             ui: None,
             tui_listen: None,
             tui_attach: None,
+            api_key: None,
             host: "127.0.0.1".to_string(),
             host_explicit: false,
             config_path: None,
@@ -82,6 +85,7 @@ fn print_usage() {
     eprintln!("                      (default: ./config.toml when present)");
     eprintln!("                      Also supplies the API key for --tui-attach");
     eprintln!("  OCTO_API_KEY[_FILE]  API key override for --tui-attach");
+    eprintln!("  --api-key <KEY>     API key for an authenticated TUI attach");
     eprintln!("  -h, --help          Show this help");
     eprintln!();
     eprintln!("Run 'octo --tui --help' or 'octo --help' for mode-specific options.");
@@ -97,6 +101,7 @@ fn print_tui_usage() {
     eprintln!("  --config <PATH>     Config file override");
     eprintln!("                      Also supplies the API key for --tui-attach");
     eprintln!("  OCTO_API_KEY[_FILE]  API key override for --tui-attach");
+    eprintln!("  --api-key <KEY>     API key for an authenticated TUI attach");
     eprintln!("  -h, --help          Show this help");
 }
 
@@ -269,6 +274,13 @@ fn parse_runtime_options(args: &[String]) -> Result<RuntimeOptions, String> {
                 };
                 options.tui_attach = Some(value.clone());
             }
+            "--api-key" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err("--api-key requires a value".to_string());
+                };
+                options.api_key = Some(value.clone());
+            }
             "--host" => {
                 i += 1;
                 let Some(value) = args.get(i) else {
@@ -328,6 +340,16 @@ fn native_tui_log_path() -> PathBuf {
     path
 }
 
+#[cfg(feature = "tui")]
+fn load_attach_config(options: &RuntimeOptions) -> io::Result<octo_dl::tui::AttachConfig> {
+    if let Some(api_key) = options.api_key.clone() {
+        return Ok(octo_dl::tui::AttachConfig::from_api_key(Some(api_key)));
+    }
+
+    let api_key = octo_dl::tui::attach_api_key(options.config_path.as_deref())?;
+    Ok(octo_dl::tui::AttachConfig::from_api_key(api_key))
+}
+
 #[tokio::main]
 async fn main() -> octo_dl::Result<()> {
     // Scan for global flags without consuming — sub-modules re-parse for their own flags
@@ -370,15 +392,17 @@ async fn main() -> octo_dl::Result<()> {
                 eprintln!("Error: {error}");
                 std::process::exit(1);
             });
-            let api_key = octo_dl::tui::attach_api_key(options.config_path.as_deref())
-                .map_err(octo_dl::Error::Io)?;
-            return octo_dl::tui::run_attach(addr, api_key)
+            let attach_config = load_attach_config(&options).unwrap_or_else(|error| {
+                eprintln!("Error loading attach configuration: {error}");
+                std::process::exit(1);
+            });
+            return octo_dl::tui::run_attach(addr, attach_config)
                 .await
                 .map_err(octo_dl::Error::Io);
         }
         #[cfg(not(feature = "tui"))]
         {
-            let _ = addr;
+            let _ = (&addr, &options);
             eprintln!("TUI support not compiled in");
             std::process::exit(1);
         }
@@ -548,6 +572,74 @@ mod tests {
         assert_eq!(options.ui, Some(UiMode::Headless));
         assert!(options.host_explicit);
         assert_eq!(options.host, "0.0.0.0");
+    }
+
+    #[test]
+    fn runtime_options_parse_attach_api_key() {
+        let args = vec![
+            "--tui-attach".to_string(),
+            "127.0.0.1:9724".to_string(),
+            "--api-key".to_string(),
+            "attach-secret".to_string(),
+        ];
+
+        let options = parse_runtime_options(&args).expect("attach API key should parse");
+
+        assert_eq!(options.api_key.as_deref(), Some("attach-secret"));
+        assert!(!has_positional_args(&args));
+    }
+
+    #[test]
+    fn runtime_options_reject_missing_attach_api_key() {
+        let error = parse_runtime_options(&[
+            "--tui-attach".to_string(),
+            "127.0.0.1:9724".to_string(),
+            "--api-key".to_string(),
+        ])
+        .expect_err("an API key value is required");
+
+        assert!(error.contains("--api-key requires a value"));
+    }
+
+    #[test]
+    fn attach_config_loads_api_key_from_explicit_config() {
+        let directory = tempfile::tempdir().expect("temporary directory should exist");
+        let config_path = directory.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[credentials]\nemail = \"\"\npassword = \"\"\n[api]\napi_key = \"config-secret\"\n",
+        )
+        .expect("config should be writable");
+
+        let options = RuntimeOptions {
+            config_path: Some(config_path),
+            ..RuntimeOptions::default()
+        };
+
+        let config = load_attach_config(&options).expect("attach config should load");
+
+        assert_eq!(config.api_key.as_deref(), Some("config-secret"));
+    }
+
+    #[test]
+    fn explicit_attach_api_key_takes_precedence_over_config() {
+        let directory = tempfile::tempdir().expect("temporary directory should exist");
+        let config_path = directory.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[credentials]\nemail = \"\"\npassword = \"\"\n[api]\napi_key = \"config-secret\"\n",
+        )
+        .expect("config should be writable");
+
+        let options = RuntimeOptions {
+            api_key: Some("explicit-secret".to_string()),
+            config_path: Some(config_path),
+            ..RuntimeOptions::default()
+        };
+
+        let config = load_attach_config(&options).expect("explicit key should be accepted");
+
+        assert_eq!(config.api_key.as_deref(), Some("explicit-secret"));
     }
 
     #[test]
