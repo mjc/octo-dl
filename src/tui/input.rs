@@ -6,7 +6,11 @@ mod selection;
 #[cfg(test)]
 mod tests;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
+use ratatui::widgets::{Block, Borders};
 use tui_input::backend::crossterm::to_input_request;
 use tui_input::{Input, InputRequest};
 
@@ -32,6 +36,65 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
     }
 
     handle_main_input(app, key);
+}
+
+pub(crate) fn handle_event(app: &mut App, event: Event, terminal_area: Rect) {
+    match event {
+        Event::Key(key) => handle_input(app, key),
+        Event::Paste(text) => handle_paste(app, &text),
+        Event::Mouse(mouse) => handle_mouse(app, mouse, terminal_area),
+        _ => {}
+    }
+}
+
+fn handle_mouse(app: &mut App, mouse: MouseEvent, terminal_area: Rect) {
+    // Popups and URL editing have their own keyboard-only interaction model.
+    // Ignoring mouse input here avoids accidentally applying a main-dashboard
+    // action to a control that is visually covered by a popup.
+    if app.popup != Popup::None || app.url_input_active {
+        return;
+    }
+
+    let Some(row) = list_row_at(app, mouse.column, mouse.row, terminal_area) else {
+        return;
+    };
+
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => app.file_list_state.select(Some(row)),
+        MouseEventKind::ScrollUp => select_previous_file(app),
+        MouseEventKind::ScrollDown => select_next_file(app),
+        _ => {}
+    }
+}
+
+fn list_row_at(app: &App, column: u16, row: u16, terminal_area: Rect) -> Option<usize> {
+    let rows = app.visible_rows();
+    if rows.is_empty() {
+        return None;
+    }
+
+    let outer = Block::default().borders(Borders::ALL);
+    let inner = outer.inner(terminal_area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    let list_inner = Block::default().borders(Borders::ALL).inner(chunks[1]);
+
+    if !list_inner.contains(Position::new(column, row)) {
+        return None;
+    }
+
+    let index = app
+        .file_list_state
+        .offset()
+        .saturating_add(usize::from(row.saturating_sub(list_inner.y)));
+    (index < rows.len()).then_some(index)
 }
 
 pub(crate) const fn request_quit(app: &mut App) {

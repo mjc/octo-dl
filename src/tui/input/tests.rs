@@ -7,14 +7,18 @@ use crate::test_support::{
 };
 use crate::tui::event::DownloadRequest;
 use crate::tui::visible::TuiRow;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
+use ratatui::layout::Rect;
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 
 fn test_app() -> App {
     let path = tempdir().expect("test state directory should exist").keep();
     std::mem::forget(StateDirectoryGuard::set(&path));
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(64);
     App::new(9723, tx, true)
 }
 
@@ -57,6 +61,29 @@ fn alt_key(code: KeyCode) -> KeyEvent {
         kind: KeyEventKind::Press,
         state: KeyEventState::NONE,
     }
+}
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
+    Event::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+fn app_with_files(count: usize) -> App {
+    let mut app = test_app();
+    for i in 0..count {
+        app.files.push(FileEntry {
+            id: format!("file-{i}").into(),
+            name: format!("file-{i}"),
+            size: 1,
+            downloaded: 0,
+            status: FileStatus::Queued,
+        });
+    }
+    app
 }
 
 fn activate_url_input(app: &mut App) {
@@ -268,6 +295,51 @@ fn handle_main_input_navigation_keys_move_selection() {
     assert_eq!(app.file_list_state.selected(), Some(11));
 
     handle_input(&mut app, key(KeyCode::Char('g')));
+    assert_eq!(app.file_list_state.selected(), Some(0));
+}
+
+#[test]
+fn mouse_click_selects_the_row_under_the_pointer() {
+    let mut app = app_with_files(3);
+    let area = Rect::new(0, 0, 40, 20);
+
+    handle_event(
+        &mut app,
+        mouse(MouseEventKind::Down(MouseButton::Left), 8, 6),
+        area,
+    );
+
+    assert_eq!(app.file_list_state.selected(), Some(1));
+}
+
+#[test]
+fn mouse_wheel_uses_keyboard_selection_semantics_inside_the_list() {
+    let mut app = app_with_files(3);
+    let area = Rect::new(0, 0, 40, 20);
+    app.file_list_state.select(Some(1));
+
+    handle_event(&mut app, mouse(MouseEventKind::ScrollUp, 8, 6), area);
+    assert_eq!(app.file_list_state.selected(), Some(0));
+
+    handle_event(&mut app, mouse(MouseEventKind::ScrollDown, 8, 6), area);
+    assert_eq!(app.file_list_state.selected(), Some(1));
+}
+
+#[test]
+fn mouse_input_is_ignored_outside_list_and_while_popup_is_open() {
+    let mut app = app_with_files(2);
+    let area = Rect::new(0, 0, 40, 20);
+    app.file_list_state.select(Some(0));
+
+    handle_event(
+        &mut app,
+        mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
+        area,
+    );
+    assert_eq!(app.file_list_state.selected(), Some(0));
+
+    app.popup = Popup::Config;
+    handle_event(&mut app, mouse(MouseEventKind::ScrollDown, 8, 6), area);
     assert_eq!(app.file_list_state.selected(), Some(0));
 }
 
@@ -667,6 +739,8 @@ fn handle_main_input_delete_uses_visible_sorted_row() {
     ] {
         app.upsert_overlay_file(file, None);
     }
+    app.sort.key = SortKey::Status;
+    app.sync_visible_files();
     app.file_list_state.select(Some(0));
 
     handle_input(&mut app, key(KeyCode::Delete));
@@ -818,7 +892,7 @@ fn handle_main_input_shift_r_resets_selected_file_from_scratch() {
     let sidecar_path = write_dummy_legacy_resume_sidecar(&final_path_string);
 
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     let token = tokio_util::sync::CancellationToken::new();
     resolve_test_package(
@@ -864,7 +938,7 @@ fn handle_main_input_shift_r_resets_selected_file_from_scratch() {
         url_rx.try_recv().unwrap(),
         DownloadRequest::ResumeFileIds {
             source_url: "https://mega.nz/file/reset".to_string(),
-            file_ids: vec!["active.bin".to_string().into()],
+            file_ids: vec![crate::core::FileId::from("active.bin")],
             attempt_ids: std::collections::HashMap::from([("active.bin".to_string().into(), 1)]),
         }
     );
@@ -876,7 +950,7 @@ fn handle_main_input_shift_r_resets_selected_file_from_scratch() {
 #[test]
 fn handle_main_input_alt_r_reverifies_selected_file() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     resolve_test_package(
         &mut app,
@@ -902,19 +976,18 @@ fn handle_main_input_alt_r_reverifies_selected_file() {
 
     assert_eq!(app.popup, Popup::None);
     assert_eq!(app.pending_confirmation, None);
-    assert_eq!(
+    assert!(matches!(
         url_rx.try_recv().unwrap(),
-        DownloadRequest::ReverifyFileIds {
-            source_url: "https://mega.nz/file/reverify".to_string(),
-            file_ids: vec!["active.bin".to_string().into()],
-        }
-    );
+        DownloadRequest::ReverifyFileIdsWithOperations { source_url, file_ids, .. }
+            if source_url == "https://mega.nz/file/reverify"
+                && file_ids == vec![crate::core::FileId::from("active.bin")]
+    ));
 }
 
 #[test]
 fn handle_main_input_alt_r_skips_never_started_file() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     resolve_test_package(
         &mut app,
@@ -943,7 +1016,7 @@ fn handle_main_input_alt_r_skips_never_started_file() {
 #[test]
 fn handle_main_input_alt_r_clears_stale_verify_state_for_never_started_file() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     resolve_test_package(
         &mut app,
@@ -977,7 +1050,7 @@ fn handle_main_input_alt_r_clears_stale_verify_state_for_never_started_file() {
 #[test]
 fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     let token = tokio_util::sync::CancellationToken::new();
     resolve_test_package(
@@ -1022,13 +1095,12 @@ fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
         app.files[0].downloaded, 0,
         "verification should show its own progress from zero"
     );
-    assert_eq!(
+    assert!(matches!(
         url_rx.try_recv().unwrap(),
-        DownloadRequest::ReverifyFileIds {
-            source_url: "https://mega.nz/file/reverify".to_string(),
-            file_ids: vec!["active.bin".to_string().into()],
-        }
-    );
+        DownloadRequest::ReverifyFileIdsWithOperations { source_url, file_ids, .. }
+            if source_url == "https://mega.nz/file/reverify"
+                && file_ids == vec![crate::core::FileId::from("active.bin")]
+    ));
     assert!(url_rx.try_recv().is_err());
 
     app.handle_download_event(crate::tui::event::DownloadEvent::VerificationProgress {
@@ -1060,7 +1132,7 @@ fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
 #[test]
 fn handle_main_input_alt_r_verifies_completed_file_instead_of_resume_sidecar() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     resolve_test_package(
         &mut app,
@@ -1089,13 +1161,12 @@ fn handle_main_input_alt_r_verifies_completed_file_instead_of_resume_sidecar() {
         app.files[0].downloaded, 0,
         "completed-file verification should show verification progress from zero"
     );
-    assert_eq!(
+    assert!(matches!(
         url_rx.try_recv().unwrap(),
-        DownloadRequest::VerifyCompletedFileIds {
-            source_url: "https://mega.nz/file/reverify".to_string(),
-            file_ids: vec!["complete.bin".to_string().into()],
-        }
-    );
+        DownloadRequest::VerifyCompletedFileIdsWithOperations { source_url, file_ids, .. }
+            if source_url == "https://mega.nz/file/reverify"
+                && file_ids == vec![crate::core::FileId::from("complete.bin")]
+    ));
 
     app.handle_download_event(crate::tui::event::DownloadEvent::VerificationProgress {
         id: "complete.bin".to_string().into(),
@@ -1115,7 +1186,7 @@ fn handle_main_input_alt_r_verifies_completed_file_instead_of_resume_sidecar() {
 #[test]
 fn handle_main_input_alt_r_on_package_verifies_all_files_by_kind() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     let source_url = "https://mega.nz/folder/reverify";
     resolve_test_package(
@@ -1161,29 +1232,27 @@ fn handle_main_input_alt_r_on_package_verifies_all_files_by_kind() {
         Some(&1),
         "Alt-R from a package row should also advance the active file generation"
     );
-    assert_eq!(app.file_attempt_ids.get("file-1.bin"), None);
-    assert_eq!(app.file_attempt_ids.get("file-4.bin"), None);
+    assert_eq!(app.file_attempt_ids.get("file-1.bin"), Some(&1));
+    assert_eq!(app.file_attempt_ids.get("file-4.bin"), Some(&1));
     for index in [2, 3] {
         let file_id = crate::core::FileId::from(format!("file-{index}.bin").as_str());
         assert!(!app.verifying_files.contains(&file_id));
         assert!(!app.verification_inflight_files.contains(&file_id));
     }
-    assert_eq!(
+    assert!(matches!(
         url_rx.try_recv().unwrap(),
-        DownloadRequest::ReverifyFileIds {
-            source_url: source_url.to_string(),
-            file_ids: (0..2)
-                .map(|index| crate::core::FileId::from(format!("file-{index}.bin").as_str()))
-                .collect(),
-        }
-    );
-    assert_eq!(
+        DownloadRequest::ReverifyFileIdsWithOperations { source_url: request_url, file_ids, .. }
+            if request_url == source_url
+                && file_ids == (0..2)
+                    .map(|index| crate::core::FileId::from(format!("file-{index}.bin").as_str()))
+                    .collect::<Vec<_>>()
+    ));
+    assert!(matches!(
         url_rx.try_recv().unwrap(),
-        DownloadRequest::VerifyCompletedFileIds {
-            source_url: source_url.to_string(),
-            file_ids: vec!["file-4.bin".to_string().into()],
-        }
-    );
+        DownloadRequest::VerifyCompletedFileIdsWithOperations { source_url: request_url, file_ids, .. }
+            if request_url == source_url
+                && file_ids == vec![crate::core::FileId::from("file-4.bin")]
+    ));
     assert!(url_rx.try_recv().is_err());
     assert!(app.status.contains("4 at a time"));
 }
@@ -1294,7 +1363,7 @@ fn add_url_deduplicates() {
 #[test]
 fn retry_recomputes_totals_for_errored_file() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     app.upsert_overlay_file(
         FileEntry {
@@ -1314,20 +1383,45 @@ fn retry_recomputes_totals_for_errored_file() {
 
     handle_input(&mut app, key(KeyCode::Char('r')));
 
-    assert_eq!(
-        app.files[0].status,
-        FileStatus::Error("Retry unavailable for this file".to_string())
-    );
-    assert_eq!(app.files[0].downloaded, 42);
+    assert_eq!(app.files[0].status, FileStatus::Queued);
+    assert_eq!(app.files[0].downloaded, 0);
     assert_eq!(app.files_total, 0);
     assert_eq!(app.total_downloaded, 0);
-    assert!(url_rx.try_recv().is_err());
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::SubmitUrl {
+            url: "https://mega.nz/file/error".to_string()
+        }
+    );
+}
+
+#[test]
+fn retrying_url_resolution_error_requeues_url_work() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
+    app.url_tx = url_tx;
+    let url = "https://mega.nz/file/url-error".to_string();
+
+    app.handle_scope_error_event(url.clone(), "resolver failed".to_string());
+    app.file_list_state.select(Some(0));
+
+    handle_input(&mut app, key(KeyCode::Char('r')));
+
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::SubmitUrl { url: url.clone() }
+    );
+    assert!(matches!(
+        app.overlay_files.get(url.as_str()),
+        Some(crate::tui::app::TransientRow::PendingUrl { source_url, .. })
+            if source_url == &url
+    ));
 }
 
 #[test]
 fn handle_main_input_url_submit() {
     let mut app = test_app();
-    let (url_tx, mut url_rx) = mpsc::unbounded_channel();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
     app.url_input = "https://mega.nz/file/test123".to_string();
     activate_url_input(&mut app);

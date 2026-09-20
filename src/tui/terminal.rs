@@ -2,17 +2,49 @@ use std::io;
 use std::panic;
 use std::time::Duration;
 
-use crossterm::event::Event;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use sysinfo::System;
+use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
 use super::app::{App, NoCredentialsFallback, UiAction};
 use super::draw::draw;
 use super::event::DownloadEvent;
-use super::input::{handle_input, handle_paste, request_quit};
-use super::terminal_support::{TerminalGuard, TerminalPanicHookGuard, terminal_input_channel};
+use super::input::{handle_event, request_quit};
+use super::terminal_support::{
+    TerminalCleanupError, TerminalGuard, TerminalInputError, TerminalPanicHookGuard,
+    terminal_input_channel,
+};
+
+const INTERACTIVE_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_millis(250);
+const INTERACTIVE_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+#[derive(Debug, Error)]
+enum TerminalLifecycleError {
+    #[error("terminal operation failed: {0}")]
+    Operation(#[source] io::Error),
+    #[error("terminal restoration failed: {0}")]
+    Restore(#[source] TerminalCleanupError),
+    #[error("terminal operation failed ({operation}) and restoration also failed ({restore})")]
+    OperationAndRestore {
+        operation: io::Error,
+        restore: TerminalCleanupError,
+    },
+}
+
+fn finish_terminal_lifecycle(operation: io::Result<()>, guard: TerminalGuard) -> io::Result<()> {
+    match (operation, guard.restore()) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(operation), Ok(())) => Err(io::Error::other(TerminalLifecycleError::Operation(
+            operation,
+        ))),
+        (Ok(()), Err(restore)) => Err(io::Error::other(TerminalLifecycleError::Restore(restore))),
+        (Err(operation), Err(restore)) => Err(io::Error::other(
+            TerminalLifecycleError::OperationAndRestore { operation, restore },
+        )),
+    }
+}
 
 fn should_draw_after_tick(app: &App, dashboard_dirty: bool) -> bool {
     dashboard_dirty || app.has_active_dashboard_transfer()
@@ -30,6 +62,23 @@ fn finish_interactive_shutdown_if_ready(app: &mut App, shutting_down: &mut bool)
     }
 
     false
+}
+
+async fn drain_late_shutdown_tokens(app: &mut App) {
+    let deadline = tokio::time::Instant::now() + INTERACTIVE_SHUTDOWN_GRACE_PERIOD;
+    let mut poll = tokio::time::interval(INTERACTIVE_SHUTDOWN_POLL_INTERVAL);
+
+    loop {
+        app.drain_token_messages();
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::select! {
+            _ = poll.tick() => {}
+            _ = tokio::time::sleep_until(deadline) => break,
+        }
+    }
+    app.drain_token_messages();
 }
 
 pub async fn wait_for_shutdown_signal() {
@@ -59,8 +108,8 @@ pub async fn wait_for_shutdown_signal() {
 
 pub async fn run_interactive_tui(
     app: &mut App,
-    download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
-    action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
+    download_rx: &mut mpsc::Receiver<DownloadEvent>,
+    action_rx: &mut mpsc::Receiver<UiAction>,
     state_tx: &watch::Sender<bytes::Bytes>,
     state_sync_enabled: bool,
 ) -> io::Result<()> {
@@ -73,15 +122,20 @@ pub async fn run_interactive_tui(
 
 async fn run_interactive_tui_loop(
     app: &mut App,
-    download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
-    action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
+    download_rx: &mut mpsc::Receiver<DownloadEvent>,
+    action_rx: &mut mpsc::Receiver<UiAction>,
     state_tx: &watch::Sender<bytes::Bytes>,
     state_sync_enabled: bool,
 ) -> io::Result<()> {
-    let _terminal_guard = TerminalGuard::new()?;
+    let terminal_guard = TerminalGuard::new().map_err(io::Error::other)?;
     let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(error) => return finish_terminal_lifecycle(Err(error), terminal_guard),
+    };
+    if let Err(error) = terminal.clear() {
+        return finish_terminal_lifecycle(Err(error), terminal_guard);
+    }
 
     let mut tick_count: u32 = 0;
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -97,83 +151,86 @@ async fn run_interactive_tui_loop(
     let mut auto_login_after_first_draw = true;
     let mut shutting_down = false;
 
-    loop {
-        let mut publish_dashboard_now = false;
-        if needs_draw {
-            terminal.draw(|f| draw(f, app))?;
-            needs_draw = false;
-            if auto_login_after_first_draw {
-                auto_login_after_first_draw = false;
-                app.schedule_auto_login(NoCredentialsFallback::ShowPopup);
-            }
-        }
-
-        tokio::select! {
-            () = &mut shutdown => {
-                request_quit(app);
-                needs_draw = true;
-                dashboard_dirty = true;
-                publish_dashboard_now = true;
-            }
-            Some(event) = input_rx.recv() => {
-                app.note_user_activity();
-                match event {
-                    Event::Key(key) => handle_input(app, key),
-                    Event::Paste(text) => handle_paste(app, &text),
-                    _ => {}
+    let loop_result = async {
+        loop {
+            let mut publish_dashboard_now = false;
+            if needs_draw {
+                terminal.draw(|f| draw(f, app))?;
+                needs_draw = false;
+                if auto_login_after_first_draw {
+                    auto_login_after_first_draw = false;
+                    app.schedule_auto_login(NoCredentialsFallback::ShowPopup);
                 }
-                needs_draw = true;
-                dashboard_dirty = true;
-                publish_dashboard_now = true;
             }
-            Some(event) = download_rx.recv() => {
-                app.handle_download_event(event);
-                let _ = app.drain_download_events(download_rx);
-                download_state_dirty = true;
-                dashboard_dirty = true;
-            }
-            Some(action) = action_rx.recv() => {
-                app.note_user_activity();
-                app.handle_ui_action(action);
-                let _ = app.drain_ui_actions(action_rx);
-                needs_draw = true;
-                dashboard_dirty = true;
-                publish_dashboard_now = true;
-            }
-            _ = tick.tick() => {
-                tick_count = tick_count.saturating_add(1);
-                let publish_active_transfer_ticks = state_tx.receiver_count() > 1;
-                dashboard_dirty |= app.handle_terminal_tick(
-                    download_rx,
-                    action_rx,
-                    tick_count,
-                    &mut sys,
-                    pid,
-                    publish_active_transfer_ticks,
-                );
-                needs_draw |= should_draw_after_tick(app, dashboard_dirty);
-                download_state_dirty = false;
-                publish_dashboard_now |= dashboard_dirty;
-            }
-        }
 
-        if state_sync_enabled && dashboard_dirty && publish_dashboard_now {
-            app.mark_dashboard_dirty();
-            let _ = app.publish_snapshot_if_observed(state_tx);
-            dashboard_dirty = false;
-        }
+            tokio::select! {
+                () = &mut shutdown => {
+                    request_quit(app);
+                    needs_draw = true;
+                    dashboard_dirty = true;
+                    publish_dashboard_now = true;
+                }
+                input = input_rx.recv_result() => {
+                    let event = input.map_err(TerminalInputError::into_io_error)?;
+                    app.note_user_activity();
+                    let size = terminal.size()?;
+                    handle_event(app, event, ratatui::layout::Rect::new(0, 0, size.width, size.height));
+                    needs_draw = true;
+                    dashboard_dirty = true;
+                    publish_dashboard_now = true;
+                }
+                Some(event) = download_rx.recv() => {
+                    app.handle_download_event(event);
+                    let _ = app.drain_download_events(download_rx);
+                    download_state_dirty = true;
+                    dashboard_dirty = true;
+                }
+                Some(action) = action_rx.recv() => {
+                    app.note_user_activity();
+                    app.handle_ui_action(action);
+                    let _ = app.drain_ui_actions(action_rx);
+                    needs_draw = true;
+                    dashboard_dirty = true;
+                    publish_dashboard_now = true;
+                }
+                _ = tick.tick() => {
+                    tick_count = tick_count.saturating_add(1);
+                    let publish_active_transfer_ticks = state_tx.receiver_count() > 1;
+                    dashboard_dirty |= app.handle_terminal_tick(
+                        download_rx,
+                        action_rx,
+                        tick_count,
+                        &mut sys,
+                        pid,
+                        publish_active_transfer_ticks,
+                    );
+                    needs_draw |= should_draw_after_tick(app, dashboard_dirty);
+                    download_state_dirty = false;
+                    publish_dashboard_now |= dashboard_dirty;
+                }
+            }
 
-        if finish_interactive_shutdown_if_ready(app, &mut shutting_down) {
-            break;
-        }
+            if state_sync_enabled && dashboard_dirty && publish_dashboard_now {
+                app.mark_dashboard_dirty();
+                let _ = app.publish_snapshot_if_observed(state_tx);
+                dashboard_dirty = false;
+            }
 
-        if download_state_dirty {
-            continue;
+            if finish_interactive_shutdown_if_ready(app, &mut shutting_down) {
+                drain_late_shutdown_tokens(app).await;
+                break;
+            }
+
+            if download_state_dirty {
+                continue;
+            }
         }
+        Ok::<(), io::Error>(())
     }
+    .await;
 
-    terminal.show_cursor()?;
-    Ok(())
+    let operation = loop_result.and_then(|()| terminal.show_cursor());
+    finish_terminal_lifecycle(operation, terminal_guard)
 }
 
 #[cfg(test)]
@@ -240,6 +297,67 @@ mod tests {
 
         let events = events.lock();
         assert_eq!(events.as_slice(), ["previous"]);
+    }
+
+    #[test]
+    fn terminal_panic_hook_does_not_leak_after_a_caught_panic() {
+        let _lock = TEST_PANIC_HOOK_LOCK.lock();
+        let original_hook = panic::take_hook();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let cleanup_events = Arc::clone(&events);
+        let previous_events = Arc::clone(&events);
+
+        panic::set_hook(Box::new(move |_| {
+            previous_events.lock().push("previous");
+        }));
+
+        let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let _hook_guard = TerminalPanicHookGuard::install_with_cleanup(Arc::new(move || {
+                cleanup_events.lock().push("cleanup");
+            }));
+            panic!("caught inner panic");
+        }));
+
+        let _ = panic::catch_unwind(|| panic!("later panic"));
+
+        panic::set_hook(original_hook);
+
+        let events = events.lock();
+        assert_eq!(events.as_slice(), ["cleanup", "previous", "previous"]);
+    }
+
+    #[tokio::test]
+    async fn interactive_shutdown_cancels_late_download_tokens() {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(9723, event_tx, true);
+        let token_tx = app
+            .token_tx
+            .as_ref()
+            .expect("the app should own the token sender")
+            .clone();
+        let token = tokio_util::sync::CancellationToken::new();
+        let late_token = token.clone();
+
+        app.should_quit = true;
+        let mut shutting_down = false;
+        assert!(finish_interactive_shutdown_if_ready(
+            &mut app,
+            &mut shutting_down
+        ));
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            token_tx
+                .try_send(crate::tui::event::TokenMessage {
+                    file_id: "late.bin".into(),
+                    token: late_token,
+                })
+                .expect("late token should queue");
+        });
+
+        drain_late_shutdown_tokens(&mut app).await;
+
+        assert!(token.is_cancelled());
     }
 
     #[test]

@@ -15,7 +15,15 @@ pub(super) fn retry_selected(app: &mut App) {
                 .find(|file| file.id == file_id)
                 .is_some_and(|file| matches!(file.status, FileStatus::Error(_)))
             {
-                app.handle_ui_action(UiAction::RetryFile(file_id));
+                match app.retry_target(&file_id) {
+                    Some(super::super::app::RetryTarget::Url(url)) => {
+                        app.handle_ui_action(UiAction::RetryUrl(url));
+                    }
+                    Some(super::super::app::RetryTarget::File(file_id)) => {
+                        app.handle_ui_action(UiAction::RetryFile(file_id));
+                    }
+                    None => {}
+                }
             }
         }
         None => {}
