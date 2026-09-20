@@ -145,6 +145,35 @@ pub struct ConfigState {
     pub active_field: usize,
 }
 
+/// The point at which an accepted configuration update takes effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigActivation {
+    /// The running downloader keeps its immutable startup configuration.
+    NextRun,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigPersistence {
+    SessionAndConfigFile,
+    SessionOnly,
+    ConfigFileOnly,
+    MemoryOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConfigUpdateRejection {
+    ConfigFile(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConfigUpdateOutcome {
+    Accepted {
+        activation: ConfigActivation,
+        persistence: ConfigPersistence,
+    },
+    Rejected(ConfigUpdateRejection),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
     Queue,
@@ -234,25 +263,32 @@ pub struct FileEntry {
 #[derive(Debug, Clone)]
 pub(crate) enum TransientRow {
     PendingUrl { file: FileEntry, source_url: String },
+    UrlError { file: FileEntry, source_url: String },
     UiError { file: FileEntry },
 }
 
 impl TransientRow {
     pub(crate) const fn file(&self) -> &FileEntry {
         match self {
-            Self::PendingUrl { file, .. } | Self::UiError { file } => file,
+            Self::PendingUrl { file, .. }
+            | Self::UrlError { file, .. }
+            | Self::UiError { file } => file,
         }
     }
 
     pub(crate) fn file_mut(&mut self) -> &mut FileEntry {
         match self {
-            Self::PendingUrl { file, .. } | Self::UiError { file } => file,
+            Self::PendingUrl { file, .. }
+            | Self::UrlError { file, .. }
+            | Self::UiError { file } => file,
         }
     }
 
     pub(crate) fn source_url(&self) -> Option<&str> {
         match self {
-            Self::PendingUrl { source_url, .. } => Some(source_url),
+            Self::PendingUrl { source_url, .. } | Self::UrlError { source_url, .. } => {
+                Some(source_url)
+            }
             Self::UiError { .. } => None,
         }
     }
@@ -299,6 +335,7 @@ pub enum UiAction {
     DeleteFile(FileId),
     DeletePackage(PackageId),
     RetryFile(FileId),
+    RetryUrl(String),
     RetryPackage(PackageId),
     ReverifyFile(FileId),
     ReverifyPackage(PackageId),
@@ -323,12 +360,12 @@ pub enum UiAction {
 
 #[derive(Clone)]
 pub struct SharedAppState {
-    pub action_tx: mpsc::UnboundedSender<UiAction>,
+    pub action_tx: mpsc::Sender<UiAction>,
     pub state_rx: watch::Receiver<bytes::Bytes>,
 }
 
 pub(crate) struct SharedStateChannels {
-    pub action_rx: mpsc::UnboundedReceiver<UiAction>,
+    pub action_rx: mpsc::Receiver<UiAction>,
     pub state_tx: watch::Sender<bytes::Bytes>,
     pub shared_state: Option<SharedAppState>,
 }
