@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::tui::event::DownloadEventSender;
 use std::future::Future;
 use std::time::Duration;
 
@@ -15,6 +17,7 @@ use super::{App, DownloadEvent, FileEntry, FileIdSet, FileStatus, UiAction};
 
 const MAX_DOWNLOAD_EVENTS_PER_TICK: usize = 256;
 const MAX_TOKEN_MESSAGES_PER_TICK: usize = 256;
+const HEADLESS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn progress_summary_pct(
     files_total: usize,
@@ -117,6 +120,9 @@ impl App {
         clear_saved_session: bool,
     ) {
         self.login.logging_in = false;
+        if !success {
+            self.client_rx = None;
+        }
         if clear_saved_session {
             self.saved_mega_session = None;
         }
@@ -231,7 +237,15 @@ impl App {
     }
 
     pub(crate) fn queue_url_placeholder(&mut self, url: String) {
-        if !self.overlay_files.contains_key(url.as_str()) {
+        if let Some(row) = self.overlay_files.get_mut(url.as_str()) {
+            if row.source_url().is_some() {
+                let file = row.file_mut();
+                file.name.clone_from(&url);
+                file.status = FileStatus::Queued;
+                file.downloaded = 0;
+                file.size = 0;
+            }
+        } else {
             self.upsert_overlay_file(
                 FileEntry {
                     id: url.clone().into(),
@@ -243,6 +257,7 @@ impl App {
                 Some(url),
             );
         }
+        self.sync_visible_files();
         self.recompute_totals();
     }
 
@@ -297,6 +312,13 @@ impl App {
             DownloadEvent::VerificationProgress { id, bytes_delta } => {
                 self.handle_verification_progress_event(id, bytes_delta);
             }
+            DownloadEvent::VerificationProgressForOperation {
+                id,
+                operation_id,
+                bytes_delta,
+            } => {
+                self.handle_verification_progress_for_operation(id, operation_id, bytes_delta);
+            }
             DownloadEvent::ResumeReused {
                 id,
                 chunks,
@@ -308,11 +330,40 @@ impl App {
             DownloadEvent::ResumeReverified { id, chunks, bytes } => {
                 self.handle_resume_reverified_event(id, chunks, bytes);
             }
+            DownloadEvent::ResumeReverifiedForOperation {
+                id,
+                operation_id,
+                chunks,
+                bytes,
+            } => {
+                self.handle_resume_reverified_for_operation(id, operation_id, chunks, bytes);
+            }
             DownloadEvent::CompletedFileVerified { id, bytes } => {
                 self.handle_completed_file_verified_event(id, bytes);
             }
+            DownloadEvent::CompletedFileVerifiedForOperation {
+                id,
+                operation_id,
+                bytes,
+            } => {
+                self.handle_completed_file_verified_for_operation(id, operation_id, bytes);
+            }
             DownloadEvent::VerificationSkipped { id, completed } => {
                 self.handle_verification_skipped_event(id, completed);
+            }
+            DownloadEvent::VerificationSkippedForOperation {
+                id,
+                operation_id,
+                completed,
+            } => {
+                self.handle_verification_skipped_for_operation(id, operation_id, completed);
+            }
+            DownloadEvent::VerificationFailed {
+                id,
+                operation_id,
+                error,
+            } => {
+                self.handle_verification_failed_event(id, operation_id, error);
             }
             DownloadEvent::FileComplete { id, attempt_id } => {
                 self.handle_file_complete_event(id, attempt_id);
@@ -331,7 +382,11 @@ impl App {
                 self.handle_scope_error_event(scope, error);
             }
             DownloadEvent::UrlQueued { url } => {
-                self.queue_url_placeholder(url);
+                if self.deleted_url_tombstones.contains(&url) {
+                    log::info!("Ignoring queued URL for deleted submission: {url}");
+                } else {
+                    self.queue_url_placeholder(url);
+                }
             }
             DownloadEvent::FileQueued(file) => {
                 self.handle_file_queued_event(file);
@@ -346,14 +401,32 @@ impl App {
             DownloadEvent::UrlsReceived { urls } => {
                 self.handle_ui_action(UiAction::AddUrls(urls));
             }
+            DownloadEvent::ProgressWakeup => {
+                if !self.event_tx.has_pending_lifecycle_events() {
+                    for (id, delta, attempt_id) in self.event_tx.take_pending_progress() {
+                        self.handle_file_progress_event(id, delta, attempt_id);
+                    }
+                }
+            }
         }
+    }
+
+    fn handle_event_delivery_failure(&mut self) -> bool {
+        let Some(failure) = self.event_tx.take_delivery_failure() else {
+            return false;
+        };
+        let message = format!("Download event delivery failed: {failure}");
+        log::error!("{message}");
+        self.status = message;
+        true
     }
 
     pub(crate) fn drain_download_events(
         &mut self,
-        download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
+        download_rx: &mut mpsc::Receiver<DownloadEvent>,
     ) -> bool {
-        self.with_deferred_batch_updates(|app| {
+        self.event_tx.flush_lifecycle_events();
+        let dashboard_dirty = self.with_deferred_batch_updates(|app| {
             let mut handled = false;
             let mut pending_progress: Vec<(FileId, crate::core::ProgressDelta, u64)> = Vec::new();
             for _ in 0..MAX_DOWNLOAD_EVENTS_PER_TICK {
@@ -390,8 +463,18 @@ impl App {
                 }
             }
             handled |= app.flush_pending_progress_events(&mut pending_progress);
+            app.event_tx.flush_lifecycle_events();
+            if !app.event_tx.has_pending_lifecycle_events() {
+                for (id, delta, attempt_id) in app.event_tx.take_pending_progress() {
+                    app.handle_file_progress_event(id, delta, attempt_id);
+                    handled = true;
+                }
+            }
+            handled |= app.handle_event_delivery_failure();
             handled
-        })
+        });
+        self.retry_pending_requests();
+        dashboard_dirty
     }
 
     pub(crate) fn drain_token_messages(&mut self) {
@@ -399,16 +482,20 @@ impl App {
             let Ok(msg) = self.token_rx.try_recv() else {
                 break;
             };
-            let file_id = msg.file_id;
-            let token = msg.token;
-            if self.paused {
-                token.cancel();
-                if !self.shutdown_pending_files.contains(&file_id) {
-                    continue;
-                }
-            }
-            self.cancellation_tokens.insert(file_id, token);
+            self.handle_token_message(msg);
         }
+    }
+
+    fn handle_token_message(&mut self, msg: super::TokenMessage) {
+        let file_id = msg.file_id;
+        let token = msg.token;
+        if self.paused {
+            token.cancel();
+            if !self.shutdown_pending_files.contains(&file_id) {
+                return;
+            }
+        }
+        self.cancellation_tokens.insert(file_id, token);
     }
 
     pub(crate) fn log_progress_summary(&mut self) {
@@ -477,8 +564,8 @@ impl App {
 
     pub(crate) fn handle_terminal_tick(
         &mut self,
-        download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
-        action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
+        download_rx: &mut mpsc::Receiver<DownloadEvent>,
+        action_rx: &mut mpsc::Receiver<UiAction>,
         tick_count: u32,
         sys: &mut System,
         pid: Option<sysinfo::Pid>,
@@ -499,6 +586,7 @@ impl App {
         }
         self.drain_token_messages();
         dashboard_dirty |= self.drain_ui_actions(action_rx);
+        self.retry_pending_requests();
         self.poll_session_persistence();
         dashboard_dirty |= self.poll_deferred_auto_login();
 
@@ -507,10 +595,30 @@ impl App {
 
     pub(crate) async fn run_headless_until_shutdown<F>(
         &mut self,
-        download_rx: &mut mpsc::UnboundedReceiver<DownloadEvent>,
-        action_rx: &mut mpsc::UnboundedReceiver<UiAction>,
+        download_rx: &mut mpsc::Receiver<DownloadEvent>,
+        action_rx: &mut mpsc::Receiver<UiAction>,
         state_tx: Option<&watch::Sender<bytes::Bytes>>,
         shutdown: F,
+    ) where
+        F: Future<Output = ()>,
+    {
+        self.run_headless_until_shutdown_with_timeout(
+            download_rx,
+            action_rx,
+            state_tx,
+            shutdown,
+            HEADLESS_SHUTDOWN_TIMEOUT,
+        )
+        .await;
+    }
+
+    async fn run_headless_until_shutdown_with_timeout<F>(
+        &mut self,
+        download_rx: &mut mpsc::Receiver<DownloadEvent>,
+        action_rx: &mut mpsc::Receiver<UiAction>,
+        state_tx: Option<&watch::Sender<bytes::Bytes>>,
+        shutdown: F,
+        shutdown_timeout: Duration,
     ) where
         F: Future<Output = ()>,
     {
@@ -520,7 +628,9 @@ impl App {
         publish_interval.tick().await;
 
         tokio::pin!(shutdown);
+        let mut shutdown_deadline = Box::pin(tokio::time::sleep(Duration::from_secs(24 * 60 * 60)));
         let mut shutting_down = false;
+        let mut shutdown_deadline_armed = false;
 
         loop {
             tokio::select! {
@@ -530,6 +640,27 @@ impl App {
                     if !self.begin_shutdown() {
                         break;
                     }
+                    shutdown_deadline
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + shutdown_timeout);
+                    shutdown_deadline_armed = true;
+                },
+                _ = &mut shutdown_deadline, if shutdown_deadline_armed => {
+                    log::error!(
+                        "Shutdown deadline elapsed with {} file(s) still pending; forcing shutdown",
+                        self.shutdown_pending_files.len(),
+                    );
+                    self.drain_token_messages();
+                    for token in self.cancellation_tokens.values() {
+                        token.cancel();
+                    }
+                    self.cancellation_tokens.clear();
+                    self.shutdown_pending_files.clear();
+                    break;
+                },
+                Some(message) = self.token_rx.recv(), if shutting_down => {
+                    self.handle_token_message(message);
+                    self.drain_token_messages();
                 },
                 event = download_rx.recv() => {
                     if let Some(evt) = event {
@@ -614,7 +745,7 @@ mod tests {
     fn ensure_download_session_refreshes_existing_session_credentials_without_mfa() {
         let dir = tempdir().expect("temp dir should exist");
         let _guard = StateDirectoryGuard::set(dir.path());
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
         let mut session = SessionSnapshot::new(
             DownloadConfig::default(),
@@ -653,7 +784,7 @@ mod tests {
 
     #[test]
     fn begin_shutdown_cancels_active_tokens() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
         let token = tokio_util::sync::CancellationToken::new();
         app.cancellation_tokens
@@ -670,8 +801,8 @@ mod tests {
     async fn headless_shutdown_waits_for_file_cancellation_events() {
         let dir = tempdir().expect("temp dir should exist");
         let _guard = StateDirectoryGuard::set(dir.path());
-        let (event_tx, download_rx) = mpsc::unbounded_channel();
-        let (_action_tx, action_rx) = mpsc::unbounded_channel();
+        let (event_tx, download_rx) = DownloadEventSender::channel();
+        let (_action_tx, action_rx) = mpsc::channel(64);
         let mut app = App::new(9723, event_tx.clone(), true);
         let file_id = crate::core::FileId::from("episode.bin");
         app.apply_core_event(CoreEvent::PackageResolved {
@@ -736,11 +867,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn headless_shutdown_forces_completion_after_workers_miss_deadline() {
+        let (event_tx, mut download_rx) = DownloadEventSender::channel();
+        let (_action_tx, mut action_rx) = mpsc::channel(64);
+        let mut app = App::new(9723, event_tx, true);
+        let token = tokio_util::sync::CancellationToken::new();
+        app.cancellation_tokens
+            .insert("episode.bin".into(), token.clone());
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            app.run_headless_until_shutdown_with_timeout(
+                &mut download_rx,
+                &mut action_rx,
+                None,
+                std::future::ready(()),
+                Duration::from_millis(10),
+            ),
+        )
+        .await
+        .expect("shutdown should be bounded");
+
+        assert!(token.is_cancelled());
+        assert!(app.shutdown_pending_files.is_empty());
+    }
+
+    #[tokio::test]
     async fn headless_shutdown_waits_for_late_download_token_registration() {
         let dir = tempdir().expect("temp dir should exist");
         let _guard = StateDirectoryGuard::set(dir.path());
-        let (event_tx, download_rx) = mpsc::unbounded_channel();
-        let (_action_tx, action_rx) = mpsc::unbounded_channel();
+        let (event_tx, download_rx) = DownloadEventSender::channel();
+        let (_action_tx, action_rx) = mpsc::channel(64);
         let mut app = App::new(9723, event_tx.clone(), true);
         let token_tx = app
             .token_tx
@@ -776,10 +933,12 @@ mod tests {
         let (release_cancel_tx, release_cancel_rx) = oneshot::channel();
         tokio::spawn(async move {
             let _ = release_token_rx.await;
-            let _ = token_tx.send(TokenMessage {
-                file_id: sent_id.clone(),
-                token: sent_token,
-            });
+            let _ = token_tx
+                .send(TokenMessage {
+                    file_id: sent_id.clone(),
+                    token: sent_token,
+                })
+                .await;
             let _ = release_cancel_rx.await;
             let _ = send_tx.send(DownloadEvent::FileCancelled {
                 id: sent_id,
@@ -823,8 +982,8 @@ mod tests {
     async fn headless_shutdown_waits_for_late_resume_validation_token_registration() {
         let dir = tempdir().expect("temp dir should exist");
         let _guard = StateDirectoryGuard::set(dir.path());
-        let (event_tx, download_rx) = mpsc::unbounded_channel();
-        let (_action_tx, action_rx) = mpsc::unbounded_channel();
+        let (event_tx, download_rx) = DownloadEventSender::channel();
+        let (_action_tx, action_rx) = mpsc::channel(64);
         let mut app = App::new(9723, event_tx.clone(), true);
         let token_tx = app
             .token_tx
@@ -857,10 +1016,12 @@ mod tests {
         let (release_cancel_tx, release_cancel_rx) = oneshot::channel();
         tokio::spawn(async move {
             let _ = release_token_rx.await;
-            let _ = token_tx.send(TokenMessage {
-                file_id: sent_id.clone(),
-                token: sent_token,
-            });
+            let _ = token_tx
+                .send(TokenMessage {
+                    file_id: sent_id.clone(),
+                    token: sent_token,
+                })
+                .await;
             let _ = release_cancel_rx.await;
             let _ = send_tx.send(DownloadEvent::FileCancelled {
                 id: sent_id,
@@ -904,7 +1065,7 @@ mod tests {
     fn ensure_download_session_does_not_create_empty_session() {
         let dir = tempdir().expect("temp dir should exist");
         let _guard = StateDirectoryGuard::set(dir.path());
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
         assert!(app.login.set_credentials(
             "fresh@example.com".to_string(),
@@ -920,7 +1081,7 @@ mod tests {
 
     #[test]
     fn publish_dashboard_snapshot_updates_single_shared_receiver() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
         let crate::tui::app::SharedStateChannels {
             state_tx,
@@ -943,7 +1104,7 @@ mod tests {
 
     #[test]
     fn tui_dashboard_snapshot_skips_single_internal_receiver() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
         let crate::tui::app::SharedStateChannels {
             state_tx,
@@ -972,7 +1133,7 @@ mod tests {
 
     #[test]
     fn dashboard_snapshot_reuses_cache_until_revision_changes() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
         let crate::tui::app::SharedStateChannels {
             state_tx,
@@ -1009,7 +1170,7 @@ mod tests {
 
     #[test]
     fn dashboard_snapshot_reuses_binary_cache_until_revision_changes() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
         let crate::tui::app::SharedStateChannels {
             state_tx,
@@ -1048,10 +1209,11 @@ mod tests {
 
     #[test]
     fn terminal_tick_bounds_download_event_drain_to_keep_input_responsive() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
-        let (download_tx, mut download_rx) = mpsc::unbounded_channel();
-        let (_action_tx, mut action_rx) = mpsc::unbounded_channel();
+        let (download_tx, mut download_rx) =
+            DownloadEventSender::channel_with_capacity(MAX_DOWNLOAD_EVENTS_PER_TICK + 10);
+        let (_action_tx, mut action_rx) = mpsc::channel(64);
         let mut sys = System::new();
 
         for index in 0..MAX_DOWNLOAD_EVENTS_PER_TICK + 10 {
@@ -1077,11 +1239,71 @@ mod tests {
     }
 
     #[test]
+    fn drain_download_events_flushes_retained_lifecycle_events_on_later_ticks() {
+        let (event_tx, mut download_rx) = DownloadEventSender::channel_with_capacities(1, 1);
+        let mut app = App::new(9723, event_tx.clone(), true);
+        let first = DownloadEvent::ScopeError {
+            scope: "setup".to_string(),
+            error: "one".to_string(),
+        };
+        let second = DownloadEvent::ScopeError {
+            scope: "download".to_string(),
+            error: "two".to_string(),
+        };
+
+        event_tx
+            .send(first)
+            .expect("first lifecycle event should enter the channel");
+        event_tx
+            .send(second)
+            .expect("second lifecycle event should enter the sender backlog");
+
+        assert!(app.drain_download_events(&mut download_rx));
+        assert!(app.overlay_files.contains_key("setup"));
+        assert!(app.drain_download_events(&mut download_rx));
+        assert!(app.overlay_files.contains_key("download"));
+    }
+
+    #[test]
+    fn drain_download_events_surfaces_lifecycle_delivery_failure() {
+        let (event_tx, mut download_rx) = DownloadEventSender::channel_with_capacities(1, 1);
+        let mut app = App::new(9723, event_tx.clone(), true);
+
+        event_tx
+            .send(DownloadEvent::ScopeError {
+                scope: "setup".to_string(),
+                error: "one".to_string(),
+            })
+            .expect("first lifecycle event should enter the channel");
+        event_tx
+            .send(DownloadEvent::ScopeError {
+                scope: "download".to_string(),
+                error: "two".to_string(),
+            })
+            .expect("second lifecycle event should enter the backlog");
+        assert!(matches!(
+            event_tx.send(DownloadEvent::ScopeError {
+                scope: "verify".to_string(),
+                error: "three".to_string(),
+            }),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(
+                DownloadEvent::ScopeError { .. }
+            ))
+        ));
+
+        assert!(app.drain_download_events(&mut download_rx));
+        assert!(
+            app.status
+                .contains("Download event delivery failed: lifecycle backlog is full")
+        );
+    }
+
+    #[test]
     fn terminal_tick_does_not_dirty_dashboard_when_idle() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
-        let (_download_tx, mut download_rx) = mpsc::unbounded_channel();
-        let (_action_tx, mut action_rx) = mpsc::unbounded_channel();
+        let (_download_tx, mut download_rx) = mpsc::channel(64);
+        let (_action_tx, mut action_rx) = mpsc::channel(64);
         let mut sys = System::new();
 
         assert!(!app.handle_terminal_tick(
@@ -1096,10 +1318,10 @@ mod tests {
 
     #[test]
     fn terminal_tick_dirties_dashboard_for_active_transfer_speed_refresh() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
-        let (_download_tx, mut download_rx) = mpsc::unbounded_channel();
-        let (_action_tx, mut action_rx) = mpsc::unbounded_channel();
+        let (_download_tx, mut download_rx) = mpsc::channel(64);
+        let (_action_tx, mut action_rx) = mpsc::channel(64);
         let mut sys = System::new();
 
         app.files.push(FileEntry {
@@ -1122,10 +1344,10 @@ mod tests {
 
     #[test]
     fn terminal_tick_skips_active_transfer_dashboard_publish_without_remote_client() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
-        let (_download_tx, mut download_rx) = mpsc::unbounded_channel();
-        let (_action_tx, mut action_rx) = mpsc::unbounded_channel();
+        let (_download_tx, mut download_rx) = mpsc::channel(64);
+        let (_action_tx, mut action_rx) = mpsc::channel(64);
         let mut sys = System::new();
 
         app.files.push(FileEntry {
@@ -1148,9 +1370,9 @@ mod tests {
 
     #[test]
     fn drain_download_events_coalesces_progress_for_same_file_within_tick() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
-        let (download_tx, mut download_rx) = mpsc::unbounded_channel();
+        let (download_tx, mut download_rx) = mpsc::channel(64);
 
         app.apply_core_event(crate::core::CoreEvent::PackageResolved {
             package: crate::core::ResolvedPackage {
@@ -1173,7 +1395,7 @@ mod tests {
 
         for _ in 0..3 {
             download_tx
-                .send(DownloadEvent::Progress {
+                .try_send(DownloadEvent::Progress {
                     id: "file.bin".into(),
                     delta: crate::core::ProgressDelta {
                         total_bytes_delta: 10,
@@ -1197,9 +1419,9 @@ mod tests {
 
     #[test]
     fn drain_download_events_applies_verification_progress_without_attempt_id() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
-        let (download_tx, mut download_rx) = mpsc::unbounded_channel();
+        let (download_tx, mut download_rx) = mpsc::channel(64);
 
         app.apply_core_event(crate::core::CoreEvent::PackageResolved {
             package: crate::core::ResolvedPackage {
@@ -1227,7 +1449,7 @@ mod tests {
         });
 
         download_tx
-            .send(DownloadEvent::VerificationProgress {
+            .try_send(DownloadEvent::VerificationProgress {
                 id: "file.bin".into(),
                 bytes_delta: 25,
             })
@@ -1246,9 +1468,9 @@ mod tests {
 
     #[test]
     fn drain_download_events_starts_resume_validation_from_download_event() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
-        let (download_tx, mut download_rx) = mpsc::unbounded_channel();
+        let (download_tx, mut download_rx) = mpsc::channel(64);
 
         app.apply_core_event(crate::core::CoreEvent::PackageResolved {
             package: crate::core::ResolvedPackage {
@@ -1266,7 +1488,7 @@ mod tests {
         });
 
         download_tx
-            .send(DownloadEvent::ResumeValidationStarted {
+            .try_send(DownloadEvent::ResumeValidationStarted {
                 id: "file.bin".into(),
                 attempt_id: 0,
             })
@@ -1290,9 +1512,9 @@ mod tests {
 
     #[test]
     fn drain_download_events_applies_verification_skip() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
-        let (download_tx, mut download_rx) = mpsc::unbounded_channel();
+        let (download_tx, mut download_rx) = mpsc::channel(64);
 
         app.apply_core_event(crate::core::CoreEvent::PackageResolved {
             package: crate::core::ResolvedPackage {
@@ -1320,7 +1542,7 @@ mod tests {
         });
 
         download_tx
-            .send(DownloadEvent::VerificationSkipped {
+            .try_send(DownloadEvent::VerificationSkipped {
                 id: "file.bin".into(),
                 completed: false,
             })

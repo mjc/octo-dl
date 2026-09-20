@@ -62,7 +62,7 @@ async fn verification_executor_limits_parallel_work_to_four() {
 
 #[test]
 fn drain_ready_requests_collects_follow_up_verification_requests_in_order() {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(64);
     let first = DownloadRequest::ReverifyFileIds {
         source_url: "https://mega.nz/folder/root".to_string(),
         file_ids: vec!["resume-a.bin".into()],
@@ -75,7 +75,7 @@ fn drain_ready_requests_collects_follow_up_verification_requests_in_order() {
         source_url: "https://mega.nz/folder/root".to_string(),
         file_ids: vec!["resume-b.bin".into()],
     };
-    tx.send(second.clone())
+    tx.try_send(second.clone())
         .expect("second request should queue");
 
     let mut pending = VecDeque::from([first.clone()]);
@@ -89,7 +89,8 @@ fn drain_ready_requests_collects_follow_up_verification_requests_in_order() {
         handled_first,
         DownloadRequest::ReverifyFileIds { .. }
     ));
-    tx.send(late.clone()).expect("late request should queue");
+    tx.try_send(late.clone())
+        .expect("late request should queue");
 
     drain_ready_requests(&mut pending, &mut rx);
     assert_eq!(pending, VecDeque::from([second, late]));
@@ -99,6 +100,35 @@ fn drain_ready_requests_collects_follow_up_verification_requests_in_order() {
 fn test_app() -> App {
     let (tx, _rx) = mpsc::unbounded_channel();
     App::new(9723, tx, true)
+}
+
+#[tokio::test]
+async fn register_download_token_delivers_token_to_application_channel() {
+    let (token_tx, mut token_rx) = mpsc::channel(1);
+    let file_id: FileId = "episode.mkv".into();
+
+    let cancel_token = register_download_token(file_id.clone(), &token_tx)
+        .await
+        .expect("a live token channel should accept registration");
+    let message = token_rx
+        .recv()
+        .await
+        .expect("registered token should arrive at the application");
+
+    assert_eq!(message.file_id, file_id);
+    assert!(!message.token.is_cancelled());
+    cancel_token.cancel();
+    assert!(message.token.is_cancelled());
+}
+
+#[tokio::test]
+async fn register_download_token_reports_closed_application_channel() {
+    let (token_tx, token_rx) = mpsc::channel(1);
+    drop(token_rx);
+
+    let result = register_download_token("episode.mkv".into(), &token_tx).await;
+
+    assert!(result.is_err());
 }
 
 #[test]
@@ -305,6 +335,49 @@ fn describe_panic_handles_known_and_unknown_payloads() {
 }
 
 #[test]
+fn pausing_active_reverify_keeps_desired_download_for_requeue() {
+    let file_id: FileId = "active.bin".into();
+    let mut scheduler = SchedulerState::new();
+    scheduler.desired_pending_order.push(file_id.clone());
+    scheduler.desired_pending_set.insert(file_id.clone());
+    scheduler.active_downloads.insert(file_id.clone());
+    scheduler
+        .active_download_ptrs
+        .insert(file_id_ptr_key(&file_id));
+
+    let paused = scheduler.pause_file_ids(std::slice::from_ref(&file_id));
+
+    assert!(
+        paused.is_empty(),
+        "active work has not yielded its queued item"
+    );
+    assert!(scheduler.desired_pending_set.contains(&file_id));
+    assert_eq!(scheduler.desired_pending_order, vec![file_id]);
+}
+
+#[test]
+fn retry_cleanup_finishes_before_a_new_attempt_can_be_queued() {
+    let directory = tempdir().expect("temporary cleanup directory should exist");
+    let output = directory.path().join("file.bin");
+    let output = output.to_string_lossy().into_owned();
+    let artifacts = [
+        crate::download::part_path(&output),
+        crate::download::sidecar_path(&output),
+        crate::download::legacy_binary_sidecar_path(&output),
+        crate::download::legacy_json_sidecar_path(&output),
+    ];
+    for artifact in &artifacts {
+        std::fs::write(artifact, b"stale").expect("stale resume artifact should be writable");
+    }
+    std::fs::write(&output, b"completed").expect("output should be writable");
+
+    schedule_resume_artifact_delete(output.clone());
+
+    assert!(artifacts.iter().all(|artifact| !artifact.exists()));
+    assert!(std::path::Path::new(&output).exists());
+}
+
+#[test]
 fn resume_priority_targets_block_other_pending_downloads() {
     let resume_a = FileId::from("resume-a.bin");
     let resume_b = FileId::from("resume-b.bin");
@@ -420,6 +493,7 @@ fn file_queued_clears_stale_error_state() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "file-id".to_string().into(),
+        attempt_id: 0,
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
@@ -452,6 +526,7 @@ fn file_queued_bootstraps_and_saves_session() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "file-id".to_string().into(),
+        attempt_id: 0,
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
@@ -479,6 +554,7 @@ fn file_queued_after_package_delete_is_ignored_when_source_is_untracked() {
     app.submit_url(source_url.clone());
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "known.bin".to_string().into(),
+        attempt_id: 0,
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
@@ -497,6 +573,7 @@ fn file_queued_after_package_delete_is_ignored_when_source_is_untracked() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "late.bin".to_string().into(),
+        attempt_id: 0,
         size: 256,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
@@ -577,6 +654,7 @@ fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "episode.mkv".to_string().into(),
+        attempt_id: 0,
         size: 128,
         accounting: crate::core::FileAccounting::Preexisting,
         origin: FileOrigin {
@@ -618,6 +696,7 @@ fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
             nodes: None,
             requested_files: RequestedFiles::All,
             requested_attempt_ids: HashMap::new(),
+            submission_attempt_id: 0,
             emit_url_resolved: true,
         },
         FetchedNodeSet {
@@ -630,6 +709,7 @@ fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
             nodes: None,
             requested_files: RequestedFiles::All,
             requested_attempt_ids: HashMap::new(),
+            submission_attempt_id: 0,
             emit_url_resolved: true,
         },
         FetchedNodeSet {
@@ -642,6 +722,7 @@ fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
             nodes: None,
             requested_files: RequestedFiles::All,
             requested_attempt_ids: HashMap::new(),
+            submission_attempt_id: 0,
             emit_url_resolved: true,
         },
     ];
