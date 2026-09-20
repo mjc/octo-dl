@@ -658,9 +658,8 @@ fn reduce_impl(
             if let Some(file) = state.files.shift_remove(&file_id) {
                 let before = FileDerivedState::from(&file);
                 let source_url = file.source_url.clone();
-                let path = file.path.clone();
-                effects.push(CoreEffect::DeleteOutputArtifacts { path: path.clone() });
-                effects.push(CoreEffect::DeleteResumeArtifacts { path });
+                let resume_path =
+                    (!matches!(file.lifecycle, FileLifecycle::Complete)).then(|| file.path.clone());
                 remove_totals_contribution(state, before);
                 remove_package_progress(state, before.package_id, before.lifecycle_bucket);
                 if !state.package_has_files(&before.package_id) {
@@ -668,19 +667,23 @@ fn reduce_impl(
                 }
                 remove_unreferenced_source_url(state, &source_url);
                 recompute_session_status(state);
+                if let Some(path) = resume_path {
+                    effects.push(CoreEffect::DeleteResumeArtifacts { path });
+                }
             }
         }
         CoreEvent::PackageDeleted { package_id } => {
             if state.packages.shift_remove(&package_id).is_some() {
                 let mut removed_source_urls = std::collections::HashSet::new();
+                let mut resume_paths = Vec::new();
                 let mut remaining_files = FileStateIndex::default();
                 for (file_id, file) in std::mem::take(&mut state.files) {
                     if file.package_id == package_id {
                         let before = FileDerivedState::from(&file);
                         removed_source_urls.insert(file.source_url.clone());
-                        let path = file.path.clone();
-                        effects.push(CoreEffect::DeleteOutputArtifacts { path: path.clone() });
-                        effects.push(CoreEffect::DeleteResumeArtifacts { path });
+                        if !matches!(file.lifecycle, FileLifecycle::Complete) {
+                            resume_paths.push(file.path.clone());
+                        }
                         remove_totals_contribution(state, before);
                     } else {
                         remaining_files.insert(file_id, file);
@@ -691,6 +694,11 @@ fn reduce_impl(
                     remove_unreferenced_source_url(state, &source_url);
                 }
                 recompute_session_status(state);
+                effects.extend(
+                    resume_paths
+                        .into_iter()
+                        .map(|path| CoreEffect::DeleteResumeArtifacts { path }),
+                );
             }
         }
         CoreEvent::FileRetryRequested { file_id } => {
@@ -2319,7 +2327,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_removes_file_artifacts() {
+    fn deleting_incomplete_file_emits_resume_cleanup_effect() {
         let mut state = sample_state();
         let effects = reduce(
             &mut state,
@@ -2329,16 +2337,34 @@ mod tests {
         );
         assert!(effects.iter().any(|effect| matches!(
             effect,
-            CoreEffect::DeleteOutputArtifacts { path } if path == "file.bin"
-        )));
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
             CoreEffect::DeleteResumeArtifacts { path } if path == "file.bin"
         )));
     }
 
     #[test]
-    fn deleting_completed_file_removes_artifacts() {
+    fn deleting_incomplete_file_emits_resume_cleanup_without_output_cleanup() {
+        let mut state = sample_state();
+
+        let effects = reduce(
+            &mut state,
+            CoreEvent::FileDeleted {
+                file_id: "file.bin".to_string().into(),
+            },
+        );
+
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            CoreEffect::DeleteResumeArtifacts { path } if path == "file.bin"
+        )));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, CoreEffect::DeleteOutputArtifacts { .. }))
+        );
+    }
+
+    #[test]
+    fn deleting_completed_file_keeps_artifacts() {
         let mut state = sample_state();
         reduce(
             &mut state,
@@ -2354,13 +2380,9 @@ mod tests {
             },
         );
 
-        assert!(effects.iter().any(|effect| matches!(
+        assert!(!effects.iter().any(|effect| matches!(
             effect,
-            CoreEffect::DeleteOutputArtifacts { path } if path == "file.bin"
-        )));
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            CoreEffect::DeleteResumeArtifacts { path } if path == "file.bin"
+            CoreEffect::DeleteOutputArtifacts { .. } | CoreEffect::DeleteResumeArtifacts { .. }
         )));
     }
 

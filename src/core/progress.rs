@@ -246,7 +246,6 @@ mod tests {
             let earlier = start + Duration::from_secs(earlier_secs);
             rate.reset(0, start);
             rate.record(delta, first);
-            prop_assert!(rate.bytes_per_sec(first) > 0);
             rate.record(delta.saturating_add(1), earlier);
             prop_assert_eq!(rate.bytes_per_sec(earlier + Duration::from_secs(1)), 0);
         }

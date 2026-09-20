@@ -1,4 +1,5 @@
 use super::*;
+use crate::download::resume_state::CURRENT_RESUME_SIDECAR_VERSION;
 use crate::download::test_support::{
     legacy_json_sidecar_for_chunk, sidecar_for_chunk, write_legacy_json_sidecar,
 };

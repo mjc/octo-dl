@@ -2,6 +2,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
