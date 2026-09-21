@@ -142,6 +142,15 @@ async fn sidecar_save_writes_postcard_not_legacy_formats() {
     assert!(serde_json::from_slice::<LegacyJsonResumeSidecar>(&data).is_err());
 }
 
+#[test]
+fn serialize_sidecar_uses_the_persisted_postcard_format() {
+    let sidecar = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
+
+    let data = serialize_sidecar(&sidecar).expect("sidecar should serialize");
+
+    assert_eq!(data, postcard::to_stdvec(&sidecar).unwrap());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn sidecar_save_rejects_preexisting_temp_symlink() {

@@ -195,6 +195,20 @@ fn deserialize_postcard_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
     postcard::from_bytes(data).ok()
 }
 
+pub(super) fn serialize_sidecar(sidecar: &ResumeSidecar) -> io::Result<Vec<u8>> {
+    postcard::to_stdvec(sidecar).map_err(io::Error::other)
+}
+
+pub(super) fn reject_symlink(path: &Path, metadata: &std::fs::Metadata) -> io::Result<()> {
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("refusing to overwrite symlink: {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
 fn deserialize_legacy_binary_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
     let mut reader = LegacyBinaryReader::new(data);
     let version = reader.read_u32()?;
@@ -314,17 +328,11 @@ fn deserialize_legacy_json_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
 pub(super) async fn save_sidecar_atomic(path: &Path, sidecar: &ResumeSidecar) -> io::Result<()> {
     let tmp = sidecar_tmp_path(path);
     match tokio::fs::symlink_metadata(&tmp).await {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("refusing to overwrite symlink: {}", tmp.display()),
-            ));
-        }
-        Ok(_) => {}
+        Ok(metadata) => reject_symlink(&tmp, &metadata)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let data = postcard::to_stdvec(sidecar).map_err(io::Error::other)?;
+    let data = serialize_sidecar(sidecar)?;
     let mut file = tokio::fs::File::create(&tmp).await?;
     file.write_all(&data).await?;
     file.flush().await?;

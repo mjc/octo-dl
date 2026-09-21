@@ -133,19 +133,45 @@ struct LoginRequest {
 }
 
 #[derive(Deserialize)]
-struct DeleteRequest {
+struct TargetRequest {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
     name: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct RetryRequest {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
+#[derive(Clone, Copy, Debug)]
+enum TargetAction {
+    Delete,
+    Retry,
+    Reset,
+    Reverify,
+}
+
+impl TargetAction {
+    fn into_ui_action(self, target: ActionTarget) -> UiAction {
+        match (self, target) {
+            (Self::Delete, ActionTarget::Package(id)) => UiAction::DeletePackage(id),
+            (Self::Delete, ActionTarget::File(id)) => UiAction::DeleteFile(id),
+            (Self::Retry, ActionTarget::Package(id)) => UiAction::RetryPackage(id),
+            (Self::Retry, ActionTarget::File(id)) => UiAction::RetryFile(id),
+            (Self::Reset, ActionTarget::Package(id)) => UiAction::ResetPackage(id),
+            (Self::Reset, ActionTarget::File(id)) => UiAction::ResetFile(id),
+            (Self::Reverify, ActionTarget::Package(id)) => UiAction::ReverifyPackage(id),
+            (Self::Reverify, ActionTarget::File(id)) => UiAction::ReverifyFile(id),
+        }
+    }
+}
+
+fn dispatch_target_action(
+    state: &ApiState,
+    request: TargetRequest,
+    action: TargetAction,
+) -> axum::response::Response {
+    match resolve_action_target(state, request.id.as_deref(), request.name.as_deref()) {
+        Ok(target) => send_ui_action(state, action.into_ui_action(target)),
+        Err(response) => *response,
+    }
 }
 
 #[derive(Deserialize)]
@@ -334,66 +360,50 @@ async fn api_pause(State(state): State<ApiState>, headers: HeaderMap) -> impl In
 async fn api_delete(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    axum::Json(payload): axum::Json<DeleteRequest>,
+    axum::Json(payload): axum::Json<TargetRequest>,
 ) -> impl IntoResponse {
     if let Some(response) = require_api_key(&state, &headers) {
         return response;
     }
-    match resolve_action_target(&state, payload.id.as_deref(), payload.name.as_deref()) {
-        Ok(ActionTarget::Package(id)) => send_ui_action(&state, UiAction::DeletePackage(id)),
-        Ok(ActionTarget::File(id)) => send_ui_action(&state, UiAction::DeleteFile(id)),
-        Err(response) => *response,
-    }
+    dispatch_target_action(&state, payload, TargetAction::Delete)
 }
 
 /// POST /api/retry — retry a failed file.
 async fn api_retry(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    axum::Json(payload): axum::Json<RetryRequest>,
+    axum::Json(payload): axum::Json<TargetRequest>,
 ) -> impl IntoResponse {
     if let Some(response) = require_api_key(&state, &headers) {
         return response;
     }
-    match resolve_action_target(&state, payload.id.as_deref(), payload.name.as_deref()) {
-        Ok(ActionTarget::Package(id)) => send_ui_action(&state, UiAction::RetryPackage(id)),
-        Ok(ActionTarget::File(id)) => send_ui_action(&state, UiAction::RetryFile(id)),
-        Err(response) => *response,
-    }
+    dispatch_target_action(&state, payload, TargetAction::Retry)
 }
 
 /// POST /api/reset — explicitly reset a file or package for a fresh download.
 async fn api_reset(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    axum::Json(payload): axum::Json<RetryRequest>,
+    axum::Json(payload): axum::Json<TargetRequest>,
 ) -> impl IntoResponse {
     if let Some(response) = require_api_key(&state, &headers) {
         return response;
     }
 
-    match resolve_action_target(&state, payload.id.as_deref(), payload.name.as_deref()) {
-        Ok(ActionTarget::Package(id)) => send_ui_action(&state, UiAction::ResetPackage(id)),
-        Ok(ActionTarget::File(id)) => send_ui_action(&state, UiAction::ResetFile(id)),
-        Err(response) => *response,
-    }
+    dispatch_target_action(&state, payload, TargetAction::Reset)
 }
 
 /// POST /api/reverify — explicitly verify a file or package without resetting it.
 async fn api_reverify(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    axum::Json(payload): axum::Json<RetryRequest>,
+    axum::Json(payload): axum::Json<TargetRequest>,
 ) -> impl IntoResponse {
     if let Some(response) = require_api_key(&state, &headers) {
         return response;
     }
 
-    match resolve_action_target(&state, payload.id.as_deref(), payload.name.as_deref()) {
-        Ok(ActionTarget::Package(id)) => send_ui_action(&state, UiAction::ReverifyPackage(id)),
-        Ok(ActionTarget::File(id)) => send_ui_action(&state, UiAction::ReverifyFile(id)),
-        Err(response) => *response,
-    }
+    dispatch_target_action(&state, payload, TargetAction::Reverify)
 }
 
 /// POST /api/config — update download configuration.

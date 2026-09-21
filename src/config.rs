@@ -443,8 +443,6 @@ impl ServiceConfig {
     ///
     /// Returns an error if the file cannot be written.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        use std::io::Write as _;
-
         let toml_str = toml::to_string(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
@@ -458,39 +456,11 @@ impl ServiceConfig {
             save_id
         ));
 
-        let result: std::io::Result<()> = (|| {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temporary_path).map_err(|error| {
-                path_io_error("write temporary config file", &temporary_path, error)
-            })?;
-
-            file.write_all(toml_str.as_bytes()).map_err(|error| {
-                path_io_error("write temporary config file", &temporary_path, error)
-            })?;
-            file.flush().map_err(|error| {
-                path_io_error("flush temporary config file", &temporary_path, error)
-            })?;
-            file.sync_all().map_err(|error| {
-                path_io_error("sync temporary config file", &temporary_path, error)
-            })?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&temporary_path, std::fs::Permissions::from_mode(0o600))
-                    .map_err(|error| {
-                    path_io_error("set config file permissions", &temporary_path, error)
-                })?;
-            }
-
-            Ok(())
-        })();
+        let result = write_durable_temp_file(
+            &temporary_path,
+            toml_str.as_bytes(),
+            "temporary config file",
+        );
 
         if result.is_err() {
             let _ = std::fs::remove_file(&temporary_path);
@@ -515,50 +485,12 @@ impl ServiceConfig {
             std::process::id(),
             save_id
         ));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let key_result = (|| {
-            let mut file = options.open(&key_temporary_path).map_err(|error| {
-                path_io_error(
-                    "write temporary credential key file",
-                    &key_temporary_path,
-                    error,
-                )
-            })?;
-            file.write_all(key.as_bytes()).map_err(|error| {
-                path_io_error(
-                    "write temporary credential key file",
-                    &key_temporary_path,
-                    error,
-                )
-            })?;
-            file.write_all(b"\n").map_err(|error| {
-                path_io_error(
-                    "write temporary credential key file",
-                    &key_temporary_path,
-                    error,
-                )
-            })?;
-            file.flush().map_err(|error| {
-                path_io_error(
-                    "flush temporary credential key file",
-                    &key_temporary_path,
-                    error,
-                )
-            })?;
-            file.sync_all().map_err(|error| {
-                path_io_error(
-                    "sync temporary credential key file",
-                    &key_temporary_path,
-                    error,
-                )
-            })
-        })();
+        let key_contents = format!("{key}\n");
+        let key_result = write_durable_temp_file(
+            &key_temporary_path,
+            key_contents.as_bytes(),
+            "temporary credential key file",
+        );
         if let Err(error) = key_result {
             let _ = std::fs::remove_file(&temporary_path);
             let _ = std::fs::remove_file(&key_temporary_path);
@@ -605,6 +537,37 @@ impl ServiceConfig {
         let _ = std::fs::remove_file(&key_backup_path);
         sync_directory(parent)
     }
+}
+
+fn write_durable_temp_file(path: &Path, contents: &[u8], description: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| path_io_error(&format!("write {description}"), path, error))?;
+    file.write_all(contents)
+        .map_err(|error| path_io_error(&format!("write {description}"), path, error))?;
+    file.flush()
+        .map_err(|error| path_io_error(&format!("flush {description}"), path, error))?;
+    file.sync_all()
+        .map_err(|error| path_io_error(&format!("sync {description}"), path, error))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |error| path_io_error(&format!("set {description} permissions"), path, error),
+        )?;
+    }
+
+    Ok(())
 }
 
 fn replace_config_file(temporary_path: &Path, path: &Path, parent: &Path) -> std::io::Result<()> {

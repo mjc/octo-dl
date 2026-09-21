@@ -492,7 +492,7 @@ async fn retry_api_dispatches_package_action_for_package_id() {
     let _ = api_retry(
         State(state),
         HeaderMap::new(),
-        axum::Json(RetryRequest {
+        axum::Json(TargetRequest {
             id: Some(package_id_str.clone()),
             name: None,
         }),
@@ -503,6 +503,99 @@ async fn retry_api_dispatches_package_action_for_package_id() {
     match rx.try_recv().expect("UI action should be sent") {
         UiAction::RetryPackage(id) => assert_eq!(id.to_string(), package_id_str),
         other => panic!("unexpected UI action: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn target_action_dispatch_preserves_file_and_package_actions() {
+    let package_id_str = package_id("pkg", "https://mega.nz/folder/pkg").to_string();
+    let (state, mut rx) = state_with_dashboard(
+        vec![DashboardFileRow {
+            id: "file-id".to_string(),
+            package_id: package_id_str.clone(),
+            name: "file.mkv".to_string(),
+            size: 0,
+            downloaded: 0,
+            speed: 0,
+            status: DashboardFileStatus::Queued,
+            package_label: None,
+        }],
+        vec![DashboardPackageRow {
+            id: package_id_str.clone(),
+            source_url: "https://mega.nz/folder/pkg".to_string(),
+            display_name: "Package".to_string(),
+            status: crate::core::PackageStatus::Pending,
+            file_ids: vec!["file-id".to_string()],
+            present_files: 1,
+            completed_files: 0,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            percent: 0,
+            expanded: false,
+            folder_label: None,
+            error: None,
+        }],
+        None,
+        None,
+    );
+
+    let cases = [
+        (TargetAction::Delete, "file"),
+        (TargetAction::Retry, "file"),
+        (TargetAction::Reset, "file"),
+        (TargetAction::Reverify, "file"),
+        (TargetAction::Delete, "package"),
+        (TargetAction::Retry, "package"),
+        (TargetAction::Reset, "package"),
+        (TargetAction::Reverify, "package"),
+    ];
+
+    for (action, target_kind) in cases {
+        let id = if target_kind == "file" {
+            "file-id"
+        } else {
+            &package_id_str
+        };
+        let response = dispatch_target_action(
+            &state,
+            TargetRequest {
+                id: Some(id.to_string()),
+                name: None,
+            },
+            action,
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let received = rx.try_recv().expect("target action should be dispatched");
+        match (action, target_kind, received) {
+            (TargetAction::Delete, "file", UiAction::DeleteFile(id)) => {
+                assert_eq!(id, "file-id")
+            }
+            (TargetAction::Retry, "file", UiAction::RetryFile(id)) => {
+                assert_eq!(id, "file-id")
+            }
+            (TargetAction::Reset, "file", UiAction::ResetFile(id)) => {
+                assert_eq!(id, "file-id")
+            }
+            (TargetAction::Reverify, "file", UiAction::ReverifyFile(id)) => {
+                assert_eq!(id, "file-id")
+            }
+            (TargetAction::Delete, "package", UiAction::DeletePackage(id)) => {
+                assert_eq!(id.to_string(), package_id_str)
+            }
+            (TargetAction::Retry, "package", UiAction::RetryPackage(id)) => {
+                assert_eq!(id.to_string(), package_id_str)
+            }
+            (TargetAction::Reset, "package", UiAction::ResetPackage(id)) => {
+                assert_eq!(id.to_string(), package_id_str)
+            }
+            (TargetAction::Reverify, "package", UiAction::ReverifyPackage(id)) => {
+                assert_eq!(id.to_string(), package_id_str)
+            }
+            (action, target_kind, other) => {
+                panic!("unexpected action for {action:?} {target_kind}: {other:?}")
+            }
+        }
     }
 }
 
@@ -533,7 +626,7 @@ async fn reset_api_dispatches_file_action_with_api_key() {
     let response = api_reset(
         State(state),
         headers,
-        axum::Json(RetryRequest {
+        axum::Json(TargetRequest {
             id: Some("file-id".to_string()),
             name: None,
         }),
@@ -584,7 +677,7 @@ async fn delete_rejects_a_name_shared_by_a_package_and_file() {
     let response = api_delete(
         State(state),
         HeaderMap::new(),
-        axum::Json(DeleteRequest {
+        axum::Json(TargetRequest {
             id: None,
             name: Some("same-name".to_string()),
         }),
