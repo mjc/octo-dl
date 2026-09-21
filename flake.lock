@@ -33,23 +33,6 @@
         "type": "github"
       }
     },
-    "mega-rs": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1789951560,
-        "narHash": "sha256-y7kKUnF864Rm58ohhiCGVO0TRrwbIhDE/kGI7qOHU2k=",
-        "owner": "mjc",
-        "repo": "mega-rs",
-        "rev": "a3ec96883f34ad2a1cbe175a4e37af732f8e9c08",
-        "type": "github"
-      },
-      "original": {
-        "owner": "mjc",
-        "repo": "mega-rs",
-        "rev": "a3ec96883f34ad2a1cbe175a4e37af732f8e9c08",
-        "type": "github"
-      }
-    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1789785513,
@@ -86,7 +69,6 @@
       "inputs": {
         "crane": "crane",
         "flake-utils": "flake-utils",
-        "mega-rs": "mega-rs",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay"
       }

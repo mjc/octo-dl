@@ -6,10 +6,6 @@
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
     crane.url = "github:ipetkov/crane";
-    mega-rs = {
-      url = "github:mjc/mega-rs/a3ec96883f34ad2a1cbe175a4e37af732f8e9c08";
-      flake = false;
-    };
   };
 
   outputs = {
@@ -18,7 +14,6 @@
     flake-utils,
     rust-overlay,
     crane,
-    mega-rs,
     ...
   }:
     flake-utils.lib.eachDefaultSystem (
@@ -83,12 +78,6 @@
 
           nativeBuildInputs = [pkgs.pkg-config pkgs.mold];
           buildInputs = [pkgs.openssl];
-
-          # Place mega-rs next to octo-dl so `path = "../mega-rs"` resolves
-          postUnpack = ''
-            cp -r ${mega-rs} mega-rs
-            chmod -R u+w mega-rs
-          '';
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           "${cargoTargetLinkerEnv}" = linuxCcLinker;
