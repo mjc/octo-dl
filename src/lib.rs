@@ -11,7 +11,7 @@
 //!
 //! # async fn example() -> octo_dl::Result<()> {
 //! // Create a MEGA client
-//! let http = reqwest::Client::new();
+//! let http = mega::http_client_builder()?.build()?;
 //! let mut client = mega::Client::builder().build(http)?;
 //! client.login("email", "password", None).await?;
 //!

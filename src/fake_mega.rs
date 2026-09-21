@@ -212,7 +212,7 @@ pub async fn run_bench(options: &BenchOptions) -> Result<BenchResult> {
     .await?;
     let server = FakeMegaServer::spawn(fixture.clone(), options.server_worker_threads)?;
 
-    let http = reqwest::Client::builder().build()?;
+    let http = mega::http_client_builder()?.build()?;
     let bench_http = http.clone();
     let client = mega::Client::builder()
         .origin(server.origin().clone())

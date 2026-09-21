@@ -3,6 +3,9 @@ all-features = true
 
 [advisories]
 unmaintained = "workspace"
+# MEGA's RustCrypto HTTP helper disables client auth and rejects private keys.
+# RSA is used only to verify signatures, outside the private-operation advisory.
+ignore = ["RUSTSEC-2023-0071"]
 
 [licenses]
 confidence-threshold = 0.8

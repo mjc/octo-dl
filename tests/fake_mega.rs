@@ -15,7 +15,7 @@ async fn public_link_round_trips_through_fake_server() {
     let server = FakeMegaServer::spawn(fixture.clone(), 1).unwrap();
     let client = mega::Client::builder()
         .origin(server.origin().clone())
-        .build(reqwest::Client::new())
+        .build(mega::http_client_builder().unwrap().build().unwrap())
         .unwrap();
 
     let nodes = client
@@ -45,7 +45,7 @@ async fn downloader_fetches_and_decrypts_fake_public_file() {
     let server = FakeMegaServer::spawn(fixture.clone(), 1).unwrap();
     let client = mega::Client::builder()
         .origin(server.origin().clone())
-        .build(reqwest::Client::new())
+        .build(mega::http_client_builder().unwrap().build().unwrap())
         .unwrap();
     let nodes = client
         .fetch_public_nodes(&fixture.public_url())

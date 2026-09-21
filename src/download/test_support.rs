@@ -119,13 +119,13 @@ impl FileSystem for MockFileSystem {
 }
 
 pub(super) fn mock_downloader(fs: MockFileSystem) -> Downloader<MockFileSystem> {
-    let http = reqwest::Client::new();
+    let http = mega::http_client_builder().unwrap().build().unwrap();
     let client = mega::Client::builder().build(http).unwrap();
     Downloader::with_fs(client, DownloadConfig::default(), fs)
 }
 
 pub(super) fn mock_downloader_force(fs: MockFileSystem) -> Downloader<MockFileSystem> {
-    let http = reqwest::Client::new();
+    let http = mega::http_client_builder().unwrap().build().unwrap();
     let client = mega::Client::builder().build(http).unwrap();
     let config = DownloadConfig {
         force_overwrite: true,
@@ -135,7 +135,7 @@ pub(super) fn mock_downloader_force(fs: MockFileSystem) -> Downloader<MockFileSy
 }
 
 pub(super) fn tokio_downloader() -> Downloader<TokioFileSystem> {
-    let http = reqwest::Client::new();
+    let http = mega::http_client_builder().unwrap().build().unwrap();
     let client = mega::Client::builder().build(http).unwrap();
     Downloader::new(client, DownloadConfig::default())
 }
@@ -160,7 +160,7 @@ impl FakeMegaDownloadHarness {
         let server = FakeMegaServer::spawn(fixture.clone(), 1).unwrap();
         let client = mega::Client::builder()
             .origin(server.origin().clone())
-            .build(reqwest::Client::new())
+            .build(mega::http_client_builder().unwrap().build().unwrap())
             .unwrap();
         let nodes = client
             .fetch_public_nodes(&fixture.public_url())

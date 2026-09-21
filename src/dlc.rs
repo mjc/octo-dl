@@ -457,9 +457,13 @@ mod tests {
     #[tokio::test]
     async fn parse_dlc_rejects_non_boundary_key_split_without_panicking() {
         let content = format!("{}{}{}", "é".repeat(7), "x", "A".repeat(86));
-        let error = parse_dlc_data(&content, &reqwest::Client::new(), &DlcKeyCache::new())
-            .await
-            .unwrap_err();
+        let error = parse_dlc_data(
+            &content,
+            &mega::http_client_builder().unwrap().build().unwrap(),
+            &DlcKeyCache::new(),
+        )
+        .await
+        .unwrap_err();
 
         assert!(matches!(error, Error::Dlc(_)));
     }
@@ -760,7 +764,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires local DLC file"]
     async fn parse_dlc_extracts_modern_urls() {
-        let http = reqwest::Client::builder()
+        let http = mega::http_client_builder()
+            .unwrap()
             .user_agent("JDownloader/2.0 (octo-dl/test)")
             .build()
             .unwrap();

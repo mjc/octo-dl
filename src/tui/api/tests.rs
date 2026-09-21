@@ -641,7 +641,10 @@ async fn mutation_routes_require_the_configured_api_key() {
     ));
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-    let response = reqwest::Client::new()
+    let response = mega::http_client_builder()
+        .unwrap()
+        .build()
+        .unwrap()
         .post(format!("http://127.0.0.1:{port}/api/pause"))
         .send()
         .await

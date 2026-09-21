@@ -25,12 +25,12 @@ const DEFAULT_CONCURRENT_FILES: usize = 4;
 const DEFAULT_CHUNKS_PER_FILE: usize = 2;
 const SEPARATOR: &str = "────────────────────────────────────────────────────────────";
 
-fn build_http_client() -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
+fn build_http_client() -> mega::Result<reqwest::Client> {
+    Ok(mega::http_client_builder()?
         .pool_idle_timeout(Duration::from_secs(60))
         .pool_max_idle_per_host(8)
         .tcp_keepalive(Duration::from_secs(30))
-        .build()
+        .build()?)
 }
 
 // ============================================================================

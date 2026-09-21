@@ -76,12 +76,12 @@ fn resume_artifact_paths(path: &str) -> [std::path::PathBuf; 4] {
     ]
 }
 
-pub(super) fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
+pub(super) fn build_http_client() -> mega::Result<reqwest::Client> {
+    Ok(mega::http_client_builder()?
         .pool_idle_timeout(Duration::from_secs(60))
         .pool_max_idle_per_host(8)
         .tcp_keepalive(Duration::from_secs(30))
-        .build()
+        .build()?)
 }
 
 fn describe_panic(panic: &(dyn std::any::Any + Send)) -> String {

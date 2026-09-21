@@ -478,7 +478,15 @@ fn spawn_remote_action(
     app.status = format!("Sending {action}");
     let url = format!("http://{addr}/api/{action}");
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
+        let client = match mega::http_client_builder().and_then(|builder| Ok(builder.build()?)) {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = status_tx.send(DashboardReaderMessage::Status(format!(
+                    "{action} failed: {error}"
+                )));
+                return;
+            }
+        };
         let request = api_key.as_deref().map_or_else(
             || client.post(&url),
             |key| client.post(&url).header("x-api-key", key),
