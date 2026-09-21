@@ -969,7 +969,8 @@ impl App {
 
         self.cancel_file_token(id);
         self.startup_resume_pending_files.remove(id);
-        debug_assert_eq!(self.bump_file_attempt_id(id), next_attempt_id);
+        let attempt_id = self.bump_file_attempt_id(id);
+        debug_assert_eq!(attempt_id, next_attempt_id);
         self.verifying_files.insert(id.clone());
         self.verification_inflight_files.insert(id.clone());
         self.verification_targets.insert(id.clone(), target);
