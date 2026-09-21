@@ -172,6 +172,7 @@ pub(in crate::download) async fn load_sidecar(path: &Path) -> Option<ResumeSidec
             if let Ok(legacy_binary_data) = tokio::fs::read(&legacy_binary_path).await
                 && let Some(sidecar) = deserialize_legacy_binary_sidecar(&legacy_binary_data)
             {
+                migrate_legacy_binary_sidecar(path, &legacy_binary_path, &sidecar).await;
                 return Some(sidecar);
             }
             let legacy_json_data = tokio::fs::read(&legacy_json_path).await.ok()?;
@@ -181,6 +182,7 @@ pub(in crate::download) async fn load_sidecar(path: &Path) -> Option<ResumeSidec
             if let Ok(legacy_binary_data) = tokio::fs::read(&legacy_binary_path).await
                 && let Some(sidecar) = deserialize_legacy_binary_sidecar(&legacy_binary_data)
             {
+                migrate_legacy_binary_sidecar(path, &legacy_binary_path, &sidecar).await;
                 return Some(sidecar);
             }
             let legacy_json_data = tokio::fs::read(&legacy_json_path).await.ok()?;
@@ -194,7 +196,113 @@ fn deserialize_postcard_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
 }
 
 fn deserialize_legacy_binary_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
-    bincode::deserialize(data).ok()
+    let mut reader = LegacyBinaryReader::new(data);
+    let version = reader.read_u32()?;
+    let file_size = reader.read_u64()?;
+    let expected_condensed_mac = reader.read_array::<8>()?;
+    let verified_chunks_len = usize::try_from(reader.read_u64()?).ok()?;
+
+    // Reject impossible lengths before allocating so a corrupt legacy file
+    // cannot request an unbounded Vec.
+    if verified_chunks_len > reader.remaining() / 20 {
+        return None;
+    }
+    let mut verified_chunks = VerifiedChunks::with_capacity(verified_chunks_len);
+    for _ in 0..verified_chunks_len {
+        verified_chunks.push(VerifiedChunkRecord {
+            index: reader.read_u32()?,
+            mac: reader.read_array::<16>()?,
+        });
+    }
+
+    let part_fingerprint = if reader.remaining() == 0 {
+        None
+    } else {
+        match reader.read_u8()? {
+            0 => None,
+            1 => Some(FileFingerprint {
+                len: reader.read_u64()?,
+                modified_ns: reader.read_u128()?,
+                allocated_bytes: reader.read_option_u64()?,
+                dev: reader.read_option_u64()?,
+                ino: reader.read_option_u64()?,
+            }),
+            _ => return None,
+        }
+    };
+
+    reader.is_empty().then_some(ResumeSidecar {
+        version,
+        file_size,
+        expected_condensed_mac,
+        verified_chunks,
+        part_fingerprint,
+    })
+}
+
+struct LegacyBinaryReader<'a> {
+    data: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> LegacyBinaryReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, offset: 0 }
+    }
+
+    fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.offset)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.offset == self.data.len()
+    }
+
+    fn read_exact<const N: usize>(&mut self) -> Option<[u8; N]> {
+        let end = self.offset.checked_add(N)?;
+        let bytes = self.data.get(self.offset..end)?;
+        self.offset = end;
+        bytes.try_into().ok()
+    }
+
+    fn read_u8(&mut self) -> Option<u8> {
+        Some(self.read_exact::<1>()?[0])
+    }
+
+    fn read_u32(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.read_exact()?))
+    }
+
+    fn read_u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.read_exact()?))
+    }
+
+    fn read_u128(&mut self) -> Option<u128> {
+        Some(u128::from_le_bytes(self.read_exact()?))
+    }
+
+    fn read_array<const N: usize>(&mut self) -> Option<[u8; N]> {
+        self.read_exact()
+    }
+
+    fn read_option_u64(&mut self) -> Option<Option<u64>> {
+        match self.read_u8()? {
+            0 => Some(None),
+            1 => Some(Some(self.read_u64()?)),
+            _ => None,
+        }
+    }
+}
+
+async fn migrate_legacy_binary_sidecar(
+    path: &Path,
+    legacy_binary_path: &Path,
+    sidecar: &ResumeSidecar,
+) {
+    if path == legacy_binary_path || save_sidecar_atomic(path, sidecar).await.is_err() {
+        return;
+    }
+    let _ = tokio::fs::remove_file(legacy_binary_path).await;
 }
 
 fn deserialize_legacy_json_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
@@ -272,3 +380,38 @@ pub(super) fn postcard_path_for_sidecar(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(super) fn legacy_binary_bytes(sidecar: &ResumeSidecar) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&sidecar.version.to_le_bytes());
+    data.extend_from_slice(&sidecar.file_size.to_le_bytes());
+    data.extend_from_slice(&sidecar.expected_condensed_mac);
+    data.extend_from_slice(&(sidecar.verified_chunks.len() as u64).to_le_bytes());
+    for record in &sidecar.verified_chunks {
+        data.extend_from_slice(&record.index.to_le_bytes());
+        data.extend_from_slice(&record.mac);
+    }
+    match sidecar.part_fingerprint {
+        None => data.push(0),
+        Some(fingerprint) => {
+            data.push(1);
+            data.extend_from_slice(&fingerprint.len.to_le_bytes());
+            data.extend_from_slice(&fingerprint.modified_ns.to_le_bytes());
+            for value in [
+                fingerprint.allocated_bytes,
+                fingerprint.dev,
+                fingerprint.ino,
+            ] {
+                match value {
+                    None => data.push(0),
+                    Some(value) => {
+                        data.push(1);
+                        data.extend_from_slice(&value.to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
+    data
+}

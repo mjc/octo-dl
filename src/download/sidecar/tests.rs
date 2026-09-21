@@ -1,6 +1,6 @@
 use super::super::sidecar_store::{
     LegacyJsonResumeSidecar, LegacyJsonVerifiedChunkRecord, ResumeSidecar, VerifiedChunkRecord,
-    load_sidecar, save_sidecar_atomic,
+    legacy_binary_bytes, load_sidecar, save_sidecar_atomic,
 };
 use super::*;
 use crate::download::{legacy_binary_sidecar_path, legacy_json_sidecar_path};
@@ -125,7 +125,7 @@ async fn delete_sidecar_removes_postcard_legacy_binary_and_legacy_json() {
     let legacy = legacy_json_sidecar_for_chunk(42, [1u8; 8], 0, [1u8; 16]);
 
     save_sidecar_atomic(&binary_path, &binary).await.unwrap();
-    tokio::fs::write(&legacy_binary_path, bincode::serialize(&binary).unwrap())
+    tokio::fs::write(&legacy_binary_path, legacy_binary_bytes(&binary))
         .await
         .unwrap();
     write_legacy_json_sidecar(&json_path, &legacy)

@@ -13,7 +13,7 @@ async fn load_sidecar_falls_back_to_legacy_binary() {
     let legacy_binary_path = legacy_binary_sidecar_path(&base);
     let legacy = sidecar_for_chunk(42, [7u8; 8], 3, [4u8; 16]);
 
-    tokio::fs::write(&legacy_binary_path, bincode::serialize(&legacy).unwrap())
+    tokio::fs::write(&legacy_binary_path, legacy_binary_bytes(&legacy))
         .await
         .unwrap();
     let loaded = load_sidecar(&postcard_path).await.unwrap();
@@ -21,6 +21,8 @@ async fn load_sidecar_falls_back_to_legacy_binary() {
     assert_eq!(loaded.expected_condensed_mac, [7u8; 8]);
     assert_eq!(loaded.verified_chunks[0].index, 3);
     assert_eq!(loaded.verified_chunks[0].mac, [4u8; 16]);
+    assert!(postcard_path.exists());
+    assert!(!legacy_binary_path.exists());
 }
 
 #[tokio::test]
@@ -93,7 +95,7 @@ async fn load_sidecar_falls_back_to_legacy_binary_when_postcard_is_corrupt() {
     tokio::fs::write(&postcard_path, b"not-postcard")
         .await
         .unwrap();
-    tokio::fs::write(&legacy_binary_path, bincode::serialize(&legacy).unwrap())
+    tokio::fs::write(&legacy_binary_path, legacy_binary_bytes(&legacy))
         .await
         .unwrap();
 
@@ -128,7 +130,7 @@ async fn load_sidecar_rejects_bad_legacy_json_base64_without_allocating_vec_deco
 }
 
 #[tokio::test]
-async fn sidecar_save_writes_binary_not_json() {
+async fn sidecar_save_writes_postcard_not_legacy_formats() {
     let dir = tempfile::tempdir().unwrap();
     let sidecar_path = dir.path().join("file.bin.part.postcard");
     let sidecar = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
@@ -137,6 +139,5 @@ async fn sidecar_save_writes_binary_not_json() {
     let data = tokio::fs::read(&sidecar_path).await.unwrap();
 
     assert!(postcard::from_bytes::<ResumeSidecar>(&data).is_ok());
-    assert!(bincode::deserialize::<ResumeSidecar>(&data).is_err());
     assert!(serde_json::from_slice::<LegacyJsonResumeSidecar>(&data).is_err());
 }
