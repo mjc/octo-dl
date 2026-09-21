@@ -1064,10 +1064,10 @@ fn reverify_package_includes_failed_file_with_partial_progress() {
         request,
         crate::tui::event::DownloadRequest::ReverifyFileIdsWithOperations {
             source_url: ref request_url,
-            file_ids: ref file_ids,
-            operation_ids: ref operation_ids,
+            file_ids,
+            operation_ids,
         } if request_url == source_url
-            && file_ids == &vec![crate::core::FileId::from("failed.bin")]
+            && file_ids == vec![crate::core::FileId::from("failed.bin")]
             && operation_ids.contains_key(&crate::core::FileId::from("failed.bin"))
     ));
     assert!(url_rx.try_recv().is_err());

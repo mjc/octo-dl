@@ -106,6 +106,7 @@ fn snapshot_state(
     )
 }
 
+#[cfg(test)]
 pub(super) fn resolve_package_id(
     state: &ApiState,
     id: Option<&str>,
@@ -143,6 +144,7 @@ pub(super) fn resolve_package_id(
     }
 }
 
+#[cfg(test)]
 pub(super) fn resolve_file_id(
     state: &ApiState,
     id: Option<String>,

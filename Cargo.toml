@@ -23,18 +23,17 @@ required-features = ["tui"]
 
 [features]
 default = ["cli", "tui"]
-cli = ["dep:indicatif", "dep:console"]
+cli = ["dep:indicatif"]
 tui = ["dep:ratatui", "dep:crossterm", "dep:sysinfo", "dep:axum", "dep:bytes", "dep:tower-http", "dep:tokio-stream", "dep:tui-input"]
 
 [dependencies]
 async-trait = "0.1"
 thiserror = "2.0"
-console = { version = "0.15.7", optional = true }
 env_logger = "0.11.8"
 futures = "0.3.29"
 indicatif = { version = "0.18.6", features = ["tokio", "improved_unicode"], optional = true }
 log = "0.4.27"
-mega = { git = "https://github.com/mjc/mega-rs.git", rev = "a3ec96883f34ad2a1cbe175a4e37af732f8e9c08", default-features = false, features = ["rustls-tls", "parallel"] }
+mega = { version = "0.8.0", git = "https://github.com/mjc/mega-rs.git", rev = "a3ec96883f34ad2a1cbe175a4e37af732f8e9c08", default-features = false, features = ["rustls-tls", "parallel"] }
 reqwest = { version = "0.12.19", default-features = false, features = ["rustls-tls", "charset", "http2", "macos-system-configuration"] }
 tokio = { version = "1.33.0", features = ["full"] }
 tokio-util = { version = "0.7.10", features = ["full"] }
@@ -66,7 +65,7 @@ tower-http = { version = "0.6", features = ["cors"], optional = true }
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 parking_lot = "0.12"
 futures-util = "0.3"
-tokio-tungstenite = "0.28.0"
+tokio-tungstenite = "0.29.0"
 unicode-width = "0.2.0"
 # sha2 with target-specific asm optimizations (not available on Windows)
 [target.'cfg(all(any(target_arch = "x86_64", target_arch = "x86"), not(target_os = "windows")))'.dependencies]

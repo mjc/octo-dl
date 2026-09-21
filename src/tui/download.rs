@@ -563,6 +563,7 @@ struct VerificationProgress {
 }
 
 impl VerificationProgress {
+    #[cfg(test)]
     fn new<E>(tx: E, id: FileId) -> Self
     where
         E: Into<DownloadEventSender>,
@@ -813,8 +814,7 @@ fn queue_download_request_events(request: &DownloadRequest, tx: &DownloadEventSe
                 file_ids.len()
             )));
         }
-        DownloadRequest::VerifyCompletedFileIds { file_ids, .. }
-        | DownloadRequest::VerifyCompletedFileIdsWithOperations { file_ids, .. } => {
+        DownloadRequest::VerifyCompletedFileIdsWithOperations { file_ids, .. } => {
             let _ = tx.send(DownloadEvent::StatusMessage(format!(
                 "Verifying {} completed file(s)...",
                 file_ids.len()
@@ -870,13 +870,6 @@ async fn handle_download_request(
         } => {
             handle_reverify_request(source_url, file_ids, operation_ids, runtime, scheduler, tx)
                 .await;
-            true
-        }
-        DownloadRequest::VerifyCompletedFileIds {
-            source_url,
-            file_ids,
-        } => {
-            verify_completed_files(source_url, file_ids, HashMap::new(), runtime, tx).await;
             true
         }
         DownloadRequest::VerifyCompletedFileIdsWithOperations {
@@ -990,7 +983,6 @@ async fn resolve_download_requests(
             }
             DownloadRequest::ReverifyFileIds { .. }
             | DownloadRequest::ReverifyFileIdsWithOperations { .. }
-            | DownloadRequest::VerifyCompletedFileIds { .. }
             | DownloadRequest::VerifyCompletedFileIdsWithOperations { .. }
             | DownloadRequest::SyncPendingOrder { .. } => {}
         }

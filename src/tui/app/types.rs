@@ -156,8 +156,6 @@ pub(crate) enum ConfigActivation {
 pub(crate) enum ConfigPersistence {
     SessionAndConfigFile,
     SessionOnly,
-    ConfigFileOnly,
-    MemoryOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

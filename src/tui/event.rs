@@ -94,14 +94,12 @@ pub(crate) struct DownloadEventDeliveryFailure {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryFailureReason {
-    BacklogFull,
     ChannelClosed,
 }
 
 impl std::fmt::Display for DownloadEventDeliveryFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let reason = match self.reason {
-            DeliveryFailureReason::BacklogFull => "lifecycle backlog is full",
             DeliveryFailureReason::ChannelClosed => "event channel is closed",
         };
         write!(formatter, "{reason} while delivering {}", self.event)
@@ -408,8 +406,7 @@ fn download_event_name(event: &DownloadEvent) -> &'static str {
         DownloadEvent::ResumeReverifiedForOperation { .. } => "resume reverify",
         DownloadEvent::CompletedFileVerified { .. } => "completed-file verification",
         DownloadEvent::CompletedFileVerifiedForOperation { .. } => "completed-file verification",
-        DownloadEvent::VerificationSkipped { .. }
-        | DownloadEvent::VerificationSkippedForOperation { .. } => "verification skip",
+        DownloadEvent::VerificationSkipped { .. } => "verification skip",
         DownloadEvent::VerificationFailed { .. } => "verification failure",
         DownloadEvent::FileComplete { .. } => "file complete",
         DownloadEvent::FileCancelled { .. } => "file cancellation",
@@ -453,10 +450,6 @@ pub enum DownloadRequest {
         source_url: String,
         file_ids: Vec<FileId>,
         operation_ids: HashMap<FileId, VerificationOperationId>,
-    },
-    VerifyCompletedFileIds {
-        source_url: String,
-        file_ids: Vec<FileId>,
     },
     VerifyCompletedFileIdsWithOperations {
         source_url: String,
@@ -523,11 +516,6 @@ pub enum DownloadEvent {
         id: FileId,
         completed: bool,
     },
-    VerificationSkippedForOperation {
-        id: FileId,
-        operation_id: VerificationOperationId,
-        completed: bool,
-    },
     VerificationFailed {
         id: FileId,
         operation_id: VerificationOperationId,
@@ -584,6 +572,7 @@ pub struct TuiProgress {
 }
 
 impl TuiProgress {
+    #[cfg(test)]
     pub fn new<E>(tx: E) -> Self
     where
         E: Into<DownloadEventSender>,

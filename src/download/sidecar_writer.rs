@@ -54,9 +54,6 @@ fn save_sidecar_atomic_sync(path: &Path, sidecar: &ResumeSidecar) -> io::Result<
 type PersistEventRx = Arc<Mutex<mpsc::Receiver<()>>>;
 #[cfg(test)]
 type PersistEventTx = mpsc::Sender<()>;
-#[cfg(not(test))]
-type PersistEventTx = ();
-
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct SidecarGeneration(u64);
 
@@ -81,6 +78,7 @@ struct SidecarWriterWorker {
     path: PathBuf,
     part_path: PathBuf,
     last_persisted_generation: Option<SidecarGeneration>,
+    #[cfg(test)]
     persist_event_tx: PersistEventTx,
     abort_requested: Arc<AtomicBool>,
 }
@@ -89,13 +87,14 @@ impl SidecarWriterWorker {
     fn new(
         path: PathBuf,
         part_path: PathBuf,
-        persist_event_tx: PersistEventTx,
+        #[cfg(test)] persist_event_tx: PersistEventTx,
         abort_requested: Arc<AtomicBool>,
     ) -> Self {
         Self {
             path,
             part_path,
             last_persisted_generation: None,
+            #[cfg(test)]
             persist_event_tx,
             abort_requested,
         }
@@ -172,8 +171,6 @@ impl LazySidecarWriter {
                     part_path,
                     #[cfg(test)]
                     persist_event_tx,
-                    #[cfg(not(test))]
-                    (),
                     worker_abort_requested,
                 )
                 .run(rx)

@@ -509,6 +509,7 @@ pub(crate) async fn start_api_server(
 /// # Errors
 ///
 /// Returns an error if the server cannot bind or if the server task fails.
+#[cfg(test)]
 pub async fn run_api_server(
     tx: DownloadEventSender,
     host: &str,

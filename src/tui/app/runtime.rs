@@ -351,13 +351,6 @@ impl App {
             DownloadEvent::VerificationSkipped { id, completed } => {
                 self.handle_verification_skipped_event(id, completed);
             }
-            DownloadEvent::VerificationSkippedForOperation {
-                id,
-                operation_id,
-                completed,
-            } => {
-                self.handle_verification_skipped_for_operation(id, operation_id, completed);
-            }
             DownloadEvent::VerificationFailed {
                 id,
                 operation_id,

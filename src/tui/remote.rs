@@ -8,12 +8,14 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+#[cfg(test)]
+use tokio_tungstenite::tungstenite::http::HeaderMap;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
         Error as WebSocketError, Message,
         client::IntoClientRequest,
-        http::{HeaderMap, HeaderValue, Request},
+        http::{HeaderValue, Request},
     },
 };
 
@@ -499,6 +501,7 @@ fn spawn_remote_action(
     });
 }
 
+#[cfg(test)]
 fn api_headers(api_key: Option<&str>) -> io::Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     if let Some(api_key) = api_key {

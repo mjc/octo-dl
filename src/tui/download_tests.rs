@@ -67,9 +67,10 @@ fn drain_ready_requests_collects_follow_up_verification_requests_in_order() {
         source_url: "https://mega.nz/folder/root".to_string(),
         file_ids: vec!["resume-a.bin".into()],
     };
-    let second = DownloadRequest::VerifyCompletedFileIds {
+    let second = DownloadRequest::VerifyCompletedFileIdsWithOperations {
         source_url: "https://mega.nz/folder/root".to_string(),
         file_ids: vec!["complete-a.bin".into()],
+        operation_ids: HashMap::new(),
     };
     let late = DownloadRequest::ReverifyFileIds {
         source_url: "https://mega.nz/folder/root".to_string(),

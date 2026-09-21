@@ -312,16 +312,6 @@ fn wait_for_save_event(events: &SaveEventRx) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-fn drain_save_events(events: &SaveEventRx) -> Vec<PathBuf> {
-    let mut drained = Vec::new();
-    let receiver = events.lock().unwrap();
-    while let Ok(path) = receiver.try_recv() {
-        drained.push(path);
-    }
-    drained
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::SessionSnapshot;

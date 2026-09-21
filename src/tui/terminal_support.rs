@@ -90,6 +90,7 @@ pub(crate) enum TerminalInputError {
 }
 
 impl TerminalInputError {
+    #[cfg(test)]
     pub(crate) fn kind(&self) -> io::ErrorKind {
         match self {
             Self::Read(error) => error.kind(),
@@ -256,13 +257,6 @@ impl TerminalInput {
             Some(Err(error)) => Err(error),
             None => Err(TerminalInputError::Closed),
         }
-    }
-
-    /// Compatibility adapter for the attached dashboard, which treats input
-    /// worker failure as input closure and lets the dashboard reader decide
-    /// whether to keep the session alive.
-    pub(crate) async fn recv(&mut self) -> Option<Event> {
-        self.recv_result().await.ok()
     }
 }
 

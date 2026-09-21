@@ -61,7 +61,7 @@
           nativeBuildInputs = [pkgs.pkg-config pkgs.mold];
           buildInputs = [pkgs.openssl];
         }
-        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           "${cargoTargetLinkerEnv}" = linuxCcLinker;
           "${cargoTargetRustflagsEnv}" = linuxMoldRustFlags;
         };
@@ -69,10 +69,16 @@
         # Build only the cargo dependencies — cached when Cargo.lock is unchanged
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
       in {
-        apps.default = flake-utils.lib.mkApp {
-          drv = self.packages.${system}.octo-dl;
-          exePath = "/bin/octo";
-        };
+        apps.default =
+          (flake-utils.lib.mkApp {
+            drv = self.packages.${system}.octo-dl;
+            exePath = "/bin/octo";
+          })
+          // {
+            meta = {
+              description = "MEGA download manager";
+            };
+          };
 
         packages = {
           default = self.packages.${system}.octo-dl;

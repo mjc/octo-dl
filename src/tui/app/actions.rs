@@ -671,19 +671,6 @@ impl App {
         self.status = format!("Verification skipped for {id}");
     }
 
-    pub(crate) fn handle_verification_skipped_for_operation(
-        &mut self,
-        id: FileId,
-        operation_id: VerificationOperationId,
-        completed: bool,
-    ) {
-        if !self.verification_operation_matches(&id, operation_id) {
-            log::info!("Ignoring stale verification skip operation for {id}");
-            return;
-        }
-        self.handle_verification_skipped_event(id, completed);
-    }
-
     pub(crate) fn handle_verification_failed_event(
         &mut self,
         id: FileId,
