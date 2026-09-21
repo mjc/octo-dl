@@ -7,7 +7,7 @@
     rust-overlay.url = "github:oxalica/rust-overlay";
     crane.url = "github:ipetkov/crane";
     mega-rs = {
-      url = "github:mjc/mega-rs/parallel-download";
+      url = "github:mjc/mega-rs/a3ec96883f34ad2a1cbe175a4e37af732f8e9c08";
       flake = false;
     };
   };
