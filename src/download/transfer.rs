@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -10,6 +11,25 @@ use super::callbacks::DownloadProgress;
 use super::downloader::Downloader;
 use super::finalize::DownloadFinishContext;
 use super::sidecar::{part_path, sidecar_path};
+
+async fn await_download_or_cancel<T, F>(
+    download: F,
+    token: CancellationToken,
+) -> crate::error::Result<T>
+where
+    F: Future<Output = Result<T, mega::Error>>,
+{
+    tokio::pin!(download);
+    tokio::select! {
+        result = &mut download => result.map_err(crate::error::Error::Mega),
+        () = token.cancelled() => {
+            // Keep polling the MEGA future to completion. Dropping it here can
+            // detach mega-rs' internal processor task while finalization starts.
+            let _ = (&mut download).await;
+            Err(crate::error::Error::Cancelled)
+        }
+    }
+}
 
 impl<F: FileSystem> Downloader<F> {
     /// Ensures the parent directory exists for a file path.
@@ -85,12 +105,7 @@ impl<F: FileSystem> Downloader<F> {
                     Arc::clone(&prepared.trusted_for_download),
                     Some(callbacks),
                 );
-            tokio::select! {
-                res = download_fut => res.map_err(crate::error::Error::Mega),
-                () = token.cancelled() => {
-                    Err(crate::error::Error::Cancelled)
-                }
-            }
+            await_download_or_cancel(download_fut, token).await
         } else {
             self.client
                 .download_node_parallel_resumable_to_file_with_callbacks(

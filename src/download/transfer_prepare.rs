@@ -72,7 +72,10 @@ impl<F: FileSystem> Downloader<F> {
             resume_validation.source
         );
         let preserve_existing = resume_validation.trusted_count > 0;
-        if !preserve_existing {
+        let preserve_sidecar_after_stat_failure = resume_validation.sidecar_loaded
+            && self.fs.file_exists(part_path).await
+            && self.fs.file_fingerprint(part_path).await.is_none();
+        if !preserve_existing && !preserve_sidecar_after_stat_failure {
             let _ = delete_sidecar(sidecar_path).await;
         }
         if resume_validation.sidecar_loaded && resume_validation.trusted_count == 0 {

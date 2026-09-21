@@ -47,9 +47,6 @@ impl<F: FileSystem> Downloader<F> {
                 ctx.chunk_verified
                     .finish_sidecar_writer(SidecarWriterShutdown::Abort)
                     .await;
-                if self.config.force_overwrite {
-                    let _ = self.fs.remove_file(Path::new(ctx.path)).await;
-                }
                 self.fs
                     .rename_file(ctx.part_path, Path::new(ctx.path))
                     .await?;
@@ -103,10 +100,13 @@ impl<F: FileSystem> Downloader<F> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::config::DownloadConfig;
     use crate::error::Error;
+    use crate::stats::DownloadStatsTracker;
 
-    use super::should_delete_resume_state_on_error;
+    use super::{DownloadFinishContext, should_delete_resume_state_on_error};
 
     #[test]
     fn cleanup_policy_preserves_recoverable_errors_by_default() {
@@ -141,5 +141,69 @@ mod tests {
             &config,
             &Error::Cancelled,
         ));
+    }
+
+    #[test]
+    fn force_overwrite_keeps_destination_when_replacement_fails() {
+        super::super::test_support::run_with_large_stack_current_thread_runtime(
+            "force-overwrite-finalize-test",
+            || async {
+                let harness = super::super::test_support::FakeMegaDownloadHarness::new(
+                    61,
+                    300_000,
+                    DownloadConfig {
+                        force_overwrite: true,
+                        ..DownloadConfig::default()
+                    },
+                )
+                .await;
+                tokio::fs::create_dir_all(&harness.output_dir)
+                    .await
+                    .unwrap();
+                let output_path = harness.output_path(harness.fixture.file_name());
+                let output_path_string = output_path.to_string_lossy().into_owned();
+                let part_path = super::super::sidecar::part_path(&output_path_string);
+                let sidecar_path = super::super::sidecar::sidecar_path(&output_path_string);
+                let old_contents = b"keep this valid destination";
+                tokio::fs::write(&output_path, old_contents).await.unwrap();
+                let node = harness.node();
+                let chunk_verified = super::super::callbacks::ChunkVerifiedState::new(
+                    super::super::resume_tracker::ResumeTracker::new(
+                        node.size(),
+                        *node.condensed_mac().unwrap(),
+                        vec![None; mega::mega_chunk_boundaries(node.size()).len()],
+                    ),
+                    super::super::sidecar_writer::LazySidecarWriter::new(
+                        sidecar_path.clone(),
+                        part_path.clone(),
+                    ),
+                );
+                let progress: Arc<dyn super::super::callbacks::DownloadProgress> =
+                    Arc::new(super::super::callbacks::NoProgress);
+                let stats = DownloadStatsTracker::new(node.size());
+
+                let result = harness
+                    .downloader
+                    .finish_download_result(
+                        DownloadFinishContext {
+                            node,
+                            path: &output_path_string,
+                            part_path: &part_path,
+                            sidecar_path: &sidecar_path,
+                            reused_bytes: 0,
+                            stats: &stats,
+                            chunk_verified: &chunk_verified,
+                            progress: &progress,
+                            name: &output_path_string,
+                        },
+                        Ok(()),
+                    )
+                    .await;
+
+                assert!(result.is_err());
+                assert_eq!(tokio::fs::read(&output_path).await.unwrap(), old_contents);
+                harness.shutdown().await;
+            },
+        );
     }
 }

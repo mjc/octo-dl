@@ -101,8 +101,22 @@ pub async fn parse_dlc_data(
         return Err(Error::Dlc("DLC content missing encryption key".to_string()));
     }
 
-    let dlc_key = trimmed[trimmed.len() - DLC_KEY_LENGTH..].to_string();
-    let encrypted_base64 = &trimmed[..trimmed.len() - DLC_KEY_LENGTH];
+    let split_at = trimmed.len() - DLC_KEY_LENGTH;
+    let bytes = trimmed.as_bytes();
+    let Some(encrypted_bytes) = bytes.get(..split_at) else {
+        return Err(Error::Dlc(
+            "DLC encryption key does not start on a UTF-8 boundary".to_string(),
+        ));
+    };
+    let Some(key_bytes) = bytes.get(split_at..) else {
+        return Err(Error::Dlc(
+            "DLC encryption key does not start on a UTF-8 boundary".to_string(),
+        ));
+    };
+    let dlc_key = std::str::from_utf8(key_bytes)
+        .map_err(|_| Error::Dlc("DLC encryption key is not valid UTF-8".to_string()))?;
+    let encrypted_base64 = std::str::from_utf8(encrypted_bytes)
+        .map_err(|_| Error::Dlc("DLC encrypted data is not valid UTF-8".to_string()))?;
 
     // Validate key format (should be base64)
     if !is_valid_base64(&dlc_key) {
@@ -438,6 +452,16 @@ mod tests {
     fn small_content_fails_size_check() {
         let small = "x".repeat(50);
         assert!(small.len() < MIN_DLC_SIZE);
+    }
+
+    #[tokio::test]
+    async fn parse_dlc_rejects_non_boundary_key_split_without_panicking() {
+        let content = format!("{}{}{}", "é".repeat(7), "x", "A".repeat(86));
+        let error = parse_dlc_data(&content, &reqwest::Client::new(), &DlcKeyCache::new())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Error::Dlc(_)));
     }
 
     #[test]

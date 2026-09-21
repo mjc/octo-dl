@@ -14,6 +14,11 @@ static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid regex")
 });
 
+fn normalize_extracted_url(raw_url: &str) -> String {
+    let trimmed = raw_url.trim_end_matches(['.', ',', '!', '?', ';', ':']);
+    normalize_mega_url(trimmed).unwrap_or_else(|| trimmed.to_string())
+}
+
 /// Extracts MEGA URLs and DLC file paths from raw input text.
 ///
 /// Scans for `https://mega.nz/...` URLs and `.dlc` file paths. If a
@@ -32,7 +37,7 @@ pub fn extract_urls(input: &str) -> Vec<String> {
 
     // Pull MEGA URLs out of the entire input.
     for m in URL_RE.find_iter(input) {
-        let url = normalize_mega_url(m.as_str()).unwrap_or_else(|| m.as_str().to_string());
+        let url = normalize_extracted_url(m.as_str());
         if seen.insert(url.clone()) {
             result.push(url);
         }
@@ -84,7 +89,7 @@ fn try_decode_base64(
 
         // Check for MEGA URLs in decoded result.
         for m in URL_RE.find_iter(&decoded) {
-            let url = normalize_mega_url(m.as_str()).unwrap_or_else(|| m.as_str().to_string());
+            let url = normalize_extracted_url(m.as_str());
             if seen.insert(url.clone()) {
                 result.push(url);
             }
@@ -339,10 +344,7 @@ mod tests {
     fn extract_urls_trailing_punctuation() {
         let input = "See https://mega.nz/file/abc.";
         let urls = extract_urls(input);
-        // The regex will capture "https://mega.nz/file/abc." including the trailing dot
-        // which is expected behavior for \S+ matching
-        assert_eq!(urls.len(), 1);
-        assert!(urls[0].starts_with("https://mega.nz/file/abc"));
+        assert_eq!(urls, vec!["https://mega.nz/file/abc"]);
     }
 
     // --- is_dlc_path ---

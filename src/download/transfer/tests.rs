@@ -1,9 +1,35 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::super::NoProgress;
 use super::super::test_support::*;
 use super::*;
 use crate::config::DownloadConfig;
+
+#[tokio::test]
+async fn cancellation_waits_for_the_outer_mega_future_to_finish_cleanup() {
+    let cancellation = CancellationToken::new();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(super::await_download_or_cancel(
+        async move {
+            release_rx.await.unwrap();
+            Ok::<(), mega::Error>(())
+        },
+        cancellation.clone(),
+    ));
+
+    cancellation.cancel();
+    tokio::time::timeout(Duration::from_millis(20), async {
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect_err("cancellation must not drop the outer future");
+    release_tx.send(()).unwrap();
+    let result = task.await.unwrap();
+    assert!(matches!(result, Err(crate::Error::Cancelled)));
+}
 
 #[tokio::test]
 async fn ensure_parent_dir_creates_missing_ancestors() {

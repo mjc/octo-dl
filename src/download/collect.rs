@@ -138,8 +138,23 @@ pub(super) async fn collect_files_with_downloader<'a, F: FileSystem>(
             .await;
         match local.status {
             FileStatus::Complete => {
-                skipped += 1;
-                completed.push(item);
+                match downloader
+                    .complete_existing_file(item.node, &item.path, progress)
+                    .await
+                {
+                    Ok(Some(_)) => {
+                        skipped += 1;
+                        completed.push(item);
+                    }
+                    Ok(None) => to_download.push(item),
+                    Err(error) => {
+                        log::warn!(
+                            "Existing completed file {} could not be verified; redownloading: {error}",
+                            item.path
+                        );
+                        to_download.push(item);
+                    }
+                }
             }
             FileStatus::Partial => {
                 progress.on_partial_detected(
@@ -203,7 +218,7 @@ fn build_relative_path<F>(file_name: &str, parent: Option<&str>, mut lookup: F) 
 where
     F: FnMut(&str) -> Option<(String, Option<String>)>,
 {
-    let mut components = vec![file_name.to_string()];
+    let mut components = vec![safe_path_component(file_name)];
     let mut parent = parent.map(str::to_string);
 
     while let Some(handle) = parent.as_deref() {
@@ -213,7 +228,7 @@ where
         if next_parent.is_none() {
             break;
         }
-        components.push(name);
+        components.push(safe_path_component(&name));
         parent = next_parent;
     }
 
@@ -221,8 +236,18 @@ where
     components.join("/")
 }
 
+fn safe_path_component(component: &str) -> String {
+    let sanitized = component.replace(['/', '\\'], "_");
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        "_".to_string()
+    } else {
+        sanitized
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
 
     use super::super::callbacks::NoProgress;
@@ -230,6 +255,7 @@ mod tests {
     use super::super::test_support::*;
     use super::*;
     use crate::fake_mega::{FakeMegaFixture, FakeMegaServer, create_fake_mega_fixture};
+    use crate::test_support::CurrentDirGuard;
 
     #[test]
     fn collected_files_total_size() {
@@ -261,6 +287,16 @@ mod tests {
         });
 
         assert_eq!(path, "a/b/file.bin");
+    }
+
+    #[test]
+    fn build_relative_path_sanitizes_traversal_components() {
+        let path = build_relative_path("../outside", Some("folder"), |handle| {
+            Some((handle.to_string(), None))
+        });
+
+        assert!(!path.split('/').any(|component| component == ".."));
+        assert!(!path.starts_with('/'));
     }
 
     #[derive(Default)]
@@ -304,12 +340,20 @@ mod tests {
 
     #[tokio::test]
     async fn collect_files_marks_existing_output_complete() {
-        let (_temp, _fixture, server, nodes) = single_file_nodes(51).await;
+        let (temp, fixture, server, nodes) = single_file_nodes(51).await;
+        let _cwd = CurrentDirGuard::set(temp.path());
         let items = collect_download_items(&nodes);
         let path = items[0].path.clone();
         let size = items[0].node.size();
+        let output_path = Path::new(&path);
+        tokio::fs::create_dir_all(output_path.parent().unwrap())
+            .await
+            .unwrap();
+        let mut bytes = vec![0u8; usize::try_from(size).unwrap()];
+        fixture.fill_plaintext(0, &mut bytes);
+        tokio::fs::write(output_path, bytes.clone()).await.unwrap();
         let fs = MockFileSystem::new();
-        fs.add_file(&path, size);
+        fs.add_bytes(&path, bytes);
         let downloader = mock_downloader(fs);
         let progress: Arc<dyn DownloadProgress> = Arc::new(NoProgress);
 
@@ -321,6 +365,42 @@ mod tests {
         assert_eq!(collected.completed.len(), 1);
         assert_eq!(collected.completed[0].path, path);
 
+        tokio::fs::remove_dir_all(output_path.parent().unwrap())
+            .await
+            .unwrap();
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn collect_files_redownloads_same_size_corrupt_output() {
+        let (temp, fixture, server, nodes) = single_file_nodes(57).await;
+        let _cwd = CurrentDirGuard::set(temp.path());
+        let items = collect_download_items(&nodes);
+        let path = items[0].path.clone();
+        let size = items[0].node.size();
+        let output_path = Path::new(&path);
+        tokio::fs::create_dir_all(output_path.parent().unwrap())
+            .await
+            .unwrap();
+        let mut bytes = vec![0u8; usize::try_from(size).unwrap()];
+        fixture.fill_plaintext(0, &mut bytes);
+        bytes[0] ^= 0xff;
+        tokio::fs::write(output_path, bytes.clone()).await.unwrap();
+        let fs = MockFileSystem::new();
+        fs.add_bytes(&path, bytes);
+        let downloader = mock_downloader(fs);
+        let progress: Arc<dyn DownloadProgress> = Arc::new(NoProgress);
+
+        let collected = collect_files_with_downloader(&downloader, &nodes, &progress).await;
+
+        assert_eq!(collected.skipped, 0);
+        assert_eq!(collected.partial, 0);
+        assert_eq!(collected.to_download.len(), 1);
+        assert!(collected.completed.is_empty());
+
+        tokio::fs::remove_dir_all(output_path.parent().unwrap())
+            .await
+            .unwrap();
         server.shutdown().await.unwrap();
     }
 
