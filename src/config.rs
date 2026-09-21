@@ -450,11 +450,12 @@ impl ServiceConfig {
 
         static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let save_id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let file_name = path.file_name().unwrap_or_default().to_string_lossy();
         let temporary_path = parent.join(format!(
             ".{file_name}.{}.{}.tmp",
             std::process::id(),
-            TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+            save_id
         ));
 
         let result: std::io::Result<()> = (|| {
@@ -488,18 +489,6 @@ impl ServiceConfig {
                 })?;
             }
 
-            std::fs::rename(&temporary_path, path)
-                .map_err(|error| path_io_error("replace config file", path, error))?;
-
-            #[cfg(unix)]
-            {
-                let directory = std::fs::File::open(parent)
-                    .map_err(|error| path_io_error("open config directory", parent, error))?;
-                directory
-                    .sync_all()
-                    .map_err(|error| path_io_error("sync config directory", parent, error))?;
-            }
-
             Ok(())
         })();
 
@@ -508,27 +497,132 @@ impl ServiceConfig {
         }
         result?;
 
-        if let Some(key) = self.credential_key.as_deref() {
-            let key_path = credential_key_path(path);
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options
-                .open(&key_path)
-                .map_err(|error| path_io_error("write credential key", &key_path, error))?;
-            file.write_all(key.as_bytes())
-                .map_err(|error| path_io_error("write credential key", &key_path, error))?;
-            file.write_all(b"\n")
-                .map_err(|error| path_io_error("write credential key", &key_path, error))?;
-            file.sync_all()
-                .map_err(|error| path_io_error("sync credential key", &key_path, error))?;
+        let Some(key) = self.credential_key.as_deref() else {
+            return replace_config_file(&temporary_path, path, parent);
+        };
+
+        let key_path = credential_key_path(path);
+        if key_path.exists() && !key_path.is_file() {
+            let _ = std::fs::remove_file(&temporary_path);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("credential key path is not a file: {}", key_path.display()),
+            ));
         }
-        Ok(())
+        let key_temporary_path = parent.join(format!(
+            ".{}.{}.{}.tmp",
+            key_path.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id(),
+            save_id
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let key_result = (|| {
+            let mut file = options.open(&key_temporary_path).map_err(|error| {
+                path_io_error(
+                    "write temporary credential key file",
+                    &key_temporary_path,
+                    error,
+                )
+            })?;
+            file.write_all(key.as_bytes()).map_err(|error| {
+                path_io_error(
+                    "write temporary credential key file",
+                    &key_temporary_path,
+                    error,
+                )
+            })?;
+            file.write_all(b"\n").map_err(|error| {
+                path_io_error(
+                    "write temporary credential key file",
+                    &key_temporary_path,
+                    error,
+                )
+            })?;
+            file.flush().map_err(|error| {
+                path_io_error(
+                    "flush temporary credential key file",
+                    &key_temporary_path,
+                    error,
+                )
+            })?;
+            file.sync_all().map_err(|error| {
+                path_io_error(
+                    "sync temporary credential key file",
+                    &key_temporary_path,
+                    error,
+                )
+            })
+        })();
+        if let Err(error) = key_result {
+            let _ = std::fs::remove_file(&temporary_path);
+            let _ = std::fs::remove_file(&key_temporary_path);
+            return Err(error);
+        }
+
+        let key_backup_path = parent.join(format!(
+            ".{}.{}.{}.bak",
+            key_path.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id(),
+            save_id
+        ));
+        let had_key = key_path.exists();
+        if had_key {
+            std::fs::copy(&key_path, &key_backup_path)
+                .map_err(|error| path_io_error("backup credential key", &key_backup_path, error))?;
+        }
+        if let Err(error) = std::fs::rename(&key_temporary_path, &key_path) {
+            let _ = std::fs::remove_file(&temporary_path);
+            let _ = std::fs::remove_file(&key_temporary_path);
+            let _ = std::fs::remove_file(&key_backup_path);
+            return Err(path_io_error("replace credential key", &key_path, error));
+        }
+        if let Err(error) = std::fs::rename(&temporary_path, path) {
+            let _ = std::fs::remove_file(&temporary_path);
+            let restore_result = if had_key {
+                std::fs::remove_file(&key_path)
+                    .and_then(|()| std::fs::rename(&key_backup_path, &key_path))
+            } else {
+                std::fs::remove_file(&key_path)
+            };
+            return Err(match restore_result {
+                Ok(()) => path_io_error("replace config file", path, error),
+                Err(restore_error) => std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "replace config file {}: {error}; failed to restore credential key {}: {restore_error}",
+                        path.display(),
+                        key_path.display()
+                    ),
+                ),
+            });
+        }
+        let _ = std::fs::remove_file(&key_backup_path);
+        sync_directory(parent)
     }
+}
+
+fn replace_config_file(temporary_path: &Path, path: &Path, parent: &Path) -> std::io::Result<()> {
+    std::fs::rename(temporary_path, path)
+        .map_err(|error| path_io_error("replace config file", path, error))?;
+    sync_directory(parent)
+}
+
+fn sync_directory(parent: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let directory = std::fs::File::open(parent)
+            .map_err(|error| path_io_error("open config directory", parent, error))?;
+        directory
+            .sync_all()
+            .map_err(|error| path_io_error("sync config directory", parent, error))?;
+    }
+    Ok(())
 }
 
 fn credential_key_path(path: &Path) -> std::path::PathBuf {
@@ -639,6 +733,101 @@ mod service_config_tests {
         let loaded = ServiceConfig::load(&path).unwrap();
         assert_eq!(loaded.credentials.email, "a@b.com");
         assert!(!loaded.credentials.encrypted);
+    }
+
+    #[test]
+    fn service_config_save_load_persists_separate_credential_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let credential_key = generate_credential_key();
+        let config = ServiceConfig {
+            credentials: ServiceCredentials {
+                encrypted: false,
+                email: "a@b.com".to_string(),
+                password: "pass".to_string(),
+                mfa: String::new(),
+                saved_session: None,
+            },
+            credential_key: Some(credential_key.clone()),
+            api: ApiConfig::default(),
+            download: DownloadConfig::default(),
+        };
+
+        config.save(&path).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(credential_key_path(&path))
+                .unwrap()
+                .trim(),
+            credential_key
+        );
+        assert_eq!(
+            ServiceConfig::load(&path)
+                .unwrap()
+                .credential_key
+                .as_deref(),
+            Some(credential_key.as_str())
+        );
+    }
+
+    #[test]
+    fn save_restores_key_when_config_replacement_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let key_path = credential_key_path(&path);
+        let old_key = generate_credential_key();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(&key_path, format!("{old_key}\n")).unwrap();
+
+        let config = ServiceConfig {
+            credentials: ServiceCredentials {
+                encrypted: false,
+                email: "a@b.com".to_string(),
+                password: "pass".to_string(),
+                mfa: String::new(),
+                saved_session: None,
+            },
+            credential_key: Some(generate_credential_key()),
+            api: ApiConfig::default(),
+            download: DownloadConfig::default(),
+        };
+
+        assert!(config.save(&path).is_err());
+        assert!(path.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(key_path).unwrap(),
+            format!("{old_key}\n")
+        );
+    }
+
+    #[test]
+    fn save_does_not_replace_config_when_key_path_is_not_a_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let initial = ServiceConfig {
+            credentials: ServiceCredentials {
+                encrypted: false,
+                email: "old@example.com".to_string(),
+                password: "old-pass".to_string(),
+                mfa: String::new(),
+                saved_session: None,
+            },
+            credential_key: None,
+            api: ApiConfig::default(),
+            download: DownloadConfig::default(),
+        };
+        initial.save(&path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        std::fs::create_dir(credential_key_path(&path)).unwrap();
+
+        let replacement = ServiceConfig {
+            credentials: initial.credentials,
+            credential_key: Some(generate_credential_key()),
+            api: initial.api,
+            download: initial.download,
+        };
+        assert!(replacement.save(&path).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), original);
     }
 
     #[test]

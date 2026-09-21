@@ -29,8 +29,8 @@ in {
         Whether the NixOS module should keep `${configPath}` aligned with the
         NixOS options for API host/port and download settings.
 
-        When enabled, the module preserves any existing `[credentials]` block
-        and existing `api.api_key`, while rewriting the managed `[api]` and
+        When enabled, the module preserves any existing `[credentials]` block,
+        `credentials.saved_session`, and `api.api_key`, while rewriting the managed `[api]` and
         `[download]` fields on each start.
       '';
     };
@@ -204,6 +204,9 @@ in {
         email="$(read_toml_value credentials email "$OCTO_CONFIG_PATH" || true)"
         password="$(read_toml_value credentials password "$OCTO_CONFIG_PATH" || true)"
         mfa="$(read_toml_value credentials mfa "$OCTO_CONFIG_PATH" || true)"
+        saved_session="$(read_toml_value credentials saved_session "$OCTO_CONFIG_PATH" || true)"
+        saved_session_email="$(read_toml_value credentials.saved_session email "$OCTO_CONFIG_PATH" || true)"
+        saved_session_value="$(read_toml_value credentials.saved_session session "$OCTO_CONFIG_PATH" || true)"
         api_key="$(read_toml_value api api_key "$OCTO_CONFIG_PATH" || true)"
 
         encrypted=''${encrypted:-false}
@@ -247,7 +250,17 @@ in {
           printf 'email = %s\n' "$email"
           printf 'password = %s\n' "$password"
           printf 'mfa = %s\n' "$mfa"
+          if [ -n "$saved_session" ]; then
+            printf 'saved_session = %s\n' "$saved_session"
+          fi
           printf '\n'
+          if [ -z "$saved_session" ] \
+            && { [ -n "$saved_session_email" ] || [ -n "$saved_session_value" ]; }; then
+            printf '%s\n' '[credentials.saved_session]'
+            printf 'email = %s\n' "$saved_session_email"
+            printf 'session = %s\n' "$saved_session_value"
+            printf '\n'
+          fi
           printf '%s\n' '[api]'
           printf 'host = %s\n' "$(toml_quote "$OCTO_API_HOST")"
           printf 'port = %s\n' "$OCTO_API_PORT"
