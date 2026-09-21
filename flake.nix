@@ -53,11 +53,11 @@
         linuxCcLinker = "${pkgs.stdenv.cc}/bin/cc";
         linuxMoldRustFlags = "-C link-arg=-fuse-ld=mold";
 
-        # Crane setup with nightly rust
-        rustNightly = pkgs.rust-bin.nightly.latest.default.override {
+        # Keep the Crane build on the same stable compiler as the dev shell.
+        rustStable = pkgs.rust-bin.stable."1.98.1".default.override {
           extensions = ["rust-src"];
         };
-        craneLib = (crane.mkLib pkgs).overrideToolchain rustNightly;
+        craneLib = (crane.mkLib pkgs).overrideToolchain rustStable;
 
         # Source filtering - only include Rust-relevant files
         src = let
@@ -140,7 +140,11 @@
           });
 
         devShells.default = pkgs.mkShell rec {
-          nativeBuildInputs = [pkgs.pkg-config];
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+            cargo-audit
+            cargo-deny
+          ];
           buildInputs = with pkgs;
             [
               clang

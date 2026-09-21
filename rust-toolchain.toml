@@ -1,5 +1,5 @@
 [toolchain]
-channel = "nightly"
+channel = "1.98.1"
 components = ["clippy", "rustfmt", "rustc", "cargo", "rust-src"]
 targets = [
   "x86_64-unknown-linux-gnu",
