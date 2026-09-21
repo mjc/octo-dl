@@ -24,6 +24,7 @@ fn apply_service_config_reports_download_directory_path() {
             mfa: String::new(),
             saved_session: None,
         },
+        credential_key: None,
         api: crate::ApiConfig::default(),
         download: crate::DownloadConfig {
             path: Some(blocked_child.display().to_string()),
@@ -92,9 +93,11 @@ fn persist_login_credentials_creates_default_config_file() {
 
     let saved = ServiceConfig::load(&config_path).expect("config should load");
     assert!(saved.credentials.encrypted);
+    let key = crate::core::decode_credential_key(saved.credential_key.as_deref().unwrap())
+        .expect("credential key should load");
     let (email, password, mfa) = saved
         .credentials
-        .decrypt_if_needed()
+        .decrypt_if_needed_with_key(&key)
         .expect("saved credentials should decrypt");
     assert_eq!(email, "user@example.com");
     assert_eq!(password, "super-secret");
@@ -182,9 +185,11 @@ fn persist_login_credentials_preserves_existing_credentials_when_only_session_ch
         .expect("session should persist");
 
     let saved = ServiceConfig::load(&config_path).expect("config should load");
+    let key = crate::core::decode_credential_key(saved.credential_key.as_deref().unwrap())
+        .expect("credential key should load");
     let (email, password, _mfa) = saved
         .credentials
-        .decrypt_if_needed()
+        .decrypt_if_needed_with_key(&key)
         .expect("saved credentials should decrypt");
     assert_eq!(email, "saved@example.com");
     assert_eq!(password, "saved-secret");

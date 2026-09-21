@@ -296,6 +296,14 @@ fn parse_runtime_options(args: &[String]) -> Result<RuntimeOptions, String> {
                 };
                 options.config_path = Some(PathBuf::from(value));
             }
+            "-j" | "--chunks" | "-p" | "--parallel" => {
+                i += 1;
+                if args.get(i).is_none() {
+                    return Err(format!("{} requires a value", args[i - 1]));
+                }
+            }
+            "-f" | "--force" | "-r" | "--resume" | "-h" | "--help" => {}
+            arg if arg.starts_with('-') => return Err(format!("unknown option {arg}")),
             _ => {}
         }
         i += 1;
@@ -535,6 +543,25 @@ mod tests {
     fn runtime_options_reject_old_mode_flags() {
         assert!(parse_runtime_options(&["--api".to_string()]).is_err());
         assert!(parse_runtime_options(&["--web".to_string()]).is_err());
+    }
+
+    #[test]
+    fn runtime_options_reject_unknown_flags() {
+        let error = parse_runtime_options(&["--definitely-not-a-flag".to_string()])
+            .expect_err("unknown runtime flags should be rejected");
+        assert!(error.contains("unknown option"));
+    }
+
+    #[test]
+    fn runtime_options_allow_cli_owned_flags() {
+        let options = parse_runtime_options(&[
+            "--parallel".to_string(),
+            "3".to_string(),
+            "--chunks".to_string(),
+            "2".to_string(),
+        ])
+        .expect("CLI-owned flags should reach the CLI parser");
+        assert_eq!(options, RuntimeOptions::default());
     }
 
     #[test]

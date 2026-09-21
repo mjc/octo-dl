@@ -27,7 +27,11 @@ use codec::{
     decode_snapshot, encode_snapshot, is_canonical_session_path, should_replace_session_candidate,
     temporary_save_path,
 };
-pub use credentials::{SavedCredentials, SavedMegaSession, decrypt_credential, encrypt_credential};
+pub use credentials::{
+    SavedCredentials, SavedMegaSession, decode_credential_key, decrypt_credential,
+    decrypt_credential_with_key, encrypt_credential, encrypt_credential_with_key,
+    generate_credential_key,
+};
 
 #[cfg(test)]
 thread_local! {

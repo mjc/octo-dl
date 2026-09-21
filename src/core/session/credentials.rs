@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const CREDENTIAL_VERSION_PREFIX: &str = "v2:";
+const RANDOM_CREDENTIAL_VERSION_PREFIX: &str = "v3:";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SavedCredentials {
@@ -77,6 +78,51 @@ fn decrypt_credential_v2(encrypted: &str) -> Option<String> {
     let (nonce_bytes, ciphertext) = data.split_at(12);
     let key = derive_machine_key();
     let cipher = Aes128Gcm::new(&key.into());
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
+        .ok()?;
+    String::from_utf8(plaintext).ok()
+}
+
+/// Creates a fresh, non-deterministic 128-bit key for a service config.
+#[must_use]
+pub fn generate_credential_key() -> String {
+    BASE64.encode(uuid::Uuid::new_v4().as_bytes())
+}
+
+/// Decodes a persisted service-config credential key.
+#[must_use]
+pub fn decode_credential_key(encoded: &str) -> Option<[u8; 16]> {
+    let bytes = BASE64.decode(encoded).ok()?;
+    bytes.try_into().ok()
+}
+
+#[must_use]
+pub fn encrypt_credential_with_key(plaintext: &str, key: &[u8; 16]) -> String {
+    let cipher = Aes128Gcm::new(key.into());
+    let nonce_uuid = uuid::Uuid::new_v4();
+    let nonce_bytes = &nonce_uuid.as_bytes()[..12];
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(nonce_bytes), plaintext.as_bytes())
+        .expect("AES-GCM encryption should succeed");
+    let mut encoded = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
+    encoded.extend_from_slice(nonce_bytes);
+    encoded.extend_from_slice(&ciphertext);
+    format!(
+        "{RANDOM_CREDENTIAL_VERSION_PREFIX}{}",
+        BASE64.encode(encoded)
+    )
+}
+
+#[must_use]
+pub fn decrypt_credential_with_key(encrypted: &str, key: &[u8; 16]) -> Option<String> {
+    let encoded = encrypted.strip_prefix(RANDOM_CREDENTIAL_VERSION_PREFIX)?;
+    let data = BASE64.decode(encoded).ok()?;
+    if data.len() < 13 {
+        return None;
+    }
+    let (nonce_bytes, ciphertext) = data.split_at(12);
+    let cipher = Aes128Gcm::new(key.into());
     let plaintext = cipher
         .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
         .ok()?;

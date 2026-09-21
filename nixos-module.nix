@@ -129,12 +129,6 @@ in {
         description = "Loopback bind address for the remote-TUI/API server.";
       };
 
-      publicHost = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        description = "Public hostname used when rendering the bookmarklet helper page. Defaults to the bind host if unset.";
-      };
-
       port = lib.mkOption {
         type = lib.types.port;
         default = 9723;
@@ -245,6 +239,8 @@ in {
         [ "$OCTO_FORCE_OVERWRITE" = "true" ] && force_overwrite=true
         [ "$OCTO_CLEANUP_ON_ERROR" = "true" ] && cleanup_on_error=true
 
+        config_tmp="$(mktemp "$(dirname "$OCTO_CONFIG_PATH")/.octo-dl-config.XXXXXX")"
+        trap 'rm -f "$config_tmp"' EXIT
         {
           printf '%s\n' '[credentials]'
           printf 'encrypted = %s\n' "$encrypted"
@@ -266,10 +262,12 @@ in {
           printf 'force_overwrite = %s\n' "$force_overwrite"
           printf 'cleanup_on_error = %s\n' "$cleanup_on_error"
           printf '\n'
-        } > "$OCTO_CONFIG_PATH"
+        } > "$config_tmp"
 
-        chown ${cfg.user}:${cfg.group} "$OCTO_CONFIG_PATH"
-        chmod 600 "$OCTO_CONFIG_PATH"
+        chown ${cfg.user}:${cfg.group} "$config_tmp"
+        chmod 600 "$config_tmp"
+        mv -f "$config_tmp" "$OCTO_CONFIG_PATH"
+        trap - EXIT
       '';
     in {
       description = "octo-dl MEGA download service";

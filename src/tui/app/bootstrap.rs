@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::io;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,10 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     DownloadConfig, ServiceConfig,
-    core::{DownloadState, SavedMegaSession, SessionMeta, SessionSnapshot},
+    core::{
+        DownloadState, SavedMegaSession, SessionMeta, SessionSnapshot, decode_credential_key,
+        generate_credential_key,
+    },
 };
 
 use crate::tui::dashboard::DashboardUiMode;
@@ -34,6 +38,34 @@ fn path_io_error(action: &str, path: &Path, error: io::Error) -> io::Error {
         error.kind(),
         format!("{action} {}: {error}", path.display()),
     )
+}
+
+fn config_credential_key(config: &mut ServiceConfig) -> io::Result<[u8; 16]> {
+    if let Some(encoded) = config.credential_key.as_deref()
+        && let Some(key) = decode_credential_key(encoded)
+    {
+        return Ok(key);
+    }
+
+    let encoded = generate_credential_key();
+    let key = decode_credential_key(&encoded).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "generated invalid credential key",
+        )
+    })?;
+    config.credential_key = Some(encoded);
+    Ok(key)
+}
+
+fn decrypt_service_credentials(
+    config: &ServiceConfig,
+    key: &[u8; 16],
+) -> Option<(String, String, String)> {
+    config
+        .credentials
+        .decrypt_if_needed_with_key(key)
+        .or_else(|| config.credentials.decrypt_if_needed())
 }
 
 fn state_dir_service_config_path() -> PathBuf {
@@ -60,6 +92,13 @@ fn lexical_user_path(path: PathBuf) -> PathBuf {
 fn distinct_fallback_service_config_path(primary: &Path) -> Option<PathBuf> {
     let fallback = state_dir_service_config_path();
     (fallback != primary).then_some(fallback)
+}
+
+pub(crate) fn api_host_requires_api_key(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    host.parse::<IpAddr>().map_or(true, |ip| !ip.is_loopback())
 }
 
 impl App {
@@ -330,6 +369,12 @@ impl App {
         shared_state: Option<SharedAppState>,
         remote_tui_stream: bool,
     ) -> io::Result<super::super::api::ApiServerHandle> {
+        if api_host_requires_api_key(&host) && self.api_key.as_deref().is_none_or(str::is_empty) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "an API key is required when binding the API outside loopback",
+            ));
+        }
         super::super::api::start_api_server(
             self.event_tx.clone(),
             &host,
@@ -508,12 +553,13 @@ impl App {
             return Ok(());
         }
 
-        let service_config = ServiceConfig::load(config_path)?;
+        let mut service_config = ServiceConfig::load(config_path)?;
         if !service_config.credentials.has_credentials() {
             return Ok(());
         }
 
-        if let Some((email, password, mfa)) = service_config.credentials.decrypt_if_needed() {
+        let key = config_credential_key(&mut service_config)?;
+        if let Some((email, password, mfa)) = decrypt_service_credentials(&service_config, &key) {
             log::info!("Loaded fallback credentials from {}", config_path.display());
             self.login
                 .set_credentials_if_missing(&email, &password, &mfa);
@@ -532,6 +578,13 @@ impl App {
 
     pub(crate) fn apply_service_config(&mut self, config_path: &Path) -> io::Result<(String, u16)> {
         let mut service_config = ServiceConfig::load_or_create(config_path)?;
+        let had_valid_credential_key = service_config
+            .credential_key
+            .as_deref()
+            .and_then(decode_credential_key)
+            .is_some();
+        let key = config_credential_key(&mut service_config)?;
+        let mut config_dirty = !had_valid_credential_key;
         log::info!("Loaded config from {}", config_path.display());
 
         if let Some(ref dl_path) = service_config.download.path {
@@ -552,14 +605,24 @@ impl App {
 
         let mut credentials_from_config = false;
         if service_config.credentials.has_credentials() {
-            if let Some((email, password, mfa)) = service_config.credentials.decrypt_if_needed() {
+            if let Some((email, password, mfa)) = decrypt_service_credentials(&service_config, &key)
+            {
                 log::info!("Loaded credentials from config file");
                 credentials_from_config = self.login.set_credentials(email, password, mfa);
 
-                if !service_config.credentials.encrypted {
+                if !service_config.credentials.encrypted
+                    || !service_config.credentials.email.starts_with("v3:")
+                {
                     log::info!("Encrypting plaintext credentials in config file");
-                    service_config.credentials.encrypt_in_place();
-                    service_config.save(config_path)?;
+                    service_config.credentials = crate::ServiceCredentials {
+                        encrypted: false,
+                        email: self.login.email().to_string(),
+                        password: self.login.password().to_string(),
+                        mfa: String::new(),
+                        saved_session: service_config.credentials.saved_session.clone(),
+                    };
+                    service_config.credentials.encrypt_in_place_with_key(&key);
+                    config_dirty = true;
                 }
             } else {
                 log::warn!(
@@ -603,8 +666,11 @@ impl App {
             let key = uuid::Uuid::new_v4().simple().to_string();
             log::info!("Generated new API key");
             service_config.api.api_key = Some(key);
-            service_config.save(config_path)?;
             self.api_key.clone_from(&service_config.api.api_key);
+            config_dirty = true;
+        }
+        if config_dirty {
+            service_config.save(config_path)?;
         }
 
         Ok((service_config.api.host, service_config.api.port))
@@ -616,6 +682,7 @@ impl App {
         };
 
         let mut service_config = ServiceConfig::load_or_create(config_path)?;
+        let key = config_credential_key(&mut service_config)?;
         if self.login.has_credentials() {
             service_config.credentials = crate::ServiceCredentials {
                 encrypted: false,
@@ -624,7 +691,7 @@ impl App {
                 mfa: String::new(),
                 saved_session: self.saved_mega_session.clone(),
             };
-            service_config.credentials.encrypt_in_place();
+            service_config.credentials.encrypt_in_place_with_key(&key);
         } else {
             service_config.credentials.saved_session = self.saved_mega_session.clone();
         }

@@ -1,10 +1,14 @@
 //! Configuration types for download operations.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::{decrypt_credential, encrypt_credential};
+use crate::core::{
+    decode_credential_key, decrypt_credential, decrypt_credential_with_key, encrypt_credential,
+    encrypt_credential_with_key, generate_credential_key,
+};
 
 const fn default_download_path() -> Option<String> {
     None
@@ -29,13 +33,22 @@ pub struct DownloadConfig {
     #[serde(default = "default_download_path")]
     pub path: Option<String>,
     /// Number of parallel chunks per file download.
-    #[serde(default = "default_chunks_per_file")]
+    #[serde(
+        default = "default_chunks_per_file",
+        deserialize_with = "deserialize_positive_usize"
+    )]
     pub chunks_per_file: usize,
     /// Maximum adjacent MEGA chunks fetched per HTTP request.
-    #[serde(default = "default_mega_chunks_per_request")]
+    #[serde(
+        default = "default_mega_chunks_per_request",
+        deserialize_with = "deserialize_positive_usize"
+    )]
     pub mega_chunks_per_request: usize,
     /// Number of concurrent file downloads.
-    #[serde(default = "default_concurrent_files")]
+    #[serde(
+        default = "default_concurrent_files",
+        deserialize_with = "deserialize_positive_usize"
+    )]
     pub concurrent_files: usize,
     /// Whether to overwrite existing files.
     #[serde(default)]
@@ -43,6 +56,16 @@ pub struct DownloadConfig {
     /// Whether to clean up `.part` files on recoverable download errors.
     #[serde(default)]
     pub cleanup_on_error: bool,
+}
+
+fn deserialize_positive_usize<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    (value > 0)
+        .then_some(value)
+        .ok_or_else(|| serde::de::Error::custom("value must be greater than zero"))
 }
 
 impl Default for DownloadConfig {
@@ -287,6 +310,34 @@ impl ServiceCredentials {
             self.encrypted = true;
         }
     }
+
+    /// Decrypts credentials using the random key persisted with the service config.
+    #[must_use]
+    pub fn decrypt_if_needed_with_key(&self, key: &[u8; 16]) -> Option<(String, String, String)> {
+        if !self.encrypted {
+            return Some((self.email.clone(), self.password.clone(), self.mfa.clone()));
+        }
+        let email = decrypt_credential_with_key(&self.email, key)?;
+        let password = decrypt_credential_with_key(&self.password, key)?;
+        let mfa = if self.mfa.is_empty() {
+            String::new()
+        } else {
+            decrypt_credential_with_key(&self.mfa, key)?
+        };
+        Some((email, password, mfa))
+    }
+
+    /// Encrypts plaintext credentials with the service config's random key.
+    pub fn encrypt_in_place_with_key(&mut self, key: &[u8; 16]) {
+        if !self.encrypted {
+            self.email = encrypt_credential_with_key(&self.email, key);
+            self.password = encrypt_credential_with_key(&self.password, key);
+            if !self.mfa.is_empty() {
+                self.mfa = encrypt_credential_with_key(&self.mfa, key);
+            }
+            self.encrypted = true;
+        }
+    }
 }
 
 /// API server bind configuration.
@@ -315,6 +366,10 @@ impl Default for ApiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
     pub credentials: ServiceCredentials,
+    /// Random per-config key used for service credentials. Older configs omit it
+    /// and are migrated after their legacy machine-bound credentials decrypt.
+    #[serde(skip)]
+    pub credential_key: Option<String>,
     #[serde(default)]
     pub api: ApiConfig,
     #[serde(default)]
@@ -330,8 +385,21 @@ impl ServiceConfig {
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let contents = std::fs::read_to_string(path)
             .map_err(|error| path_io_error("read config file", path, error))?;
-        toml::from_str(&contents)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        let mut config: Self = toml::from_str(&contents)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let key_path = credential_key_path(path);
+        if key_path.exists() {
+            let key = std::fs::read_to_string(&key_path)
+                .map_err(|error| path_io_error("read credential key", &key_path, error))?;
+            if decode_credential_key(key.trim()).is_none() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid credential key in {}", key_path.display()),
+                ));
+            }
+            config.credential_key = Some(key.trim().to_string());
+        }
+        Ok(config)
     }
 
     /// Loads from `path`, or creates a template config file if it doesn't exist.
@@ -358,9 +426,10 @@ impl ServiceConfig {
                 mfa: String::new(),
                 saved_session: None,
             },
+            credential_key: Some(generate_credential_key()),
             api: ApiConfig::default(),
             download: DownloadConfig {
-                path: Some("/var/lib/octo-dl/downloads".to_string()),
+                path: None,
                 ..DownloadConfig::default()
             },
         };
@@ -379,31 +448,91 @@ impl ServiceConfig {
         let toml_str = toml::to_string(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path)
-                .map_err(|error| path_io_error("write config file", path, error))?;
-            file.write_all(toml_str.as_bytes())
-                .map_err(|error| path_io_error("write config file", path, error))?;
-            file.flush()
-                .map_err(|error| path_io_error("write config file", path, error))?;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(path, perms)
-                .map_err(|error| path_io_error("set config file permissions", path, error))?;
+        static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+        let temporary_path = parent.join(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        let result: std::io::Result<()> = (|| {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary_path).map_err(|error| {
+                path_io_error("write temporary config file", &temporary_path, error)
+            })?;
+
+            file.write_all(toml_str.as_bytes()).map_err(|error| {
+                path_io_error("write temporary config file", &temporary_path, error)
+            })?;
+            file.flush().map_err(|error| {
+                path_io_error("flush temporary config file", &temporary_path, error)
+            })?;
+            file.sync_all().map_err(|error| {
+                path_io_error("sync temporary config file", &temporary_path, error)
+            })?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&temporary_path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|error| {
+                    path_io_error("set config file permissions", &temporary_path, error)
+                })?;
+            }
+
+            std::fs::rename(&temporary_path, path)
+                .map_err(|error| path_io_error("replace config file", path, error))?;
+
+            #[cfg(unix)]
+            {
+                let directory = std::fs::File::open(parent)
+                    .map_err(|error| path_io_error("open config directory", parent, error))?;
+                directory
+                    .sync_all()
+                    .map_err(|error| path_io_error("sync config directory", parent, error))?;
+            }
+
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary_path);
         }
+        result?;
 
-        #[cfg(not(unix))]
-        std::fs::write(path, &toml_str)
-            .map_err(|error| path_io_error("write config file", path, error))?;
-
+        if let Some(key) = self.credential_key.as_deref() {
+            let key_path = credential_key_path(path);
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&key_path)
+                .map_err(|error| path_io_error("write credential key", &key_path, error))?;
+            file.write_all(key.as_bytes())
+                .map_err(|error| path_io_error("write credential key", &key_path, error))?;
+            file.write_all(b"\n")
+                .map_err(|error| path_io_error("write credential key", &key_path, error))?;
+            file.sync_all()
+                .map_err(|error| path_io_error("sync credential key", &key_path, error))?;
+        }
         Ok(())
     }
+}
+
+fn credential_key_path(path: &Path) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{}.key", path.display()))
 }
 
 fn path_io_error(action: &str, path: &Path, error: std::io::Error) -> std::io::Error {
@@ -432,6 +561,7 @@ mod service_config_tests {
                 mfa: String::new(),
                 saved_session: None,
             },
+            credential_key: None,
             api: ApiConfig::default(),
             download: DownloadConfig::default(),
         };
@@ -470,6 +600,24 @@ mod service_config_tests {
     }
 
     #[test]
+    fn service_credentials_use_persisted_random_key_format() {
+        let key = decode_credential_key(&generate_credential_key()).unwrap();
+        let mut creds = ServiceCredentials {
+            encrypted: false,
+            email: "test@test.com".to_string(),
+            password: "hunter2".to_string(),
+            mfa: String::new(),
+            saved_session: None,
+        };
+
+        creds.encrypt_in_place_with_key(&key);
+
+        assert!(creds.email.starts_with("v3:"));
+        assert!(creds.decrypt_if_needed_with_key(&key).is_some());
+        assert!(creds.decrypt_if_needed_with_key(&[0; 16]).is_none());
+    }
+
+    #[test]
     fn service_config_save_load() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
@@ -482,6 +630,7 @@ mod service_config_tests {
                 mfa: String::new(),
                 saved_session: None,
             },
+            credential_key: None,
             api: ApiConfig::default(),
             download: DownloadConfig::default(),
         };
@@ -528,6 +677,33 @@ path = "/tmp/downloads"
         assert!(!config.download.cleanup_on_error);
     }
 
+    #[test]
+    fn zero_download_limits_are_rejected() {
+        for field in [
+            "chunks_per_file",
+            "mega_chunks_per_request",
+            "concurrent_files",
+        ] {
+            let toml_str = format!(
+                "[credentials]\nemail = \"x@y.com\"\npassword = \"pw\"\n\n[download]\n{field} = 0\n"
+            );
+            let error = toml::from_str::<ServiceConfig>(&toml_str)
+                .expect_err("zero download limits should be invalid");
+            assert!(error.to_string().contains("greater than zero"));
+        }
+    }
+
+    #[test]
+    fn first_run_explicit_config_does_not_assume_nixos_download_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let config = ServiceConfig::load_or_create(&path).unwrap();
+
+        assert_eq!(config.download.path, None);
+        assert_eq!(ServiceConfig::load(&path).unwrap().download.path, None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn save_writes_config_with_owner_only_permissions() {
@@ -543,6 +719,7 @@ path = "/tmp/downloads"
                 mfa: String::new(),
                 saved_session: None,
             },
+            credential_key: None,
             api: ApiConfig::default(),
             download: DownloadConfig::default(),
         };

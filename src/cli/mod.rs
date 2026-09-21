@@ -496,7 +496,10 @@ async fn download_all(
 // CLI Parsing
 // ============================================================================
 
-fn parse_args() -> CliConfig {
+fn parse_args<I>(args: I) -> Result<CliConfig, String>
+where
+    I: IntoIterator<Item = String>,
+{
     let mut urls = Vec::new();
     let mut dlc_files = Vec::new();
     let mut chunks_per_file = DEFAULT_CHUNKS_PER_FILE;
@@ -504,20 +507,14 @@ fn parse_args() -> CliConfig {
     let mut force = false;
     let mut resume = false;
 
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-j" | "--chunks" => {
-                chunks_per_file = args
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(DEFAULT_CHUNKS_PER_FILE);
+                chunks_per_file = parse_positive_number(&mut args, &arg)?;
             }
             "-p" | "--parallel" => {
-                concurrent_files = args
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(DEFAULT_CONCURRENT_FILES);
+                concurrent_files = parse_positive_number(&mut args, &arg)?;
             }
             "-f" | "--force" => {
                 force = true;
@@ -542,13 +539,12 @@ fn parse_args() -> CliConfig {
                 }
             }
             _ => {
-                eprintln!("Unknown option: {arg}");
-                std::process::exit(1);
+                return Err(format!("unknown option: {arg}"));
             }
         }
     }
 
-    CliConfig {
+    Ok(CliConfig {
         urls,
         dlc_files,
         download_config: DownloadConfig::new()
@@ -556,7 +552,22 @@ fn parse_args() -> CliConfig {
             .with_concurrent_files(concurrent_files)
             .with_force_overwrite(force),
         resume,
-    }
+    })
+}
+
+fn parse_positive_number<I>(args: &mut I, flag: &str) -> Result<usize, String>
+where
+    I: Iterator<Item = String>,
+{
+    let value = args
+        .next()
+        .ok_or_else(|| format!("{flag} requires a positive integer"))?;
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("{flag} requires a positive integer, got {value:?}"))?;
+    (parsed > 0)
+        .then_some(parsed)
+        .ok_or_else(|| format!("{flag} requires a positive integer, got {value:?}"))
 }
 
 fn print_usage() {
@@ -603,7 +614,7 @@ fn get_credentials() -> crate::Result<(String, String, Option<String>)> {
 /// Returns an error if download operations fail or configuration loading fails.
 #[allow(clippy::too_many_lines, clippy::similar_names)]
 pub async fn run() -> crate::Result<()> {
-    let mut config = parse_args();
+    let mut config = parse_args(std::env::args().skip(1)).map_err(crate::Error::Download)?;
 
     // Check for resumable session
     if config.resume {
@@ -952,6 +963,19 @@ mod tests {
     fn progress_bar_creation() {
         let bar = make_progress_bar(1000, "test.txt");
         assert_eq!(bar.length(), Some(1000));
+    }
+
+    #[test]
+    fn malformed_numeric_cli_values_are_rejected() {
+        let error = parse_args(["--parallel", "not-a-number"].map(str::to_string))
+            .err()
+            .expect("malformed parallel value should be rejected");
+        assert!(error.contains("--parallel requires a positive integer"));
+
+        let error = parse_args(["--chunks", "0"].map(str::to_string))
+            .err()
+            .expect("zero chunks value should be rejected");
+        assert!(error.contains("--chunks requires a positive integer"));
     }
 
     #[test]
