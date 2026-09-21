@@ -167,6 +167,51 @@ async fn panicked_download_task_releases_its_scheduler_slot() {
     assert!(scheduler.active_task_files.is_empty());
 }
 
+#[tokio::test]
+async fn panicked_download_task_is_removed_from_available_and_pending_state() {
+    let mut scheduler = SchedulerState::new();
+    let file_id: FileId = "panic-queued.bin".into();
+    let file_id_ptr = file_id_ptr_key(&file_id);
+    scheduler.active_downloads.insert(file_id.clone());
+    scheduler.active_download_ptrs.insert(file_id_ptr);
+    scheduler.available_download_ptrs.insert(file_id_ptr);
+    scheduler.desired_pending_order.push(file_id.clone());
+    scheduler.desired_pending_set.insert(file_id.clone());
+    scheduler.pending_queue.push_back(file_id.clone());
+
+    let handle = scheduler.join_set.spawn(async {
+        panic!("download task panic");
+        #[allow(unreachable_code)]
+        DownloadTaskResult {
+            task_id: tokio::task::id(),
+            id: "panic-queued.bin".into(),
+            attempt_id: 4,
+            result: Ok(crate::FileStats {
+                size: 0,
+                network_bytes: 0,
+                reused_bytes: 0,
+                elapsed: std::time::Duration::ZERO,
+                average_speed: 0,
+                peak_speed: 0,
+                ramp_up_time: None,
+            }),
+        }
+    });
+    scheduler
+        .active_task_files
+        .insert(handle.id(), (file_id.clone(), 4));
+    let (event_tx, _event_rx) = super::super::event::DownloadEventSender::channel();
+    let result = scheduler.join_set.join_next().await.unwrap();
+
+    handle_download_join_result(result, &mut scheduler, &event_tx);
+
+    assert!(!scheduler.active_downloads.contains(&file_id));
+    assert!(!scheduler.active_download_ptrs.contains(&file_id_ptr));
+    assert!(!scheduler.available_download_ptrs.contains(&file_id_ptr));
+    assert!(!scheduler.pending_queue.contains(&file_id));
+    assert!(scheduler.active_task_files.is_empty());
+}
+
 #[test]
 fn expand_dlc_path_expands_tilde_prefix() {
     let home = dirs::home_dir().expect("home dir should exist for test");
@@ -829,6 +874,20 @@ fn remote_files_match_prefers_sparse_checksum_then_size_and_date() {
 fn duplicate_path_renames_file_inside_folder_preserving_extension() {
     assert_eq!(duplicate_path("folder/file.mkv", 2), "folder/file (2).mkv");
     assert_eq!(duplicate_path("folder/file", 3), "folder/file (3)");
+}
+
+#[test]
+fn duplicate_path_suffixes_are_reserved_across_packages() {
+    let mut used_paths = HashSet::from([
+        "folder/file.mkv".to_string(),
+        "folder/file (2).mkv".to_string(),
+    ]);
+
+    assert_eq!(
+        next_available_duplicate_path("folder/file.mkv", &mut used_paths),
+        "folder/file (3).mkv"
+    );
+    assert!(used_paths.contains("folder/file (3).mkv"));
 }
 
 #[test]

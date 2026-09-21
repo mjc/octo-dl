@@ -98,7 +98,9 @@ pub(crate) fn api_host_requires_api_key(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return false;
     }
-    host.parse::<IpAddr>().map_or(true, |ip| !ip.is_loopback())
+    host.trim_matches(['[', ']'])
+        .parse::<IpAddr>()
+        .map_or(true, |ip| !ip.is_loopback())
 }
 
 impl App {

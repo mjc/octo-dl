@@ -10,6 +10,19 @@ use tokio::sync::mpsc;
 use tempfile::tempdir;
 
 #[test]
+fn api_host_policy_treats_bracketed_ipv6_loopback_as_loopback() {
+    assert!(!api_host_requires_api_key("[::1]"));
+}
+
+#[test]
+fn api_host_policy_preserves_non_loopback_host_support() {
+    assert!(api_host_requires_api_key("192.0.2.1"));
+    assert!(api_host_requires_api_key("[2001:db8::1]"));
+    assert!(api_host_requires_api_key("api.example.test"));
+    assert!(!api_host_requires_api_key("localhost"));
+}
+
+#[test]
 fn apply_service_config_reports_download_directory_path() {
     let dir = tempdir().expect("temp dir should exist");
     let blocker = dir.path().join("not-a-directory");

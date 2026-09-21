@@ -349,6 +349,16 @@ impl SchedulerState {
             .remove(&file_id_ptr_key(file_id));
     }
 
+    fn discard_download(&mut self, file_id: &FileId) {
+        self.active_downloads.remove(file_id);
+        self.active_download_ptrs.remove(&file_id_ptr_key(file_id));
+        self.available_downloads.remove(file_id);
+        self.available_download_ptrs
+            .remove(&file_id_ptr_key(file_id));
+        self.resume_priority_set.remove(file_id);
+        self.pending_queue.retain(|pending| pending != file_id);
+    }
+
     fn pause_file_ids(&mut self, file_ids: &[FileId]) -> Vec<QueuedDownload> {
         let mut paused = Vec::new();
         let removed_file_ids = file_ids
@@ -1378,7 +1388,7 @@ fn handle_download_join_result(
         }
         Err(error) => {
             if let Some((file_id, attempt_id)) = scheduler.active_task_files.remove(&error.id()) {
-                scheduler.finish_download(&file_id, &Err(crate::Error::Cancelled));
+                scheduler.discard_download(&file_id);
                 let _ = tx.send(DownloadEvent::FileError {
                     id: file_id,
                     error: format!("Download task failed: {error}"),
@@ -1735,8 +1745,8 @@ struct BatchItemRef {
 
 #[derive(Default)]
 struct BatchDuplicateResolver {
-    item_paths: HashMap<(String, String), BatchItemRef>,
-    used_paths: HashSet<(String, String)>,
+    item_paths: HashMap<String, BatchItemRef>,
+    used_paths: HashSet<String>,
 }
 
 impl BatchDuplicateResolver {
@@ -1779,49 +1789,36 @@ impl BatchDuplicateResolver {
         mut item: QueuedDownload,
         destination: BatchDestination,
     ) {
-        let package_id = batch_item_package_id(&item);
         let original_path = item.item.path.clone();
         let snapshot = batch_item_snapshot(&item);
 
-        if let Some(existing_ref) = self
-            .item_paths
-            .get(&(package_id.clone(), original_path.clone()))
-            .copied()
-        {
+        if let Some(existing_ref) = self.item_paths.get(&original_path).copied() {
             let existing_snapshot = self.snapshot_for(queued_items, completed_items, existing_ref);
             if remote_files_match(&existing_snapshot, &snapshot) {
                 return;
             }
 
             if snapshot.size > existing_snapshot.size {
-                let renamed_existing = next_available_duplicate_path(
-                    &package_id,
-                    &original_path,
-                    &mut self.used_paths,
-                );
+                let renamed_existing =
+                    next_available_duplicate_path(&original_path, &mut self.used_paths);
                 self.rename_item(
                     queued_items,
                     completed_items,
                     existing_ref,
-                    &package_id,
                     &original_path,
                     &renamed_existing,
                 );
             } else {
-                let renamed_incoming = next_available_duplicate_path(
-                    &package_id,
-                    &original_path,
-                    &mut self.used_paths,
-                );
+                let renamed_incoming =
+                    next_available_duplicate_path(&original_path, &mut self.used_paths);
                 item.item.path = renamed_incoming;
             }
         }
 
         let final_path = item.item.path.clone();
         let item_ref = self.push_item(queued_items, completed_items, item, destination);
-        self.used_paths
-            .insert((package_id.clone(), final_path.clone()));
-        self.item_paths.insert((package_id, final_path), item_ref);
+        self.used_paths.insert(final_path.clone());
+        self.item_paths.insert(final_path, item_ref);
     }
 
     fn snapshot_for(
@@ -1842,7 +1839,6 @@ impl BatchDuplicateResolver {
         queued_items: &mut [QueuedDownload],
         completed_items: &mut [QueuedDownload],
         item_ref: BatchItemRef,
-        package_id: &str,
         old_path: &str,
         new_path: &str,
     ) {
@@ -1851,10 +1847,8 @@ impl BatchDuplicateResolver {
             BatchDestination::Completed => &mut completed_items[item_ref.index],
         };
         item.item.path = new_path.to_string();
-        self.item_paths
-            .remove(&(package_id.to_string(), old_path.to_string()));
-        self.item_paths
-            .insert((package_id.to_string(), new_path.to_string()), item_ref);
+        self.item_paths.remove(old_path);
+        self.item_paths.insert(new_path.to_string(), item_ref);
     }
 
     fn push_item(
@@ -1883,13 +1877,6 @@ impl BatchDuplicateResolver {
     }
 }
 
-fn batch_item_package_id(item: &QueuedDownload) -> String {
-    item.resolved
-        .package_id
-        .map(|package_id| package_id.to_string())
-        .unwrap_or_else(|| item.resolved.source_url.clone())
-}
-
 fn package_identity_for_nodes(
     nodes: &mega::Nodes,
     collected: &crate::CollectedFiles<'_>,
@@ -1916,14 +1903,10 @@ fn remote_files_match(left: &BatchItemSnapshot, right: &BatchItemSnapshot) -> bo
     left.size == right.size && left.modified_at.is_some() && left.modified_at == right.modified_at
 }
 
-fn next_available_duplicate_path(
-    package_id: &str,
-    path: &str,
-    used_paths: &mut HashSet<(String, String)>,
-) -> String {
+fn next_available_duplicate_path(path: &str, used_paths: &mut HashSet<String>) -> String {
     for ordinal in 2.. {
         let candidate = duplicate_path(path, ordinal);
-        if used_paths.insert((package_id.to_string(), candidate.clone())) {
+        if used_paths.insert(candidate.clone()) {
             return candidate;
         }
     }
