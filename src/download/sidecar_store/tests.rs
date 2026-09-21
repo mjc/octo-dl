@@ -141,3 +141,26 @@ async fn sidecar_save_writes_postcard_not_legacy_formats() {
     assert!(postcard::from_bytes::<ResumeSidecar>(&data).is_ok());
     assert!(serde_json::from_slice::<LegacyJsonResumeSidecar>(&data).is_err());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sidecar_save_rejects_preexisting_temp_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar_path = dir.path().join("file.bin.part.postcard");
+    let temp_path = sidecar_tmp_path(&sidecar_path);
+    let target_path = dir.path().join("target");
+    let sidecar = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
+    tokio::fs::write(&target_path, b"keep target")
+        .await
+        .unwrap();
+    symlink(&target_path, &temp_path).unwrap();
+
+    let error = save_sidecar_atomic(&sidecar_path, &sidecar)
+        .await
+        .expect_err("a pre-existing sidecar temp symlink must be rejected");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(tokio::fs::read(&target_path).await.unwrap(), b"keep target");
+}

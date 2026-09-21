@@ -144,6 +144,14 @@ impl FileSystem for TokioFileSystem {
         size: u64,
         preserve_existing: bool,
     ) -> std::io::Result<tokio::fs::File> {
+        if let Ok(metadata) = tokio::fs::symlink_metadata(path).await {
+            if metadata.file_type().is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("refusing to open symlink as part file: {}", path.display()),
+                ));
+            }
+        }
         let file = tokio::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -291,6 +299,26 @@ mod tests {
         let fs = TokioFileSystem::new();
         // Should not error on missing file
         fs.remove_file(&path).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tokio_fs_open_part_file_rejects_preexisting_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("target.part");
+        let link = dir.path().join("download.part");
+        std::fs::write(&target, b"keep target").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let error = TokioFileSystem::new()
+            .open_part_file(&link, 32, false)
+            .await
+            .expect_err("a pre-existing part symlink must be rejected");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep target");
     }
 
     #[tokio::test]

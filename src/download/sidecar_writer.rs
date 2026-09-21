@@ -13,6 +13,18 @@ pub(in crate::download) fn sidecar_tmp_path(path: &Path) -> PathBuf {
     path.with_extension("postcard.tmp")
 }
 
+fn reject_existing_symlink_sync(path: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("refusing to overwrite symlink: {}", path.display()),
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn fingerprint_part_sync(path: &Path) -> Option<FileFingerprint> {
     let file = std::fs::OpenOptions::new().read(true).open(path).ok()?;
     let metadata = file.metadata().ok()?;
@@ -21,6 +33,7 @@ fn fingerprint_part_sync(path: &Path) -> Option<FileFingerprint> {
 
 fn save_sidecar_atomic_sync(path: &Path, sidecar: &ResumeSidecar) -> io::Result<()> {
     let tmp = sidecar_tmp_path(path);
+    reject_existing_symlink_sync(&tmp)?;
     let data = postcard::to_stdvec(sidecar).map_err(io::Error::other)?;
     let mut file = std::fs::File::create(&tmp)?;
     std::io::Write::write_all(&mut file, &data)?;

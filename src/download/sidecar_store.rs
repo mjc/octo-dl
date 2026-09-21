@@ -313,6 +313,17 @@ fn deserialize_legacy_json_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
 
 pub(super) async fn save_sidecar_atomic(path: &Path, sidecar: &ResumeSidecar) -> io::Result<()> {
     let tmp = sidecar_tmp_path(path);
+    match tokio::fs::symlink_metadata(&tmp).await {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("refusing to overwrite symlink: {}", tmp.display()),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     let data = postcard::to_stdvec(sidecar).map_err(io::Error::other)?;
     let mut file = tokio::fs::File::create(&tmp).await?;
     file.write_all(&data).await?;

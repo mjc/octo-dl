@@ -114,10 +114,9 @@ impl<F: FileSystem> Downloader<F> {
             }
             Err(error) => {
                 log::warn!(
-                    "Existing completed file {} failed verification; deleting and redownloading: {error}",
+                    "Existing completed file {} failed verification; keeping it and redownloading: {error}",
                     path
                 );
-                self.fs.remove_file(Path::new(path)).await?;
                 Ok(None)
             }
         }

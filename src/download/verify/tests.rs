@@ -182,6 +182,7 @@ async fn run_complete_existing_file_rejects_same_size_corrupt_final_file_test() 
         existing.is_none(),
         "same-size corrupted completed files must not be accepted as already complete"
     );
+    assert_eq!(tokio::fs::read(&output_path).await.unwrap(), corrupt);
 
     harness.shutdown().await;
 }

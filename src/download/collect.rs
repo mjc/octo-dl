@@ -106,7 +106,7 @@ pub(crate) fn collect_download_items<'a>(nodes: &'a mega::Nodes) -> Vec<Download
                 collect_files_recursive(nodes, root)
             } else {
                 let path = if single_root_file {
-                    single_file_package_path(root.name())
+                    single_file_package_path(&safe_path_component(root.name()))
                 } else {
                     root.name().to_string()
                 };
@@ -297,6 +297,19 @@ mod tests {
 
         assert!(!path.split('/').any(|component| component == ".."));
         assert!(!path.starts_with('/'));
+    }
+
+    #[test]
+    fn single_root_file_path_sanitizes_the_filename_before_wrapping_it() {
+        let path = single_file_package_path(&safe_path_component("../outside\\file.bin"));
+
+        assert_eq!(path, ".._outside_file/.._outside_file.bin");
+        assert!(!path.starts_with('/'));
+        assert!(
+            !path
+                .split('/')
+                .any(|component| component == "." || component == "..")
+        );
     }
 
     #[derive(Default)]

@@ -159,3 +159,28 @@ async fn sync_and_fingerprint_part_reports_missing_files_as_untrusted() {
 
     assert_eq!(fingerprint_part_sync(&missing), None);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sidecar_writer_rejects_preexisting_temp_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar_path = dir.path().join("file.bin.part.postcard");
+    let temp_path = super::sidecar_tmp_path(&sidecar_path);
+    let target_path = dir.path().join("target");
+    let part_path = dir.path().join("file.bin.part");
+    let snapshot = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
+    tokio::fs::write(&part_path, b"partial").await.unwrap();
+    tokio::fs::write(&target_path, b"keep target")
+        .await
+        .unwrap();
+    symlink(&target_path, &temp_path).unwrap();
+
+    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path);
+    writer.persist_verified_snapshot(SidecarGeneration::new(1), snapshot);
+    writer.finish(SidecarWriterShutdown::Flush).await;
+
+    assert!(!sidecar_path.exists());
+    assert_eq!(tokio::fs::read(&target_path).await.unwrap(), b"keep target");
+}

@@ -2,6 +2,7 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
+use futures::future::{AbortHandle, Abortable};
 use tokio_util::sync::CancellationToken;
 
 use crate::fs::FileSystem;
@@ -19,12 +20,16 @@ async fn await_download_or_cancel<T, F>(
 where
     F: Future<Output = Result<T, mega::Error>>,
 {
+    let (abort_handle, abort_registration) = AbortHandle::new_pair();
+    let download = Abortable::new(download, abort_registration);
     tokio::pin!(download);
     tokio::select! {
-        result = &mut download => result.map_err(crate::error::Error::Mega),
+        result = &mut download => match result {
+            Ok(result) => result.map_err(crate::error::Error::Mega),
+            Err(_) => Err(crate::error::Error::Cancelled),
+        },
         () = token.cancelled() => {
-            // Keep polling the MEGA future to completion. Dropping it here can
-            // detach mega-rs' internal processor task while finalization starts.
+            abort_handle.abort();
             let _ = (&mut download).await;
             Err(crate::error::Error::Cancelled)
         }

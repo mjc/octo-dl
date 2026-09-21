@@ -1,3 +1,4 @@
+use std::future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,27 +8,17 @@ use super::*;
 use crate::config::DownloadConfig;
 
 #[tokio::test]
-async fn cancellation_waits_for_the_outer_mega_future_to_finish_cleanup() {
+async fn cancellation_returns_when_the_download_future_never_resolves() {
     let cancellation = CancellationToken::new();
-    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(super::await_download_or_cancel(
-        async move {
-            release_rx.await.unwrap();
-            Ok::<(), mega::Error>(())
-        },
-        cancellation.clone(),
-    ));
-
     cancellation.cancel();
-    tokio::time::timeout(Duration::from_millis(20), async {
-        while !task.is_finished() {
-            tokio::task::yield_now().await;
-        }
-    })
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(20),
+        super::await_download_or_cancel(future::pending::<Result<(), mega::Error>>(), cancellation),
+    )
     .await
-    .expect_err("cancellation must not drop the outer future");
-    release_tx.send(()).unwrap();
-    let result = task.await.unwrap();
+    .expect("cancellation must not wait for a permanently pending download");
+
     assert!(matches!(result, Err(crate::Error::Cancelled)));
 }
 
