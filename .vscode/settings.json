@@ -5,6 +5,5 @@
         "octo",
         "reqwest",
         "rustc"
-    ],
-    "nixEnvSelector.nixFile": "${workspaceFolder}/flake.nix"
+    ]
 }

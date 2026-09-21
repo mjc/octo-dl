@@ -110,9 +110,9 @@ echo "════════════════════════�
 echo ""
 
 # Enter cross-compilation environment if not already in it
-if [ -z "${IN_NIX_SHELL:-}" ]; then
-	log_info "Entering Nix cross-compilation environment..."
-	exec nix develop .#cross -c "$0" "$@"
+if [ "${OCTO_DEVENV_CROSS:-}" != "1" ]; then
+	log_info "Entering devenv cross-compilation environment..."
+	exec devenv shell --profile cross -- "$0" "$@"
 fi
 
 log_info "Using Rust toolchain: $(rustc --version)"

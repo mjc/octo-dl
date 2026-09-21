@@ -83,6 +83,28 @@ The benchmark harness:
 - accepts `OCTO_FAKE_MEGA_SIZE_MIB`, `OCTO_FAKE_MEGA_OUTPUT_DIR`,
   `OCTO_FAKE_MEGA_SEED`, and `OCTO_FAKE_MEGA_KEEP=1` as additional overrides
 
+The development environment is managed by devenv. Enter it with:
+
+```sh
+devenv shell
+```
+
+The repository keeps the Nix flake for package and NixOS-module outputs, but
+the development shell and cross-compilation environment are defined in
+`devenv.nix`. Run the standard checks with:
+
+```sh
+devenv tasks run check:all
+```
+
+Use the cross-compilation profile for release builds:
+
+```sh
+./scripts/build-release.sh [VERSION]
+```
+
+The script enters `devenv shell --profile cross` automatically when needed.
+
 Example:
 
 ```sh
@@ -90,7 +112,7 @@ OCTO_FAKE_MEGA_SIZE_MIB=1024 \
 OCTO_FAKE_MEGA_CHUNKS_PER_FILE=4 \
 OCTO_FAKE_MEGA_SERVER_WORKER_THREADS=4 \
 OCTO_FAKE_MEGA_MEGA_CHUNKS_PER_REQUEST=8 \
-nix develop -c cargo bench --bench fake_mega
+devenv shell -- cargo bench --bench fake_mega
 ```
 
 The table below records 10x averages for the fixed memory-backed harness with

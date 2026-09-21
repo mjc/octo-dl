@@ -1,5 +1,7 @@
 /target
-.direnv
+.devenv/
+devenv.local.nix
+devenv.local.yaml
 .zig-cache/
 
 # Profiling artifacts

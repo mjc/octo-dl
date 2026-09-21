@@ -23,24 +23,6 @@
           overlays = [(import rust-overlay)];
         };
         cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-        overrides = builtins.fromTOML (builtins.readFile (self + "/rust-toolchain.toml"));
-        libPath = with pkgs;
-          lib.makeLibraryPath [];
-
-        # glib include paths for bindgen
-        glibIncludePaths = [
-          ''-I${pkgs.glib.dev}/include/glib-2.0''
-          ''-I${pkgs.glib.out}/lib/glib-2.0/include''
-        ];
-
-        clangIncludePaths = [
-          ''-I${pkgs.llvmPackages_latest.libclang.lib}/lib/clang/${pkgs.llvmPackages_latest.libclang.version}/include''
-        ];
-
-        commonIncludePaths =
-          if pkgs.stdenv.isLinux
-          then [''-I${pkgs.glibc.dev}/include'']
-          else [];
 
         cargoTargetEnvPrefix = pkgs.lib.toUpper (builtins.replaceStrings ["-"] ["_"] pkgs.stdenv.hostPlatform.config);
         cargoTargetLinkerEnv = "CARGO_TARGET_${cargoTargetEnvPrefix}_LINKER";
@@ -48,7 +30,7 @@
         linuxCcLinker = "${pkgs.stdenv.cc}/bin/cc";
         linuxMoldRustFlags = "-C link-arg=-fuse-ld=mold";
 
-        # Keep the Crane build on the same stable compiler as the dev shell.
+        # Keep the Crane build on the same stable compiler as devenv.
         rustStable = pkgs.rust-bin.stable."1.98.1".default.override {
           extensions = ["rust-src"];
         };
@@ -128,96 +110,6 @@
             cargoClippyExtraArgs = "--all-targets";
           });
 
-        devShells.default = pkgs.mkShell rec {
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-            cargo-audit
-            cargo-deny
-          ];
-          buildInputs = with pkgs;
-            [
-              clang
-              llvmPackages.bintools
-              rustup
-              openssl
-              openssl.dev
-              pkg-config
-              par2cmdline
-              xxd
-              gh
-              cargo-bloat
-              gnuplot
-              bc
-              sccache
-            ]
-            ++ (
-              if pkgs.stdenv.isLinux
-              then [
-                linuxPackages_latest.perf
-                strace
-                mold
-              ]
-              else []
-            );
-
-          RUSTC_VERSION = overrides.toolchain.channel;
-          LIBCLANG_PATH = pkgs.lib.makeLibraryPath [pkgs.llvmPackages_latest.libclang.lib];
-
-          shellHook =
-            ''
-              export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
-              export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
-              export "CARGO_TARGET_${cargoTargetEnvPrefix}_LINKER"="${pkgs.lib.optionalString pkgs.stdenv.isLinux linuxCcLinker}${pkgs.lib.optionalString (!pkgs.stdenv.isLinux) "${pkgs.stdenv.cc}/bin/cc"}"
-              export "CARGO_TARGET_${cargoTargetEnvPrefix}_RUSTFLAGS"="-C target-cpu=native${pkgs.lib.optionalString pkgs.stdenv.isLinux " ${linuxMoldRustFlags}"}"
-            ''
-            + (
-              if pkgs.stdenv.isLinux
-              then ''
-                export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-x86_64-unknown-linux-gnu/bin/
-                export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (buildInputs ++ nativeBuildInputs)}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-              ''
-              else ""
-            );
-
-          RUSTFLAGS = builtins.map (a: ''-L ${a}/lib'') [];
-
-          BINDGEN_EXTRA_CLANG_ARGS =
-            (builtins.map (a: ''-I${a}/include'') commonIncludePaths)
-            ++ clangIncludePaths
-            ++ glibIncludePaths;
-        };
-
-        # Cross-compilation shell for release builds
-        devShells.cross = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [
-            rustup
-            cargo-zigbuild
-            zig
-            pkg-config
-            pkgsCross.mingwW64.stdenv.cc
-          ];
-
-          shellHook = ''
-            export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
-
-            unset CC
-            unset CXX
-            unset AR
-            unset RANLIB
-
-            export ZIG_GLOBAL_CACHE_DIR="$HOME/.cache/zig"
-            export ZIG_LOCAL_CACHE_DIR="$PWD/.zig-cache"
-
-            echo "Cross-compilation environment ready"
-            echo "Available targets:"
-            echo "  - x86_64-unknown-linux-gnu"
-            echo "  - aarch64-unknown-linux-gnu"
-            echo "  - x86_64-pc-windows-gnu"
-            echo ""
-            echo "Build with: cargo zigbuild --release --target <target>"
-            echo "Or run: ./scripts/build-release.sh <version>"
-          '';
-        };
       }
     )
     // {
