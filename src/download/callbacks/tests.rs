@@ -41,7 +41,8 @@ fn download_callbacks_request_durable_chunk_syncs() {
         ProgressCallbackState::new("file.bin".to_string(), 1024, 0, Arc::new(NoProgress)),
         ChunkVerifiedState::new(
             ResumeTracker::new(1024, [0; 8], vec![None; 1]),
-            LazySidecarWriter::new("file.bin.part.postcard".into(), "file.bin.part".into()),
+            LazySidecarWriter::new("file.bin.part.postcard".into(), "file.bin.part".into())
+                .expect("sidecar writer should start"),
         ),
     );
 
@@ -82,7 +83,8 @@ async fn chunk_verified_persists_sidecar_after_each_chunk() {
         .await
         .unwrap();
 
-    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path.clone());
+    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path.clone())
+        .expect("sidecar writer should start");
     let persist_events = writer.persist_event_listener();
     let verified = ChunkVerifiedState::new(
         ResumeTracker::new(file_size, [9_u8; 8], vec![None; boundaries.len()]),
@@ -131,7 +133,8 @@ async fn chunk_verified_flush_persists_queued_sidecar_updates() {
 
     let verified = ChunkVerifiedState::new(
         ResumeTracker::new(file_size, [9_u8; 8], vec![None; boundaries.len()]),
-        LazySidecarWriter::new(sidecar_path.clone(), part_path.clone()),
+        LazySidecarWriter::new(sidecar_path.clone(), part_path.clone())
+            .expect("sidecar writer should start"),
     );
 
     verified.mark_verified(boundaries[0].index, [1_u8; 16]);
@@ -163,7 +166,8 @@ async fn chunk_verified_replaces_existing_sidecar_record_without_duplication() {
 
     let verified = ChunkVerifiedState::new(
         ResumeTracker::new(300_000, [9_u8; 8], vec![None; 1]),
-        LazySidecarWriter::new(sidecar_path.clone(), part_path),
+        LazySidecarWriter::new(sidecar_path.clone(), part_path)
+            .expect("sidecar writer should start"),
     );
 
     verified.mark_verified(0, [1_u8; 16]);
@@ -193,7 +197,8 @@ async fn chunk_verified_flush_keeps_sidecar_chunks_sorted_after_out_of_order_mar
 
     let verified = ChunkVerifiedState::new(
         ResumeTracker::new(file_size, [9_u8; 8], vec![None; boundaries.len()]),
-        LazySidecarWriter::new(sidecar_path.clone(), part_path),
+        LazySidecarWriter::new(sidecar_path.clone(), part_path)
+            .expect("sidecar writer should start"),
     );
 
     verified.mark_verified(boundaries[2].index, [3_u8; 16]);

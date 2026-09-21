@@ -101,7 +101,7 @@ impl<F: FileSystem> Downloader<F> {
                     expected_condensed_mac,
                     resume_validation.trusted_chunks,
                 ),
-                LazySidecarWriter::new(sidecar_path.to_path_buf(), part_path.to_path_buf()),
+                LazySidecarWriter::new(sidecar_path.to_path_buf(), part_path.to_path_buf())?,
             ),
         ));
 

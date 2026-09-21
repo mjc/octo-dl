@@ -176,7 +176,8 @@ mod tests {
                     super::super::sidecar_writer::LazySidecarWriter::new(
                         sidecar_path.clone(),
                         part_path.clone(),
-                    ),
+                    )
+                    .expect("sidecar writer should start"),
                 );
                 let progress: Arc<dyn super::super::callbacks::DownloadProgress> =
                     Arc::new(super::super::callbacks::NoProgress);

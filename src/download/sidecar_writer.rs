@@ -154,7 +154,7 @@ pub(super) struct LazySidecarWriter {
 }
 
 impl LazySidecarWriter {
-    pub(super) fn new(path: PathBuf, part_path: PathBuf) -> Self {
+    pub(super) fn new(path: PathBuf, part_path: PathBuf) -> io::Result<Self> {
         let (tx, rx) = mpsc::channel();
         let abort_requested = Arc::new(AtomicBool::new(false));
         #[cfg(test)]
@@ -163,7 +163,9 @@ impl LazySidecarWriter {
         let persist_event_rx = Arc::new(Mutex::new(persist_event_rx));
         let worker_abort_requested = Arc::clone(&abort_requested);
         let worker = std::thread::Builder::new()
-            .name(format!("sidecar-writer:{}", path.display()))
+            // Keep user-controlled paths out of the OS thread name. In
+            // particular, `Builder::name` panics on interior NUL bytes.
+            .name("octo-sidecar-writer".to_string())
             .spawn(move || {
                 SidecarWriterWorker::new(
                     path,
@@ -175,15 +177,14 @@ impl LazySidecarWriter {
                     worker_abort_requested,
                 )
                 .run(rx)
-            })
-            .expect("spawn sidecar writer thread");
-        Self {
+            })?;
+        Ok(Self {
             tx: Mutex::new(Some(tx)),
             worker: Mutex::new(Some(worker)),
             abort_requested,
             #[cfg(test)]
             persist_event_rx,
-        }
+        })
     }
 
     #[cfg(test)]

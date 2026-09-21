@@ -8,6 +8,22 @@ use super::{
     fingerprint_part_sync,
 };
 
+#[tokio::test]
+async fn malformed_path_cannot_panic_worker_startup() {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        LazySidecarWriter::new("invalid\0name".into(), "partial.bin".into())
+    }));
+    assert!(
+        result.is_ok(),
+        "worker startup must not panic on a malformed path"
+    );
+    let writer = match result.unwrap() {
+        Ok(writer) => writer,
+        Err(error) => panic!("worker thread should start: {error}"),
+    };
+    writer.finish(SidecarWriterShutdown::Abort).await;
+}
+
 fn sidecar_with_chunks(file_size: u64, chunks: &[(u32, [u8; 16])]) -> ResumeSidecar {
     let (&(first_index, first_mac), rest) = chunks
         .split_first()
@@ -29,7 +45,8 @@ async fn sidecar_writer_persists_verified_snapshots_in_order() {
     let sidecar_path = dir.path().join("file.bin.part.postcard");
     let part_path = dir.path().join("file.bin.part");
     tokio::fs::write(&part_path, b"partial").await.unwrap();
-    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path.clone());
+    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path.clone())
+        .expect("sidecar writer should start");
     let first = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
     let second = sidecar_with_chunks(42, &[(0, [1u8; 16]), (1, [2u8; 16])]);
 
@@ -50,7 +67,8 @@ async fn sidecar_writer_saves_snapshot_without_fingerprint_when_part_is_missing(
     let dir = tempfile::tempdir().unwrap();
     let sidecar_path = dir.path().join("file.bin.part.postcard");
     let part_path = dir.path().join("file.bin.part");
-    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path.clone());
+    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path.clone())
+        .expect("sidecar writer should start");
     let mut snapshot = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
     snapshot.part_fingerprint = Some(FileFingerprint {
         len: 999,
@@ -74,7 +92,8 @@ async fn sidecar_writer_allows_equal_generation_for_final_flush() {
     let sidecar_path = dir.path().join("file.bin.part.postcard");
     let part_path = dir.path().join("file.bin.part");
     tokio::fs::write(&part_path, b"partial").await.unwrap();
-    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path);
+    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path)
+        .expect("sidecar writer should start");
     let first = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
     let final_snapshot = sidecar_with_chunks(42, &[(0, [1u8; 16]), (1, [2u8; 16])]);
 
@@ -92,7 +111,8 @@ async fn sidecar_writer_rejects_older_final_snapshot_after_newer_generation() {
     let sidecar_path = dir.path().join("file.bin.part.postcard");
     let part_path = dir.path().join("file.bin.part");
     tokio::fs::write(&part_path, b"partial").await.unwrap();
-    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path);
+    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path)
+        .expect("sidecar writer should start");
     let older = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
     let newer = sidecar_with_chunks(42, &[(0, [1u8; 16]), (1, [2u8; 16])]);
 
@@ -112,7 +132,8 @@ async fn sidecar_writer_rejects_older_verified_snapshot_after_newer_generation()
     let part_path = part_path(&file_path);
     let sidecar_path = sidecar_path(&file_path);
     tokio::fs::write(&part_path, b"partial").await.unwrap();
-    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path);
+    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path)
+        .expect("sidecar writer should start");
     let first_snapshot = sidecar_for_chunk(300_000, [9_u8; 8], 1, [1_u8; 16]);
     let second_snapshot = sidecar_with_chunks(300_000, &[(1, [1_u8; 16]), (2, [2_u8; 16])]);
 
@@ -140,7 +161,8 @@ async fn sidecar_writer_ignores_persist_requests_after_finish() {
     let sidecar_path = dir.path().join("file.bin.part.postcard");
     let part_path = dir.path().join("file.bin.part");
     tokio::fs::write(&part_path, b"partial").await.unwrap();
-    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path);
+    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path)
+        .expect("sidecar writer should start");
     let first = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
     let second = sidecar_with_chunks(42, &[(0, [1u8; 16]), (1, [2u8; 16])]);
 
@@ -177,7 +199,8 @@ async fn sidecar_writer_rejects_preexisting_temp_symlink() {
         .unwrap();
     symlink(&target_path, &temp_path).unwrap();
 
-    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path);
+    let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path)
+        .expect("sidecar writer should start");
     writer.persist_verified_snapshot(SidecarGeneration::new(1), snapshot);
     writer.finish(SidecarWriterShutdown::Flush).await;
 
