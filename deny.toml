@@ -3,9 +3,6 @@ all-features = true
 
 [advisories]
 unmaintained = "workspace"
-ignore = [
-  { id = "RUSTSEC-2023-0071", reason = "The locked mega-rs revision still uses rsa; remove this exception when octo-dl updates to the locally hardened mega-rs revision." },
-]
 
 [licenses]
 confidence-threshold = 0.8
