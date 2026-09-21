@@ -12,7 +12,7 @@ use super::{
     App, ConfigActivation, ConfigPersistence, ConfigUpdateOutcome, ConfigUpdateRejection,
     ProgressDelta, QueuedFile, SessionAdapter, UiAction, VerificationTarget, VisibleFileContext,
 };
-use crate::tui::event::VerificationOperationId;
+use crate::tui::event::{DownloadAttemptId, VerificationOperationId};
 
 const MAX_UI_ACTIONS_PER_TICK: usize = 64;
 
@@ -59,6 +59,7 @@ impl App {
     fn clear_verification_state(&mut self, id: &FileId) {
         self.verifying_files.remove(id);
         self.verification_inflight_files.remove(id);
+        self.verification_operation_ids.remove(id);
         self.verification_targets.remove(id);
         self.shutdown_blocking_verifications.remove(id);
         self.startup_resume_pending_files.remove(id);
@@ -71,7 +72,7 @@ impl App {
         operation_id: VerificationOperationId,
     ) -> bool {
         self.verification_inflight_files.contains(id)
-            && self.current_attempt_id(id) == operation_id.raw()
+            && self.verification_operation_ids.get(id).copied() == Some(operation_id)
     }
 
     pub(crate) fn forget_visible_file(&mut self, id: &FileId) {
@@ -215,17 +216,20 @@ impl App {
         self.reset_pending_files.contains(id)
     }
 
-    fn current_attempt_id(&self, id: &FileId) -> u64 {
-        self.file_attempt_ids.get(id).copied().unwrap_or(0)
+    fn current_attempt_id(&self, id: &FileId) -> DownloadAttemptId {
+        self.file_attempt_ids
+            .get(id)
+            .copied()
+            .unwrap_or(DownloadAttemptId::new(0))
     }
 
-    fn bump_file_attempt_id(&mut self, id: &FileId) -> u64 {
-        let next = self.current_attempt_id(id).saturating_add(1);
+    fn bump_file_attempt_id(&mut self, id: &FileId) -> DownloadAttemptId {
+        let next = DownloadAttemptId::new(self.current_attempt_id(id).raw().saturating_add(1));
         self.file_attempt_ids.insert(id.clone(), next);
         next
     }
 
-    fn event_matches_current_attempt(&self, id: &FileId, attempt_id: u64) -> bool {
+    fn event_matches_current_attempt(&self, id: &FileId, attempt_id: DownloadAttemptId) -> bool {
         self.current_attempt_id(id) == attempt_id
     }
 
@@ -259,7 +263,12 @@ impl App {
         self.show_url_error(url, error);
     }
 
-    pub(crate) fn handle_file_error_event(&mut self, id: FileId, error: String, attempt_id: u64) {
+    pub(crate) fn handle_file_error_event(
+        &mut self,
+        id: FileId,
+        error: String,
+        attempt_id: DownloadAttemptId,
+    ) {
         log::error!("Download error: {id}: {error}");
         if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale download error after retry/reset: {id}");
@@ -397,7 +406,12 @@ impl App {
         self.handle_session_url_fetched(&url);
     }
 
-    pub(crate) fn handle_file_start_event(&mut self, id: FileId, size: u64, attempt_id: u64) {
+    pub(crate) fn handle_file_start_event(
+        &mut self,
+        id: FileId,
+        size: u64,
+        attempt_id: DownloadAttemptId,
+    ) {
         log::info!("Download started: {id} ({})", format_bytes(size));
         if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale download start after retry/reset: {id}");
@@ -429,7 +443,11 @@ impl App {
         self.update_download_status_message();
     }
 
-    pub(crate) fn handle_resume_validation_started_event(&mut self, id: FileId, attempt_id: u64) {
+    pub(crate) fn handle_resume_validation_started_event(
+        &mut self,
+        id: FileId,
+        attempt_id: DownloadAttemptId,
+    ) {
         if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale resume validation start after retry/reset: {id}");
             return;
@@ -440,6 +458,8 @@ impl App {
         }
         self.verifying_files.insert(id.clone());
         self.verification_inflight_files.insert(id.clone());
+        self.verification_operation_ids
+            .insert(id.clone(), VerificationOperationId::new(attempt_id.raw()));
         self.shutdown_blocking_verifications.insert(id.clone());
         self.verification_targets
             .insert(id.clone(), VerificationTarget::Resume);
@@ -453,7 +473,7 @@ impl App {
         &mut self,
         id: FileId,
         delta: ProgressDelta,
-        attempt_id: u64,
+        attempt_id: DownloadAttemptId,
     ) {
         if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale download progress after retry/reset: {}", id);
@@ -520,7 +540,7 @@ impl App {
         id: FileId,
         chunks: usize,
         bytes: u64,
-        attempt_id: u64,
+        attempt_id: DownloadAttemptId,
     ) {
         if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale resume reuse event after retry/reset: {id}");
@@ -693,7 +713,7 @@ impl App {
         self.status = format!("Verification failed for {id}: {error}");
     }
 
-    pub(crate) fn handle_file_complete_event(&mut self, id: FileId, attempt_id: u64) {
+    pub(crate) fn handle_file_complete_event(&mut self, id: FileId, attempt_id: DownloadAttemptId) {
         log::info!("Download complete: {id}");
         if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale download completion after retry/reset: {id}");
@@ -720,7 +740,11 @@ impl App {
         self.update_download_status_message();
     }
 
-    pub(crate) fn handle_file_cancelled_event(&mut self, id: FileId, attempt_id: u64) {
+    pub(crate) fn handle_file_cancelled_event(
+        &mut self,
+        id: FileId,
+        attempt_id: DownloadAttemptId,
+    ) {
         log::info!("Download cancelled: {id}");
         if !self.event_matches_current_attempt(&id, attempt_id) {
             log::info!("Ignoring stale download cancellation after retry/reset: {id}");
@@ -933,8 +957,9 @@ impl App {
             return;
         };
 
-        let next_attempt_id = self.current_attempt_id(id).saturating_add(1);
-        let operation_id = VerificationOperationId::new(next_attempt_id);
+        let next_attempt_id =
+            DownloadAttemptId::new(self.current_attempt_id(id).raw().saturating_add(1));
+        let operation_id = VerificationOperationId::new(next_attempt_id.raw());
         let request = if target == VerificationTarget::Completed {
             crate::tui::event::DownloadRequest::VerifyCompletedFileIdsWithOperations {
                 source_url: source_url.clone(),
@@ -960,6 +985,8 @@ impl App {
         debug_assert_eq!(attempt_id, next_attempt_id);
         self.verifying_files.insert(id.clone());
         self.verification_inflight_files.insert(id.clone());
+        self.verification_operation_ids
+            .insert(id.clone(), operation_id);
         self.verification_targets.insert(id.clone(), target);
         self.apply_core_event(CoreEvent::FileVerificationStarted {
             file_id: id.clone(),
@@ -1034,9 +1061,12 @@ impl App {
         for (file_id, source_url, lifecycle, target) in files {
             self.cancel_file_token(&file_id);
             self.startup_resume_pending_files.remove(&file_id);
-            let operation_id = VerificationOperationId::new(self.bump_file_attempt_id(&file_id));
+            let attempt_id = self.bump_file_attempt_id(&file_id);
+            let operation_id = VerificationOperationId::new(attempt_id.raw());
             self.verifying_files.insert(file_id.clone());
             self.verification_inflight_files.insert(file_id.clone());
+            self.verification_operation_ids
+                .insert(file_id.clone(), operation_id);
             self.verification_targets.insert(file_id.clone(), target);
             self.apply_core_event(CoreEvent::FileVerificationStarted {
                 file_id: file_id.clone(),

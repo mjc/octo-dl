@@ -25,8 +25,8 @@ use crate::{
 use dirs;
 
 use super::event::{
-    DownloadChannels, DownloadEvent, DownloadEventSender, DownloadRequest, FileOrigin, QueuedFile,
-    TokenMessage, TuiProgress, VerificationOperationId,
+    DownloadAttemptId, DownloadChannels, DownloadEvent, DownloadEventSender, DownloadRequest,
+    FileOrigin, QueuedFile, TokenMessage, TuiProgress, VerificationOperationId,
 };
 
 const PACKAGE_REVERIFY_CONCURRENCY: usize = 4;
@@ -137,8 +137,8 @@ struct FetchedNodeSet {
     resolved: ResolvedUrl,
     nodes: Option<mega::Nodes>,
     requested_files: RequestedFiles,
-    requested_attempt_ids: HashMap<FileId, u64>,
-    submission_attempt_id: u64,
+    requested_attempt_ids: HashMap<FileId, DownloadAttemptId>,
+    submission_attempt_id: DownloadAttemptId,
     emit_url_resolved: bool,
 }
 
@@ -152,7 +152,7 @@ enum RequestedFiles {
 struct QueuedDownload {
     resolved: ResolvedUrl,
     item: crate::OwnedDownloadItem,
-    attempt_id: u64,
+    attempt_id: DownloadAttemptId,
     trust_resume_state: bool,
 }
 
@@ -261,7 +261,7 @@ impl DownloadRuntime {
 struct DownloadTaskResult {
     task_id: tokio::task::Id,
     id: FileId,
-    attempt_id: u64,
+    attempt_id: DownloadAttemptId,
     result: crate::Result<crate::FileStats>,
 }
 
@@ -274,7 +274,7 @@ struct SchedulerState {
     available_download_ptrs: HashSet<FileIdPtrKey>,
     active_downloads: HashSet<FileId, FxBuildHasher>,
     active_download_ptrs: HashSet<FileIdPtrKey>,
-    active_task_files: HashMap<tokio::task::Id, (FileId, u64)>,
+    active_task_files: HashMap<tokio::task::Id, (FileId, DownloadAttemptId)>,
     join_set: tokio::task::JoinSet<DownloadTaskResult>,
 }
 
@@ -493,7 +493,7 @@ fn select_startable_file_ids(
 struct FileProgress {
     tx: DownloadEventSender,
     id: FileId,
-    attempt_id: u64,
+    attempt_id: DownloadAttemptId,
 }
 
 impl DownloadProgress for FileProgress {
@@ -517,7 +517,7 @@ impl DownloadProgress for FileProgress {
             .tx
             .send(DownloadEvent::VerificationProgressForOperation {
                 id: self.id.clone(),
-                operation_id: VerificationOperationId::new(self.attempt_id),
+                operation_id: VerificationOperationId::new(self.attempt_id.raw()),
                 bytes_delta,
             });
     }
@@ -835,8 +835,10 @@ async fn handle_download_request(
         DownloadRequest::SubmitUrl { .. } | DownloadRequest::ResumeFileIds { .. } => {
             queue_download_request_events(&request, tx);
             let submission_attempt_id = match &request {
-                DownloadRequest::SubmitUrl { url } => runtime.next_submission_attempt(url),
-                DownloadRequest::ResumeFileIds { .. } => 0,
+                DownloadRequest::SubmitUrl { url } => {
+                    DownloadAttemptId::new(runtime.next_submission_attempt(url))
+                }
+                DownloadRequest::ResumeFileIds { .. } => DownloadAttemptId::new(0),
                 _ => unreachable!(),
             };
             let batch = vec![request];
@@ -900,12 +902,12 @@ async fn handle_reverify_request(
     for download in &mut paused {
         let id = FileId::from(download.item.path.as_str());
         if let Some(operation_id) = operation_ids.get(&id) {
-            download.attempt_id = operation_id.raw();
+            download.attempt_id = DownloadAttemptId::new(operation_id.raw());
         }
     }
     for (id, operation_id) in &operation_ids {
         if let Some(download) = scheduler.available_downloads.get_mut(id) {
-            download.attempt_id = operation_id.raw();
+            download.attempt_id = DownloadAttemptId::new(operation_id.raw());
         }
     }
     let paused_ids = paused
@@ -941,13 +943,15 @@ async fn handle_reverify_request(
 /// Resolves download requests (including DLC files) into MEGA URLs.
 async fn resolve_download_requests(
     requests: &[DownloadRequest],
-    submission_attempt_id: u64,
+    submission_attempt_id: DownloadAttemptId,
     http: &Arc<reqwest::Client>,
     dlc_cache: &Arc<DlcKeyCache>,
     tx: &DownloadEventSender,
 ) -> Vec<FetchedNodeSet> {
-    let mut by_source: IndexMap<String, (RequestedFiles, HashMap<FileId, u64>, bool)> =
-        IndexMap::new();
+    let mut by_source: IndexMap<
+        String,
+        (RequestedFiles, HashMap<FileId, DownloadAttemptId>, bool),
+    > = IndexMap::new();
 
     for request in requests {
         match request {
@@ -1531,7 +1535,7 @@ fn spawn_file_download(
 
 fn file_progress(
     file_id: &FileId,
-    attempt_id: u64,
+    attempt_id: DownloadAttemptId,
     event_tx: &DownloadEventSender,
 ) -> Arc<dyn DownloadProgress> {
     Arc::new(FileProgress {
@@ -1543,7 +1547,7 @@ fn file_progress(
 
 fn emit_pause_cancellation_if_needed(
     file_id: &FileId,
-    attempt_id: u64,
+    attempt_id: DownloadAttemptId,
     result: &crate::Result<crate::FileStats>,
     pause_rx: &watch::Receiver<bool>,
     event_tx: &DownloadEventSender,
@@ -1614,7 +1618,9 @@ fn collection_progress(
 ) -> Arc<dyn DownloadProgress> {
     let default_attempt_id = node_sets
         .first()
-        .map_or(0, |node_set| node_set.submission_attempt_id);
+        .map_or(DownloadAttemptId::new(0), |node_set| {
+            node_set.submission_attempt_id
+        });
     let attempt_ids = node_sets
         .iter()
         .flat_map(|node_set| node_set.requested_attempt_ids.iter())
@@ -1947,8 +1953,8 @@ fn visible_downloads(
     items: Vec<crate::OwnedDownloadItem>,
     resolved: &ResolvedUrl,
     requested_files: &RequestedFiles,
-    requested_attempt_ids: &HashMap<FileId, u64>,
-    submission_attempt_id: u64,
+    requested_attempt_ids: &HashMap<FileId, DownloadAttemptId>,
+    submission_attempt_id: DownloadAttemptId,
 ) -> Vec<QueuedDownload> {
     items
         .into_iter()

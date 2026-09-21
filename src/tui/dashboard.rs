@@ -2278,7 +2278,7 @@ mod tests {
         app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
             id: "file.bin".to_string().into(),
             size: 100,
-            attempt_id: 0,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         });
         app.handle_download_event(crate::tui::event::DownloadEvent::Progress {
             id: "file.bin".to_string().into(),
@@ -2286,7 +2286,7 @@ mod tests {
                 total_bytes_delta: 100,
                 network_bytes_delta: 100,
             },
-            attempt_id: 0,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         });
 
         let state = app.dashboard_state(DashboardUiMode::Tui, false);

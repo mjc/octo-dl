@@ -95,7 +95,11 @@ impl App {
 
     fn flush_pending_progress_events(
         &mut self,
-        pending_progress: &mut Vec<(FileId, crate::core::ProgressDelta, u64)>,
+        pending_progress: &mut Vec<(
+            FileId,
+            crate::core::ProgressDelta,
+            super::super::event::DownloadAttemptId,
+        )>,
     ) -> bool {
         if pending_progress.is_empty() {
             return false;
@@ -421,7 +425,11 @@ impl App {
         self.event_tx.flush_lifecycle_events();
         let dashboard_dirty = self.with_deferred_batch_updates(|app| {
             let mut handled = false;
-            let mut pending_progress: Vec<(FileId, crate::core::ProgressDelta, u64)> = Vec::new();
+            let mut pending_progress: Vec<(
+                FileId,
+                crate::core::ProgressDelta,
+                super::super::event::DownloadAttemptId,
+            )> = Vec::new();
             for _ in 0..MAX_DOWNLOAD_EVENTS_PER_TICK {
                 let Ok(event) = download_rx.try_recv() else {
                     break;
@@ -825,7 +833,7 @@ mod tests {
             let _ = release_cancel_rx.await;
             let _ = event_tx.send(DownloadEvent::FileCancelled {
                 id: cancelled_id,
-                attempt_id: 0,
+                attempt_id: crate::tui::event::DownloadAttemptId::new(0),
             });
         });
 
@@ -935,7 +943,7 @@ mod tests {
             let _ = release_cancel_rx.await;
             let _ = send_tx.send(DownloadEvent::FileCancelled {
                 id: sent_id,
-                attempt_id: 0,
+                attempt_id: crate::tui::event::DownloadAttemptId::new(0),
             });
         });
 
@@ -999,7 +1007,10 @@ mod tests {
                 collision: None,
             },
         });
-        app.handle_resume_validation_started_event(file_id.clone(), 0);
+        app.handle_resume_validation_started_event(
+            file_id.clone(),
+            crate::tui::event::DownloadAttemptId::new(0),
+        );
 
         let token = tokio_util::sync::CancellationToken::new();
         let sent_token = token.clone();
@@ -1018,7 +1029,7 @@ mod tests {
             let _ = release_cancel_rx.await;
             let _ = send_tx.send(DownloadEvent::FileCancelled {
                 id: sent_id,
-                attempt_id: 0,
+                attempt_id: crate::tui::event::DownloadAttemptId::new(0),
             });
         });
 
@@ -1392,7 +1403,7 @@ mod tests {
                         total_bytes_delta: 10,
                         network_bytes_delta: 10,
                     },
-                    attempt_id: 0,
+                    attempt_id: crate::tui::event::DownloadAttemptId::new(0),
                 })
                 .expect("progress event should send");
         }
@@ -1481,7 +1492,7 @@ mod tests {
         download_tx
             .try_send(DownloadEvent::ResumeValidationStarted {
                 id: "file.bin".into(),
-                attempt_id: 0,
+                attempt_id: crate::tui::event::DownloadAttemptId::new(0),
             })
             .expect("resume validation start should send");
 

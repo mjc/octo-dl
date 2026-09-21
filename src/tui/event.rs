@@ -10,6 +10,32 @@ use crate::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Identity of one download attempt for one file.
+///
+/// This is intentionally distinct from both [`FileId`] and
+/// [`VerificationOperationId`]. It is an internal TUI/runtime identity and is
+/// not persisted in [`crate::core::FileLifecycle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DownloadAttemptId(u64);
+
+impl DownloadAttemptId {
+    #[must_use]
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for DownloadAttemptId {
+    fn from(raw: u64) -> Self {
+        Self::new(raw)
+    }
+}
+
 /// Identity of one explicit verification operation for one file.
 ///
 /// This is intentionally distinct from a download attempt. A verification
@@ -47,7 +73,7 @@ pub struct FileOrigin {
 #[derive(Debug, Clone)]
 pub struct QueuedFile {
     pub id: FileId,
-    pub attempt_id: u64,
+    pub attempt_id: DownloadAttemptId,
     pub size: u64,
     pub accounting: FileAccounting,
     pub origin: FileOrigin,
@@ -72,7 +98,7 @@ pub struct DownloadEventSender {
 }
 
 struct PendingProgress {
-    values: Mutex<HashMap<(FileId, u64), crate::core::ProgressDelta>>,
+    values: Mutex<HashMap<(FileId, DownloadAttemptId), crate::core::ProgressDelta>>,
     capacity: usize,
     wakeup_pending: std::sync::atomic::AtomicBool,
 }
@@ -288,7 +314,7 @@ impl DownloadEventSender {
         &self,
         id: FileId,
         delta: crate::core::ProgressDelta,
-        attempt_id: u64,
+        attempt_id: DownloadAttemptId,
     ) -> Result<(), mpsc::error::TrySendError<DownloadEvent>> {
         let event = || DownloadEvent::Progress {
             id: id.clone(),
@@ -352,7 +378,9 @@ impl DownloadEventSender {
         Ok(())
     }
 
-    pub(crate) fn take_pending_progress(&self) -> Vec<(FileId, crate::core::ProgressDelta, u64)> {
+    pub(crate) fn take_pending_progress(
+        &self,
+    ) -> Vec<(FileId, crate::core::ProgressDelta, DownloadAttemptId)> {
         let mut values = self.progress.values.lock().unwrap();
         let pending = values
             .drain()
@@ -440,7 +468,7 @@ pub enum DownloadRequest {
     ResumeFileIds {
         source_url: String,
         file_ids: Vec<FileId>,
-        attempt_ids: HashMap<FileId, u64>,
+        attempt_ids: HashMap<FileId, DownloadAttemptId>,
     },
     ReverifyFileIds {
         source_url: String,
@@ -466,16 +494,16 @@ pub enum DownloadEvent {
     FileStart {
         id: FileId,
         size: u64,
-        attempt_id: u64,
+        attempt_id: DownloadAttemptId,
     },
     ResumeValidationStarted {
         id: FileId,
-        attempt_id: u64,
+        attempt_id: DownloadAttemptId,
     },
     Progress {
         id: FileId,
         delta: ProgressDelta,
-        attempt_id: u64,
+        attempt_id: DownloadAttemptId,
     },
     VerificationProgress {
         id: FileId,
@@ -490,7 +518,7 @@ pub enum DownloadEvent {
         id: FileId,
         chunks: usize,
         bytes: u64,
-        attempt_id: u64,
+        attempt_id: DownloadAttemptId,
     },
     ResumeReverified {
         id: FileId,
@@ -523,16 +551,16 @@ pub enum DownloadEvent {
     },
     FileComplete {
         id: FileId,
-        attempt_id: u64,
+        attempt_id: DownloadAttemptId,
     },
     FileCancelled {
         id: FileId,
-        attempt_id: u64,
+        attempt_id: DownloadAttemptId,
     },
     FileError {
         id: FileId,
         error: String,
-        attempt_id: u64,
+        attempt_id: DownloadAttemptId,
     },
     ScopeError {
         scope: String,
@@ -567,8 +595,8 @@ pub enum DownloadEvent {
 pub struct TuiProgress {
     pub tx: DownloadEventSender,
     ids: Mutex<TrackedFileIds>,
-    default_attempt_id: u64,
-    attempt_ids: HashMap<FileId, u64>,
+    default_attempt_id: DownloadAttemptId,
+    attempt_ids: HashMap<FileId, DownloadAttemptId>,
 }
 
 impl TuiProgress {
@@ -577,13 +605,13 @@ impl TuiProgress {
     where
         E: Into<DownloadEventSender>,
     {
-        Self::with_attempt_ids(tx, 0, HashMap::new())
+        Self::with_attempt_ids(tx, DownloadAttemptId::new(0), HashMap::new())
     }
 
     pub fn with_attempt_ids<E>(
         tx: E,
-        default_attempt_id: u64,
-        attempt_ids: HashMap<FileId, u64>,
+        default_attempt_id: DownloadAttemptId,
+        attempt_ids: HashMap<FileId, DownloadAttemptId>,
     ) -> Self
     where
         E: Into<DownloadEventSender>,
@@ -615,7 +643,7 @@ impl TuiProgress {
         id
     }
 
-    fn attempt_id(&self, id: &FileId) -> u64 {
+    fn attempt_id(&self, id: &FileId) -> DownloadAttemptId {
         self.attempt_ids
             .get(id)
             .copied()
@@ -649,7 +677,7 @@ impl DownloadProgress for TuiProgress {
             .tx
             .send(DownloadEvent::VerificationProgressForOperation {
                 id,
-                operation_id: VerificationOperationId::new(attempt_id),
+                operation_id: VerificationOperationId::new(attempt_id.raw()),
                 bytes_delta,
             });
     }
@@ -779,22 +807,22 @@ mod tests {
         tx.send(DownloadEvent::FileStart {
             id: first_id.clone(),
             size: 1,
-            attempt_id: 0,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         })
         .expect("first lifecycle event should enter the channel");
         tx.send(DownloadEvent::FileComplete {
             id: second_id.clone(),
-            attempt_id: 0,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         })
         .expect("first retained lifecycle event should enter the backlog");
         tx.send(DownloadEvent::FileComplete {
             id: third_id.clone(),
-            attempt_id: 0,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         })
         .expect("second retained lifecycle event should enter the backlog");
         tx.send(DownloadEvent::FileComplete {
             id: fourth_id.clone(),
-            attempt_id: 0,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         })
         .expect("state-changing lifecycle events must not be dropped when the channel is full");
         assert!(tx.take_delivery_failure().is_none());
@@ -830,12 +858,12 @@ mod tests {
         tx.send(DownloadEvent::FileStart {
             id: lifecycle_id,
             size: 1,
-            attempt_id: 0,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         })
         .expect("first lifecycle event should enter the channel");
         tx.send(DownloadEvent::FileComplete {
             id: FileId::from("retained"),
-            attempt_id: 0,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         })
         .expect("second lifecycle event should enter the backlog");
         tx.send(DownloadEvent::Progress {
@@ -844,7 +872,7 @@ mod tests {
                 total_bytes_delta: 5,
                 network_bytes_delta: 5,
             },
-            attempt_id: 1,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(1),
         })
         .expect("progress should remain coalesced while lifecycle is retained");
 
@@ -867,7 +895,7 @@ mod tests {
                     total_bytes_delta: 5,
                     network_bytes_delta: 5,
                 },
-                1,
+                crate::tui::event::DownloadAttemptId::new(1),
             )]
         );
     }
@@ -884,7 +912,7 @@ mod tests {
                 total_bytes_delta: 2,
                 network_bytes_delta: 1,
             },
-            attempt_id: 7,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(7),
         })
         .expect("first progress should be admitted");
         tx.send(DownloadEvent::Progress {
@@ -893,7 +921,7 @@ mod tests {
                 total_bytes_delta: 3,
                 network_bytes_delta: 4,
             },
-            attempt_id: 7,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(7),
         })
         .expect("same progress identity should coalesce");
         assert!(matches!(
@@ -903,7 +931,7 @@ mod tests {
                     total_bytes_delta: 1,
                     network_bytes_delta: 1,
                 },
-                attempt_id: 1,
+                attempt_id: crate::tui::event::DownloadAttemptId::new(1),
             }),
             Err(mpsc::error::TrySendError::Full(
                 DownloadEvent::Progress { .. }
@@ -923,7 +951,7 @@ mod tests {
                     total_bytes_delta: 5,
                     network_bytes_delta: 5,
                 },
-                7,
+                crate::tui::event::DownloadAttemptId::new(7),
             )]
         );
     }
@@ -942,7 +970,7 @@ mod tests {
                     total_bytes_delta: 5,
                     network_bytes_delta: 3,
                 },
-                attempt_id: 7,
+                attempt_id: crate::tui::event::DownloadAttemptId::new(7),
             }),
             Err(mpsc::error::TrySendError::Full(
                 DownloadEvent::Progress { .. }
@@ -961,7 +989,7 @@ mod tests {
                     total_bytes_delta: 5,
                     network_bytes_delta: 3,
                 },
-                7,
+                crate::tui::event::DownloadAttemptId::new(7),
             )]
         );
     }
@@ -983,7 +1011,7 @@ mod tests {
                     total_bytes_delta: 1,
                     network_bytes_delta: 1,
                 },
-                attempt_id: 1,
+                attempt_id: crate::tui::event::DownloadAttemptId::new(1),
             }),
             Err(mpsc::error::TrySendError::Closed(
                 DownloadEvent::Progress { .. }
@@ -993,7 +1021,7 @@ mod tests {
             tx.send(DownloadEvent::FileStart {
                 id: FileId::from("closed-lifecycle"),
                 size: 1,
-                attempt_id: 1,
+                attempt_id: crate::tui::event::DownloadAttemptId::new(1),
             }),
             Err(mpsc::error::TrySendError::Closed(
                 DownloadEvent::FileStart { .. }
@@ -1026,13 +1054,20 @@ mod tests {
     fn collection_resume_progress_uses_per_file_attempt_identity() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let file_id = FileId::from("resume.bin");
-        let progress = TuiProgress::with_attempt_ids(tx, 17, HashMap::from([(file_id.clone(), 4)]));
+        let progress = TuiProgress::with_attempt_ids(
+            tx,
+            crate::tui::event::DownloadAttemptId::new(17),
+            HashMap::from([(
+                file_id.clone(),
+                crate::tui::event::DownloadAttemptId::new(4),
+            )]),
+        );
 
         progress.on_resume_validation_start(file_id.as_str());
         assert!(matches!(
             rx.blocking_recv().expect("validation start should be emitted"),
             DownloadEvent::ResumeValidationStarted { id, attempt_id }
-                if id == file_id && attempt_id == 4
+                if id == file_id && attempt_id == crate::tui::event::DownloadAttemptId::new(4)
         ));
 
         progress.on_resume_validation_chunk(file_id.as_str(), 32);
@@ -1050,7 +1085,7 @@ mod tests {
         progress.on_resume_validation_start("new-file.bin");
         assert!(matches!(
             rx.blocking_recv().expect("default validation start should be emitted"),
-            DownloadEvent::ResumeValidationStarted { attempt_id, .. } if attempt_id == 17
+            DownloadEvent::ResumeValidationStarted { attempt_id, .. } if attempt_id == crate::tui::event::DownloadAttemptId::new(17)
         ));
     }
 }

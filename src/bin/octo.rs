@@ -3,6 +3,7 @@ use std::env;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 /// Flags that consume the next argument as a value (not a positional arg).
@@ -48,6 +49,27 @@ impl Default for RuntimeOptions {
             config_path: None,
         }
     }
+}
+
+/// The complete set of startup modes after command-line validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StartupPlan {
+    Cli,
+    Tui {
+        host: Option<String>,
+        config_path: Option<PathBuf>,
+        listen: Option<SocketAddr>,
+    },
+    Headless {
+        host: Option<String>,
+        config_path: Option<PathBuf>,
+        listen: Option<SocketAddr>,
+    },
+    Attach {
+        addr: SocketAddr,
+        config_path: Option<PathBuf>,
+        api_key: Option<String>,
+    },
 }
 
 /// Returns true if `args` contains positional arguments (URLs, DLC paths, etc.)
@@ -126,20 +148,6 @@ fn startup_log_mode(options: &RuntimeOptions) -> Option<&'static str> {
         Some(UiMode::Headless) => Some("headless"),
         None => Some("cli"),
     }
-}
-
-#[cfg(feature = "tui")]
-fn parse_tui_listen(value: &str) -> std::net::SocketAddr {
-    octo_dl::tui::parse_loopback_addr(value).unwrap_or_else(|error| {
-        eprintln!("Error: {error}");
-        std::process::exit(1);
-    })
-}
-
-#[cfg(not(feature = "tui"))]
-fn parse_tui_listen(_value: &str) -> std::net::SocketAddr {
-    eprintln!("TUI support not compiled in");
-    std::process::exit(1);
 }
 
 fn init_logger(options: &RuntimeOptions) {
@@ -329,6 +337,49 @@ fn parse_runtime_options(args: &[String]) -> Result<RuntimeOptions, String> {
     Ok(options)
 }
 
+fn parse_loopback_addr(value: &str) -> Result<SocketAddr, String> {
+    let addr = value
+        .parse::<SocketAddr>()
+        .map_err(|error| format!("invalid socket address {value:?}: {error}"))?;
+    if !addr.ip().is_loopback() {
+        return Err(format!(
+            "{value:?} is not loopback-only; use 127.0.0.1 or ::1"
+        ));
+    }
+    Ok(addr)
+}
+
+fn startup_plan(options: RuntimeOptions) -> Result<StartupPlan, String> {
+    let host = options.host_explicit.then_some(options.host);
+    let listen = options
+        .tui_listen
+        .as_deref()
+        .map(parse_loopback_addr)
+        .transpose()?;
+
+    if let Some(value) = options.tui_attach {
+        return Ok(StartupPlan::Attach {
+            addr: parse_loopback_addr(&value)?,
+            config_path: options.config_path,
+            api_key: options.api_key,
+        });
+    }
+
+    Ok(match options.ui {
+        Some(UiMode::Tui) => StartupPlan::Tui {
+            host,
+            config_path: options.config_path,
+            listen,
+        },
+        Some(UiMode::Headless) => StartupPlan::Headless {
+            host,
+            config_path: options.config_path,
+            listen,
+        },
+        None => StartupPlan::Cli,
+    })
+}
+
 fn native_tui_log_writer() -> Box<dyn Write + Send> {
     let path = native_tui_log_path();
     if let Some(parent) = path.parent() {
@@ -348,13 +399,21 @@ fn native_tui_log_path() -> PathBuf {
     path
 }
 
-#[cfg(feature = "tui")]
+#[cfg(all(feature = "tui", test))]
 fn load_attach_config(options: &RuntimeOptions) -> io::Result<octo_dl::tui::AttachConfig> {
-    if let Some(api_key) = options.api_key.clone() {
+    load_attach_config_values(options.config_path.as_deref(), options.api_key.clone())
+}
+
+#[cfg(feature = "tui")]
+fn load_attach_config_values(
+    config_path: Option<&std::path::Path>,
+    api_key: Option<String>,
+) -> io::Result<octo_dl::tui::AttachConfig> {
+    if let Some(api_key) = api_key {
         return Ok(octo_dl::tui::AttachConfig::from_api_key(Some(api_key)));
     }
 
-    let api_key = octo_dl::tui::attach_api_key(options.config_path.as_deref())?;
+    let api_key = octo_dl::tui::attach_api_key(config_path)?;
     Ok(octo_dl::tui::AttachConfig::from_api_key(api_key))
 }
 
@@ -387,86 +446,99 @@ async fn main() -> octo_dl::Result<()> {
         }
     }
 
+    let plan = startup_plan(options.clone()).unwrap_or_else(|error| {
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    });
+
     if let Some(mode) = startup_log_mode(&options) {
         log::info!("Starting octo in {mode} mode");
     }
 
-    if options.ui == Some(UiMode::Tui)
-        && let Some(addr) = options.tui_attach.as_deref()
-    {
-        #[cfg(feature = "tui")]
-        {
-            let addr = octo_dl::tui::parse_loopback_addr(addr).unwrap_or_else(|error| {
-                eprintln!("Error: {error}");
+    match plan {
+        StartupPlan::Attach {
+            addr,
+            config_path,
+            api_key,
+        } => {
+            #[cfg(feature = "tui")]
+            {
+                let attach_config = load_attach_config_values(config_path.as_deref(), api_key)
+                    .unwrap_or_else(|error| {
+                        eprintln!("Error loading attach configuration: {error}");
+                        std::process::exit(1);
+                    });
+                return octo_dl::tui::run_attach(addr, attach_config)
+                    .await
+                    .map_err(octo_dl::Error::Io);
+            }
+            #[cfg(not(feature = "tui"))]
+            {
+                let _ = (addr, config_path, api_key);
+                eprintln!("TUI support not compiled in");
                 std::process::exit(1);
-            });
-            let attach_config = load_attach_config(&options).unwrap_or_else(|error| {
-                eprintln!("Error loading attach configuration: {error}");
-                std::process::exit(1);
-            });
-            return octo_dl::tui::run_attach(addr, attach_config)
-                .await
-                .map_err(octo_dl::Error::Io);
-        }
-        #[cfg(not(feature = "tui"))]
-        {
-            let _ = (&addr, &options);
-            eprintln!("TUI support not compiled in");
-            std::process::exit(1);
-        }
-    }
-
-    if options.ui == Some(UiMode::Tui) {
-        let listen = options.tui_listen.as_deref().map(parse_tui_listen);
-        let host_param = options.host_explicit.then_some(Some(options.host.clone()));
-        #[cfg(feature = "tui")]
-        {
-            octo_dl::tui::run(host_param, options.config_path.as_deref(), listen)
-                .await
-                .map_err(octo_dl::Error::Io)
-        }
-        #[cfg(not(feature = "tui"))]
-        {
-            let _ = host_param;
-            let _ = listen;
-            eprintln!("TUI support not compiled in");
-            std::process::exit(1);
-        }
-    } else if options.ui == Some(UiMode::Headless) {
-        let listen = options.tui_listen.as_deref().map(parse_tui_listen);
-        let host_param = options.host_explicit.then_some(Some(options.host.clone()));
-        #[cfg(feature = "tui")]
-        {
-            octo_dl::tui::run_api_only(host_param, options.config_path.as_deref(), listen)
-                .await
-                .map_err(octo_dl::Error::Io)
-        }
-        #[cfg(not(feature = "tui"))]
-        {
-            let _ = host_param;
-            let _ = listen;
-            eprintln!("API support requires the 'tui' feature");
-            std::process::exit(1);
-        }
-    } else {
-        // CLI mode — check if there are any positional args (URLs/DLC)
-        let has_positional = has_positional_args(&args);
-        if !has_positional && !args.iter().any(|a| a == "-r" || a == "--resume") {
-            // No URLs, no --resume, and not TUI/API — show help
-            if args.is_empty() {
-                print_usage();
-                std::process::exit(0);
             }
         }
-
-        #[cfg(feature = "cli")]
-        {
-            octo_dl::cli::run().await
+        StartupPlan::Tui {
+            host,
+            config_path,
+            listen,
+        } => {
+            let host_param = host.map(Some);
+            #[cfg(feature = "tui")]
+            {
+                octo_dl::tui::run(host_param, config_path.as_deref(), listen)
+                    .await
+                    .map_err(octo_dl::Error::Io)
+            }
+            #[cfg(not(feature = "tui"))]
+            {
+                let _ = host_param;
+                let _ = (config_path, listen);
+                eprintln!("TUI support not compiled in");
+                std::process::exit(1);
+            }
         }
-        #[cfg(not(feature = "cli"))]
-        {
-            eprintln!("CLI support not compiled in");
-            std::process::exit(1);
+        StartupPlan::Headless {
+            host,
+            config_path,
+            listen,
+        } => {
+            let host_param = host.map(Some);
+            #[cfg(feature = "tui")]
+            {
+                octo_dl::tui::run_api_only(host_param, config_path.as_deref(), listen)
+                    .await
+                    .map_err(octo_dl::Error::Io)
+            }
+            #[cfg(not(feature = "tui"))]
+            {
+                let _ = host_param;
+                let _ = (config_path, listen);
+                eprintln!("API support requires the 'tui' feature");
+                std::process::exit(1);
+            }
+        }
+        StartupPlan::Cli => {
+            // CLI mode — check if there are any positional args (URLs/DLC)
+            let has_positional = has_positional_args(&args);
+            if !has_positional && !args.iter().any(|a| a == "-r" || a == "--resume") {
+                // No URLs, no --resume, and not TUI/API — show help
+                if args.is_empty() {
+                    print_usage();
+                    std::process::exit(0);
+                }
+            }
+
+            #[cfg(feature = "cli")]
+            {
+                octo_dl::cli::run().await
+            }
+            #[cfg(not(feature = "cli"))]
+            {
+                eprintln!("CLI support not compiled in");
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -703,5 +775,42 @@ mod tests {
         ])
         .expect_err("attach cannot listen");
         assert!(error.contains("cannot be combined"));
+    }
+
+    #[test]
+    fn startup_plan_owns_validated_mode_inputs() {
+        let options = parse_runtime_options(&[
+            "--tui".to_string(),
+            "--host".to_string(),
+            "127.0.0.1".to_string(),
+            "--tui-listen".to_string(),
+            "[::1]:9724".to_string(),
+        ])
+        .expect("TUI options should parse");
+
+        assert_eq!(
+            startup_plan(options).expect("startup plan should validate"),
+            StartupPlan::Tui {
+                host: Some("127.0.0.1".to_string()),
+                config_path: None,
+                listen: Some("[::1]:9724".parse().unwrap()),
+            }
+        );
+    }
+
+    #[test]
+    fn startup_plan_rejects_non_loopback_attach_and_listen_addresses() {
+        let options = parse_runtime_options(&[
+            "--headless".to_string(),
+            "--tui-listen".to_string(),
+            "192.168.1.5:9724".to_string(),
+        ])
+        .expect("mode parsing should defer address validation");
+        assert!(startup_plan(options).is_err());
+
+        let options =
+            parse_runtime_options(&["--tui-attach".to_string(), "192.168.1.5:9724".to_string()])
+                .expect("attach parsing should defer address validation");
+        assert!(startup_plan(options).is_err());
     }
 }

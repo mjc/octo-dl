@@ -2010,7 +2010,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mega"
 version = "0.8.0"
-source = "git+https://github.com/mjc/mega-rs.git?rev=4e671901c35a1cec326597e6c28fefa30845cdef#4e671901c35a1cec326597e6c28fefa30845cdef"
+source = "git+https://github.com/mjc/mega-rs.git?rev=f109210a34e756851da506e302e71faf2c7ce6b3#f109210a34e756851da506e302e71faf2c7ce6b3"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -3124,7 +3124,7 @@ dependencies = [
 [[package]]
 name = "rustls-rustcrypto"
 version = "0.0.2-alpha"
-source = "git+https://github.com/mjc/mega-rs.git?rev=4e671901c35a1cec326597e6c28fefa30845cdef#4e671901c35a1cec326597e6c28fefa30845cdef"
+source = "git+https://github.com/mjc/mega-rs.git?rev=f109210a34e756851da506e302e71faf2c7ce6b3#f109210a34e756851da506e302e71faf2c7ce6b3"
 dependencies = [
  "aead 0.6.1",
  "aes-gcm 0.11.1",

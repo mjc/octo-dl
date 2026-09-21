@@ -274,7 +274,7 @@ pub struct App {
     pub(crate) shutdown_pending_files: FileIdSet,
     pub(crate) shutdown_blocking_verifications: FileIdSet,
     // Per-file download attempt IDs for retry/reset flows
-    pub file_attempt_ids: HashMap<FileId, u64>,
+    pub file_attempt_ids: HashMap<FileId, super::event::DownloadAttemptId>,
     // Files reset from the UI — used to suppress stale terminal events from the old attempt
     pub reset_pending_files: FileIdSet,
     // Files restored from restart whose first start should preserve restored visible progress.
@@ -285,6 +285,7 @@ pub struct App {
     pub verifying_files: FileIdSet,
     // Files allowed to accept verification progress callbacks.
     pub(crate) verification_inflight_files: FileIdSet,
+    pub(crate) verification_operation_ids: FxHashMap<FileId, super::event::VerificationOperationId>,
     pub(crate) verification_targets: FileIdMap<VerificationTarget>,
     // Session
     pub session: Option<SessionSnapshot>,

@@ -60,6 +60,15 @@ fn mark_verification_inflight(app: &mut App, id: &str) -> crate::core::FileId {
     let file_id = crate::core::FileId::from(id);
     app.verifying_files.insert(file_id.clone());
     app.verification_inflight_files.insert(file_id.clone());
+    let operation_id = crate::tui::event::VerificationOperationId::new(
+        app.file_attempt_ids
+            .get(&file_id)
+            .copied()
+            .unwrap_or(crate::tui::event::DownloadAttemptId::new(0))
+            .raw(),
+    );
+    app.verification_operation_ids
+        .insert(file_id.clone(), operation_id);
     app.verification_targets
         .insert(file_id.clone(), VerificationTarget::Resume);
     app.apply_core_event(CoreEvent::FileVerificationStarted {
@@ -463,7 +472,7 @@ fn progress_event_updates_visible_file_without_full_visible_sync() {
             total_bytes_delta: 40,
             network_bytes_delta: 40,
         },
-        0,
+        crate::tui::event::DownloadAttemptId::new(0),
     );
 
     let file = app
@@ -788,7 +797,11 @@ fn file_error_clears_verification_state() {
         .insert(file_id.clone(), token.clone());
     app.track_shutdown_pending_file(&file_id);
 
-    app.handle_file_error_event(file_id.clone(), "network failed".to_string(), 0);
+    app.handle_file_error_event(
+        file_id.clone(),
+        "network failed".to_string(),
+        crate::tui::event::DownloadAttemptId::new(0),
+    );
 
     assert!(!app.verifying_files.contains(&file_id));
     assert!(!app.verification_inflight_files.contains(&file_id));
@@ -807,7 +820,10 @@ fn file_cancelled_clears_verification_state() {
     resolve_package(&mut app, "https://mega.nz/file/root", &[("file.bin", 100)]);
     let file_id = mark_verification_inflight(&mut app, "file.bin");
 
-    app.handle_file_cancelled_event(file_id.clone(), 0);
+    app.handle_file_cancelled_event(
+        file_id.clone(),
+        crate::tui::event::DownloadAttemptId::new(0),
+    );
 
     assert!(!app.verifying_files.contains(&file_id));
     assert!(!app.verification_inflight_files.contains(&file_id));
@@ -827,7 +843,10 @@ fn file_complete_clears_verification_state() {
         .insert(file_id.clone(), token.clone());
     app.track_shutdown_pending_file(&file_id);
 
-    app.handle_file_complete_event(file_id.clone(), 0);
+    app.handle_file_complete_event(
+        file_id.clone(),
+        crate::tui::event::DownloadAttemptId::new(0),
+    );
 
     assert!(!app.verifying_files.contains(&file_id));
     assert!(!app.verification_inflight_files.contains(&file_id));
@@ -847,7 +866,11 @@ fn file_start_clears_verification_state_and_pending_reverify() {
     let file_id = mark_verification_inflight(&mut app, "file.bin");
     app.reverify_pending_files.insert(file_id.clone());
 
-    app.handle_file_start_event(file_id.clone(), 100, 0);
+    app.handle_file_start_event(
+        file_id.clone(),
+        100,
+        crate::tui::event::DownloadAttemptId::new(0),
+    );
 
     assert!(!app.verifying_files.contains(&file_id));
     assert!(!app.verification_inflight_files.contains(&file_id));
@@ -1097,7 +1120,10 @@ fn reverify_active_file_bumps_attempt_generation() {
 
     app.perform_reverify_file_action(&file_id);
 
-    assert_eq!(app.file_attempt_ids.get(&file_id), Some(&1));
+    assert_eq!(
+        app.file_attempt_ids.get(&file_id),
+        Some(&crate::tui::event::DownloadAttemptId::new(1))
+    );
     assert!(app.verifying_files.contains(&file_id));
     let request = url_rx.try_recv().unwrap();
     assert!(matches!(
@@ -1282,7 +1308,7 @@ fn stale_old_attempt_progress_is_ignored_during_alt_r_reverify() {
             total_bytes_delta: 5,
             network_bytes_delta: 5,
         },
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     let file = app
@@ -1293,7 +1319,7 @@ fn stale_old_attempt_progress_is_ignored_during_alt_r_reverify() {
     assert!(app.verification_inflight_files.contains(&file_id));
     assert_eq!(
         app.file_attempt_ids.get(&file_id),
-        Some(&1),
+        Some(&crate::tui::event::DownloadAttemptId::new(1)),
         "stale old-attempt events must no longer match after Alt-R on an active file"
     );
 }
@@ -1329,11 +1355,11 @@ fn stale_old_attempt_cancel_is_ignored_after_alt_r_resume() {
     app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
         id: file_id.clone(),
         size: 100,
-        attempt_id: 1,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(1),
     });
     app.handle_download_event(crate::tui::event::DownloadEvent::FileCancelled {
         id: file_id.clone(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     let file = app
@@ -1408,7 +1434,7 @@ fn sync_visible_files_rebuilds_visible_file_positions_for_core_rows() {
             total_bytes_delta: 25,
             network_bytes_delta: 25,
         },
-        0,
+        crate::tui::event::DownloadAttemptId::new(0),
     );
 
     assert_eq!(app.visible_file_positions.get("file.bin"), Some(&0));
@@ -1516,7 +1542,7 @@ fn file_queued_without_explicit_package_id_reuses_existing_package_for_url() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "episode-1.mkv".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: crate::tui::event::FileOrigin {
@@ -1567,7 +1593,7 @@ fn file_queued_does_not_demote_completed_file() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "episode-1.mkv".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: crate::tui::event::FileOrigin {
@@ -1693,7 +1719,7 @@ fn file_queued_retires_submitted_url_alias_after_resolution() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "episode-1.mkv".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: crate::tui::event::FileOrigin {
@@ -2085,7 +2111,7 @@ fn shutdown_persists_latest_file_progress_after_non_persisted_progress_events() 
             total_bytes_delta: 400,
             network_bytes_delta: 400,
         },
-        0,
+        crate::tui::event::DownloadAttemptId::new(0),
     );
 
     let latest_before_shutdown =
@@ -2636,7 +2662,7 @@ fn late_queued_file_after_individual_delete_cannot_resurrect_sibling_source_file
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: deleted_id.clone(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
@@ -2659,12 +2685,15 @@ fn queued_file_with_new_attempt_can_readd_path_after_delete() {
 
     let file_id: crate::core::FileId = "episode.mkv".into();
     app.perform_delete_file_action(&file_id);
-    assert_eq!(app.file_attempt_ids.get(&file_id), Some(&1));
+    assert_eq!(
+        app.file_attempt_ids.get(&file_id),
+        Some(&crate::tui::event::DownloadAttemptId::new(1))
+    );
     app.submit_url(source_url.to_string());
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: file_id.clone(),
-        attempt_id: 1,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(1),
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
@@ -2688,7 +2717,10 @@ fn stale_resume_validation_progress_operation_is_ignored_after_new_attempt() {
         &[("file.bin", 100)],
     );
     let file_id: crate::core::FileId = "file.bin".into();
-    app.file_attempt_ids.insert(file_id.clone(), 1);
+    app.file_attempt_ids.insert(
+        file_id.clone(),
+        crate::tui::event::DownloadAttemptId::new(1),
+    );
     mark_verification_inflight(&mut app, "file.bin");
 
     app.handle_download_event(DownloadEvent::VerificationProgressForOperation {
@@ -2728,7 +2760,7 @@ fn collection_resume_validation_progress_uses_current_attempt_and_rejects_stale_
 
     app.handle_download_event(DownloadEvent::ResumeValidationStarted {
         id: file_id.clone(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
     app.handle_download_event(DownloadEvent::VerificationProgressForOperation {
         id: file_id.clone(),
@@ -2742,10 +2774,13 @@ fn collection_resume_validation_progress_uses_current_attempt_and_rejects_stale_
         25
     );
 
-    app.file_attempt_ids.insert(file_id.clone(), 1);
+    app.file_attempt_ids.insert(
+        file_id.clone(),
+        crate::tui::event::DownloadAttemptId::new(1),
+    );
     app.handle_download_event(DownloadEvent::ResumeValidationStarted {
         id: file_id.clone(),
-        attempt_id: 1,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(1),
     });
     app.handle_download_event(DownloadEvent::VerificationProgressForOperation {
         id: file_id.clone(),
@@ -2815,9 +2850,10 @@ fn typed_stale_verification_operation_is_rejected_after_reset() {
 
     app.perform_reverify_file_action(&file_id);
     let old_operation = crate::tui::event::VerificationOperationId::new(
-        *app.file_attempt_ids
+        app.file_attempt_ids
             .get(&file_id)
-            .expect("reverify should establish an operation generation"),
+            .expect("reverify should establish an operation generation")
+            .raw(),
     );
     app.perform_reset_file_action(&file_id);
     app.handle_download_event(DownloadEvent::CompletedFileVerifiedForOperation {
@@ -3101,7 +3137,7 @@ fn downloading_file_can_reach_full_progress_before_complete_event() {
     app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
         id: "file-id".to_string().into(),
         size: 100,
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
     app.handle_download_event(crate::tui::event::DownloadEvent::Progress {
         id: "file-id".to_string().into(),
@@ -3109,7 +3145,7 @@ fn downloading_file_can_reach_full_progress_before_complete_event() {
             total_bytes_delta: 100,
             network_bytes_delta: 100,
         },
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     let file = app
@@ -3122,7 +3158,7 @@ fn downloading_file_can_reach_full_progress_before_complete_event() {
 
     app.handle_download_event(crate::tui::event::DownloadEvent::FileComplete {
         id: "file-id".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     let file = app
@@ -3152,7 +3188,7 @@ fn stale_start_does_not_demote_completed_file() {
     app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
         id: "file-id".to_string().into(),
         size: 100,
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     let file = app
@@ -3193,7 +3229,7 @@ fn restarting_partial_file_preserves_visible_progress_before_new_deltas() {
     app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
         id: "file-id".to_string().into(),
         size: 100,
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     let file = app
@@ -3219,13 +3255,13 @@ fn resume_reuse_then_progress_keeps_file_bandwidth_on_fresh_bytes_only() {
     app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
         id: "file-id".to_string().into(),
         size: 100,
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
     app.handle_download_event(crate::tui::event::DownloadEvent::ResumeReused {
         id: "file-id".to_string().into(),
         chunks: 1,
         bytes: 60,
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
     app.handle_download_event(crate::tui::event::DownloadEvent::Progress {
         id: "file-id".to_string().into(),
@@ -3233,7 +3269,7 @@ fn resume_reuse_then_progress_keeps_file_bandwidth_on_fresh_bytes_only() {
             total_bytes_delta: 25,
             network_bytes_delta: 25,
         },
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     let file_id = crate::core::FileId::from("file-id");
@@ -3265,7 +3301,7 @@ fn fast_trusted_resume_progress_is_not_double_counted_when_reuse_event_arrives()
     app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
         id: file_id.clone(),
         size: 100,
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
     app.handle_download_event(crate::tui::event::DownloadEvent::Progress {
         id: file_id.clone(),
@@ -3273,13 +3309,13 @@ fn fast_trusted_resume_progress_is_not_double_counted_when_reuse_event_arrives()
             total_bytes_delta: 60,
             network_bytes_delta: 0,
         },
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
     app.handle_download_event(crate::tui::event::DownloadEvent::ResumeReused {
         id: file_id.clone(),
         chunks: 1,
         bytes: 60,
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     let core_file = app
@@ -3310,11 +3346,11 @@ fn resume_validation_progress_transitions_to_download_progress_on_network_bytes(
     app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
         id: file_id.clone(),
         size: 100,
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
     app.handle_download_event(crate::tui::event::DownloadEvent::ResumeValidationStarted {
         id: file_id.clone(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
     app.handle_download_event(crate::tui::event::DownloadEvent::VerificationProgress {
         id: file_id.clone(),
@@ -3334,7 +3370,7 @@ fn resume_validation_progress_transitions_to_download_progress_on_network_bytes(
             total_bytes_delta: 15,
             network_bytes_delta: 15,
         },
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     let file = app
@@ -3813,7 +3849,7 @@ fn drain_download_events_collapses_visible_syncs_for_batched_files() {
         _download_tx
             .try_send(DownloadEvent::FileQueued(QueuedFile {
                 id: name.to_string().into(),
-                attempt_id: 0,
+                attempt_id: crate::tui::event::DownloadAttemptId::new(0),
                 size,
                 accounting: crate::core::FileAccounting::CurrentRun,
                 origin: crate::tui::event::FileOrigin {

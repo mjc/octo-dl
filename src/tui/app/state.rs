@@ -325,7 +325,7 @@ impl App {
                     self.file_attempt_ids
                         .get(file_id)
                         .copied()
-                        .filter(|attempt_id| *attempt_id > 0)
+                        .filter(|attempt_id| attempt_id.raw() > 0)
                         .map(|attempt_id| (file_id.clone(), attempt_id))
                 })
                 .collect();

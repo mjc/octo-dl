@@ -759,7 +759,10 @@ fn ui_retry_file_recomputes_totals() {
         DownloadRequest::ResumeFileIds {
             source_url: "https://mega.nz/file/error".to_string(),
             file_ids: vec!["error.bin".to_string().into()],
-            attempt_ids: std::collections::HashMap::from([("error.bin".to_string().into(), 1)]),
+            attempt_ids: std::collections::HashMap::from([(
+                "error.bin".to_string().into(),
+                crate::tui::event::DownloadAttemptId::new(1)
+            )]),
         }
     );
 }
@@ -995,7 +998,7 @@ fn deleted_file_completion_event_is_ignored_and_leaves_artifacts() {
     let _ = write_dummy_legacy_resume_sidecar_for_path(&file_path);
     app.handle_download_event(DownloadEvent::FileComplete {
         id: file_id.into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     assert!(app.files.is_empty());
@@ -1046,7 +1049,7 @@ fn deleted_file_stays_deleted_after_cancel_then_completion_events() {
     app.handle_ui_action(UiAction::DeleteFile(file_id.clone().into()));
     app.handle_download_event(DownloadEvent::FileCancelled {
         id: file_id.clone().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     std::fs::write(&file_path, b"done").unwrap();
@@ -1054,7 +1057,7 @@ fn deleted_file_stays_deleted_after_cancel_then_completion_events() {
     let _ = write_dummy_legacy_resume_sidecar_for_path(&file_path);
     app.handle_download_event(DownloadEvent::FileComplete {
         id: file_id.clone().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     assert!(app.files.is_empty());
@@ -1108,7 +1111,7 @@ fn deleted_file_error_event_is_ignored_and_leaves_artifacts() {
     app.handle_download_event(DownloadEvent::FileError {
         id: file_id.into(),
         error: "boom".to_string(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     assert!(app.files.is_empty());
@@ -1147,7 +1150,10 @@ fn ui_reset_file_resets_progress_and_requeues_url() {
         DownloadRequest::ResumeFileIds {
             source_url: "https://mega.nz/file/reset".to_string(),
             file_ids: vec!["active.bin".to_string().into()],
-            attempt_ids: std::collections::HashMap::from([("active.bin".to_string().into(), 1)]),
+            attempt_ids: std::collections::HashMap::from([(
+                "active.bin".to_string().into(),
+                crate::tui::event::DownloadAttemptId::new(1)
+            )]),
         }
     );
     assert!(!file_path.exists());
@@ -1169,7 +1175,7 @@ fn reset_file_ignores_late_completion_until_new_attempt_starts() {
     app.handle_ui_action(UiAction::ResetFile("active.bin".to_string().into()));
     app.handle_download_event(DownloadEvent::FileComplete {
         id: "active.bin".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     assert_eq!(app.files[0].status, FileStatus::Queued);
@@ -1191,7 +1197,7 @@ fn reset_file_ignores_late_error_until_new_attempt_starts() {
     app.handle_download_event(DownloadEvent::FileError {
         id: "active.bin".to_string().into(),
         error: "boom".to_string(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     assert_eq!(app.files[0].status, FileStatus::Queued);
@@ -1213,12 +1219,12 @@ fn reset_file_accepts_new_terminal_events_after_restart() {
     app.handle_download_event(DownloadEvent::FileStart {
         id: "active.bin".to_string().into(),
         size: 100,
-        attempt_id: 1,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(1),
     });
     app.handle_download_event(DownloadEvent::FileError {
         id: "active.bin".to_string().into(),
         error: "boom".to_string(),
-        attempt_id: 1,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(1),
     });
 
     assert_eq!(app.files[0].downloaded, 0);
@@ -1423,7 +1429,7 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
     harness.inject_download(DownloadEvent::FileError {
         id: "a.bin".to_string().into(),
         error: "boom".to_string(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
     harness.tick();
     let _ = harness.render();
@@ -1439,7 +1445,7 @@ fn scenario_selection_falls_back_to_parent_package_after_failed_package_recovers
 
     harness.inject_download(DownloadEvent::FileQueued(QueuedFile {
         id: "a.bin".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: crate::tui::event::FileOrigin {
@@ -1491,7 +1497,7 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
         .handle_ui_action(UiAction::ResetFile("active.bin".to_string().into()));
     harness.inject_download(DownloadEvent::FileComplete {
         id: "active.bin".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
     harness.tick();
 
@@ -1507,11 +1513,11 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
     harness.inject_download(DownloadEvent::FileStart {
         id: "active.bin".to_string().into(),
         size: 128,
-        attempt_id: 1,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(1),
     });
     harness.inject_download(DownloadEvent::FileComplete {
         id: "active.bin".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
     harness.tick();
 
@@ -1526,7 +1532,7 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
 
     harness.inject_download(DownloadEvent::FileComplete {
         id: "active.bin".to_string().into(),
-        attempt_id: 1,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(1),
     });
     harness.tick();
 

@@ -939,7 +939,10 @@ fn handle_main_input_shift_r_resets_selected_file_from_scratch() {
         DownloadRequest::ResumeFileIds {
             source_url: "https://mega.nz/file/reset".to_string(),
             file_ids: vec![crate::core::FileId::from("active.bin")],
-            attempt_ids: std::collections::HashMap::from([("active.bin".to_string().into(), 1)]),
+            attempt_ids: std::collections::HashMap::from([(
+                "active.bin".to_string().into(),
+                crate::tui::event::DownloadAttemptId::new(1)
+            )]),
         }
     );
     assert!(!final_path.exists());
@@ -1087,7 +1090,7 @@ fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
     assert!(app.verification_inflight_files.contains("active.bin"));
     assert_eq!(
         app.file_attempt_ids.get("active.bin"),
-        Some(&1),
+        Some(&crate::tui::event::DownloadAttemptId::new(1)),
         "Alt-R should advance the attempt generation before stale cancel/progress events arrive"
     );
     assert_eq!(app.files[0].status, FileStatus::Queued);
@@ -1119,7 +1122,7 @@ fn handle_main_input_alt_r_pauses_active_file_for_reverify_without_retrying() {
     app.handle_download_event(crate::tui::event::DownloadEvent::FileStart {
         id: "active.bin".to_string().into(),
         size: 100,
-        attempt_id: 1,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(1),
     });
     assert!(!app.verifying_files.contains("active.bin"));
     assert!(!app.verification_inflight_files.contains("active.bin"));
@@ -1229,11 +1232,17 @@ fn handle_main_input_alt_r_on_package_verifies_all_files_by_kind() {
     }
     assert_eq!(
         app.file_attempt_ids.get("file-0.bin"),
-        Some(&1),
+        Some(&crate::tui::event::DownloadAttemptId::new(1)),
         "Alt-R from a package row should also advance the active file generation"
     );
-    assert_eq!(app.file_attempt_ids.get("file-1.bin"), Some(&1));
-    assert_eq!(app.file_attempt_ids.get("file-4.bin"), Some(&1));
+    assert_eq!(
+        app.file_attempt_ids.get("file-1.bin"),
+        Some(&crate::tui::event::DownloadAttemptId::new(1))
+    );
+    assert_eq!(
+        app.file_attempt_ids.get("file-4.bin"),
+        Some(&crate::tui::event::DownloadAttemptId::new(1))
+    );
     for index in [2, 3] {
         let file_id = crate::core::FileId::from(format!("file-{index}.bin").as_str());
         assert!(!app.verifying_files.contains(&file_id));

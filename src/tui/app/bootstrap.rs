@@ -173,6 +173,7 @@ impl App {
             reverify_pending_files: FileIdSet::default(),
             verifying_files: FileIdSet::default(),
             verification_inflight_files: FileIdSet::default(),
+            verification_operation_ids: FileIdMap::default(),
             verification_targets: FileIdMap::default(),
             session: None,
             session_persistence: super::SessionPersistence::new(),

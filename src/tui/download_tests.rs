@@ -143,7 +143,7 @@ async fn panicked_download_task_releases_its_scheduler_slot() {
         DownloadTaskResult {
             task_id: tokio::task::id(),
             id: "panic.bin".into(),
-            attempt_id: 4,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(4),
             result: Ok(crate::FileStats {
                 size: 0,
                 network_bytes: 0,
@@ -155,9 +155,13 @@ async fn panicked_download_task_releases_its_scheduler_slot() {
             }),
         }
     });
-    scheduler
-        .active_task_files
-        .insert(handle.id(), (file_id.clone(), 4));
+    scheduler.active_task_files.insert(
+        handle.id(),
+        (
+            file_id.clone(),
+            crate::tui::event::DownloadAttemptId::new(4),
+        ),
+    );
     let (event_tx, _event_rx) = super::super::event::DownloadEventSender::channel();
     let result = scheduler.join_set.join_next().await.unwrap();
 
@@ -186,7 +190,7 @@ async fn panicked_download_task_is_removed_from_available_and_pending_state() {
         DownloadTaskResult {
             task_id: tokio::task::id(),
             id: "panic-queued.bin".into(),
-            attempt_id: 4,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(4),
             result: Ok(crate::FileStats {
                 size: 0,
                 network_bytes: 0,
@@ -198,9 +202,13 @@ async fn panicked_download_task_is_removed_from_available_and_pending_state() {
             }),
         }
     });
-    scheduler
-        .active_task_files
-        .insert(handle.id(), (file_id.clone(), 4));
+    scheduler.active_task_files.insert(
+        handle.id(),
+        (
+            file_id.clone(),
+            crate::tui::event::DownloadAttemptId::new(4),
+        ),
+    );
     let (event_tx, _event_rx) = super::super::event::DownloadEventSender::channel();
     let result = scheduler.join_set.join_next().await.unwrap();
 
@@ -382,7 +390,7 @@ mod property_tests {
             app.handle_download_event(DownloadEvent::FileStart {
                 id: "test.bin".to_string().into(),
                 size: file_size,
-                attempt_id: 0,
+                attempt_id: crate::tui::event::DownloadAttemptId::new(0),
             });
 
             for delta in &deltas {
@@ -392,7 +400,7 @@ mod property_tests {
                         total_bytes_delta: *delta,
                         network_bytes_delta: *delta,
                     },
-                    attempt_id: 0,
+                    attempt_id: crate::tui::event::DownloadAttemptId::new(0),
                 });
             }
 
@@ -575,7 +583,7 @@ fn file_queued_clears_stale_error_state() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "file-id".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
@@ -608,7 +616,7 @@ fn file_queued_bootstraps_and_saves_session() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "file-id".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
@@ -636,7 +644,7 @@ fn file_queued_after_package_delete_is_ignored_when_source_is_untracked() {
     app.submit_url(source_url.clone());
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "known.bin".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         size: 128,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
@@ -655,7 +663,7 @@ fn file_queued_after_package_delete_is_ignored_when_source_is_untracked() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "late.bin".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         size: 256,
         accounting: crate::core::FileAccounting::CurrentRun,
         origin: FileOrigin {
@@ -736,7 +744,7 @@ fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
 
     app.handle_download_event(DownloadEvent::FileQueued(QueuedFile {
         id: "episode.mkv".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         size: 128,
         accounting: crate::core::FileAccounting::Preexisting,
         origin: FileOrigin {
@@ -748,7 +756,7 @@ fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
     }));
     app.handle_download_event(DownloadEvent::FileComplete {
         id: "episode.mkv".to_string().into(),
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     assert_eq!(app.files.len(), 1);
@@ -778,7 +786,7 @@ fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
             nodes: None,
             requested_files: RequestedFiles::All,
             requested_attempt_ids: HashMap::new(),
-            submission_attempt_id: 0,
+            submission_attempt_id: crate::tui::event::DownloadAttemptId::new(0),
             emit_url_resolved: true,
         },
         FetchedNodeSet {
@@ -791,7 +799,7 @@ fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
             nodes: None,
             requested_files: RequestedFiles::All,
             requested_attempt_ids: HashMap::new(),
-            submission_attempt_id: 0,
+            submission_attempt_id: crate::tui::event::DownloadAttemptId::new(0),
             emit_url_resolved: true,
         },
         FetchedNodeSet {
@@ -804,7 +812,7 @@ fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
             nodes: None,
             requested_files: RequestedFiles::All,
             requested_attempt_ids: HashMap::new(),
-            submission_attempt_id: 0,
+            submission_attempt_id: crate::tui::event::DownloadAttemptId::new(0),
             emit_url_resolved: true,
         },
     ];
@@ -926,7 +934,7 @@ fn cumulative_values_as_deltas_are_capped_at_file_size() {
     app.handle_download_event(DownloadEvent::FileStart {
         id: "test.bin".to_string().into(),
         size: file_size,
-        attempt_id: 0,
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
     });
 
     let cumulatives = [100_000u64, 350_000, 700_000, 900_000, 1_000_000];
@@ -937,7 +945,7 @@ fn cumulative_values_as_deltas_are_capped_at_file_size() {
                 total_bytes_delta: c,
                 network_bytes_delta: c,
             },
-            attempt_id: 0,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
         });
     }
 

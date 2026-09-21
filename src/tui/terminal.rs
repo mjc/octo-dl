@@ -414,7 +414,7 @@ mod tests {
                 total_bytes_delta: 64,
                 network_bytes_delta: 64,
             },
-            0,
+            crate::tui::event::DownloadAttemptId::new(0),
         );
         app.flush_session_persistence();
 
@@ -486,7 +486,7 @@ mod tests {
                 total_bytes_delta: 64,
                 network_bytes_delta: 64,
             },
-            0,
+            crate::tui::event::DownloadAttemptId::new(0),
         );
         app.flush_session_persistence();
 
@@ -548,7 +548,10 @@ mod tests {
                 collision: None,
             },
         });
-        app.handle_resume_validation_started_event(file_id.clone(), 0);
+        app.handle_resume_validation_started_event(
+            file_id.clone(),
+            crate::tui::event::DownloadAttemptId::new(0),
+        );
         app.handle_verification_progress_event(file_id.clone(), 64);
         app.flush_session_persistence();
 
@@ -710,7 +713,10 @@ mod tests {
                 collision: None,
             },
         });
-        app.handle_resume_validation_started_event(file_id.clone(), 0);
+        app.handle_resume_validation_started_event(
+            file_id.clone(),
+            crate::tui::event::DownloadAttemptId::new(0),
+        );
         app.handle_verification_progress_event(file_id.clone(), 64);
         app.flush_session_persistence();
 
