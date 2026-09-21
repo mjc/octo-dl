@@ -230,6 +230,10 @@ impl Drop for TerminalPanicHookGuard {
     fn drop(&mut self) {
         self.active.store(false, Ordering::Release);
         if std::thread::panicking() {
+            // Rust forbids installing a panic hook while unwinding. Drop our
+            // owned previous hook so a nested panic cannot retain stale hook
+            // state; the process is already on an unrecoverable unwind path.
+            self.previous_hook.take();
             return;
         }
         drop(panic::take_hook());

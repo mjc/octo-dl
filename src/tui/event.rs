@@ -60,10 +60,9 @@ const LIFECYCLE_BACKLOG_CAPACITY: usize = 256;
 ///
 /// Progress is deliberately accumulated by file and attempt before it enters
 /// the bounded control queue. Lifecycle events use the queue directly when
-/// possible and otherwise enter a second fixed-capacity FIFO. That FIFO is
-/// deliberately bounded: if both queues are exhausted, the sender records a
-/// delivery failure instead of blocking a worker callback; the application
-/// surfaces that failure. Status messages remain best effort.
+/// possible and otherwise enter a durable FIFO. The FIFO is separate from the
+/// bounded channel so state-changing lifecycle events remain available for
+/// the application instead of being dropped while the channel is full.
 #[derive(Clone)]
 pub struct DownloadEventSender {
     tx: mpsc::Sender<DownloadEvent>,
@@ -80,7 +79,6 @@ struct PendingProgress {
 
 struct PendingLifecycle {
     events: Mutex<PendingLifecycleState>,
-    capacity: usize,
 }
 
 struct PendingLifecycleState {
@@ -130,7 +128,7 @@ impl DownloadEventSender {
 
     pub(crate) fn channel_with_capacities(
         capacity: usize,
-        lifecycle_capacity: usize,
+        _lifecycle_capacity: usize,
     ) -> (Self, mpsc::Receiver<DownloadEvent>) {
         let (tx, rx) = mpsc::channel(capacity.max(1));
         (
@@ -147,7 +145,6 @@ impl DownloadEventSender {
                         events: VecDeque::new(),
                         failure: None,
                     }),
-                    capacity: lifecycle_capacity.max(1),
                 }),
             },
             rx,
@@ -172,7 +169,6 @@ impl DownloadEventSender {
                     events: VecDeque::new(),
                     failure: None,
                 }),
-                capacity: LIFECYCLE_BACKLOG_CAPACITY,
             }),
         }
     }
@@ -219,14 +215,6 @@ impl DownloadEventSender {
     ) -> Result<(), mpsc::error::TrySendError<DownloadEvent>> {
         let mut lifecycle = self.lifecycle.events.lock().unwrap();
         if !lifecycle.events.is_empty() {
-            if lifecycle.events.len() >= self.lifecycle.capacity {
-                self.record_failure_locked(
-                    &mut lifecycle,
-                    &event,
-                    DeliveryFailureReason::BacklogFull,
-                );
-                return Err(mpsc::error::TrySendError::Full(event));
-            }
             lifecycle.events.push_back(event);
             return Ok(());
         }
@@ -234,14 +222,6 @@ impl DownloadEventSender {
         match self.tx.try_send(event) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(event)) => {
-                if self.lifecycle.capacity == 0 {
-                    self.record_failure_locked(
-                        &mut lifecycle,
-                        &event,
-                        DeliveryFailureReason::BacklogFull,
-                    );
-                    return Err(mpsc::error::TrySendError::Full(event));
-                }
                 lifecycle.events.push_back(event);
                 Ok(())
             }
@@ -411,7 +391,6 @@ impl From<mpsc::Sender<DownloadEvent>> for DownloadEventSender {
                     events: VecDeque::new(),
                     failure: None,
                 }),
-                capacity: LIFECYCLE_BACKLOG_CAPACITY,
             }),
         }
     }
@@ -824,22 +803,12 @@ mod tests {
             attempt_id: 0,
         })
         .expect("second retained lifecycle event should enter the backlog");
-        assert!(matches!(
-            tx.send(DownloadEvent::FileComplete {
-                id: fourth_id,
-                attempt_id: 0,
-            }),
-            Err(mpsc::error::TrySendError::Full(
-                DownloadEvent::FileComplete { .. }
-            ))
-        ));
-        assert_eq!(
-            tx.take_delivery_failure(),
-            Some(DownloadEventDeliveryFailure {
-                event: "file complete",
-                reason: DeliveryFailureReason::BacklogFull,
-            })
-        );
+        tx.send(DownloadEvent::FileComplete {
+            id: fourth_id.clone(),
+            attempt_id: 0,
+        })
+        .expect("state-changing lifecycle events must not be dropped when the channel is full");
+        assert!(tx.take_delivery_failure().is_none());
 
         assert!(matches!(
             rx.blocking_recv().expect("first event should be queued"),
@@ -854,6 +823,11 @@ mod tests {
         assert!(matches!(
             rx.blocking_recv().expect("second retained event should flush"),
             DownloadEvent::FileComplete { id, .. } if id == third_id
+        ));
+        assert!(tx.flush_lifecycle_events());
+        assert!(matches!(
+            rx.blocking_recv().expect("third retained event should flush"),
+            DownloadEvent::FileComplete { id, .. } if id == fourth_id
         ));
         assert!(!tx.has_pending_lifecycle_events());
     }

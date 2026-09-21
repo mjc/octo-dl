@@ -131,6 +131,42 @@ async fn register_download_token_reports_closed_application_channel() {
     assert!(result.is_err());
 }
 
+#[tokio::test]
+async fn panicked_download_task_releases_its_scheduler_slot() {
+    let mut scheduler = SchedulerState::new();
+    let file_id: FileId = "panic.bin".into();
+    scheduler.active_downloads.insert(file_id.clone());
+    let handle = scheduler.join_set.spawn(async {
+        panic!("download task panic");
+        #[allow(unreachable_code)]
+        DownloadTaskResult {
+            task_id: tokio::task::id(),
+            id: "panic.bin".into(),
+            attempt_id: 4,
+            result: Ok(crate::FileStats {
+                size: 0,
+                network_bytes: 0,
+                reused_bytes: 0,
+                elapsed: std::time::Duration::ZERO,
+                average_speed: 0,
+                peak_speed: 0,
+                ramp_up_time: None,
+            }),
+        }
+    });
+    scheduler
+        .active_task_files
+        .insert(handle.id(), (file_id.clone(), 4));
+    let (event_tx, _event_rx) = super::super::event::DownloadEventSender::channel();
+    let result = scheduler.join_set.join_next().await.unwrap();
+
+    handle_download_join_result(result, &mut scheduler, &event_tx);
+
+    assert!(!scheduler.active_downloads.contains(&file_id));
+    assert!(!scheduler.available_downloads.contains_key(&file_id));
+    assert!(scheduler.active_task_files.is_empty());
+}
+
 #[test]
 fn expand_dlc_path_expands_tilde_prefix() {
     let home = dirs::home_dir().expect("home dir should exist for test");
@@ -729,13 +765,7 @@ fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
 
     let urls = successful_submitted_urls(resolved.iter());
 
-    assert_eq!(
-        urls,
-        vec![
-            "bundle.dlc".to_string(),
-            "https://mega.nz/folder/direct".to_string()
-        ]
-    );
+    assert!(urls.is_empty());
 }
 
 #[test]

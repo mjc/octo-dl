@@ -18,6 +18,7 @@ mod selection;
 mod tests;
 
 use std::io;
+use std::net::IpAddr;
 
 use axum::Router;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -467,6 +468,17 @@ pub(crate) async fn start_api_server(
     remote_tui_stream: bool,
     api_key: Option<String>,
 ) -> io::Result<ApiServerHandle> {
+    let host_for_parse = host.trim_matches(['[', ']']);
+    let requires_key = host_for_parse
+        .parse::<IpAddr>()
+        .map_or(true, |ip| !ip.is_loopback())
+        && !host.eq_ignore_ascii_case("localhost");
+    if requires_key && api_key.as_deref().is_none_or(str::is_empty) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "an API key is required when binding the API outside loopback",
+        ));
+    }
     let state = ApiState {
         tx,
         host: host.to_string(),

@@ -259,6 +259,7 @@ impl DownloadRuntime {
 }
 
 struct DownloadTaskResult {
+    task_id: tokio::task::Id,
     id: FileId,
     attempt_id: u64,
     result: crate::Result<crate::FileStats>,
@@ -273,6 +274,7 @@ struct SchedulerState {
     available_download_ptrs: HashSet<FileIdPtrKey>,
     active_downloads: HashSet<FileId, FxBuildHasher>,
     active_download_ptrs: HashSet<FileIdPtrKey>,
+    active_task_files: HashMap<tokio::task::Id, (FileId, u64)>,
     join_set: tokio::task::JoinSet<DownloadTaskResult>,
 }
 
@@ -287,6 +289,7 @@ impl SchedulerState {
             available_download_ptrs: HashSet::new(),
             active_downloads: HashSet::with_hasher(FxBuildHasher::default()),
             active_download_ptrs: HashSet::new(),
+            active_task_files: HashMap::new(),
             join_set: tokio::task::JoinSet::new(),
         }
     }
@@ -1361,6 +1364,7 @@ fn handle_download_join_result(
 ) {
     match result {
         Ok(task) => {
+            scheduler.active_task_files.remove(&task.task_id);
             scheduler.finish_download(&task.id, &task.result);
             if let Err(error) = task.result
                 && !matches!(error, crate::Error::Cancelled)
@@ -1373,6 +1377,14 @@ fn handle_download_join_result(
             }
         }
         Err(error) => {
+            if let Some((file_id, attempt_id)) = scheduler.active_task_files.remove(&error.id()) {
+                scheduler.finish_download(&file_id, &Err(crate::Error::Cancelled));
+                let _ = tx.send(DownloadEvent::FileError {
+                    id: file_id,
+                    error: format!("Download task failed: {error}"),
+                    attempt_id,
+                });
+            }
             let _ = tx.send(DownloadEvent::ScopeError {
                 scope: "download".to_string(),
                 error: format!("Download task panicked: {error}"),
@@ -1452,7 +1464,8 @@ async fn start_pending_downloads(
                     return false;
                 }
             };
-        spawn_file_download(
+        let attempt_id = item.attempt_id;
+        let task_id = spawn_file_download(
             &mut scheduler.join_set,
             item,
             Arc::clone(&runtime.downloader),
@@ -1460,6 +1473,9 @@ async fn start_pending_downloads(
             pause_rx.clone(),
             cancel_token,
         );
+        scheduler
+            .active_task_files
+            .insert(task_id, (file_id, attempt_id));
     }
     true
 }
@@ -1485,27 +1501,30 @@ fn spawn_file_download(
     event_tx: DownloadEventSender,
     pause_rx: watch::Receiver<bool>,
     cancel_token: CancellationToken,
-) {
-    join_set.spawn(async move {
-        let file_id: FileId = item.item.path.clone().into();
-        let attempt_id = item.attempt_id;
-        let progress = file_progress(&file_id, attempt_id, &event_tx);
-        let result = downloader
-            .download_file(
-                &item.item.node,
-                &item.item.path,
-                &progress,
-                item.trust_resume_state,
-                Some(cancel_token),
-            )
-            .await;
-        emit_pause_cancellation_if_needed(&file_id, attempt_id, &result, &pause_rx, &event_tx);
-        DownloadTaskResult {
-            id: item.item.path.into(),
-            attempt_id,
-            result,
-        }
-    });
+) -> tokio::task::Id {
+    join_set
+        .spawn(async move {
+            let file_id: FileId = item.item.path.clone().into();
+            let attempt_id = item.attempt_id;
+            let progress = file_progress(&file_id, attempt_id, &event_tx);
+            let result = downloader
+                .download_file(
+                    &item.item.node,
+                    &item.item.path,
+                    &progress,
+                    item.trust_resume_state,
+                    Some(cancel_token),
+                )
+                .await;
+            emit_pause_cancellation_if_needed(&file_id, attempt_id, &result, &pause_rx, &event_tx);
+            DownloadTaskResult {
+                task_id: tokio::task::id(),
+                id: item.item.path.into(),
+                attempt_id,
+                result,
+            }
+        })
+        .id()
 }
 
 fn file_progress(
@@ -1938,7 +1957,7 @@ fn successful_submitted_urls<'a>(
     let mut urls = Vec::new();
 
     for resolved in resolved_urls {
-        if !resolved.emit_url_resolved {
+        if !resolved.emit_url_resolved || resolved.nodes.is_none() {
             continue;
         }
         if seen.insert(resolved.resolved.submitted_url.clone()) {

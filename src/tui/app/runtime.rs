@@ -1265,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_download_events_surfaces_lifecycle_delivery_failure() {
+    fn drain_download_events_preserves_all_lifecycle_events() {
         let (event_tx, mut download_rx) = DownloadEventSender::channel_with_capacities(1, 1);
         let mut app = App::new(9723, event_tx.clone(), true);
 
@@ -1281,21 +1281,19 @@ mod tests {
                 error: "two".to_string(),
             })
             .expect("second lifecycle event should enter the backlog");
-        assert!(matches!(
-            event_tx.send(DownloadEvent::ScopeError {
+        event_tx
+            .send(DownloadEvent::ScopeError {
                 scope: "verify".to_string(),
                 error: "three".to_string(),
-            }),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(
-                DownloadEvent::ScopeError { .. }
-            ))
-        ));
+            })
+            .expect("third lifecycle event should enter the durable backlog");
 
         assert!(app.drain_download_events(&mut download_rx));
-        assert!(
-            app.status
-                .contains("Download event delivery failed: lifecycle backlog is full")
-        );
+        assert!(app.overlay_files.contains_key("setup"));
+        assert!(app.drain_download_events(&mut download_rx));
+        assert!(app.overlay_files.contains_key("download"));
+        assert!(app.drain_download_events(&mut download_rx));
+        assert!(!event_tx.has_pending_lifecycle_events());
     }
 
     #[test]

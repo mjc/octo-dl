@@ -187,6 +187,10 @@ pub fn reconcile_restart(
             .into_iter()
             .flat_map(|package| package.files.into_iter())
         {
+            // File IDs identify the logical remote file and are not the local
+            // destination key. Filesystem observations are keyed by the path
+            // that was actually scanned.
+            let path_id = FileId::from(file.path.as_str());
             let mut file = FileState {
                 id: file.id.clone(),
                 package_id: file.package_id.clone(),
@@ -202,14 +206,14 @@ pub fn reconcile_restart(
                 continue;
             }
             let observed = crate::download::ObservedLocalFile {
-                final_size: complete_map.get(&file.id).copied(),
-                part_size: partial_map.get(&file.id).map(|partial| partial.bytes),
+                final_size: complete_map.get(&path_id).copied(),
+                part_size: partial_map.get(&path_id).map(|partial| partial.bytes),
                 part_allocated_bytes: None,
                 has_sidecar: partial_map
-                    .get(&file.id)
+                    .get(&path_id)
                     .is_some_and(|partial| partial.has_sidecar),
                 verified_resume_bytes: partial_map
-                    .get(&file.id)
+                    .get(&path_id)
                     .map_or(0, |partial| partial.verified_bytes),
             };
             let local = crate::download::classify_observed_local_file(observed, file.size, false);
@@ -465,6 +469,33 @@ mod tests {
         assert_eq!(file.accounting, FileAccounting::CurrentRun);
         assert_eq!(file.progress.visible_completed_bytes, 0);
         assert_eq!(restart.resume_file_ids, vec!["a.bin".to_string()]);
+    }
+
+    #[test]
+    fn restart_matches_filesystem_observations_by_path_not_file_id() {
+        let mut snapshot = sample_snapshot();
+        snapshot.packages[0].files[0].id = "remote-file-id".into();
+
+        let restart = reconcile_restart(
+            Some(snapshot),
+            FilesystemSnapshot {
+                complete_files: vec![FilesystemFile {
+                    file_id: "a.bin".into(),
+                    size: 100,
+                }],
+                partial_files: Vec::new(),
+            },
+            vec!["https://mega.nz/file/test".to_string()],
+        );
+
+        let file = &restart.state.files["remote-file-id"];
+        assert_eq!(file.path, "a.bin");
+        assert_eq!(file.lifecycle, FileLifecycle::Complete);
+        assert_eq!(file.accounting, FileAccounting::Preexisting);
+        assert_eq!(
+            restart.preexisting_complete_file_ids,
+            vec![FileId::from("remote-file-id")]
+        );
     }
 
     #[test]
