@@ -144,7 +144,7 @@ fn help_requested(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "-h" || arg == "--help")
 }
 
-fn startup_log_mode(options: &RuntimeOptions) -> Option<&'static str> {
+const fn startup_log_mode(options: &RuntimeOptions) -> Option<&'static str> {
     match options.ui {
         Some(UiMode::Tui) => None,
         Some(UiMode::Headless) => Some("headless"),
