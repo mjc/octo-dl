@@ -48,6 +48,8 @@ where
     let mut builder = SessionStatsBuilder::new();
     builder.set_skipped(skipped_count);
 
+    downloader.validate_config()?;
+
     if files.is_empty() {
         return Ok(builder.build());
     }

@@ -6,6 +6,8 @@ use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use octo_dl::config::ApiKey;
+
 /// Flags that consume the next argument as a value (not a positional arg).
 const FLAGS_WITH_VALUES: &[&str] = &[
     "--host",
@@ -31,7 +33,7 @@ struct RuntimeOptions {
     ui: Option<UiMode>,
     tui_listen: Option<String>,
     tui_attach: Option<String>,
-    api_key: Option<String>,
+    api_key: Option<ApiKey>,
     host: String,
     host_explicit: bool,
     config_path: Option<PathBuf>,
@@ -68,7 +70,7 @@ enum StartupPlan {
     Attach {
         addr: SocketAddr,
         config_path: Option<PathBuf>,
-        api_key: Option<String>,
+        api_key: Option<ApiKey>,
     },
 }
 
@@ -287,7 +289,8 @@ fn parse_runtime_options(args: &[String]) -> Result<RuntimeOptions, String> {
                 let Some(value) = args.get(i) else {
                     return Err("--api-key requires a value".to_string());
                 };
-                options.api_key = Some(value.clone());
+                options.api_key =
+                    Some(ApiKey::new(value.clone()).map_err(|error| error.to_string())?);
             }
             "--host" => {
                 i += 1;
@@ -407,7 +410,7 @@ fn load_attach_config(options: &RuntimeOptions) -> io::Result<octo_dl::tui::Atta
 #[cfg(feature = "tui")]
 fn load_attach_config_values(
     config_path: Option<&std::path::Path>,
-    api_key: Option<String>,
+    api_key: Option<ApiKey>,
 ) -> io::Result<octo_dl::tui::AttachConfig> {
     if let Some(api_key) = api_key {
         return Ok(octo_dl::tui::AttachConfig::from_api_key(Some(api_key)));
@@ -684,7 +687,10 @@ mod tests {
 
         let options = parse_runtime_options(&args).expect("attach API key should parse");
 
-        assert_eq!(options.api_key.as_deref(), Some("attach-secret"));
+        assert_eq!(
+            options.api_key.as_ref().map(ApiKey::expose_secret),
+            Some("attach-secret")
+        );
         assert!(!has_positional_args(&args));
     }
 
@@ -717,7 +723,10 @@ mod tests {
 
         let config = load_attach_config(&options).expect("attach config should load");
 
-        assert_eq!(config.api_key.as_deref(), Some("config-secret"));
+        assert_eq!(
+            config.api_key.as_ref().map(ApiKey::expose_secret),
+            Some("config-secret")
+        );
     }
 
     #[test]
@@ -731,14 +740,17 @@ mod tests {
         .expect("config should be writable");
 
         let options = RuntimeOptions {
-            api_key: Some("explicit-secret".to_string()),
+            api_key: Some(ApiKey::new("explicit-secret").expect("test API key")),
             config_path: Some(config_path),
             ..RuntimeOptions::default()
         };
 
         let config = load_attach_config(&options).expect("explicit key should be accepted");
 
-        assert_eq!(config.api_key.as_deref(), Some("explicit-secret"));
+        assert_eq!(
+            config.api_key.as_ref().map(ApiKey::expose_secret),
+            Some("explicit-secret")
+        );
     }
 
     #[test]

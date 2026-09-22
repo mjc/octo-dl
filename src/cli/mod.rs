@@ -18,7 +18,8 @@ use crate::{
         SessionSnapshot, SessionUrlSnapshot, build_restart_snapshot,
     },
     download::{infer_package_display_name, infer_package_id},
-    format_bytes, format_duration, is_dlc_path,
+    format_bytes, format_duration,
+    url::DownloadSource,
 };
 
 const DEFAULT_CONCURRENT_FILES: usize = 4;
@@ -531,13 +532,13 @@ where
                 let _ = args.next(); // consume the value
             }
             "--tui" | "--headless" => {}
-            _ if !arg.starts_with('-') => {
-                if is_dlc_path(&arg) {
-                    dlc_files.push(arg);
-                } else {
-                    urls.push(arg);
+            _ if !arg.starts_with('-') => match DownloadSource::parse(&arg) {
+                Ok(DownloadSource::Mega(url)) => urls.push(url.into_string()),
+                Ok(DownloadSource::Dlc(path)) => dlc_files.push(path.into_string()),
+                Err(error) => {
+                    return Err(format!("invalid download source {arg:?}: {error}"));
                 }
-            }
+            },
             _ => {
                 return Err(format!("unknown option: {arg}"));
             }
@@ -976,6 +977,25 @@ mod tests {
             .err()
             .expect("zero chunks value should be rejected");
         assert!(error.contains("--chunks requires a positive integer"));
+    }
+
+    #[test]
+    fn cli_source_boundary_normalizes_and_types_inputs() {
+        let config =
+            parse_args(["https://mega.nz/#F!folder!key", "./links.DLC"].map(str::to_string))
+                .expect("supported sources should parse");
+
+        assert_eq!(config.urls, ["https://mega.nz/folder/folder#key"]);
+        assert_eq!(config.dlc_files, ["./links.DLC"]);
+    }
+
+    #[test]
+    fn cli_source_boundary_rejects_unsupported_inputs() {
+        let error = match parse_args(["https://example.com/file/id"].map(str::to_string)) {
+            Ok(_) => panic!("non-MEGA URLs should be rejected at submission"),
+            Err(error) => error,
+        };
+        assert!(error.contains("invalid download source"));
     }
 
     #[test]

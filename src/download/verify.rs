@@ -89,6 +89,8 @@ impl<F: FileSystem> Downloader<F> {
         path: &str,
         progress: &Arc<dyn DownloadProgress>,
     ) -> Result<Option<FileStats>> {
+        self.validate_config()?;
+        self.validate_output_path(path)?;
         if self.config.force_overwrite
             || self
                 .fs
@@ -143,6 +145,8 @@ impl<F: FileSystem> Downloader<F> {
         path: &str,
         progress: Option<&dyn DownloadProgress>,
     ) -> Result<CompletedFileVerify> {
+        self.validate_config()?;
+        self.validate_output_path(path)?;
         let final_path = Path::new(path);
         let size = self.fs.file_size(final_path).await.ok_or_else(|| {
             let mut message =

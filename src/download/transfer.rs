@@ -72,6 +72,11 @@ impl<F: FileSystem> Downloader<F> {
         trust_resume_state: bool,
         cancellation_token: Option<CancellationToken>,
     ) -> crate::error::Result<FileStats> {
+        self.validate_config()?;
+        // A configured root makes the caller's output name a relative,
+        // trusted path. With no configured root, preserve the historical
+        // direct-path API for library callers.
+        self.validate_output_path(path)?;
         if let Some(stats) = self.complete_existing_file(node, path, progress).await? {
             return Ok(stats);
         }

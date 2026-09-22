@@ -1,7 +1,9 @@
 //! URL extraction and DLC path detection utilities.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::LazyLock;
 
 use base64::Engine;
@@ -13,6 +15,285 @@ static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid regex")
 });
+
+/// A validated MEGA public link.
+///
+/// The string representation is always the canonical `/file/...` or
+/// `/folder/...` form. Legacy `#!...` and `#F!...` links are accepted and
+/// normalized while parsing.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct MegaUrl(String);
+
+impl MegaUrl {
+    /// Parses and canonicalizes a MEGA public link.
+    ///
+    /// Both `http` and `https` are preserved. The public-link fragment is
+    /// preserved verbatim because MEGA keys are opaque to this crate.
+    pub fn parse(input: &str) -> Result<Self, SourceParseError> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(SourceParseError::Empty);
+        }
+
+        let Some((scheme, payload)) = split_mega_url(input) else {
+            return Err(SourceParseError::UnsupportedMegaUrl(input.to_string()));
+        };
+
+        let canonical = if let Some(rest) = payload.strip_prefix("#!") {
+            canonicalize_legacy_link(scheme, rest, "file")?
+        } else if let Some(rest) = payload.strip_prefix("#F!") {
+            canonicalize_legacy_link(scheme, rest, "folder")?
+        } else {
+            canonicalize_modern_link(scheme, payload)?
+        };
+
+        Ok(Self(canonical))
+    }
+
+    /// Returns the canonical URL without exposing internal representation.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Converts this validated URL into its canonical string form.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for MegaUrl {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for MegaUrl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for MegaUrl {
+    type Err = SourceParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        Self::parse(input)
+    }
+}
+
+/// A validated path to a JDownloader DLC file.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct DlcPath(String);
+
+impl DlcPath {
+    /// Parses a local path whose extension is `.dlc`, case-insensitively.
+    pub fn parse(input: &str) -> Result<Self, SourceParseError> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(SourceParseError::Empty);
+        }
+        if input.contains("://") {
+            return Err(SourceParseError::UnsupportedDlcPath(input.to_string()));
+        }
+        if input.as_bytes().contains(&0) {
+            return Err(SourceParseError::UnsupportedDlcPath(input.to_string()));
+        }
+        if !is_dlc_path(input) {
+            return Err(SourceParseError::NotDlcPath(input.to_string()));
+        }
+
+        Ok(Self(input.to_string()))
+    }
+
+    /// Returns the original path spelling supplied by the caller.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Converts this validated path into its original string form.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for DlcPath {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for DlcPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for DlcPath {
+    type Err = SourceParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        Self::parse(input)
+    }
+}
+
+/// A supported download submission source.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum DownloadSource {
+    Mega(MegaUrl),
+    Dlc(DlcPath),
+}
+
+impl DownloadSource {
+    /// Parses one supported CLI/TUI submission source.
+    pub fn parse(input: &str) -> Result<Self, SourceParseError> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(SourceParseError::Empty);
+        }
+
+        if input.starts_with("http://") || input.starts_with("https://") {
+            return MegaUrl::parse(input).map(Self::Mega);
+        }
+        if is_dlc_path(input) {
+            return DlcPath::parse(input).map(Self::Dlc);
+        }
+
+        Err(SourceParseError::UnsupportedSource(input.to_string()))
+    }
+
+    /// Returns the source in the canonical string form accepted downstream.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Mega(url) => url.as_str(),
+            Self::Dlc(path) => path.as_str(),
+        }
+    }
+
+    /// Converts the source into the string representation used by legacy
+    /// persistence and download request fields.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        match self {
+            Self::Mega(url) => url.into_string(),
+            Self::Dlc(path) => path.into_string(),
+        }
+    }
+}
+
+impl fmt::Display for DownloadSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for DownloadSource {
+    type Err = SourceParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        Self::parse(input)
+    }
+}
+
+/// Errors returned when a submission is not a supported MEGA or DLC source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SourceParseError {
+    Empty,
+    UnsupportedSource(String),
+    UnsupportedMegaUrl(String),
+    UnsupportedDlcPath(String),
+    NotDlcPath(String),
+}
+
+impl fmt::Display for SourceParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("download source is empty"),
+            Self::UnsupportedSource(source) => write!(
+                formatter,
+                "unsupported download source {source:?}; expected a mega.nz URL or .dlc path"
+            ),
+            Self::UnsupportedMegaUrl(url) => write!(
+                formatter,
+                "unsupported MEGA URL {url:?}; expected /file/<id>, /folder/<id>, or a legacy #!/#F! link"
+            ),
+            Self::UnsupportedDlcPath(path) => {
+                write!(formatter, "unsupported DLC path {path:?}")
+            }
+            Self::NotDlcPath(path) => {
+                write!(formatter, "DLC source must have a .dlc extension: {path:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SourceParseError {}
+
+fn split_mega_url(input: &str) -> Option<(&str, &str)> {
+    input
+        .strip_prefix("https://mega.nz/")
+        .map(|payload| ("https", payload))
+        .or_else(|| {
+            input
+                .strip_prefix("http://mega.nz/")
+                .map(|payload| ("http", payload))
+        })
+}
+
+fn canonicalize_modern_link(scheme: &str, payload: &str) -> Result<String, SourceParseError> {
+    let (kind, rest) = payload.split_once('/').ok_or_else(|| {
+        SourceParseError::UnsupportedMegaUrl(format!("{scheme}://mega.nz/{payload}"))
+    })?;
+    if kind != "file" && kind != "folder" {
+        return Err(SourceParseError::UnsupportedMegaUrl(format!(
+            "{scheme}://mega.nz/{payload}"
+        )));
+    }
+
+    let (node_id, key) = rest
+        .split_once('#')
+        .map_or((rest, None), |(id, key)| (id, Some(key)));
+    if node_id.is_empty()
+        || node_id.contains(['/', '?', '#', ' ', '\t', '\r', '\n'])
+        || key.is_some_and(|key| key.is_empty() || key.contains(['?', ' ', '\t', '\r', '\n']))
+    {
+        return Err(SourceParseError::UnsupportedMegaUrl(format!(
+            "{scheme}://mega.nz/{payload}"
+        )));
+    }
+
+    let mut canonical = format!("{scheme}://mega.nz/{kind}/{node_id}");
+    if let Some(key) = key {
+        canonical.push('#');
+        canonical.push_str(key);
+    }
+    Ok(canonical)
+}
+
+fn canonicalize_legacy_link(
+    scheme: &str,
+    rest: &str,
+    kind: &str,
+) -> Result<String, SourceParseError> {
+    let (node_id, key) = rest.split_once('!').ok_or_else(|| {
+        SourceParseError::UnsupportedMegaUrl(format!("{scheme}://mega.nz/#!{rest}"))
+    })?;
+    if node_id.is_empty()
+        || key.is_empty()
+        || node_id.contains(['/', '?', '#', ' ', '\t', '\r', '\n'])
+        || key.contains(['?', ' ', '\t', '\r', '\n'])
+    {
+        return Err(SourceParseError::UnsupportedMegaUrl(format!(
+            "{scheme}://mega.nz/#{kind}!{rest}"
+        )));
+    }
+
+    Ok(format!("{scheme}://mega.nz/{kind}/{node_id}#{key}"))
+}
 
 fn normalize_extracted_url(raw_url: &str) -> String {
     let trimmed = raw_url.trim_end_matches(['.', ',', '!', '?', ';', ':']);
@@ -112,35 +393,7 @@ fn looks_like_base64_token(token: &str) -> bool {
 
 #[must_use]
 pub(crate) fn normalize_mega_url(url: &str) -> Option<String> {
-    let (scheme, payload) = url
-        .strip_prefix("https://mega.nz/")
-        .map(|payload| ("https", payload))
-        .or_else(|| {
-            url.strip_prefix("http://mega.nz/")
-                .map(|payload| ("http", payload))
-        })?;
-
-    if payload.starts_with("file/") || payload.starts_with("folder/") {
-        return Some(url.to_string());
-    }
-
-    if let Some(rest) = payload.strip_prefix("#!") {
-        let (node_id, node_key) = rest.split_once('!')?;
-        if node_id.is_empty() || node_key.is_empty() {
-            return None;
-        }
-        return Some(format!("{scheme}://mega.nz/file/{node_id}#{node_key}"));
-    }
-
-    if let Some(rest) = payload.strip_prefix("#F!") {
-        let (node_id, node_key) = rest.split_once('!')?;
-        if node_id.is_empty() || node_key.is_empty() {
-            return None;
-        }
-        return Some(format!("{scheme}://mega.nz/folder/{node_id}#{node_key}"));
-    }
-
-    None
+    MegaUrl::parse(url).ok().map(MegaUrl::into_string)
 }
 
 /// Returns `true` if `s` looks like a path to a `.dlc` file.
@@ -401,6 +654,61 @@ mod tests {
         let encoded = STANDARD.encode("https://mega.nz/#!abc!key123");
         let urls = extract_urls(&encoded);
         assert_eq!(urls, vec!["https://mega.nz/file/abc#key123"]);
+    }
+
+    #[test]
+    fn mega_url_parsing_preserves_scheme_and_fragment_key() {
+        let url = MegaUrl::parse("http://mega.nz/file/node#key!@#$%^&*()")
+            .expect("canonical MEGA URL should parse");
+        assert_eq!(url.as_str(), "http://mega.nz/file/node#key!@#$%^&*()");
+    }
+
+    #[test]
+    fn mega_url_parsing_normalizes_legacy_file_and_folder_links() {
+        assert_eq!(
+            MegaUrl::parse("https://mega.nz/#!file-id!file-key")
+                .unwrap()
+                .as_str(),
+            "https://mega.nz/file/file-id#file-key"
+        );
+        assert_eq!(
+            MegaUrl::parse("http://mega.nz/#F!folder-id!folder-key")
+                .unwrap()
+                .as_str(),
+            "http://mega.nz/folder/folder-id#folder-key"
+        );
+    }
+
+    #[test]
+    fn mega_url_parsing_rejects_unsupported_forms() {
+        for input in [
+            "https://example.com/file/id#key",
+            "https://mega.nz/unknown/id#key",
+            "https://mega.nz/file/",
+            "https://mega.nz/file/id?download=1",
+            "https://mega.nz/#!id",
+        ] {
+            assert!(MegaUrl::parse(input).is_err(), "{input} should be rejected");
+        }
+    }
+
+    #[test]
+    fn download_source_distinguishes_mega_urls_and_dlc_paths() {
+        assert!(matches!(
+            DownloadSource::parse("https://mega.nz/#!id!key"),
+            Ok(DownloadSource::Mega(url)) if url.as_str() == "https://mega.nz/file/id#key"
+        ));
+        assert!(matches!(
+            DownloadSource::parse("./links.DLC"),
+            Ok(DownloadSource::Dlc(path)) if path.as_str() == "./links.DLC"
+        ));
+    }
+
+    #[test]
+    fn dlc_path_parsing_rejects_urls_and_non_dlc_paths() {
+        assert!(DlcPath::parse("https://example.com/links.dlc").is_err());
+        assert!(DlcPath::parse("links.zip").is_err());
+        assert!(DlcPath::parse("").is_err());
     }
 
     mod property_tests {

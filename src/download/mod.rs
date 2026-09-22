@@ -6,6 +6,7 @@ mod downloader;
 mod finalize;
 mod inspect;
 mod package_identity;
+mod path;
 mod resume_reverify;
 mod resume_state;
 mod resume_tracker;

@@ -51,7 +51,10 @@ mod test_support;
 pub mod url;
 
 // Re-export main types for convenience
-pub use config::{ApiConfig, DownloadConfig, ServiceConfig, ServiceCredentials};
+pub use config::{
+    ApiConfig, ApiKey, ApiKeyError, DownloadConfig, DownloadConfigError, ServiceConfig,
+    ServiceCredentials,
+};
 pub use core::{
     FileSnapshot, PackageSnapshot, SavedCredentials, SavedMegaSession, SessionSnapshot,
 };
@@ -65,7 +68,7 @@ pub use error::{Error, Result};
 pub use format::{format_bytes, format_duration};
 pub use fs::{FileSystem, TokioFileSystem};
 pub use stats::{DownloadStatsTracker, FileStats, SessionStats, SessionStatsBuilder};
-pub use url::{extract_urls, is_dlc_path};
+pub use url::{DlcPath, DownloadSource, MegaUrl, SourceParseError, extract_urls, is_dlc_path};
 
 // Re-export mega types used in the public API
 pub use mega::{Client as MegaClient, Node, Nodes};

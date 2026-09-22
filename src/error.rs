@@ -28,6 +28,10 @@ pub enum Error {
     #[error("Download failed: {0}")]
     Download(String),
 
+    /// Download configuration cannot be used for a transfer.
+    #[error("Invalid download configuration: {0}")]
+    InvalidDownloadConfig(#[from] crate::config::DownloadConfigError),
+
     /// HTTP request error.
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),

@@ -3,7 +3,8 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
+use thiserror::Error;
 
 use crate::core::{
     decode_credential_key, decrypt_credential, decrypt_credential_with_key, encrypt_credential,
@@ -30,7 +31,10 @@ const fn default_concurrent_files() -> usize {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DownloadConfig {
     /// Download directory path (used in service mode).
-    #[serde(default = "default_download_path")]
+    #[serde(
+        default = "default_download_path",
+        deserialize_with = "deserialize_non_empty_path"
+    )]
     pub path: Option<String>,
     /// Number of parallel chunks per file download.
     #[serde(
@@ -58,6 +62,21 @@ pub struct DownloadConfig {
     pub cleanup_on_error: bool,
 }
 
+/// Validation failures for values that control download parallelism or output
+/// location.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DownloadConfigError {
+    /// A positive download limit was configured as zero.
+    #[error("{field} must be greater than zero")]
+    NonPositive {
+        /// Name of the invalid configuration field.
+        field: &'static str,
+    },
+    /// The configured download root is ambiguous.
+    #[error("download path must not be empty")]
+    EmptyPath,
+}
+
 fn deserialize_positive_usize<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -66,6 +85,18 @@ where
     (value > 0)
         .then_some(value)
         .ok_or_else(|| serde::de::Error::custom("value must be greater than zero"))
+}
+
+fn deserialize_non_empty_path<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let path = Option::<String>::deserialize(deserializer)?;
+    path.map_or(Ok(None), |path| {
+        (!path.is_empty())
+            .then_some(Some(path))
+            .ok_or_else(|| serde::de::Error::custom("download path must not be empty"))
+    })
 }
 
 impl Default for DownloadConfig {
@@ -86,6 +117,24 @@ impl DownloadConfig {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Validates values that would otherwise make download execution
+    /// ambiguous or unable to make progress.
+    pub fn validate(&self) -> Result<(), DownloadConfigError> {
+        for (field, value) in [
+            ("chunks_per_file", self.chunks_per_file),
+            ("mega_chunks_per_request", self.mega_chunks_per_request),
+            ("concurrent_files", self.concurrent_files),
+        ] {
+            if value == 0 {
+                return Err(DownloadConfigError::NonPositive { field });
+            }
+        }
+        if self.path.as_deref().is_some_and(str::is_empty) {
+            return Err(DownloadConfigError::EmptyPath);
+        }
+        Ok(())
     }
 
     /// Sets the number of chunks per file.
@@ -130,15 +179,15 @@ mod tests {
     use proptest::{option, prelude::*, string::string_regex};
 
     fn optional_path() -> impl Strategy<Value = Option<String>> {
-        option::of(string_regex("[A-Za-z0-9_./-]{0,32}").expect("valid path regex"))
+        option::of(string_regex("[A-Za-z0-9_./-]{1,32}").expect("valid path regex"))
     }
 
     fn download_config_strategy() -> impl Strategy<Value = DownloadConfig> {
         (
             optional_path(),
-            any::<u16>(),
-            any::<u16>(),
-            any::<u16>(),
+            1..=u16::MAX,
+            1..=u16::MAX,
+            1..=u16::MAX,
             any::<bool>(),
             any::<bool>(),
         )
@@ -169,6 +218,37 @@ mod tests {
         assert_eq!(config.concurrent_files, 4);
         assert!(!config.force_overwrite);
         assert!(!config.cleanup_on_error);
+    }
+
+    #[test]
+    fn validation_rejects_zero_chunk_and_concurrency_limits() {
+        for (field, config) in [
+            (
+                "chunks_per_file",
+                DownloadConfig::default().with_chunks_per_file(0),
+            ),
+            (
+                "mega_chunks_per_request",
+                DownloadConfig::default().with_mega_chunks_per_request(0),
+            ),
+            (
+                "concurrent_files",
+                DownloadConfig::default().with_concurrent_files(0),
+            ),
+        ] {
+            let error = config.validate().expect_err("zero limit should be invalid");
+            assert_eq!(error, DownloadConfigError::NonPositive { field });
+        }
+    }
+
+    #[test]
+    fn validation_rejects_an_empty_download_root() {
+        let config = DownloadConfig {
+            path: Some(String::new()),
+            ..DownloadConfig::default()
+        };
+
+        assert_eq!(config.validate(), Err(DownloadConfigError::EmptyPath));
     }
 
     #[test]
@@ -341,6 +421,79 @@ impl ServiceCredentials {
 }
 
 /// API server bind configuration.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ApiKey(String);
+
+impl ApiKey {
+    /// Constructs an API key, rejecting values that cannot authenticate a request.
+    pub fn new(value: impl Into<String>) -> Result<Self, ApiKeyError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(ApiKeyError::Empty);
+        }
+        Ok(Self(value))
+    }
+
+    /// Exposes the key at a protocol boundary that must send it to a peer.
+    #[must_use]
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("ApiKey")
+            .field(&"<redacted>")
+            .finish()
+    }
+}
+
+impl<'de> Deserialize<'de> for ApiKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+impl TryFrom<String> for ApiKey {
+    type Error = ApiKeyError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for ApiKey {
+    type Error = ApiKeyError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ApiKeyError {
+    #[error("API key must not be empty")]
+    Empty,
+}
+
+fn deserialize_optional_api_key<'de, D>(deserializer: D) -> Result<Option<ApiKey>, D::Error>
+where
+    D: de::Deserializer<'de>,
+{
+    match Option::<String>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(value) if value.trim().is_empty() => Ok(None),
+        Some(value) => ApiKey::new(value).map(Some).map_err(de::Error::custom),
+    }
+}
+
+/// API server bind configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiConfig {
     #[serde(default = "default_api_host")]
@@ -348,8 +501,8 @@ pub struct ApiConfig {
     #[serde(default = "default_api_port")]
     pub port: u16,
     /// Optional API key for authenticating API and remote-TUI requests.
-    #[serde(default)]
-    pub api_key: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_api_key")]
+    pub api_key: Option<ApiKey>,
 }
 
 impl Default for ApiConfig {
@@ -603,6 +756,36 @@ fn path_io_error(action: &str, path: &Path, error: std::io::Error) -> std::io::E
 mod service_config_tests {
     use super::*;
     use proptest::{prelude::*, string::string_regex};
+
+    #[test]
+    fn api_key_rejects_empty_values_and_redacts_debug() {
+        assert!(ApiKey::new("").is_err());
+        assert!(ApiKey::new("   ").is_err());
+        assert!(toml::from_str::<ApiKey>(r#""""#).is_err());
+
+        let key = ApiKey::new("secret").expect("test API key should be valid");
+        let debug = format!("{key:?}");
+        assert!(debug.contains("redacted"));
+        assert!(!debug.contains("secret"));
+        assert_eq!(key.expose_secret(), "secret");
+    }
+
+    #[test]
+    fn empty_legacy_api_key_loads_as_unconfigured() {
+        let config: ServiceConfig = toml::from_str(
+            r#"
+                [credentials]
+                email = ""
+                password = ""
+
+                [api]
+                api_key = ""
+            "#,
+        )
+        .expect("legacy empty API key should remain readable");
+
+        assert!(config.api.api_key.is_none());
+    }
 
     fn credential_field() -> impl Strategy<Value = String> {
         string_regex("[A-Za-z0-9_.:@+/-]{0,32}").expect("valid credential regex")

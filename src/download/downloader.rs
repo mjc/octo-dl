@@ -8,6 +8,7 @@ use crate::fs::{FileSystem, TokioFileSystem};
 use super::callbacks::DownloadProgress;
 use super::collect::{CollectedFiles, collect_files_with_downloader};
 use super::inspect::{InspectedLocalFile, inspect_local_file as inspect_local_file_with_fs};
+use super::path::{DownloadRoot, RelativeOutputPath};
 use super::sidecar;
 
 /// Fetches public-link metadata with a fresh anonymous MEGA client.
@@ -55,6 +56,23 @@ impl Downloader<TokioFileSystem> {
 }
 
 impl<F: FileSystem> Downloader<F> {
+    pub(super) fn validate_config(&self) -> Result<()> {
+        self.config.validate().map_err(Error::from)
+    }
+
+    /// Validates a configured relative output path without allowing it to
+    /// escape the configured download root.
+    pub(super) fn validate_output_path(&self, path: &str) -> Result<()> {
+        let Some(root) = self.config.path.as_deref() else {
+            return Ok(());
+        };
+        let root = DownloadRoot::new(root).map_err(|message| Error::Download(message.into()))?;
+        let output =
+            RelativeOutputPath::new(path).map_err(|message| Error::Download(message.into()))?;
+        let _ = root.resolve(&output);
+        Ok(())
+    }
+
     /// Creates a new downloader with a custom file system implementation.
     #[must_use]
     pub const fn with_fs(client: mega::Client, config: DownloadConfig, fs: F) -> Self {

@@ -33,6 +33,8 @@ impl<F: FileSystem> Downloader<F> {
         path: &str,
         progress: Option<&dyn DownloadProgress>,
     ) -> Result<ResumeReverify> {
+        self.validate_config()?;
+        self.validate_output_path(path)?;
         let part_path = part_path(path);
         let sidecar_path = sidecar_path(path);
         let expected_condensed_mac = expected_mac(node)?;
