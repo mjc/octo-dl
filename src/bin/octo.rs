@@ -297,7 +297,7 @@ fn parse_runtime_options(args: &[String]) -> Result<RuntimeOptions, String> {
                 let Some(value) = args.get(i) else {
                     return Err("--host requires a value".to_string());
                 };
-                options.host = value.clone();
+                options.host.clone_from(value);
                 options.host_explicit = true;
             }
             "--config" => {
@@ -402,6 +402,29 @@ fn native_tui_log_path() -> PathBuf {
     path
 }
 
+fn handle_help(args: &[String], ui: Option<UiMode>) {
+    if !help_requested(args) {
+        return;
+    }
+
+    match ui {
+        Some(UiMode::Tui) => {
+            print_tui_usage();
+            std::process::exit(0);
+        }
+        Some(UiMode::Headless) => {
+            print_headless_usage();
+            std::process::exit(0);
+        }
+        None => {
+            if args.iter().all(|arg| arg == "-h" || arg == "--help") {
+                print_usage();
+                std::process::exit(0);
+            }
+        }
+    }
+}
+
 #[cfg(all(feature = "tui", test))]
 fn load_attach_config(options: &RuntimeOptions) -> io::Result<octo_dl::tui::AttachConfig> {
     load_attach_config_values(options.config_path.as_deref(), options.api_key.clone())
@@ -430,24 +453,7 @@ async fn main() -> octo_dl::Result<()> {
     });
     init_logger(&options);
 
-    if help_requested(&args) {
-        match options.ui {
-            Some(UiMode::Tui) => {
-                print_tui_usage();
-                std::process::exit(0);
-            }
-            Some(UiMode::Headless) => {
-                print_headless_usage();
-                std::process::exit(0);
-            }
-            None => {
-                if args.iter().all(|arg| arg == "-h" || arg == "--help") {
-                    print_usage();
-                    std::process::exit(0);
-                }
-            }
-        }
-    }
+    handle_help(&args, options.ui);
 
     let plan = startup_plan(options.clone()).unwrap_or_else(|error| {
         eprintln!("Error: {error}");

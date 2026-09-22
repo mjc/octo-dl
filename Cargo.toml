@@ -5,6 +5,9 @@ edition = "2024"
 default-run = "octo"
 publish = false
 
+[lints.clippy]
+pedantic = "warn"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
