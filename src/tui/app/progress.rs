@@ -1,3 +1,5 @@
+#![allow(clippy::cast_precision_loss)]
+
 use std::time::{Duration, Instant};
 
 use crate::core::{FileAccounting, FileLifecycle, PackageId};
@@ -8,7 +10,7 @@ const MIN_RATE_SAMPLE_SPAN: Duration = Duration::from_secs(1);
 const THROUGHPUT_DECAY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct FileUiState {
+pub struct FileUiState {
     pub speed: u64,
     pub rate: TransferRate,
     pub sort_key: Option<crate::tui::visible::CachedFileSortKey>,
@@ -16,7 +18,7 @@ pub(crate) struct FileUiState {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct TransferRate {
+pub struct TransferRate {
     start_time: Instant,
     last_time: Instant,
     last_total: u64,
@@ -38,7 +40,7 @@ impl Default for TransferRate {
 }
 
 impl TransferRate {
-    pub(crate) fn reset(&mut self, total: u64, now: Instant) {
+    pub(crate) const fn reset(&mut self, total: u64, now: Instant) {
         self.start_time = now;
         self.last_time = now;
         self.last_total = total;

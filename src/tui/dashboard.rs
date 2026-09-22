@@ -1,3 +1,12 @@
+#![allow(
+    clippy::debug_assert_with_mut_call,
+    clippy::needless_lifetimes,
+    clippy::option_if_let_else,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names,
+    clippy::too_many_lines
+)]
+
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -29,17 +38,17 @@ impl Serialize for BinaryDashboardPackagesRef<'_> {
         S: serde::Serializer,
     {
         let app = self.0;
-        if !app.core_state.packages.is_empty() {
+        if app.core_state.packages.is_empty() {
+            let mut seq = serializer.serialize_seq(Some(app.files.len()))?;
+            for file in &app.files {
+                seq.serialize_element(&BinaryLegacyPackageRowRef { app, file })?;
+            }
+            seq.end()
+        } else {
             let package_rows = binary_core_package_rows(app);
             let mut seq = serializer.serialize_seq(Some(package_rows.len()))?;
             for row in package_rows {
                 seq.serialize_element(&row)?;
-            }
-            seq.end()
-        } else {
-            let mut seq = serializer.serialize_seq(Some(app.files.len()))?;
-            for file in &app.files {
-                seq.serialize_element(&BinaryLegacyPackageRowRef { app, file })?;
             }
             seq.end()
         }
@@ -568,14 +577,14 @@ impl From<DashboardFileRow> for BinaryDashboardFileRow {
     }
 }
 
-pub(crate) fn dashboard_state_from_postcard(
+pub fn dashboard_state_from_postcard(
     bytes: &[u8],
 ) -> Result<DownloadDashboardState, postcard::Error> {
     postcard::from_bytes::<BinaryDownloadDashboardState>(bytes).map(Into::into)
 }
 
 #[cfg(test)]
-pub(crate) fn dashboard_state_to_postcard(
+pub fn dashboard_state_to_postcard(
     state: DownloadDashboardState,
 ) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_stdvec(&BinaryDownloadDashboardState::from(state))
@@ -587,7 +596,7 @@ pub struct DashboardChrome<'a> {
     pub url_input_active: bool,
 }
 
-impl<'a> DashboardChrome<'a> {
+impl DashboardChrome<'_> {
     #[must_use]
     pub const fn read_only() -> Self {
         Self {
@@ -628,7 +637,7 @@ impl AttachedDashboard {
     }
 }
 
-pub fn clamp_selection(list_state: &mut ListState, row_count: usize) {
+pub const fn clamp_selection(list_state: &mut ListState, row_count: usize) {
     if row_count == 0 {
         list_state.select(None);
     } else if list_state.selected().is_none() {
@@ -876,7 +885,13 @@ impl Serialize for DashboardPackagesRef<'_> {
         S: serde::Serializer,
     {
         let app = self.0;
-        if !app.core_state.packages.is_empty() {
+        if app.core_state.packages.is_empty() {
+            let mut seq = serializer.serialize_seq(Some(app.files.len()))?;
+            for file in &app.files {
+                seq.serialize_element(&LegacyPackageRowRef { app, file })?;
+            }
+            seq.end()
+        } else {
             let package_rows = app
                 .core_state
                 .packages
@@ -893,12 +908,6 @@ impl Serialize for DashboardPackagesRef<'_> {
                     package,
                     stats,
                 })?;
-            }
-            seq.end()
-        } else {
-            let mut seq = serializer.serialize_seq(Some(app.files.len()))?;
-            for file in &app.files {
-                seq.serialize_element(&LegacyPackageRowRef { app, file })?;
             }
             seq.end()
         }
@@ -2228,7 +2237,7 @@ mod tests {
             package: ResolvedPackage {
                 id: package_id("pkg", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
-                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string()),
                 display_name: "Package".to_string(),
                 files: vec![ResolvedFile {
                     file_id: "file.bin".to_string().into(),
@@ -2265,7 +2274,7 @@ mod tests {
             package: ResolvedPackage {
                 id: package_id("pkg", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
-                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string()),
                 display_name: "Package".to_string(),
                 files: vec![ResolvedFile {
                     file_id: "file.bin".to_string().into(),
@@ -2366,9 +2375,7 @@ mod tests {
             package_id,
             crate::core::PackageState {
                 id: package_id,
-                key: crate::core::PackageKey::new(
-                    "https://mega.nz/folder/failed".to_string().clone(),
-                ),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/failed".to_string()),
                 display_name: "Failed".to_string(),
                 progress: crate::core::model::PackageProgressState::default(),
                 error: Some("boom".to_string()),

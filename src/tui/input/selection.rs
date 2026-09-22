@@ -8,25 +8,24 @@ pub(super) fn retry_selected(app: &mut App) {
         Some(TuiRow::Package(package_id)) => {
             app.handle_ui_action(UiAction::RetryPackage(package_id));
         }
-        Some(TuiRow::File { file_id, .. }) => {
+        Some(TuiRow::File { file_id, .. })
             if app
                 .files
                 .iter()
                 .find(|file| file.id == file_id)
-                .is_some_and(|file| matches!(file.status, FileStatus::Error(_)))
-            {
-                match app.retry_target(&file_id) {
-                    Some(super::super::app::RetryTarget::Url(url)) => {
-                        app.handle_ui_action(UiAction::RetryUrl(url));
-                    }
-                    Some(super::super::app::RetryTarget::File(file_id)) => {
-                        app.handle_ui_action(UiAction::RetryFile(file_id));
-                    }
-                    None => {}
+                .is_some_and(|file| matches!(file.status, FileStatus::Error(_))) =>
+        {
+            match app.retry_target(&file_id) {
+                Some(super::super::app::RetryTarget::Url(url)) => {
+                    app.handle_ui_action(UiAction::RetryUrl(url));
                 }
+                Some(super::super::app::RetryTarget::File(file_id)) => {
+                    app.handle_ui_action(UiAction::RetryFile(file_id));
+                }
+                None => {}
             }
         }
-        None => {}
+        Some(TuiRow::File { .. }) | None => {}
     }
 }
 
@@ -143,16 +142,7 @@ pub(super) fn move_selected_queue_item(app: &mut App, delta: isize) {
         Some(TuiRow::Package(package_id)) => {
             app.handle_ui_action(UiAction::MovePackage { package_id, delta });
         }
-        Some(TuiRow::File {
-            package_id: Some(_),
-            file_id,
-        }) => {
-            app.handle_ui_action(UiAction::MoveFile { file_id, delta });
-        }
-        Some(TuiRow::File {
-            package_id: None,
-            file_id,
-        }) => {
+        Some(TuiRow::File { file_id, .. }) => {
             app.handle_ui_action(UiAction::MoveFile { file_id, delta });
         }
         _ => {}

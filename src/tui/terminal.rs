@@ -75,7 +75,7 @@ async fn drain_late_shutdown_tokens(app: &mut App) {
         }
         tokio::select! {
             _ = poll.tick() => {}
-            _ = tokio::time::sleep_until(deadline) => break,
+            () = tokio::time::sleep_until(deadline) => break,
         }
     }
     app.drain_token_messages();
@@ -106,6 +106,7 @@ pub async fn wait_for_shutdown_signal() {
     }
 }
 
+#[allow(clippy::future_not_send)]
 pub async fn run_interactive_tui(
     app: &mut App,
     download_rx: &mut mpsc::Receiver<DownloadEvent>,
@@ -146,7 +147,6 @@ async fn run_interactive_tui_loop(
     let mut sys = System::new();
     let pid = sysinfo::get_current_pid().ok();
     let mut needs_draw = true;
-    let mut download_state_dirty = false;
     let mut dashboard_dirty = state_sync_enabled;
     let mut auto_login_after_first_draw = true;
     let mut shutting_down = false;
@@ -182,7 +182,6 @@ async fn run_interactive_tui_loop(
                 Some(event) = download_rx.recv() => {
                     app.handle_download_event(event);
                     let _ = app.drain_download_events(download_rx);
-                    download_state_dirty = true;
                     dashboard_dirty = true;
                 }
                 Some(action) = action_rx.recv() => {
@@ -205,7 +204,6 @@ async fn run_interactive_tui_loop(
                         publish_active_transfer_ticks,
                     );
                     needs_draw |= should_draw_after_tick(app, dashboard_dirty);
-                    download_state_dirty = false;
                     publish_dashboard_now |= dashboard_dirty;
                 }
             }
@@ -221,9 +219,6 @@ async fn run_interactive_tui_loop(
                 break;
             }
 
-            if download_state_dirty {
-                continue;
-            }
         }
         Ok::<(), io::Error>(())
     }
@@ -430,8 +425,7 @@ mod tests {
         );
 
         let token = tokio_util::sync::CancellationToken::new();
-        app.cancellation_tokens
-            .insert(file_id.clone(), token.clone());
+        app.cancellation_tokens.insert(file_id, token.clone());
         app.should_quit = true;
         let mut shutting_down = false;
 
@@ -481,7 +475,7 @@ mod tests {
             size: 128,
         });
         app.handle_file_progress_event(
-            file_id.clone(),
+            file_id,
             crate::core::ProgressDelta {
                 total_bytes_delta: 64,
                 network_bytes_delta: 64,
@@ -619,8 +613,7 @@ mod tests {
             size: 128,
         });
         let token = tokio_util::sync::CancellationToken::new();
-        app.cancellation_tokens
-            .insert(file_id.clone(), token.clone());
+        app.cancellation_tokens.insert(file_id, token.clone());
 
         app.pause_downloads();
         assert!(token.is_cancelled());

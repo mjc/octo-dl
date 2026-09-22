@@ -1,3 +1,5 @@
+#![allow(clippy::default_trait_access)]
+
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -21,22 +23,22 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) fn reset_visible_rows_for_call_count() {
+pub fn reset_visible_rows_for_call_count() {
     VISIBLE_ROWS_FOR_CALLS.with(|count| count.set(0));
 }
 
 #[cfg(test)]
-pub(crate) fn visible_rows_for_call_count() -> usize {
+pub fn visible_rows_for_call_count() -> usize {
     VISIBLE_ROWS_FOR_CALLS.with(Cell::get)
 }
 
 #[cfg(test)]
-pub(crate) fn reset_build_file_sort_key_call_count() {
+pub fn reset_build_file_sort_key_call_count() {
     BUILD_FILE_SORT_KEY_CALLS.with(|count| count.set(0));
 }
 
 #[cfg(test)]
-pub(crate) fn build_file_sort_key_call_count() -> usize {
+pub fn build_file_sort_key_call_count() -> usize {
     BUILD_FILE_SORT_KEY_CALLS.with(Cell::get)
 }
 
@@ -79,7 +81,7 @@ fn package_projections<'a>(
     projections
 }
 
-fn file_status_rank(status: &FileStatus) -> u8 {
+const fn file_status_rank(status: &FileStatus) -> u8 {
     match status {
         FileStatus::Error(_) => 0,
         FileStatus::Downloading => 1,
@@ -170,7 +172,7 @@ fn cmp_natural_sort_keys(left: &NaturalSortKey, right: &NaturalSortKey) -> Order
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CachedFileSortKey {
+pub struct CachedFileSortKey {
     pub(super) package_order: usize,
     pub(super) package_display_name: String,
     pub(super) status_rank: u8,
@@ -185,7 +187,7 @@ pub(super) fn cached_file_sort_key_matches(
     cached.package_order == package_order && cached.package_display_name == package_display_name
 }
 
-pub(crate) fn build_file_sort_key(
+pub fn build_file_sort_key(
     name: &str,
     status: &FileStatus,
     package_order: usize,
@@ -202,6 +204,7 @@ pub(crate) fn build_file_sort_key(
 }
 
 #[cfg(test)]
+#[allow(clippy::large_enum_variant)]
 enum FileSortProjection<'a> {
     Borrowed(&'a CachedFileSortKey),
     Owned(CachedFileSortKey),
@@ -411,7 +414,7 @@ fn package_percent(package: &PackageProjection<'_>) -> u64 {
     }
 }
 
-fn package_status_rank(status: PackageStatus) -> u8 {
+const fn package_status_rank(status: PackageStatus) -> u8 {
     match status {
         PackageStatus::Downloading => 0,
         PackageStatus::Failed => 1,
@@ -475,7 +478,7 @@ pub(super) fn visible_rows_for(
             .collect::<FxHashMap<_, _>>()
     });
 
-    let mut package_ids: Vec<_> = core_state.packages.keys().cloned().collect();
+    let mut package_ids: Vec<_> = core_state.packages.keys().copied().collect();
     package_ids.sort_by(|left, right| {
         let left_projection = &package_projections[left];
         let right_projection = &package_projections[right];
@@ -487,7 +490,7 @@ pub(super) fn visible_rows_for(
                 .cmp(&package_status_rank(right_package.status())),
             SortKey::Name => left_projection
                 .display_name
-                .cmp(&right_projection.display_name),
+                .cmp(right_projection.display_name),
             SortKey::Percent => package_percents
                 .as_ref()
                 .map_or(Ordering::Equal, |percents| {
@@ -502,7 +505,7 @@ pub(super) fn visible_rows_for(
                 .then_with(|| {
                     left_projection
                         .display_name
-                        .cmp(&right_projection.display_name)
+                        .cmp(right_projection.display_name)
                 })
                 .then_with(|| left.cmp(right))
         };

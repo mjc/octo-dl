@@ -73,7 +73,7 @@ use crate::ServiceConfig;
 ///
 /// # Errors
 /// Returns an error if terminal setup fails or TUI operations encounter I/O errors.
-#[allow(clippy::too_many_lines, clippy::unused_async)]
+#[allow(clippy::future_not_send, clippy::too_many_lines, clippy::unused_async)]
 pub async fn run(
     api_host: Option<Option<String>>,
     config_path: Option<&Path>,
@@ -139,6 +139,7 @@ pub async fn run(
 /// # Errors
 /// Returns an error if configuration loading fails, server startup fails, or I/O operations fail.
 ///
+#[allow(clippy::future_not_send)]
 pub async fn run_api_only(
     explicit_api_host: Option<Option<String>>,
     config_path: Option<&Path>,
@@ -203,12 +204,18 @@ pub async fn run_api_only(
 /// # Errors
 ///
 /// Returns an error if terminal setup or remote communication fails.
+#[allow(clippy::future_not_send)]
 pub async fn run_attach(addr: SocketAddr, config: AttachConfig) -> io::Result<()> {
     remote::run_attached_dashboard(addr, config).await
 }
 
 /// Resolve the credentials used by an attached TUI without creating or
 /// modifying the service configuration.
+///
+/// # Errors
+///
+/// Returns an error when a configured credential source cannot be read or
+/// contains an invalid API key.
 pub fn attach_api_key(config_path: Option<&Path>) -> io::Result<Option<ApiKey>> {
     if let Some(key) = std::env::var_os("OCTO_API_KEY").and_then(|value| {
         let value = value.to_string_lossy().trim().to_string();
@@ -236,6 +243,9 @@ pub fn attach_api_key(config_path: Option<&Path>) -> io::Result<Option<ApiKey>> 
     })
 }
 
+/// # Errors
+///
+/// Returns an error when the value is not a loopback socket address.
 pub fn parse_loopback_addr(value: &str) -> Result<SocketAddr, String> {
     remote::parse_loopback_addr(value)
 }

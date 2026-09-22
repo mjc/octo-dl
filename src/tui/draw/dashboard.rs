@@ -663,7 +663,10 @@ fn is_processing_status(status: &str) -> bool {
     status.starts_with("Processing ")
 }
 
-pub(super) fn package_status_style(status: PackageStatus, percent: u64) -> (&'static str, Color) {
+pub(super) const fn package_status_style(
+    status: PackageStatus,
+    percent: u64,
+) -> (&'static str, Color) {
     match status {
         PackageStatus::Downloading => (package_progress_icon(percent), Color::Yellow),
         PackageStatus::Failed => ("\u{2717}", Color::Red),
@@ -673,7 +676,7 @@ pub(super) fn package_status_style(status: PackageStatus, percent: u64) -> (&'st
     }
 }
 
-fn package_progress_icon(percent: u64) -> &'static str {
+const fn package_progress_icon(percent: u64) -> &'static str {
     match percent {
         0 => "\u{25cb}",
         1..=24 => "\u{25d4}",
@@ -1008,7 +1011,7 @@ mod tests {
         let rendered = buffer
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("verify"));

@@ -42,9 +42,9 @@ pub fn bookmarklet_html(
     );
     html.push_str(&fallback_host);
     html.push_str(
-        r#"</code></p>
+        r"</code></p>
 </body>
-</html>"#,
+</html>",
     );
     html
 }
@@ -189,8 +189,8 @@ mod tests {
             let html = bookmarklet_html(&fallback_origin, &fallback_host, &api_key_header);
             let escaped_href = html_escape_attr(&bookmarklet_href(&fallback_origin, &api_key_header));
             let escaped_host = html_escape_text(&fallback_host);
-            let expected_href = format!(r#"href="{}""#, escaped_href);
-            let expected_host = format!("<p>Configured to use <code>{}</code></p>", escaped_host);
+            let expected_href = format!(r#"href="{escaped_href}""#);
+            let expected_host = format!("<p>Configured to use <code>{escaped_host}</code></p>");
 
             prop_assert!(html.contains(&expected_href));
             prop_assert!(html.contains(&expected_host));

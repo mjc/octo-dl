@@ -47,7 +47,7 @@ pub(super) fn resolve_action_target(
     match (package_matches.as_slice(), file_matches.as_slice()) {
         ([package], []) => PackageId::from_str(&package.id)
             .map(ActionTarget::Package)
-            .map_err(|_| invalid_package_id_response()),
+            .map_err(|_| Box::new(invalid_package_id_response())),
         ([], [file]) => Ok(ActionTarget::File(file.id.clone().into())),
         ([], []) => Err(Box::new(
             (
@@ -70,14 +70,12 @@ pub(super) fn resolve_action_target(
     }
 }
 
-fn invalid_package_id_response() -> Box<axum::response::Response> {
-    Box::new(
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({"error": "invalid package id in app state"})),
-        )
-            .into_response(),
+fn invalid_package_id_response() -> axum::response::Response {
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(serde_json::json!({"error": "invalid package id in app state"})),
     )
+        .into_response()
 }
 
 fn snapshot_state(

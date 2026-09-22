@@ -36,7 +36,7 @@ const DASHBOARD_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const DASHBOARD_READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
 enum DashboardReaderMessage {
-    State(DownloadDashboardState),
+    State(Box<DownloadDashboardState>),
     Status(String),
     Fatal {
         kind: io::ErrorKind,
@@ -51,12 +51,11 @@ pub struct AttachConfig {
 
 impl AttachConfig {
     #[must_use]
-    pub fn from_api_key(api_key: Option<ApiKey>) -> Self {
+    pub const fn from_api_key(api_key: Option<ApiKey>) -> Self {
         Self { api_key }
     }
 }
 
-#[must_use]
 pub fn parse_loopback_addr(value: &str) -> Result<SocketAddr, String> {
     let addr = value
         .parse::<SocketAddr>()
@@ -74,6 +73,7 @@ pub fn socket_host(addr: SocketAddr) -> String {
     addr.ip().to_string()
 }
 
+#[allow(clippy::future_not_send)]
 pub async fn run_attached_dashboard(addr: SocketAddr, config: AttachConfig) -> io::Result<()> {
     let panic_hook_guard = TerminalPanicHookGuard::install();
     let guard = TerminalGuard::new()?;
@@ -98,30 +98,7 @@ async fn run_attached_dashboard_loop(addr: SocketAddr, config: AttachConfig) -> 
         let mut dashboard_error = None;
         let shutdown = wait_for_shutdown_signal();
         tokio::pin!(shutdown);
-        terminal.draw(|frame| {
-            if let Some(state) = &app.state {
-                draw_dashboard(
-                    frame,
-                    state,
-                    &DashboardChrome::read_only(),
-                    &mut app.list_state,
-                );
-            } else {
-                let mut state = DownloadDashboardState::empty(
-                    DashboardUiMode::Attached,
-                    true,
-                    &app.status,
-                    addr.port(),
-                );
-                state.status = app.status.clone();
-                draw_dashboard(
-                    frame,
-                    &state,
-                    &DashboardChrome::read_only(),
-                    &mut app.list_state,
-                );
-            }
-        })?;
+        draw_attached_dashboard(&mut terminal, &mut app, addr)?;
 
         loop {
             tokio::select! {
@@ -139,8 +116,9 @@ async fn run_attached_dashboard_loop(addr: SocketAddr, config: AttachConfig) -> 
                 }
                 message = dashboard_reader.receiver.recv() => match message {
                     Some(DashboardReaderMessage::Fatal { kind, message }) => {
-                        app.status = message.clone();
-                        dashboard_error = Some(io::Error::new(kind, message));
+                        let error = io::Error::new(kind, message);
+                        app.status = error.to_string();
+                        dashboard_error = Some(error);
                         app.should_quit = true;
                     }
                     Some(message) => handle_dashboard_reader_message(&mut app, message),
@@ -160,30 +138,7 @@ async fn run_attached_dashboard_loop(addr: SocketAddr, config: AttachConfig) -> 
                 break;
             }
 
-            terminal.draw(|frame| {
-                if let Some(state) = &app.state {
-                    draw_dashboard(
-                        frame,
-                        state,
-                        &DashboardChrome::read_only(),
-                        &mut app.list_state,
-                    );
-                } else {
-                    let mut state = DownloadDashboardState::empty(
-                        DashboardUiMode::Attached,
-                        true,
-                        &app.status,
-                        addr.port(),
-                    );
-                    state.status = app.status.clone();
-                    draw_dashboard(
-                        frame,
-                        &state,
-                        &DashboardChrome::read_only(),
-                        &mut app.list_state,
-                    );
-                }
-            })?;
+            draw_attached_dashboard(&mut terminal, &mut app, addr)?;
         }
 
         terminal.show_cursor()?;
@@ -199,6 +154,39 @@ async fn run_attached_dashboard_loop(addr: SocketAddr, config: AttachConfig) -> 
             "{loop_error}; dashboard reader cleanup failed: {reader_error}"
         ))),
     }
+}
+
+fn draw_attached_dashboard(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut AttachedDashboard,
+    addr: SocketAddr,
+) -> io::Result<()> {
+    terminal
+        .draw(|frame| {
+            if let Some(state) = &app.state {
+                draw_dashboard(
+                    frame,
+                    state,
+                    &DashboardChrome::read_only(),
+                    &mut app.list_state,
+                );
+            } else {
+                let mut state = DownloadDashboardState::empty(
+                    DashboardUiMode::Attached,
+                    true,
+                    &app.status,
+                    addr.port(),
+                );
+                state.status.clone_from(&app.status);
+                draw_dashboard(
+                    frame,
+                    &state,
+                    &DashboardChrome::read_only(),
+                    &mut app.list_state,
+                );
+            }
+        })
+        .map(|_| ())
 }
 
 struct DashboardReader {
@@ -266,8 +254,8 @@ fn spawn_dashboard_reader(addr: SocketAddr, config: AttachConfig) -> DashboardRe
                 }
             }
             tokio::select! {
-                _ = task_cancel.cancelled() => break,
-                _ = tokio::time::sleep(DASHBOARD_RECONNECT_DELAY) => {}
+                () = task_cancel.cancelled() => break,
+                () = tokio::time::sleep(DASHBOARD_RECONNECT_DELAY) => {}
             }
         }
     });
@@ -287,15 +275,15 @@ async fn dashboard_reader_session(
 ) -> io::Result<()> {
     let request = dashboard_request(ws_url, config)?;
     let (mut socket, _) = tokio::select! {
-        _ = cancel.cancelled() => return Ok(()),
+        () = cancel.cancelled() => return Ok(()),
         result = connect_async(request) => result
-            .map_err(|error| dashboard_connection_error(error, config.api_key.is_some()))?,
+            .map_err(|error| dashboard_connection_error(&error, config.api_key.is_some()))?,
     };
     let _ = tx.send(DashboardReaderMessage::Status("Connected".to_string()));
 
     loop {
         let Some(message) = (tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
+            () = cancel.cancelled() => return Ok(()),
             message = socket.next() => message,
         }) else {
             break;
@@ -305,7 +293,7 @@ async fn dashboard_reader_session(
             continue;
         };
         state.ui_mode = DashboardUiMode::Attached;
-        tx.send(DashboardReaderMessage::State(state))
+        tx.send(DashboardReaderMessage::State(Box::new(state)))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "dashboard receiver closed"))?;
     }
     Err(io::Error::new(
@@ -323,7 +311,7 @@ fn handle_attached_input_result(
 ) -> io::Result<()> {
     match result {
         Ok(event) => {
-            handle_attached_input(app, event, addr, api_key, status_tx);
+            handle_attached_input(app, &event, addr, api_key, status_tx);
             Ok(())
         }
         Err(error) => {
@@ -351,7 +339,7 @@ fn dashboard_request(ws_url: &str, config: &AttachConfig) -> io::Result<Request<
     Ok(request)
 }
 
-fn dashboard_connection_error(error: WebSocketError, api_key_supplied: bool) -> io::Error {
+fn dashboard_connection_error(error: &WebSocketError, api_key_supplied: bool) -> io::Error {
     if let WebSocketError::Http(response) = &error
         && matches!(response.status().as_u16(), 401 | 403)
     {
@@ -384,13 +372,13 @@ fn dashboard_state_from_message(message: Message) -> io::Result<Option<DownloadD
 fn handle_dashboard_reader_message(app: &mut AttachedDashboard, message: DashboardReaderMessage) {
     match message {
         DashboardReaderMessage::State(state) => {
-            app.replace_state(state);
+            app.replace_state(*state);
             app.status.clear();
         }
         DashboardReaderMessage::Status(status) => {
             app.status = status;
             if let Some(state) = app.state.as_mut() {
-                state.status = app.status.clone();
+                state.status.clone_from(&app.status);
                 state.ui_mode = DashboardUiMode::Attached;
             }
         }
@@ -403,7 +391,7 @@ fn handle_dashboard_reader_message(app: &mut AttachedDashboard, message: Dashboa
 
 fn handle_attached_input(
     app: &mut AttachedDashboard,
-    event: Event,
+    event: &Event,
     addr: SocketAddr,
     api_key: Option<ApiKey>,
     status_tx: tokio::sync::mpsc::UnboundedSender<DashboardReaderMessage>,
@@ -414,7 +402,7 @@ fn handle_attached_input(
     else {
         return;
     };
-    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+    if modifiers.contains(KeyModifiers::CONTROL) && *code == KeyCode::Char('c') {
         app.should_quit = true;
         return;
     }

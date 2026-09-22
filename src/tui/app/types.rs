@@ -147,24 +147,24 @@ pub struct ConfigState {
 
 /// The point at which an accepted configuration update takes effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConfigActivation {
+pub enum ConfigActivation {
     /// The running downloader keeps its immutable startup configuration.
     NextRun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConfigPersistence {
+pub enum ConfigPersistence {
     SessionAndConfigFile,
     SessionOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ConfigUpdateRejection {
+pub enum ConfigUpdateRejection {
     ConfigFile(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ConfigUpdateOutcome {
+pub enum ConfigUpdateOutcome {
     Accepted {
         activation: ConfigActivation,
         persistence: ConfigPersistence,
@@ -259,7 +259,7 @@ pub struct FileEntry {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum TransientRow {
+pub enum TransientRow {
     PendingUrl { file: FileEntry, source_url: String },
     UrlError { file: FileEntry, source_url: String },
     UiError { file: FileEntry },
@@ -274,7 +274,7 @@ impl TransientRow {
         }
     }
 
-    pub(crate) fn file_mut(&mut self) -> &mut FileEntry {
+    pub(crate) const fn file_mut(&mut self) -> &mut FileEntry {
         match self {
             Self::PendingUrl { file, .. }
             | Self::UrlError { file, .. }
@@ -293,7 +293,7 @@ impl TransientRow {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct VisibleFileContext {
+pub struct VisibleFileContext {
     pub id: FileId,
     pub status: FileStatus,
     pub source_url: Option<String>,
@@ -362,7 +362,7 @@ pub struct SharedAppState {
     pub state_rx: watch::Receiver<bytes::Bytes>,
 }
 
-pub(crate) struct SharedStateChannels {
+pub struct SharedStateChannels {
     pub action_rx: mpsc::Receiver<UiAction>,
     pub state_tx: watch::Sender<bytes::Bytes>,
     pub shared_state: Option<SharedAppState>,

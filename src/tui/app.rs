@@ -1,5 +1,11 @@
 //! Application state model.
 
+#![allow(
+    clippy::option_option,
+    clippy::struct_excessive_bools,
+    clippy::collection_is_never_read
+)]
+
 #[path = "app/actions.rs"]
 mod actions;
 #[path = "app/bootstrap.rs"]
@@ -40,11 +46,11 @@ use crate::core::{
 };
 use crate::tui::dashboard::DashboardUiMode;
 
-pub(crate) use self::actions::RetryTarget;
+pub use self::actions::RetryTarget;
 use self::persistence::SessionPersistence;
-pub(crate) use self::progress::FileUiState;
+pub use self::progress::FileUiState;
 use self::progress::TransferRate;
-pub(crate) use self::types::{
+pub use self::types::{
     ConfigActivation, ConfigPersistence, ConfigUpdateOutcome, ConfigUpdateRejection,
     SharedStateChannels, TransientRow, VisibleFileContext,
 };
@@ -59,11 +65,11 @@ use super::event::{DownloadEvent, QueuedFile, TokenMessage};
 use super::session::SessionAdapter;
 use super::visible;
 
-pub(crate) type VisibleFilePositions = FxHashMap<FileId, usize>;
-pub(crate) type FileUiMap = FxHashMap<FileId, FileUiState>;
-pub(crate) type FileIdSet = FxHashSet<FileId>;
-pub(crate) type ExpandedPackages = FxHashSet<PackageId>;
-pub(crate) type FileIdMap<V> = FxHashMap<FileId, V>;
+pub type VisibleFilePositions = FxHashMap<FileId, usize>;
+pub type FileUiMap = FxHashMap<FileId, FileUiState>;
+pub type FileIdSet = FxHashSet<FileId>;
+pub type ExpandedPackages = FxHashSet<PackageId>;
+pub type FileIdMap<V> = FxHashMap<FileId, V>;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct VisibleRowsCacheKey {
@@ -537,7 +543,7 @@ impl App {
         self.borrowed_dashboard_json(ui_mode, read_only)
     }
 
-    pub(crate) fn mark_dashboard_dirty(&mut self) {
+    pub(crate) const fn mark_dashboard_dirty(&mut self) {
         self.dashboard_revision = self.dashboard_revision.wrapping_add(1);
     }
 
@@ -565,17 +571,17 @@ impl App {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum VerificationTarget {
+pub enum VerificationTarget {
     Resume,
     Completed,
 }
 
-pub(crate) enum VisibleRowsSnapshot<'a> {
+pub enum VisibleRowsSnapshot<'a> {
     Borrowed(&'a [visible::TuiRow]),
     Owned(Vec<visible::TuiRow>),
 }
 
-impl<'a> VisibleRowsSnapshot<'a> {
+impl VisibleRowsSnapshot<'_> {
     pub(crate) fn as_slice(&self) -> &[visible::TuiRow] {
         match self {
             Self::Borrowed(rows) => rows,

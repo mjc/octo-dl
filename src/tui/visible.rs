@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 mod rows;
 mod sync;
 
@@ -10,15 +12,15 @@ use crate::tui::app::{
     ExpandedPackages, FileEntry, FileUiMap, SortState, TransientRow, VisibleFilePositions,
 };
 
-pub(crate) use rows::CachedFileSortKey;
+pub use rows::CachedFileSortKey;
 #[cfg(test)]
-pub(crate) use rows::{
+pub use rows::{
     build_file_sort_key_call_count, reset_build_file_sort_key_call_count,
     reset_visible_rows_for_call_count, visible_rows_for_call_count,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TuiRow {
+pub enum TuiRow {
     Package(PackageId),
     File {
         package_id: Option<PackageId>,

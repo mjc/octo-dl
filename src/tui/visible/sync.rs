@@ -1,3 +1,13 @@
+#![allow(
+    clippy::assigning_clones,
+    clippy::debug_assert_with_mut_call,
+    clippy::needless_pass_by_ref_mut,
+    clippy::reserve_after_initialization,
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::unnecessary_wraps
+)]
+
 use indexmap::IndexMap;
 use ratatui::widgets::ListState;
 

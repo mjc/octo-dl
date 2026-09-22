@@ -41,7 +41,7 @@ use crate::config::ApiKey;
 pub const DEFAULT_API_PORT: u16 = 9723;
 const API_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) struct ApiServerHandle {
+pub(super) struct ApiServerHandle {
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<io::Result<()>>>,
 }
@@ -166,7 +166,7 @@ impl TargetAction {
 
 fn dispatch_target_action(
     state: &ApiState,
-    request: TargetRequest,
+    request: &TargetRequest,
     action: TargetAction,
 ) -> axum::response::Response {
     match resolve_action_target(state, request.id.as_deref(), request.name.as_deref()) {
@@ -312,7 +312,7 @@ async fn dashboard_socket(
                         let _ = socket.send(WsMessage::Close(frame)).await;
                         break;
                     }
-                    Some(Ok(WsMessage::Pong(_))) | Some(Ok(WsMessage::Text(_))) | Some(Ok(WsMessage::Binary(_))) => {}
+                    Some(Ok(WsMessage::Pong(_) | WsMessage::Text(_) | WsMessage::Binary(_))) => {}
                     Some(Err(_)) | None => break,
                 }
             }
@@ -366,7 +366,7 @@ async fn api_delete(
     if let Some(response) = require_api_key(&state, &headers) {
         return response;
     }
-    dispatch_target_action(&state, payload, TargetAction::Delete)
+    dispatch_target_action(&state, &payload, TargetAction::Delete)
 }
 
 /// POST /api/retry — retry a failed file.
@@ -378,7 +378,7 @@ async fn api_retry(
     if let Some(response) = require_api_key(&state, &headers) {
         return response;
     }
-    dispatch_target_action(&state, payload, TargetAction::Retry)
+    dispatch_target_action(&state, &payload, TargetAction::Retry)
 }
 
 /// POST /api/reset — explicitly reset a file or package for a fresh download.
@@ -391,7 +391,7 @@ async fn api_reset(
         return response;
     }
 
-    dispatch_target_action(&state, payload, TargetAction::Reset)
+    dispatch_target_action(&state, &payload, TargetAction::Reset)
 }
 
 /// POST /api/reverify — explicitly verify a file or package without resetting it.
@@ -404,7 +404,7 @@ async fn api_reverify(
         return response;
     }
 
-    dispatch_target_action(&state, payload, TargetAction::Reverify)
+    dispatch_target_action(&state, &payload, TargetAction::Reverify)
 }
 
 /// POST /api/config — update download configuration.
@@ -470,7 +470,7 @@ fn api_router(state: ApiState) -> Router {
 ///
 /// Binding is completed before this function returns, so callers can report
 /// address-in-use and other startup failures before entering their main loop.
-pub(crate) async fn start_api_server(
+pub(super) async fn start_api_server(
     tx: DownloadEventSender,
     host: &str,
     port: u16,

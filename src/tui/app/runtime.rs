@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_lines, clippy::useless_let_if_seq)]
+
 #[cfg(test)]
 use crate::tui::event::DownloadEventSender;
 use std::future::Future;
@@ -81,12 +83,7 @@ impl App {
             self.track_shutdown_pending_file(&id);
         }
         self.pause_downloads();
-        for (id, token) in self
-            .cancellation_tokens
-            .iter()
-            .map(|(id, token)| (id.clone(), token.clone()))
-            .collect::<Vec<_>>()
-        {
+        for (id, token) in self.cancellation_tokens.clone() {
             token.cancel();
             self.track_shutdown_pending_file(&id);
         }
@@ -629,7 +626,7 @@ impl App {
         publish_interval.tick().await;
 
         tokio::pin!(shutdown);
-        let mut shutdown_deadline = Box::pin(tokio::time::sleep(Duration::from_secs(24 * 60 * 60)));
+        let mut shutdown_deadline = Box::pin(tokio::time::sleep(Duration::from_hours(24)));
         let mut shutting_down = false;
         let mut shutdown_deadline_armed = false;
 
@@ -646,7 +643,7 @@ impl App {
                         .reset(tokio::time::Instant::now() + shutdown_timeout);
                     shutdown_deadline_armed = true;
                 },
-                _ = &mut shutdown_deadline, if shutdown_deadline_armed => {
+                () = &mut shutdown_deadline, if shutdown_deadline_armed => {
                     log::error!(
                         "Shutdown deadline elapsed with {} file(s) still pending; forcing shutdown",
                         self.shutdown_pending_files.len(),

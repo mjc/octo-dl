@@ -17,7 +17,7 @@ static TERMINAL_PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Error)]
-pub(crate) enum TerminalCleanupError {
+pub enum TerminalCleanupError {
     #[error("failed to disable raw terminal mode: {0}")]
     RawMode(#[source] io::Error),
     #[error("failed to restore the terminal screen: {0}")]
@@ -32,7 +32,7 @@ pub(crate) enum TerminalCleanupError {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum TerminalSetupError {
+pub enum TerminalSetupError {
     #[error("failed to enable raw terminal mode: {0}")]
     RawMode(#[source] io::Error),
     #[error("failed to enter the alternate screen: {0}")]
@@ -47,7 +47,7 @@ pub(crate) enum TerminalSetupError {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum TerminalLifecycleError {
+pub enum TerminalLifecycleError {
     #[error("terminal operation failed: {0}")]
     Operation(#[source] io::Error),
     #[error("terminal restoration failed: {0}")]
@@ -61,7 +61,7 @@ pub(crate) enum TerminalLifecycleError {
 
 impl From<TerminalSetupError> for io::Error {
     fn from(error: TerminalSetupError) -> Self {
-        io::Error::other(error)
+        Self::other(error)
     }
 }
 
@@ -82,7 +82,7 @@ fn finish_terminal_lifecycle_result(
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum TerminalInputError {
+pub enum TerminalInputError {
     #[error("terminal input read failed: {0}")]
     Read(#[source] io::Error),
     #[error("terminal input worker closed unexpectedly")]
@@ -111,18 +111,18 @@ impl TerminalInputError {
 
 /// RAII guard that ensures terminal cleanup on drop.
 /// Restores terminal to normal mode even if a panic occurs.
-pub(crate) struct TerminalGuard {
+pub struct TerminalGuard {
     restored: bool,
 }
 
-pub(crate) fn finish_terminal_lifecycle(
+pub fn finish_terminal_lifecycle(
     operation: io::Result<()>,
     guard: TerminalGuard,
 ) -> io::Result<()> {
     finish_terminal_lifecycle_result(operation, guard.restore())
 }
 
-pub(crate) fn restore_terminal_state() -> Result<(), TerminalCleanupError> {
+pub fn restore_terminal_state() -> Result<(), TerminalCleanupError> {
     restore_terminal_state_with(disable_raw_mode, || {
         crossterm::execute!(
             io::stdout(),
@@ -184,7 +184,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub(crate) struct TerminalPanicHookGuard {
+pub struct TerminalPanicHookGuard {
     _lock: parking_lot::MutexGuard<'static, ()>,
     previous_hook: Option<Arc<PanicHook>>,
     active: Arc<AtomicBool>,
@@ -244,7 +244,7 @@ impl Drop for TerminalPanicHookGuard {
     }
 }
 
-pub(crate) struct TerminalInput {
+pub struct TerminalInput {
     receiver: mpsc::UnboundedReceiver<Result<Event, TerminalInputError>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -305,7 +305,7 @@ where
     }
 }
 
-pub(crate) fn terminal_input_channel() -> TerminalInput {
+pub fn terminal_input_channel() -> TerminalInput {
     let stop = Arc::new(AtomicBool::new(false));
     spawn_terminal_input_worker(stop, || {
         if crossterm::event::poll(INPUT_POLL_INTERVAL)? {

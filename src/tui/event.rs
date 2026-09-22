@@ -1,5 +1,13 @@
 //! Download event types and TUI progress adapter.
 
+#![allow(
+    clippy::result_large_err,
+    clippy::match_same_arms,
+    clippy::needless_pass_by_value,
+    clippy::significant_drop_tightening,
+    clippy::unused_self
+)]
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -113,7 +121,7 @@ struct PendingLifecycleState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DownloadEventDeliveryFailure {
+pub struct DownloadEventDeliveryFailure {
     event: &'static str,
     reason: DeliveryFailureReason,
 }
@@ -323,10 +331,8 @@ impl DownloadEventSender {
         };
         let mut values = self.progress.values.lock().unwrap();
         let key = (id.clone(), attempt_id);
-        if !values.contains_key(&key) {
-            if values.len() >= self.progress.capacity {
-                return Err(mpsc::error::TrySendError::Full(event()));
-            }
+        if !values.contains_key(&key) && values.len() >= self.progress.capacity {
+            return Err(mpsc::error::TrySendError::Full(event()));
         }
 
         let lifecycle_pending = self.has_pending_lifecycle_events();
@@ -422,7 +428,7 @@ impl From<mpsc::Sender<DownloadEvent>> for DownloadEventSender {
     }
 }
 
-fn download_event_name(event: &DownloadEvent) -> &'static str {
+const fn download_event_name(event: &DownloadEvent) -> &'static str {
     match event {
         DownloadEvent::FileStart { .. } => "file start",
         DownloadEvent::ResumeValidationStarted { .. } => "resume validation start",
@@ -452,13 +458,13 @@ fn download_event_name(event: &DownloadEvent) -> &'static str {
 }
 
 /// Channel endpoints consumed by the background download task.
-pub(crate) struct AuthenticatedClient {
+pub struct AuthenticatedClient {
     mega: mega::Client,
     http: reqwest::Client,
 }
 
 impl AuthenticatedClient {
-    pub(crate) fn new(mega: mega::Client, http: reqwest::Client) -> Self {
+    pub(crate) const fn new(mega: mega::Client, http: reqwest::Client) -> Self {
         Self { mega, http }
     }
 
@@ -648,10 +654,10 @@ impl TuiProgress {
             return id.clone();
         }
         let id = FileId::from(name);
-        if ids.by_name.len() >= MAX_TRACKED_FILE_IDS {
-            if let Some(oldest) = ids.order.pop_front() {
-                ids.by_name.remove(&oldest);
-            }
+        if ids.by_name.len() >= MAX_TRACKED_FILE_IDS
+            && let Some(oldest) = ids.order.pop_front()
+        {
+            ids.by_name.remove(&oldest);
         }
         ids.by_name.insert(name.to_string(), id.clone());
         ids.order.push_back(name.to_string());

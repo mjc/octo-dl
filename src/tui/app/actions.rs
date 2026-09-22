@@ -1,3 +1,10 @@
+#![allow(
+    clippy::iter_on_single_items,
+    clippy::needless_pass_by_value,
+    clippy::option_if_let_else,
+    clippy::too_many_lines
+)]
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::time::Instant;
@@ -17,7 +24,7 @@ use crate::tui::event::{DownloadAttemptId, VerificationOperationId};
 const MAX_UI_ACTIONS_PER_TICK: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RetryTarget {
+pub enum RetryTarget {
     Url(String),
     File(FileId),
 }
@@ -344,7 +351,6 @@ impl App {
         let package_id = file
             .origin
             .package_id
-            .clone()
             .or_else(|| existing_package.map(|package| package.id))
             .unwrap_or_else(|| PackageId::for_package_key(&package_key));
         if file.origin.submitted_url != file.origin.source_url {
@@ -476,7 +482,7 @@ impl App {
         attempt_id: DownloadAttemptId,
     ) {
         if !self.event_matches_current_attempt(&id, attempt_id) {
-            log::info!("Ignoring stale download progress after retry/reset: {}", id);
+            log::info!("Ignoring stale download progress after retry/reset: {id}");
             return;
         }
         if !self.core_state.files.contains_key(&id) {
@@ -790,7 +796,7 @@ impl App {
         if !is_core_backed && self.is_session_url(id.as_str()) {
             self.deleted_url_tombstones.insert(id.to_string());
             let _ = self.mutate_session_and_save(|session| {
-                SessionAdapter::remove_url(session, id.as_str())
+                SessionAdapter::remove_url(session, id.as_str());
             });
             self.core_state.url_order.retain(|url| url != id.as_str());
         } else if !is_core_backed && is_url_overlay {
@@ -962,13 +968,13 @@ impl App {
         let operation_id = VerificationOperationId::new(next_attempt_id.raw());
         let request = if target == VerificationTarget::Completed {
             crate::tui::event::DownloadRequest::VerifyCompletedFileIdsWithOperations {
-                source_url: source_url.clone(),
+                source_url,
                 file_ids: vec![id.clone()],
                 operation_ids: [(id.clone(), operation_id)].into_iter().collect(),
             }
         } else {
             crate::tui::event::DownloadRequest::ReverifyFileIdsWithOperations {
-                source_url: source_url.clone(),
+                source_url,
                 file_ids: vec![id.clone()],
                 operation_ids: [(id.clone(), operation_id)].into_iter().collect(),
             }
@@ -1022,14 +1028,15 @@ impl App {
         let files = self
             .core_state
             .package_files(&package_id)
-            .filter_map(|file| match reverify_target_for_core_file(file) {
-                Some(target) => Some((
-                    file.id.clone(),
-                    file.source_url.clone(),
-                    file.lifecycle.clone(),
-                    target,
-                )),
-                None => {
+            .filter_map(|file| {
+                if let Some(target) = reverify_target_for_core_file(file) {
+                    Some((
+                        file.id.clone(),
+                        file.source_url.clone(),
+                        file.lifecycle.clone(),
+                        target,
+                    ))
+                } else {
                     skipped_stale_files.push(file.id.clone());
                     None
                 }
@@ -1150,7 +1157,7 @@ impl App {
             self.status = "Reset unavailable for selected file".to_string();
             self.recompute_totals();
             return;
-        };
+        }
 
         self.cancel_file_token(id);
         self.bump_file_attempt_id(id);
@@ -1274,7 +1281,7 @@ impl App {
             UiAction::ResetPackage(id) => self.perform_reset_package_action(id),
             UiAction::MoveFile { file_id, delta } => self.perform_move_file_action(file_id, delta),
             UiAction::MovePackage { package_id, delta } => {
-                self.perform_move_package_action(package_id, delta)
+                self.perform_move_package_action(package_id, delta);
             }
             UiAction::UpdateConfig {
                 chunks_per_file,

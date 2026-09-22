@@ -1,3 +1,11 @@
+#![allow(
+    clippy::default_trait_access,
+    clippy::future_not_send,
+    clippy::needless_pass_by_value,
+    clippy::redundant_locals,
+    clippy::too_many_lines
+)]
+
 use std::collections::HashMap;
 use std::env;
 use std::io;
@@ -77,9 +85,10 @@ fn state_dir_service_config_path() -> PathBuf {
 }
 
 fn default_service_config_path() -> PathBuf {
-    env::current_dir()
-        .map(|dir| lexical_user_path(dir).join("config.toml"))
-        .unwrap_or_else(|_| state_dir_service_config_path())
+    env::current_dir().map_or_else(
+        |_| state_dir_service_config_path(),
+        |dir| lexical_user_path(dir).join("config.toml"),
+    )
 }
 
 fn lexical_user_path(path: PathBuf) -> PathBuf {
@@ -95,7 +104,7 @@ fn distinct_fallback_service_config_path(primary: &Path) -> Option<PathBuf> {
     (fallback != primary).then_some(fallback)
 }
 
-pub(crate) fn api_host_requires_api_key(host: &str) -> bool {
+pub fn api_host_requires_api_key(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return false;
     }
@@ -331,7 +340,7 @@ impl App {
         self.auto_login(fallback)
     }
 
-    fn clear_deferred_auto_login(&mut self) {
+    const fn clear_deferred_auto_login(&mut self) {
         self.deferred_login_fallback = None;
         self.deferred_login_deadline = None;
     }
@@ -350,9 +359,11 @@ impl App {
         ui_mode: DashboardUiMode,
     ) -> SharedStateChannels {
         let (action_tx, action_rx) = mpsc::channel::<UiAction>(64);
-        let initial_state = enabled
-            .then(|| bytes::Bytes::from(self.borrowed_dashboard_postcard(ui_mode, false)))
-            .unwrap_or_default();
+        let initial_state = if enabled {
+            bytes::Bytes::from(self.borrowed_dashboard_postcard(ui_mode, false))
+        } else {
+            Default::default()
+        };
         let (state_tx, state_rx) = watch::channel(initial_state);
         let shared_state = enabled.then_some(SharedAppState {
             action_tx,
@@ -412,8 +423,6 @@ impl App {
         let email = self.login.email().to_owned();
         let password = self.login.password().to_owned();
         let mfa = self.login.mfa_option().map(str::to_owned);
-        let resume_session = resume_session.clone();
-
         let (client_tx, client_rx) = tokio::sync::oneshot::channel();
         self.client_rx = Some(client_rx);
 
@@ -704,10 +713,13 @@ impl App {
             };
             service_config.credentials.encrypt_in_place_with_key(&key);
         } else {
-            service_config.credentials.saved_session = self.saved_mega_session.clone();
+            service_config
+                .credentials
+                .saved_session
+                .clone_from(&self.saved_mega_session);
         }
         service_config.api.port = self.api_port;
-        service_config.api.api_key = self.api_key.clone();
+        service_config.api.api_key.clone_from(&self.api_key);
         service_config.download = self.config.config.clone();
         service_config.save(config_path)
     }

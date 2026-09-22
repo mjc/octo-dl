@@ -87,7 +87,7 @@ fn handle_config_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('-') | KeyCode::Left => update_active_config_field(app, false),
         KeyCode::Char(' ') => match ConfigField::ALL[app.config.active_field] {
             ConfigField::ForceOverwrite | ConfigField::CleanupOnError => {
-                update_active_config_field(app, true)
+                update_active_config_field(app, true);
             }
             _ => {}
         },
@@ -157,7 +157,7 @@ fn update_active_config_field(app: &mut App, increment: bool) {
 
 fn handle_confirm_input(app: &mut App, key: KeyEvent) {
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+        KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
             if let Some(action) = app.pending_confirmation.take() {
                 app.popup = Popup::None;
                 match action {
@@ -178,7 +178,7 @@ fn handle_confirm_input(app: &mut App, key: KeyEvent) {
                 app.popup = Popup::None;
             }
         }
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+        KeyCode::Char('n' | 'N') | KeyCode::Esc => {
             app.pending_confirmation = None;
             app.popup = Popup::None;
         }
@@ -204,11 +204,10 @@ fn handle_sort_input(app: &mut App, key: KeyEvent) {
         KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
             if app.sort.active_field == SortKey::ALL.len() {
                 app.sort.direction = app.sort.direction.toggled();
-                sort_changed = true;
             } else {
                 app.sort.key = SortKey::ALL[app.sort.active_field];
-                sort_changed = true;
             }
+            sort_changed = true;
         }
         KeyCode::Enter => {
             if app.sort.active_field < SortKey::ALL.len() {

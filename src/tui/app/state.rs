@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::HashSet;
 use std::time::Instant;
 
@@ -17,7 +19,7 @@ use crate::tui::event::DownloadRequest;
 // File IDs are filesystem-derived and cannot contain NUL, so this remains an
 // internal-only marker in the existing pending-effect map. It is removed
 // before a ResumeFileIds request is constructed.
-fn core_event_requires_visible_sync(event: &CoreEvent) -> bool {
+const fn core_event_requires_visible_sync(event: &CoreEvent) -> bool {
     !matches!(
         event,
         CoreEvent::FileProgress { .. }
@@ -26,7 +28,7 @@ fn core_event_requires_visible_sync(event: &CoreEvent) -> bool {
     )
 }
 
-fn core_event_requires_pending_sync(event: &CoreEvent) -> bool {
+const fn core_event_requires_pending_sync(event: &CoreEvent) -> bool {
     matches!(
         event,
         CoreEvent::PackageResolved { .. }
@@ -43,7 +45,7 @@ fn core_event_requires_pending_sync(event: &CoreEvent) -> bool {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum RequestDispatchOutcome {
+pub enum RequestDispatchOutcome {
     Accepted,
     Backpressured(DownloadRequest),
     Closed(DownloadRequest),
@@ -57,7 +59,7 @@ struct CoreApplyPolicy {
 }
 
 impl CoreApplyPolicy {
-    fn for_event(event: &CoreEvent) -> Self {
+    const fn for_event(event: &CoreEvent) -> Self {
         Self {
             sync_visible: core_event_requires_visible_sync(event),
             sync_pending: core_event_requires_pending_sync(event),
@@ -126,18 +128,12 @@ impl App {
     }
 
     pub(crate) fn refresh_visible_core_file(&mut self, file_id: &FileId) -> Option<(u64, u64)> {
-        let Some(core_file) = self.core_state.files.get(file_id) else {
-            return None;
-        };
-        let Some(&visible_index) = self.visible_file_positions.get(file_id) else {
-            return None;
-        };
-        let Some(visible_file) = self.files.get_mut(visible_index) else {
-            return None;
-        };
+        let core_file = self.core_state.files.get(file_id)?;
+        let &visible_index = self.visible_file_positions.get(file_id)?;
+        let visible_file = self.files.get_mut(visible_index)?;
 
         let previous_downloaded = visible_file.downloaded;
-        visible_file.name = core_file.path.clone();
+        visible_file.name.clone_from(&core_file.path);
         visible_file.size = core_file.size;
         visible_file.downloaded = match &core_file.lifecycle {
             crate::core::FileLifecycle::Complete => core_file.size,
@@ -169,7 +165,7 @@ impl App {
             crate::core::FileLifecycle::Complete => core_file.size,
             _ => crate::core::visible_completed_bytes_for_display(core_file),
         };
-        let network_downloaded = crate::tui::app::App::core_file_network_downloaded(core_file);
+        let network_downloaded = Self::core_file_network_downloaded(core_file);
         let complete = matches!(core_file.lifecycle, crate::core::FileLifecycle::Complete);
         let failure_message = core_file.lifecycle.failure_message().map(str::to_owned);
 
@@ -534,7 +530,7 @@ impl App {
         self.refresh_session_from_core_state();
         let visible: HashSet<String> = self.files.iter().map(|file| file.id.to_string()).collect();
         let _ = self.mutate_session_and_save(|session| {
-            SessionAdapter::sync_for_shutdown(session, &visible)
+            SessionAdapter::sync_for_shutdown(session, &visible);
         });
         self.flush_session_persistence();
     }

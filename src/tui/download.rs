@@ -1,5 +1,12 @@
 //! Download task management and transport-side event emission.
 
+#![allow(
+    clippy::needless_pass_by_value,
+    clippy::significant_drop_tightening,
+    clippy::too_many_lines,
+    clippy::unused_self
+)]
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::sync::{
@@ -32,7 +39,7 @@ use super::event::{
 const PACKAGE_REVERIFY_CONCURRENCY: usize = 4;
 const VERIFICATION_PROGRESS_EVENT_BYTES: u64 = 8 * 1024 * 1024;
 
-pub(crate) fn schedule_resume_artifact_delete(path: String) {
+pub fn schedule_resume_artifact_delete(path: String) {
     for artifact in resume_artifact_paths(&path) {
         if let Err(error) = std::fs::remove_file(&artifact)
             && error.kind() != std::io::ErrorKind::NotFound
@@ -45,7 +52,7 @@ pub(crate) fn schedule_resume_artifact_delete(path: String) {
     }
 }
 
-pub(crate) fn schedule_output_artifact_delete(path: String) {
+pub fn schedule_output_artifact_delete(path: String) {
     if let Err(error) = std::fs::remove_file(&path)
         && error.kind() != std::io::ErrorKind::NotFound
     {
@@ -111,7 +118,7 @@ impl ResolvedUrl {
 
     fn file_origin(&self) -> FileOrigin {
         FileOrigin {
-            package_id: self.package_id.clone(),
+            package_id: self.package_id,
             package_display_name: self.package_display_name.clone(),
             source_url: self.source_url.clone(),
             submitted_url: self.submitted_url.clone(),
@@ -178,7 +185,7 @@ impl CollectedBatch {
             .sum()
     }
 
-    fn file_total(&self) -> usize {
+    const fn file_total(&self) -> usize {
         self.queued_items.len() + self.completed_items.len()
     }
 
@@ -266,11 +273,11 @@ impl SchedulerState {
     fn new() -> Self {
         Self {
             desired_pending_order: Vec::new(),
-            desired_pending_set: HashSet::with_hasher(FxBuildHasher::default()),
+            desired_pending_set: HashSet::with_hasher(FxBuildHasher),
             pending_queue: VecDeque::new(),
-            resume_priority_set: HashSet::with_hasher(FxBuildHasher::default()),
-            available_downloads: HashMap::with_hasher(FxBuildHasher::default()),
-            active_downloads: HashSet::with_hasher(FxBuildHasher::default()),
+            resume_priority_set: HashSet::with_hasher(FxBuildHasher),
+            available_downloads: HashMap::with_hasher(FxBuildHasher),
+            active_downloads: HashSet::with_hasher(FxBuildHasher),
             active_task_files: HashMap::new(),
             join_set: tokio::task::JoinSet::new(),
         }
@@ -357,7 +364,7 @@ impl SchedulerState {
         let mut paused = Vec::new();
         let removed_file_ids = file_ids
             .iter()
-            .map(|file_id| file_id.as_str())
+            .map(super::super::core::model::FileId::as_str)
             .collect::<HashSet<_, FxBuildHasher>>();
         for file_id in file_ids {
             let active = self.has_active_download(file_id);
@@ -547,7 +554,7 @@ impl VerificationProgress {
         Self::with_operation(tx.into(), id, None)
     }
 
-    fn with_operation(
+    const fn with_operation(
         tx: DownloadEventSender,
         id: FileId,
         operation_id: Option<VerificationOperationId>,
@@ -1210,11 +1217,7 @@ async fn reverify_resume_files(
             }
         };
         let collected = runtime.downloader.collect_files(&nodes, &progress).await;
-        for item in collected
-            .to_download
-            .into_iter()
-            .chain(collected.completed.into_iter())
-        {
+        for item in collected.to_download.into_iter().chain(collected.completed) {
             let id = FileId::from(item.path.as_str());
             if !requested.contains(&id) {
                 continue;
@@ -1653,7 +1656,7 @@ async fn collect_node_set(
     let to_download = to_download
         .into_iter()
         .map(|item| crate::OwnedDownloadItem {
-            path: item.path.to_string(),
+            path: item.path.clone(),
             node: item.node.clone(),
             was_partial: item.was_partial,
         })
@@ -1662,7 +1665,7 @@ async fn collect_node_set(
     let completed = completed
         .into_iter()
         .map(|item| crate::OwnedDownloadItem {
-            path: item.path.to_string(),
+            path: item.path.clone(),
             node: item.node.clone(),
             was_partial: item.was_partial,
         })

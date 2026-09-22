@@ -1,5 +1,19 @@
 //! All drawing / rendering functions.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::if_same_then_else,
+    clippy::match_same_arms,
+    clippy::needless_pass_by_value,
+    clippy::option_if_let_else,
+    clippy::struct_field_names,
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::branches_sharing_code
+)]
+
 mod dashboard;
 mod popup;
 
@@ -35,7 +49,7 @@ fn draw_interactive_dashboard(frame: &mut ratatui::Frame, app: &mut App) {
     app.ensure_visible_rows_cache();
     let area = frame.area();
     let mut title_right = String::with_capacity(48);
-    let _ = write!(title_right, " {}% CPU | ", (app.cpu_usage as u16).min(999),);
+    let _ = write!(title_right, " {}% CPU | ", (app.cpu_usage as u16).min(999));
     push_byte_label(&mut title_right, app.memory_rss);
     let _ = write!(title_right, " RAM | API: {}", app.api_port);
     if app.paused {
@@ -595,11 +609,11 @@ impl<'a> PackageRowStats<'a> {
         }
     }
 
-    fn active(&self) -> bool {
+    const fn active(&self) -> bool {
         self.downloading || self.verifying
     }
 
-    fn activity_label(&self, status: PackageStatus) -> &'static str {
+    const fn activity_label(&self, status: PackageStatus) -> &'static str {
         if self.verifying {
             "verify"
         } else if self.downloading || matches!(status, PackageStatus::Downloading) {
@@ -616,7 +630,7 @@ impl<'a> PackageRowStats<'a> {
     }
 }
 
-fn selected_style(style: Style, selected: bool) -> Style {
+const fn selected_style(style: Style, selected: bool) -> Style {
     if selected {
         style.bg(Color::DarkGray)
     } else {
@@ -888,7 +902,7 @@ fn render_progress_bar_clipped(
     }
 }
 
-fn decimal_len(value: u64) -> usize {
+const fn decimal_len(value: u64) -> usize {
     if value == 0 {
         return 1;
     }
@@ -1129,7 +1143,7 @@ impl ByteLabel {
         }
     }
 
-    fn width(&self) -> usize {
+    const fn width(&self) -> usize {
         decimal_len(self.whole) + if self.fractional { 3 } else { 0 } + 1 + self.unit.len()
     }
 
@@ -1516,7 +1530,7 @@ mod tests {
                     &state,
                     &DashboardChrome::read_only(),
                     &mut list_state,
-                )
+                );
             })
             .expect("draw should succeed");
         terminal.backend().buffer().clone()
@@ -1537,7 +1551,7 @@ mod tests {
                         matched = false;
                         break;
                     };
-                    if cell.symbol().chars().next() != Some(*expected) || cell.fg != color {
+                    if !cell.symbol().starts_with(*expected) || cell.fg != color {
                         matched = false;
                         break;
                     }
@@ -1566,10 +1580,7 @@ mod tests {
                         matched = false;
                         break;
                     };
-                    if cell.symbol().chars().next() != Some(*expected)
-                        || cell.fg != fg
-                        || cell.bg != bg
-                    {
+                    if !cell.symbol().starts_with(*expected) || cell.fg != fg || cell.bg != bg {
                         matched = false;
                         break;
                     }
@@ -2235,7 +2246,7 @@ mod tests {
             package: ResolvedPackage {
                 id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
-                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string()),
                 display_name: "Mega Package".to_string(),
                 files: vec![
                     ResolvedFile {
@@ -2276,7 +2287,7 @@ mod tests {
             package: ResolvedPackage {
                 id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
-                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string()),
                 display_name: "Mega Package".to_string(),
                 files: vec![
                     ResolvedFile {
@@ -2317,9 +2328,7 @@ mod tests {
                     "https://mega.nz/folder/abc#secret",
                 ),
                 source_url: "https://mega.nz/folder/abc#secret".to_string(),
-                key: crate::core::PackageKey::new(
-                    "https://mega.nz/folder/abc#secret".to_string().clone(),
-                ),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/abc#secret".to_string()),
                 display_name: "https://mega.nz/folder/abc#secret".to_string(),
                 files: vec![ResolvedFile {
                     file_id: "file.bin".to_string().into(),
@@ -2480,7 +2489,7 @@ mod tests {
             package: ResolvedPackage {
                 id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
-                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string()),
                 display_name: "Mega Package".to_string(),
                 files: vec![ResolvedFile {
                     file_id: "active.bin".to_string().into(),
@@ -2511,7 +2520,7 @@ mod tests {
             package: ResolvedPackage {
                 id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
-                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string()),
                 display_name: "Mega Package".to_string(),
                 files: vec![ResolvedFile {
                     file_id: file_id.clone(),
@@ -2544,7 +2553,7 @@ mod tests {
             package: ResolvedPackage {
                 id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
-                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string()),
                 display_name: "Mega Package".to_string(),
                 files: vec![ResolvedFile {
                     file_id: "active.bin".to_string().into(),
@@ -2572,7 +2581,7 @@ mod tests {
             package: ResolvedPackage {
                 id: package_id("pkg-1", "https://mega.nz/folder/pkg"),
                 source_url: "https://mega.nz/folder/pkg".to_string(),
-                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string().clone()),
+                key: crate::core::PackageKey::new("https://mega.nz/folder/pkg".to_string()),
                 display_name: "Mega Package".to_string(),
                 files: vec![ResolvedFile {
                     file_id: "active.bin".to_string().into(),

@@ -41,7 +41,7 @@ pub(super) fn send_ui_action(state: &ApiState, action: UiAction) -> axum::respon
             shared
                 .action_tx
                 .try_send(action)
-                .map_or(DispatchOutcome::Unavailable, |_| DispatchOutcome::Accepted)
+                .map_or(DispatchOutcome::Unavailable, |()| DispatchOutcome::Accepted)
         });
 
     outcome.error_response().unwrap_or_else(|| {
@@ -64,12 +64,12 @@ pub(super) fn dispatch_urls(state: &ApiState, urls: Vec<String>) -> DispatchOutc
         shared
             .action_tx
             .try_send(UiAction::AddUrls(urls))
-            .map_or(DispatchOutcome::Unavailable, |_| DispatchOutcome::Accepted)
+            .map_or(DispatchOutcome::Unavailable, |()| DispatchOutcome::Accepted)
     } else {
         state
             .tx
             .send(DownloadEvent::UrlsReceived { urls })
-            .map_or(DispatchOutcome::Unavailable, |_| DispatchOutcome::Accepted)
+            .map_or(DispatchOutcome::Unavailable, |()| DispatchOutcome::Accepted)
     }
 }
 

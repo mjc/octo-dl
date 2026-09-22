@@ -73,7 +73,7 @@ impl SessionAdapter {
         for package in restart.state.packages.values() {
             upsert_package_metadata(
                 session,
-                package.id.clone(),
+                package.id,
                 package.key.clone(),
                 package.display_name.clone(),
                 package.error.clone(),
@@ -144,10 +144,10 @@ impl SessionAdapter {
         size: u64,
     ) -> bool {
         Self::ensure_url(session, source_url);
-        if submitted_url != source_url {
-            session.urls.retain(|entry| entry.url != submitted_url);
-        } else {
+        if submitted_url == source_url {
             Self::ensure_url(session, submitted_url);
+        } else {
+            session.urls.retain(|entry| entry.url != submitted_url);
         }
         let package_id = ensure_package_identity(session, package_id, package_display_name);
         let existing = session
@@ -167,7 +167,7 @@ impl SessionAdapter {
         if let Some((package_index, file_index)) = existing {
             if session.packages[package_index].id == package_id {
                 let file = &mut session.packages[package_index].files[file_index];
-                file.package_id = package_id.clone();
+                file.package_id = package_id;
                 file.source_url = source_url.to_string();
                 file.size = size;
                 file.path = path.to_string();
@@ -175,7 +175,7 @@ impl SessionAdapter {
                 file.accounting = crate::core::FileAccounting::CurrentRun;
             } else {
                 let mut file = session.packages[package_index].files.remove(file_index);
-                file.package_id = package_id.clone();
+                file.package_id = package_id;
                 file.source_url = source_url.to_string();
                 file.size = size;
                 file.path = path.to_string();
@@ -225,7 +225,7 @@ impl SessionAdapter {
     fn snapshot_file_from_state(file: &crate::core::FileState) -> FileSnapshot {
         FileSnapshot {
             id: file.id.clone(),
-            package_id: file.package_id.clone(),
+            package_id: file.package_id,
             source_url: file.source_url.clone(),
             path: file.path.clone(),
             size: file.size,

@@ -38,7 +38,7 @@ pub fn handle_input(app: &mut App, key: KeyEvent) {
     handle_main_input(app, key);
 }
 
-pub(crate) fn handle_event(app: &mut App, event: Event, terminal_area: Rect) {
+pub(super) fn handle_event(app: &mut App, event: Event, terminal_area: Rect) {
     match event {
         Event::Key(key) => handle_input(app, key),
         Event::Paste(text) => handle_paste(app, &text),
@@ -97,7 +97,7 @@ fn list_row_at(app: &App, column: u16, row: u16, terminal_area: Rect) -> Option<
     (index < rows.len()).then_some(index)
 }
 
-pub(crate) const fn request_quit(app: &mut App) {
+pub(super) const fn request_quit(app: &mut App) {
     if app.quit_policy.is_enabled() {
         app.should_quit = true;
     }
@@ -130,7 +130,7 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('s') => {
             app.popup = Popup::Sort;
         }
-        KeyCode::Char('+') | KeyCode::Char('=') => move_selected_queue_item(app, -1),
+        KeyCode::Char('+' | '=') => move_selected_queue_item(app, -1),
         KeyCode::Char('-') => move_selected_queue_item(app, 1),
         KeyCode::Enter | KeyCode::Char(' ') => toggle_selected_package(app),
         KeyCode::Up | KeyCode::Char('k') => select_previous_file(app),
@@ -139,12 +139,7 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
         KeyCode::PageDown => move_file_selection(app, 10),
         KeyCode::Home | KeyCode::Char('g') => select_first_file(app),
         KeyCode::End | KeyCode::Char('G') => select_last_file(app),
-        KeyCode::Char('q') => {
-            request_quit(app);
-        }
-        KeyCode::Esc => {
-            request_quit(app);
-        }
+        KeyCode::Char('q') | KeyCode::Esc => request_quit(app),
         _ => {}
     }
 }
@@ -200,7 +195,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
             for c in text.chars() {
                 input.handle(InputRequest::InsertChar(c));
             }
-            sync_url_input(app, input);
+            sync_url_input(app, &input);
         }
     }
 }
@@ -218,7 +213,7 @@ fn handle_url_edit_key(app: &mut App, key: KeyEvent) {
     };
     if let Some(request) = request {
         input.handle(request);
-        sync_url_input(app, input);
+        sync_url_input(app, &input);
     }
 }
 
@@ -226,7 +221,7 @@ fn url_input_state(app: &App) -> Input {
     Input::new(app.url_input.clone()).with_cursor(app.url_input_cursor)
 }
 
-fn sync_url_input(app: &mut App, input: Input) {
+fn sync_url_input(app: &mut App, input: &Input) {
     app.url_input = input.value().to_string();
     app.url_input_cursor = input.cursor();
 }
