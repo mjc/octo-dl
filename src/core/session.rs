@@ -176,6 +176,10 @@ impl SessionSnapshot {
         Self::canonical_state_path(&self.id)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot cannot be serialized or written.
     pub fn save(&self) -> std::io::Result<()> {
         self.save_to_path(&self.state_path())
     }
@@ -184,7 +188,7 @@ impl SessionSnapshot {
         validate_snapshot(self)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(dir)?;
         let tmp = temporary_save_path(path);
         let bytes = encode_snapshot(path, self)?;
         std::fs::write(&tmp, bytes)?;
@@ -200,6 +204,10 @@ impl SessionSnapshot {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot cannot be read, decoded, or validated.
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let snapshot = decode_snapshot(path)?;
         validate_snapshot(&snapshot)
@@ -209,13 +217,11 @@ impl SessionSnapshot {
 
     pub fn latest() -> Option<Self> {
         let dir = Self::state_dir();
-        let read_dir = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => return None,
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+            return None;
         };
 
-        let mut canonical_sessions =
-            HashMap::<String, (PathBuf, SessionSnapshot, Option<SystemTime>)>::new();
+        let mut canonical_sessions = HashMap::<String, (PathBuf, Self, Option<SystemTime>)>::new();
         for entry in read_dir.filter_map(Result::ok) {
             let path = entry.path();
             if !is_canonical_session_path(&path) {
@@ -299,6 +305,7 @@ impl SessionSnapshot {
             .count()
     }
 
+    #[must_use]
     pub fn find_file(&self, file_id: &str) -> Option<&FileSnapshot> {
         self.iter_files().find(|file| file.id == file_id)
     }
@@ -342,13 +349,18 @@ pub fn queued_file_snapshot(
     }
 }
 
-fn session_resume_priority(snapshot: &SessionSnapshot) -> u8 {
+const fn session_resume_priority(snapshot: &SessionSnapshot) -> u8 {
     match snapshot.status {
         SessionRunStatus::Paused => 2,
         SessionRunStatus::InProgress => 1,
         SessionRunStatus::Completed => 0,
     }
 }
+///
+/// # Errors
+///
+/// Returns an error when the snapshot version, URL set, package set, or file
+/// relationships are invalid.
 pub fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), String> {
     if snapshot.version != SESSION_VERSION {
         return Err(format!("unsupported session version {}", snapshot.version));

@@ -1,3 +1,5 @@
+#![allow(clippy::cast_possible_truncation)]
+
 use super::super::sidecar_store::{
     LegacyJsonResumeSidecar, LegacyJsonVerifiedChunkRecord, ResumeSidecar, VerifiedChunkRecord,
     legacy_binary_bytes, load_sidecar, save_sidecar_atomic,
@@ -96,7 +98,7 @@ fn expected_verified_bytes(file_size: u64, indices: &[u32]) -> u64 {
             *seen_slot = true;
             Some(boundary.length)
         })
-        .fold(0u64, |sum, chunk| sum.saturating_add(chunk))
+        .fold(0u64, u64::saturating_add)
 }
 
 #[tokio::test]

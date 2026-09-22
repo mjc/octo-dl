@@ -49,6 +49,7 @@ pub struct ResolvedPackage {
     pub collision: Option<PackageCollision>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
     UrlSubmitted {
@@ -213,8 +214,7 @@ fn recompute_session_status(state: &mut DownloadState) {
 }
 
 fn complete_file(state: &mut DownloadState, file_id: &FileId) {
-    let mut delta = None;
-    if let Some(file) = state.files.get_mut(file_id) {
+    let delta = if let Some(file) = state.files.get_mut(file_id) {
         let before = FileDerivedState::from(&*file);
         if file.progress.verification_origin_complete {
             file.progress.downloaded_network_bytes = file
@@ -228,8 +228,10 @@ fn complete_file(state: &mut DownloadState, file_id: &FileId) {
         file.progress.verification_origin_complete = false;
         file.progress.verification_restore_downloaded_network_bytes = 0;
         let after = FileDerivedState::from(&*file);
-        delta = Some((before, after));
-    }
+        Some((before, after))
+    } else {
+        None
+    };
     if let Some((before, after)) = delta {
         apply_file_change(state, file_id, before, after);
     }
@@ -254,6 +256,7 @@ fn maybe_debug_assert_invariants(state: &DownloadState) {
 #[cfg(not(debug_assertions))]
 fn maybe_debug_assert_invariants(_state: &DownloadState) {}
 
+#[allow(clippy::too_many_lines, clippy::useless_let_if_seq)]
 fn reduce_impl(
     state: &mut DownloadState,
     event: CoreEvent,
@@ -292,26 +295,25 @@ fn reduce_impl(
                 handle_empty_package_resolution(state, &package, &mut effects, persist_session);
                 return effects;
             }
-            let incoming_package_id = package.id.clone();
+            let incoming_package_id = package.id;
             let mut reassigned_progress = Vec::new();
             let mut reordered_files = false;
             let previous_package = state
                 .packages
                 .iter()
                 .find(|(_, existing)| existing.key == package.key)
-                .map(|(id, existing)| (id.clone(), existing.clone()));
+                .map(|(id, existing)| (*id, existing.clone()));
 
             if let Some((previous_package_id, _)) = previous_package.as_ref()
                 && previous_package_id != &incoming_package_id
+                && let Some(previous_state) = state.packages.shift_remove(previous_package_id)
             {
-                if let Some(previous_state) = state.packages.shift_remove(previous_package_id) {
-                    reordered_files = previous_state.progress.file_count() > 0;
-                    for file in state.files.values_mut() {
-                        if file.package_id == *previous_package_id {
-                            reassigned_progress
-                                .push(PackageProgressBucket::from_lifecycle(&file.lifecycle));
-                            file.package_id = incoming_package_id;
-                        }
+                reordered_files = previous_state.progress.file_count() > 0;
+                for file in state.files.values_mut() {
+                    if file.package_id == *previous_package_id {
+                        reassigned_progress
+                            .push(PackageProgressBucket::from_lifecycle(&file.lifecycle));
+                        file.package_id = incoming_package_id;
                     }
                 }
             }
@@ -324,10 +326,10 @@ fn reduce_impl(
                         && package.display_name == package.source_url
                 });
             let package_display_name = if preserve_display_name {
-                previous_package
-                    .as_ref()
-                    .map(|(_, existing)| existing.display_name.clone())
-                    .unwrap_or_else(|| package.display_name.clone())
+                previous_package.as_ref().map_or_else(
+                    || package.display_name.clone(),
+                    |(_, existing)| existing.display_name.clone(),
+                )
             } else {
                 package.display_name.clone()
             };
@@ -337,16 +339,17 @@ fn reduce_impl(
                 .as_ref()
                 .map(|collision| format!("path collision on {}", collision.file_id));
             {
-                let package_entry = state
-                    .packages
-                    .entry(incoming_package_id.clone())
-                    .or_insert_with(|| PackageState {
-                        id: incoming_package_id.clone(),
-                        key: package.key.clone(),
-                        display_name: package_display_name.clone(),
-                        progress: PackageProgressState::default(),
-                        error: None,
-                    });
+                let package_entry =
+                    state
+                        .packages
+                        .entry(incoming_package_id)
+                        .or_insert_with(|| PackageState {
+                            id: incoming_package_id,
+                            key: package.key.clone(),
+                            display_name: package_display_name.clone(),
+                            progress: PackageProgressState::default(),
+                            error: None,
+                        });
                 package_entry.key = package.key.clone();
                 if !preserve_display_name {
                     package_entry.display_name = package_display_name;
@@ -367,7 +370,7 @@ fn reduce_impl(
                 let existing_package_id = state
                     .files
                     .get(&resolved.file_id)
-                    .map(|existing| existing.package_id.clone());
+                    .map(|existing| existing.package_id);
                 match existing_package_id {
                     Some(existing_package_id) if existing_package_id != incoming_package_id => {
                         package_error = Some(format!(
@@ -379,8 +382,8 @@ fn reduce_impl(
                         let mut delta = None;
                         if let Some(file) = state.files.get_mut(&resolved.file_id) {
                             let before = FileDerivedState::from(&*file);
-                            file.source_url = package.source_url.clone();
-                            file.path = resolved.path.clone();
+                            file.source_url.clone_from(&package.source_url);
+                            file.path.clone_from(&resolved.path);
                             file.size = resolved.size;
                             let after = FileDerivedState::from(&*file);
                             delta = Some((before, after));
@@ -392,7 +395,7 @@ fn reduce_impl(
                     None => {
                         let file = FileState {
                             id: resolved.file_id.clone(),
-                            package_id: incoming_package_id.clone(),
+                            package_id: incoming_package_id,
                             source_url: package.source_url.clone(),
                             path: resolved.path,
                             size: resolved.size,
@@ -600,10 +603,7 @@ fn reduce_impl(
                 apply_file_change(state, &file_id, before, after);
             }
         }
-        CoreEvent::FileCompleted { file_id } => {
-            complete_file(state, &file_id);
-        }
-        CoreEvent::FileVerificationCompleted { file_id } => {
+        CoreEvent::FileCompleted { file_id } | CoreEvent::FileVerificationCompleted { file_id } => {
             complete_file(state, &file_id);
         }
         CoreEvent::FileFailed { file_id, message } => {
@@ -825,15 +825,16 @@ fn debug_assert_invariants(state: &DownloadState) {
         .map(|(index, package_id)| (*package_id, index))
         .collect::<HashMap<_, _, rustc_hash::FxBuildHasher>>();
     let mut file_counts = HashMap::<PackageId, usize, rustc_hash::FxBuildHasher>::with_hasher(
-        rustc_hash::FxBuildHasher::default(),
+        rustc_hash::FxBuildHasher,
     );
     for (package_id, package) in &state.packages {
         debug_assert_eq!(
             package_id, &package.id,
             "package map key must equal package.id"
         );
+        let package_key_is_unique = package_keys.insert(package.key.clone());
         debug_assert!(
-            package_keys.insert(package.key.clone()),
+            package_key_is_unique,
             "only one package may exist per package key"
         );
         debug_assert_eq!(
@@ -874,6 +875,7 @@ fn debug_assert_invariants(state: &DownloadState) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::redundant_clone, clippy::redundant_closure_for_method_calls)]
     use super::*;
 
     fn package_id(raw: &str, source_url: &str) -> PackageId {

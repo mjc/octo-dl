@@ -1,3 +1,5 @@
+#![allow(clippy::cast_possible_truncation)]
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;

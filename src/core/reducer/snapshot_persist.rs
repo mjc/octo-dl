@@ -1,3 +1,5 @@
+#![allow(clippy::redundant_pub_crate)]
+
 #[cfg(test)]
 use std::cell::Cell;
 
@@ -16,7 +18,7 @@ thread_local! {
     static SNAPSHOT_FROM_STATE_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
-pub(crate) fn should_persist_session(event: &CoreEvent) -> bool {
+pub(crate) const fn should_persist_session(event: &CoreEvent) -> bool {
     !matches!(
         event,
         CoreEvent::FileProgress { .. }
@@ -42,6 +44,13 @@ pub(crate) fn snapshot_from_state_call_count() -> usize {
     SNAPSHOT_FROM_STATE_CALLS.with(Cell::get)
 }
 
+/// Builds a persisted session snapshot from the current state.
+///
+/// # Panics
+///
+/// Panics if the state violates the invariant that a peeked file remains
+/// available while its package snapshot is being assembled.
+#[must_use]
 pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
     #[cfg(test)]
     SNAPSHOT_FROM_STATE_CALLS.with(|count| count.set(count.get().saturating_add(1)));
@@ -84,8 +93,9 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
             error: package.error.clone(),
         });
     }
+    let no_remaining_files = remaining_files.next().is_none();
     debug_assert!(
-        remaining_files.next().is_none(),
+        no_remaining_files,
         "snapshot_from_state expects files grouped in package order"
     );
     SessionSnapshot {

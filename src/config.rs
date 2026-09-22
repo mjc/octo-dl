@@ -27,6 +27,8 @@ const fn default_concurrent_files() -> usize {
     4
 }
 
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Configuration for download operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DownloadConfig {
@@ -121,6 +123,11 @@ impl DownloadConfig {
 
     /// Validates values that would otherwise make download execution
     /// ambiguous or unable to make progress.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required positive setting is zero or when the
+    /// configured download path is empty.
     pub fn validate(&self) -> Result<(), DownloadConfigError> {
         for (field, value) in [
             ("chunks_per_file", self.chunks_per_file),
@@ -427,6 +434,11 @@ pub struct ApiKey(String);
 
 impl ApiKey {
     /// Constructs an API key, rejecting values that cannot authenticate a request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiKeyError::Empty`] when the supplied value is empty or only
+    /// whitespace.
     pub fn new(value: impl Into<String>) -> Result<Self, ApiKeyError> {
         let value = value.into();
         if value.trim().is_empty() {
@@ -537,13 +549,13 @@ impl ServiceConfig {
     /// Returns an error if the file cannot be read or parsed.
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let contents = std::fs::read_to_string(path)
-            .map_err(|error| path_io_error("read config file", path, error))?;
+            .map_err(|error| path_io_error("read config file", path, &error))?;
         let mut config: Self = toml::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let key_path = credential_key_path(path);
         if key_path.exists() {
             let key = std::fs::read_to_string(&key_path)
-                .map_err(|error| path_io_error("read credential key", &key_path, error))?;
+                .map_err(|error| path_io_error("read credential key", &key_path, &error))?;
             if decode_credential_key(key.trim()).is_none() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -568,7 +580,7 @@ impl ServiceConfig {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|error| path_io_error("create config directory", parent, error))?;
+                .map_err(|error| path_io_error("create config directory", parent, &error))?;
         }
 
         let template = Self {
@@ -599,7 +611,6 @@ impl ServiceConfig {
         let toml_str = toml::to_string(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let save_id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let file_name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -658,14 +669,15 @@ impl ServiceConfig {
         ));
         let had_key = key_path.exists();
         if had_key {
-            std::fs::copy(&key_path, &key_backup_path)
-                .map_err(|error| path_io_error("backup credential key", &key_backup_path, error))?;
+            std::fs::copy(&key_path, &key_backup_path).map_err(|error| {
+                path_io_error("backup credential key", &key_backup_path, &error)
+            })?;
         }
         if let Err(error) = std::fs::rename(&key_temporary_path, &key_path) {
             let _ = std::fs::remove_file(&temporary_path);
             let _ = std::fs::remove_file(&key_temporary_path);
             let _ = std::fs::remove_file(&key_backup_path);
-            return Err(path_io_error("replace credential key", &key_path, error));
+            return Err(path_io_error("replace credential key", &key_path, &error));
         }
         if let Err(error) = std::fs::rename(&temporary_path, path) {
             let _ = std::fs::remove_file(&temporary_path);
@@ -676,7 +688,7 @@ impl ServiceConfig {
                 std::fs::remove_file(&key_path)
             };
             return Err(match restore_result {
-                Ok(()) => path_io_error("replace config file", path, error),
+                Ok(()) => path_io_error("replace config file", path, &error),
                 Err(restore_error) => std::io::Error::new(
                     error.kind(),
                     format!(
@@ -704,19 +716,19 @@ fn write_durable_temp_file(path: &Path, contents: &[u8], description: &str) -> s
     }
     let mut file = options
         .open(path)
-        .map_err(|error| path_io_error(&format!("write {description}"), path, error))?;
+        .map_err(|error| path_io_error(&format!("write {description}"), path, &error))?;
     file.write_all(contents)
-        .map_err(|error| path_io_error(&format!("write {description}"), path, error))?;
+        .map_err(|error| path_io_error(&format!("write {description}"), path, &error))?;
     file.flush()
-        .map_err(|error| path_io_error(&format!("flush {description}"), path, error))?;
+        .map_err(|error| path_io_error(&format!("flush {description}"), path, &error))?;
     file.sync_all()
-        .map_err(|error| path_io_error(&format!("sync {description}"), path, error))?;
+        .map_err(|error| path_io_error(&format!("sync {description}"), path, &error))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
-            |error| path_io_error(&format!("set {description} permissions"), path, error),
+            |error| path_io_error(&format!("set {description} permissions"), path, &error),
         )?;
     }
 
@@ -725,7 +737,7 @@ fn write_durable_temp_file(path: &Path, contents: &[u8], description: &str) -> s
 
 fn replace_config_file(temporary_path: &Path, path: &Path, parent: &Path) -> std::io::Result<()> {
     std::fs::rename(temporary_path, path)
-        .map_err(|error| path_io_error("replace config file", path, error))?;
+        .map_err(|error| path_io_error("replace config file", path, &error))?;
     sync_directory(parent)
 }
 
@@ -733,10 +745,10 @@ fn sync_directory(parent: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         let directory = std::fs::File::open(parent)
-            .map_err(|error| path_io_error("open config directory", parent, error))?;
+            .map_err(|error| path_io_error("open config directory", parent, &error))?;
         directory
             .sync_all()
-            .map_err(|error| path_io_error("sync config directory", parent, error))?;
+            .map_err(|error| path_io_error("sync config directory", parent, &error))?;
     }
     Ok(())
 }
@@ -745,7 +757,7 @@ fn credential_key_path(path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("{}.key", path.display()))
 }
 
-fn path_io_error(action: &str, path: &Path, error: std::io::Error) -> std::io::Error {
+fn path_io_error(action: &str, path: &Path, error: &std::io::Error) -> std::io::Error {
     std::io::Error::new(
         error.kind(),
         format!("{action} {}: {error}", path.display()),

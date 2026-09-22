@@ -2,10 +2,10 @@ use std::path::{Component, Path, PathBuf};
 
 /// A trusted base directory for downloaded output.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DownloadRoot(PathBuf);
+pub(super) struct DownloadRoot(PathBuf);
 
 impl DownloadRoot {
-    pub(crate) fn new(path: impl Into<PathBuf>) -> Result<Self, &'static str> {
+    pub(super) fn new(path: impl Into<PathBuf>) -> Result<Self, &'static str> {
         let path = path.into();
         if path.as_os_str().is_empty() {
             return Err("download root must not be empty");
@@ -13,17 +13,17 @@ impl DownloadRoot {
         Ok(Self(path))
     }
 
-    pub(crate) fn resolve(&self, output: &RelativeOutputPath) -> PathBuf {
+    pub(super) fn resolve(&self, output: &RelativeOutputPath) -> PathBuf {
         self.0.join(output.as_path())
     }
 }
 
 /// A download output path that cannot escape its configured [`DownloadRoot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RelativeOutputPath(PathBuf);
+pub(super) struct RelativeOutputPath(PathBuf);
 
 impl RelativeOutputPath {
-    pub(crate) fn new(path: impl AsRef<Path>) -> Result<Self, &'static str> {
+    pub(super) fn new(path: impl AsRef<Path>) -> Result<Self, &'static str> {
         let path = path.as_ref();
         if path.as_os_str().is_empty() {
             return Err("relative output path must not be empty");
@@ -54,7 +54,7 @@ impl RelativeOutputPath {
         Ok(Self(path.to_path_buf()))
     }
 
-    pub(crate) fn as_path(&self) -> &Path {
+    pub(super) fn as_path(&self) -> &Path {
         &self.0
     }
 }

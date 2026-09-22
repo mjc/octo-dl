@@ -8,7 +8,7 @@ use std::time::Duration;
 pub struct ByteSize(u64);
 
 #[must_use]
-pub fn format_bytes(bytes: u64) -> ByteSize {
+pub const fn format_bytes(bytes: u64) -> ByteSize {
     ByteSize(bytes)
 }
 
@@ -20,6 +20,11 @@ impl fmt::Display for ByteSize {
 
 /// Appends a human-readable byte count to an existing string without creating
 /// a temporary formatted byte string.
+///
+/// # Panics
+///
+/// Panics only if writing to the in-memory `String` fails, which cannot happen
+/// for the standard `String` implementation.
 pub fn push_formatted_bytes(out: &mut String, bytes: u64) {
     write_formatted_bytes(out, bytes).expect("writing formatted bytes to a string should not fail");
 }
@@ -48,7 +53,8 @@ fn push_scaled_bytes(
 ) -> fmt::Result {
     let scaled =
         ((u128::from(bytes) * 100) + (u128::from(unit_bytes) / 2)) / u128::from(unit_bytes);
-    push_decimal(out, (scaled / 100) as u64)?;
+    let whole = u64::try_from(scaled / 100).expect("scaled byte count fits in u64");
+    push_decimal(out, whole)?;
     out.write_char('.')?;
     let frac = (scaled % 100) as u8;
     out.write_char(char::from(b'0' + (frac / 10)))?;

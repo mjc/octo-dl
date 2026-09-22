@@ -1,3 +1,5 @@
+#![allow(clippy::branches_sharing_code, clippy::option_option)]
+
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -156,39 +158,30 @@ pub(super) fn load_sidecar_sync(
 pub(in crate::download) async fn load_sidecar(path: &Path) -> Option<ResumeSidecar> {
     let legacy_binary_path = legacy_binary_path_for_sidecar(path);
     let legacy_json_path = legacy_json_path_for_sidecar(path);
-    match tokio::fs::read(path).await {
-        Ok(data) => {
-            if let Some(sidecar) = deserialize_postcard_sidecar(&data) {
-                return Some(sidecar);
-            }
-            if legacy_binary_path == path {
-                if let Some(sidecar) = deserialize_legacy_binary_sidecar(&data) {
-                    return Some(sidecar);
-                }
-            }
-            if legacy_json_path == path {
-                return deserialize_legacy_json_sidecar(&data);
-            }
-            if let Ok(legacy_binary_data) = tokio::fs::read(&legacy_binary_path).await
-                && let Some(sidecar) = deserialize_legacy_binary_sidecar(&legacy_binary_data)
-            {
-                migrate_legacy_binary_sidecar(path, &legacy_binary_path, &sidecar).await;
-                return Some(sidecar);
-            }
-            let legacy_json_data = tokio::fs::read(&legacy_json_path).await.ok()?;
-            deserialize_legacy_json_sidecar(&legacy_json_data)
+    if let Ok(data) = tokio::fs::read(path).await {
+        if let Some(sidecar) = deserialize_postcard_sidecar(&data) {
+            return Some(sidecar);
         }
-        Err(_) => {
-            if let Ok(legacy_binary_data) = tokio::fs::read(&legacy_binary_path).await
-                && let Some(sidecar) = deserialize_legacy_binary_sidecar(&legacy_binary_data)
-            {
-                migrate_legacy_binary_sidecar(path, &legacy_binary_path, &sidecar).await;
-                return Some(sidecar);
-            }
-            let legacy_json_data = tokio::fs::read(&legacy_json_path).await.ok()?;
-            deserialize_legacy_json_sidecar(&legacy_json_data)
+        if legacy_binary_path == path
+            && let Some(sidecar) = deserialize_legacy_binary_sidecar(&data)
+        {
+            return Some(sidecar);
+        }
+        if legacy_json_path == path {
+            return deserialize_legacy_json_sidecar(&data);
+        }
+        if legacy_json_path == path {
+            return deserialize_legacy_json_sidecar(&data);
         }
     }
+    if let Ok(legacy_binary_data) = tokio::fs::read(&legacy_binary_path).await
+        && let Some(sidecar) = deserialize_legacy_binary_sidecar(&legacy_binary_data)
+    {
+        migrate_legacy_binary_sidecar(path, &legacy_binary_path, &sidecar).await;
+        return Some(sidecar);
+    }
+    let legacy_json_data = tokio::fs::read(&legacy_json_path).await.ok()?;
+    deserialize_legacy_json_sidecar(&legacy_json_data)
 }
 
 fn deserialize_postcard_sidecar(data: &[u8]) -> Option<ResumeSidecar> {
@@ -260,15 +253,15 @@ struct LegacyBinaryReader<'a> {
 }
 
 impl<'a> LegacyBinaryReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    const fn new(data: &'a [u8]) -> Self {
         Self { data, offset: 0 }
     }
 
-    fn remaining(&self) -> usize {
+    const fn remaining(&self) -> usize {
         self.data.len().saturating_sub(self.offset)
     }
 
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.offset == self.data.len()
     }
 

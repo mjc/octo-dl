@@ -42,7 +42,7 @@ pub(super) async fn download_all_items<T, F>(
     skipped_count: usize,
 ) -> Result<SessionStats>
 where
-    T: SessionDownloadItem,
+    T: SessionDownloadItem + Sync,
     F: FileSystem,
 {
     let mut builder = SessionStatsBuilder::new();
@@ -56,10 +56,12 @@ where
 
     let mut peak_speed = 0;
     let mut downloads = stream::iter(files.iter())
-        .map(|item| async move {
-            downloader
-                .download_file(item.node(), item.path(), progress, false, None)
-                .await
+        .map(|item| {
+            Box::pin(async move {
+                downloader
+                    .download_file(item.node(), item.path(), progress, false, None)
+                    .await
+            })
         })
         .buffer_unordered(downloader.config.concurrent_files);
 

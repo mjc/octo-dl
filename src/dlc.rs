@@ -37,7 +37,7 @@ impl DlcKeyCache {
     fn get(&self, key: &str) -> Option<String> {
         self.cache
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(key)
             .cloned()
     }
@@ -45,7 +45,7 @@ impl DlcKeyCache {
     pub(crate) fn set(&self, key: String, value: String) {
         self.cache
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(key, value);
     }
 }
@@ -119,7 +119,7 @@ pub async fn parse_dlc_data(
         .map_err(|_| Error::Dlc("DLC encrypted data is not valid UTF-8".to_string()))?;
 
     // Validate key format (should be base64)
-    if !is_valid_base64(&dlc_key) {
+    if !is_valid_base64(dlc_key) {
         return Err(Error::Dlc(
             "DLC encryption key is not valid base64".to_string(),
         ));
@@ -132,7 +132,7 @@ pub async fn parse_dlc_data(
     }
 
     // Get decryption key from service (with caching)
-    let decryption_key = get_decryption_key(&dlc_key, http_client, cache)
+    let decryption_key = get_decryption_key(dlc_key, http_client, cache)
         .await
         .ok_or_else(|| Error::Dlc("Failed to get decryption key from service".to_string()))?;
 

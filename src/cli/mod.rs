@@ -1,5 +1,7 @@
 //! octo-dl CLI - Command-line interface for downloading MEGA files.
 
+#![allow(clippy::too_many_lines)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -458,9 +460,14 @@ async fn download_all(
             let progress = Arc::clone(&progress_trait);
             let trust_resume_state = known_session_file_ids.contains(item.path.as_str());
             async move {
-                let result = downloader
-                    .download_file(item.node, &item.path, &progress, trust_resume_state, None)
-                    .await;
+                let result = Box::pin(downloader.download_file(
+                    item.node,
+                    &item.path,
+                    &progress,
+                    trust_resume_state,
+                    None,
+                ))
+                .await;
                 (item.path.clone(), result)
             }
         })
@@ -840,26 +847,14 @@ async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> cra
         "Fetching file lists from {} URL(s)...\n",
         remaining_urls.len()
     );
-    let mut all_nodes: Vec<(usize, String, mega::Nodes)> = Vec::new();
-    let mut had_fetch_failures = false;
-    for (url_idx, url) in &remaining_urls {
-        print!("  {url} ... ");
-        match crate::fetch_public_nodes(&http, url).await {
-            Ok(nodes) => {
-                let collected_tmp = downloader.collect_files(&nodes, &no_progress).await;
-                let file_count = collected_tmp.to_download.len() + collected_tmp.skipped;
-                println!("{file_count} file(s)");
-                if let Some(entry) = session.urls.get_mut(*url_idx) {
-                    entry.error = None;
-                }
-                all_nodes.push((*url_idx, url.clone(), nodes));
-            }
-            Err(e) => {
-                had_fetch_failures = true;
-                println!("ERROR: {e:?}");
-            }
-        }
-    }
+    let (all_nodes, had_fetch_failures) = fetch_remaining_nodes(
+        &downloader,
+        &http,
+        &no_progress,
+        &mut session,
+        &remaining_urls,
+    )
+    .await;
 
     // Completed file paths from session state
     let resumable_file_ids: std::collections::HashSet<_> =
@@ -949,6 +944,38 @@ async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> cra
     Ok(())
 }
 
+async fn fetch_remaining_nodes(
+    downloader: &crate::Downloader,
+    http: &reqwest::Client,
+    no_progress: &Arc<dyn crate::DownloadProgress>,
+    session: &mut SessionSnapshot,
+    remaining_urls: &[(usize, String)],
+) -> (Vec<(usize, String, mega::Nodes)>, bool) {
+    let mut all_nodes = Vec::new();
+    let mut had_fetch_failures = false;
+
+    for (url_idx, url) in remaining_urls {
+        print!("  {url} ... ");
+        match crate::fetch_public_nodes(http, url).await {
+            Ok(nodes) => {
+                let collected = downloader.collect_files(&nodes, no_progress).await;
+                let file_count = collected.to_download.len() + collected.skipped;
+                println!("{file_count} file(s)");
+                if let Some(entry) = session.urls.get_mut(*url_idx) {
+                    entry.error = None;
+                }
+                all_nodes.push((*url_idx, url.clone(), nodes));
+            }
+            Err(error) => {
+                had_fetch_failures = true;
+                println!("ERROR: {error:?}");
+            }
+        }
+    }
+
+    (all_nodes, had_fetch_failures)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -991,9 +1018,8 @@ mod tests {
 
     #[test]
     fn cli_source_boundary_rejects_unsupported_inputs() {
-        let error = match parse_args(["https://example.com/file/id"].map(str::to_string)) {
-            Ok(_) => panic!("non-MEGA URLs should be rejected at submission"),
-            Err(error) => error,
+        let Err(error) = parse_args(["https://example.com/file/id"].map(str::to_string)) else {
+            panic!("non-MEGA URLs should be rejected at submission");
         };
         assert!(error.contains("invalid download source"));
     }

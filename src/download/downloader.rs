@@ -27,11 +27,19 @@ pub async fn fetch_public_nodes(http: &reqwest::Client, url: &str) -> Result<meg
 }
 
 /// Deletes resumable download artifacts for a final output path.
+///
+/// # Errors
+///
+/// Returns an error when an artifact cannot be removed.
 pub async fn delete_resume_artifacts(path: &str) -> io::Result<()> {
     sidecar::delete_resume_artifacts_for_path(path).await
 }
 
 /// Deletes the final output and resumable download artifacts for a path.
+///
+/// # Errors
+///
+/// Returns an error when an artifact cannot be removed.
 pub async fn delete_download_artifacts(path: &str) -> io::Result<()> {
     sidecar::delete_download_artifacts_for_path(path).await
 }

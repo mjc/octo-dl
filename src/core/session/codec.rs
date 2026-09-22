@@ -189,7 +189,7 @@ pub(super) fn encode_snapshot(path: &Path, snapshot: &SessionSnapshot) -> std::i
         SessionEncoding::Postcard => postcard::to_stdvec(&PostcardSessionSnapshot::from(snapshot))
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
         SessionEncoding::Toml => toml::to_string(snapshot)
-            .map(|value| value.into_bytes())
+            .map(String::into_bytes)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
     }
 }

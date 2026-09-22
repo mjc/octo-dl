@@ -110,6 +110,7 @@ pub fn build_restart_snapshot(session: &SessionSnapshot) -> RestartSnapshot {
     )
 }
 
+#[allow(clippy::too_many_lines, clippy::branches_sharing_code)]
 pub fn reconcile_restart(
     session: Option<SessionSnapshot>,
     fs: FilesystemSnapshot,
@@ -172,9 +173,9 @@ pub fn reconcile_restart(
         }
         for package in &snapshot_packages {
             packages.insert(
-                package.id.clone(),
+                package.id,
                 PackageState {
-                    id: package.id.clone(),
+                    id: package.id,
                     key: package.key.clone(),
                     display_name: package.display_name.clone(),
                     progress: PackageProgressState::default(),
@@ -193,7 +194,7 @@ pub fn reconcile_restart(
             let path_id = FileId::from(file.path.as_str());
             let mut file = FileState {
                 id: file.id.clone(),
-                package_id: file.package_id.clone(),
+                package_id: file.package_id,
                 source_url: file.source_url.clone(),
                 path: file.path.clone(),
                 size: file.size,
@@ -251,10 +252,9 @@ pub fn reconcile_restart(
 
     let mut seen_urls: HashSet<String> = HashSet::new();
     for url in urls {
-        if seen_urls.insert(url.clone()) {
-            if !state.url_order.iter().any(|existing| existing == &url) {
-                state.url_order.push(url);
-            }
+        if seen_urls.insert(url.clone()) && !state.url_order.iter().any(|existing| existing == &url)
+        {
+            state.url_order.push(url);
         }
     }
 
@@ -290,9 +290,9 @@ mod tests {
     }
 
     fn sample_snapshot() -> SessionSnapshot {
-        let snapshot = SessionSnapshot {
+        SessionSnapshot {
             version: 6,
-            id: "session".to_string().into(),
+            id: "session".to_string(),
             created: Utc::now(),
             status: SessionRunStatus::InProgress,
             urls: vec![SessionUrlSnapshot {
@@ -317,8 +317,7 @@ mod tests {
             }],
             config: crate::config::DownloadConfig::default(),
             credentials: SavedCredentials::encrypt("u", "p", None),
-        };
-        snapshot
+        }
     }
 
     fn push_snapshot_file(snapshot: &mut SessionSnapshot, path: &str, size: u64) {
@@ -612,7 +611,7 @@ mod tests {
         snapshot.packages = vec![
             PackageSnapshot {
                 id: package_id(&source_url, &source_url),
-                key: crate::core::PackageKey::new(source_url.clone().clone()),
+                key: crate::core::PackageKey::new(source_url.clone()),
                 display_name: source_url.clone(),
                 files: vec![FileSnapshot {
                     id: "a.bin".to_string().into(),
@@ -628,7 +627,7 @@ mod tests {
             },
             PackageSnapshot {
                 id: package_id("batch-dup", &source_url),
-                key: crate::core::PackageKey::new(source_url.clone().clone()),
+                key: crate::core::PackageKey::new(source_url.clone()),
                 display_name: "Folder".to_string(),
                 files: vec![FileSnapshot {
                     id: "b.bin".to_string().into(),
@@ -652,7 +651,7 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.packages.push(PackageSnapshot {
             id: package_id("batch-folder", "https://mega.nz/file/test"),
-            key: crate::core::PackageKey::new("https://mega.nz/file/test".to_string().clone()),
+            key: crate::core::PackageKey::new("https://mega.nz/file/test".to_string()),
             display_name: "Batch Folder".to_string(),
             files: Vec::new(),
             error: Some("boom".to_string()),

@@ -29,6 +29,11 @@ impl MegaUrl {
     ///
     /// Both `http` and `https` are preserved. The public-link fragment is
     /// preserved verbatim because MEGA keys are opaque to this crate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is empty or is not a supported MEGA
+    /// public-link form.
     pub fn parse(input: &str) -> Result<Self, SourceParseError> {
         let input = input.trim();
         if input.is_empty() {
@@ -83,12 +88,17 @@ impl FromStr for MegaUrl {
     }
 }
 
-/// A validated path to a JDownloader DLC file.
+/// A validated path to a `JDownloader` `.dlc` file.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DlcPath(String);
 
 impl DlcPath {
     /// Parses a local path whose extension is `.dlc`, case-insensitively.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is empty, contains a URL scheme or NUL
+    /// byte, or does not have a `.dlc` extension.
     pub fn parse(input: &str) -> Result<Self, SourceParseError> {
         let input = input.trim();
         if input.is_empty() {
@@ -149,6 +159,11 @@ pub enum DownloadSource {
 
 impl DownloadSource {
     /// Parses one supported CLI/TUI submission source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is empty or is neither a supported MEGA
+    /// public link nor a `.dlc` path.
     pub fn parse(input: &str) -> Result<Self, SourceParseError> {
         let input = input.trim();
         if input.is_empty() {

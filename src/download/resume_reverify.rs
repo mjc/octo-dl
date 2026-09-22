@@ -23,10 +23,15 @@ impl<F: FileSystem> Downloader<F> {
         node: &mega::Node,
         path: &str,
     ) -> Result<ResumeReverify> {
-        self.reverify_resume_file_with_progress(node, path, None)
-            .await
+        Box::pin(self.reverify_resume_file_with_progress(node, path, None)).await
     }
 
+    /// Revalidates resumable chunks and reports progress while scanning them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when configuration, filesystem access, sidecar
+    /// persistence, or remote-node MAC metadata is invalid.
     pub async fn reverify_resume_file_with_progress(
         &self,
         node: &mega::Node,
@@ -39,17 +44,16 @@ impl<F: FileSystem> Downloader<F> {
         let sidecar_path = sidecar_path(path);
         let expected_condensed_mac = expected_mac(node)?;
         let boundaries = mega::mega_chunk_boundaries(node.size());
-        let validation = self
-            .revalidate_resume_chunks(
-                node,
-                &boundaries,
-                &part_path,
-                &sidecar_path,
-                expected_condensed_mac,
-                progress.map(|progress| (path, progress)),
-                None,
-            )
-            .await?;
+        let validation = Box::pin(self.revalidate_resume_chunks(
+            node,
+            &boundaries,
+            &part_path,
+            &sidecar_path,
+            expected_condensed_mac,
+            progress.map(|progress| (path, progress)),
+            None,
+        ))
+        .await?;
         if validation.sidecar_loaded {
             persist_revalidated_sidecar(
                 &self.fs,

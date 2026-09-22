@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments, clippy::too_many_lines)]
+
 use std::path::Path;
 
 use tokio_util::sync::CancellationToken;
@@ -27,7 +29,7 @@ impl<F: FileSystem> Downloader<F> {
         progress: Option<(&str, &dyn DownloadProgress)>,
         cancellation_token: Option<&CancellationToken>,
     ) -> Result<ResumeValidation> {
-        if cancellation_token.is_some_and(|token| token.is_cancelled()) {
+        if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
             return Err(Error::Cancelled);
         }
         let Some(sidecar) = load_sidecar(sidecar_path).await else {
@@ -35,7 +37,7 @@ impl<F: FileSystem> Downloader<F> {
         };
         let aes_iv = node.aes_iv().ok_or(mega::Error::MissingNodeAesIv)?;
 
-        self.revalidate_sidecar_chunks(
+        Box::pin(self.revalidate_sidecar_chunks(
             SidecarValidationInput {
                 boundaries,
                 part_path,
@@ -47,7 +49,7 @@ impl<F: FileSystem> Downloader<F> {
                 progress,
             },
             cancellation_token,
-        )
+        ))
         .await
     }
 

@@ -19,7 +19,7 @@ pub struct CompletedFileVerify {
     pub bytes: u64,
 }
 
-pub(crate) fn expected_mac(node: &mega::Node) -> Result<[u8; 8]> {
+pub(super) fn expected_mac(node: &mega::Node) -> Result<[u8; 8]> {
     let mac = node
         .condensed_mac()
         .ok_or(mega::Error::MissingCondensedMac)?;
@@ -45,7 +45,7 @@ async fn compute_completed_file_mac_from_file(
         tokio::task::spawn_blocking(move || -> Result<([u8; 8], Vec<u64>)> {
             let mut condensed_mac = mega::MegaCondensedMac::new(&aes_key);
             let mut file = std::fs::File::open(&final_path)?;
-            let mut buffer = [0; REVALIDATION_BUFFER_BYTES];
+            let mut buffer = vec![0; REVALIDATION_BUFFER_BYTES];
             let mut progress_deltas = Vec::new();
             for boundary in mega::mega_chunk_boundaries_iter(file_size) {
                 let mut mac = mega::MegaChunkMac::new(&aes_key, &aes_iv);
@@ -116,8 +116,7 @@ impl<F: FileSystem> Downloader<F> {
             }
             Err(error) => {
                 log::warn!(
-                    "Existing completed file {} failed verification; keeping it and redownloading: {error}",
-                    path
+                    "Existing completed file {path} failed verification; keeping it and redownloading: {error}"
                 );
                 Ok(None)
             }
@@ -139,6 +138,12 @@ impl<F: FileSystem> Downloader<F> {
             .await
     }
 
+    /// Verifies a completed file and reports progress for bytes read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file is missing, has the wrong size, or its
+    /// computed MEGA condensed MAC does not match the node.
     pub async fn verify_completed_file_with_progress(
         &self,
         node: &mega::Node,

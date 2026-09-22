@@ -19,7 +19,7 @@ pub enum FileStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct ObservedLocalFile {
+pub struct ObservedLocalFile {
     pub final_size: Option<u64>,
     pub part_size: Option<u64>,
     pub part_allocated_bytes: Option<u64>,
@@ -28,7 +28,7 @@ pub(crate) struct ObservedLocalFile {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct InspectedLocalFile {
+pub struct InspectedLocalFile {
     pub status: FileStatus,
     pub existing_partial_bytes: u64,
     pub has_resume_sidecar: bool,
@@ -46,7 +46,7 @@ impl Default for InspectedLocalFile {
     }
 }
 
-pub(crate) fn classify_observed_local_file(
+pub fn classify_observed_local_file(
     observed: ObservedLocalFile,
     expected_size: u64,
     force_overwrite: bool,
@@ -66,7 +66,7 @@ pub(crate) fn classify_observed_local_file(
     }
 
     if let Some(part_size) = observed.part_size {
-        let baseline_partial_bytes = observed.part_allocated_bytes.unwrap_or_else(|| {
+        let baseline_partial_bytes = observed.part_allocated_bytes.unwrap_or({
             if observed.has_sidecar {
                 observed.verified_resume_bytes
             } else {
@@ -94,7 +94,7 @@ pub(crate) fn classify_observed_local_file(
     }
 }
 
-pub(crate) async fn inspect_local_file<F: FileSystem>(
+pub async fn inspect_local_file<F: FileSystem>(
     fs: &F,
     path: &str,
     expected_size: u64,

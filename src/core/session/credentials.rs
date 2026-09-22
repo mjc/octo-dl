@@ -42,16 +42,22 @@ fn derive_machine_key() -> [u8; 16] {
         return *key;
     }
 
-    match hostname::get() {
-        Ok(hostname) => {
+    hostname::get().map_or_else(
+        |_| derive_machine_key_from_parts("unknown-host", &whoami::username()),
+        |hostname| {
             let hostname = hostname.to_string_lossy().into_owned();
             let username = whoami::username();
             *MACHINE_KEY.get_or_init(|| derive_machine_key_from_parts(&hostname, &username))
-        }
-        Err(_) => derive_machine_key_from_parts("unknown-host", &whoami::username()),
-    }
+        },
+    )
 }
 
+/// Encrypts a credential using the machine-derived key.
+///
+/// # Panics
+///
+/// Panics only if the authenticated-encryption implementation rejects the
+/// generated nonce and plaintext combination.
 #[must_use]
 pub fn encrypt_credential(plaintext: &str) -> String {
     let key = derive_machine_key();
@@ -97,6 +103,12 @@ pub fn decode_credential_key(encoded: &str) -> Option<[u8; 16]> {
     bytes.try_into().ok()
 }
 
+/// Encrypts a credential using an explicitly supplied key.
+///
+/// # Panics
+///
+/// Panics only if the authenticated-encryption implementation rejects the
+/// generated nonce and plaintext combination.
 #[must_use]
 pub fn encrypt_credential_with_key(plaintext: &str, key: &[u8; 16]) -> String {
     let cipher = Aes128Gcm::new(key.into());

@@ -61,20 +61,20 @@ pub(super) fn trust_resume_candidate(
     true
 }
 
-pub(super) fn mark_sidecar_source_if_trusted(validation: &mut ResumeValidation) {
+pub(super) const fn mark_sidecar_source_if_trusted(validation: &mut ResumeValidation) {
     if validation.trusted_count > 0 {
         validation.source = Some(ResumeReuseSource::Sidecar);
     }
 }
 
-pub(crate) fn should_emit_resume_validation_progress(
+pub(super) fn should_emit_resume_validation_progress(
     last_report_at: Instant,
     now: Instant,
 ) -> bool {
     now.saturating_duration_since(last_report_at) >= Duration::from_secs(30)
 }
 
-pub(crate) fn resume_fingerprint_matches(
+pub(super) fn resume_fingerprint_matches(
     expected: FileFingerprint,
     actual: FileFingerprint,
 ) -> bool {

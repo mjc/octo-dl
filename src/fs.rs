@@ -144,13 +144,13 @@ impl FileSystem for TokioFileSystem {
         size: u64,
         preserve_existing: bool,
     ) -> std::io::Result<tokio::fs::File> {
-        if let Ok(metadata) = tokio::fs::symlink_metadata(path).await {
-            if metadata.file_type().is_symlink() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!("refusing to open symlink as part file: {}", path.display()),
-                ));
-            }
+        if let Ok(metadata) = tokio::fs::symlink_metadata(path).await
+            && metadata.file_type().is_symlink()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("refusing to open symlink as part file: {}", path.display()),
+            ));
         }
         let file = tokio::fs::OpenOptions::new()
             .read(true)
@@ -176,15 +176,12 @@ impl FileSystem for TokioFileSystem {
 
     async fn sync_file(&self, path: &Path) -> std::io::Result<()> {
         let path = PathBuf::from(path);
-        match tokio::task::spawn_blocking({
+        tokio::task::spawn_blocking({
             let path = path.clone();
             move || sync_file_blocking(&path)
         })
         .await
-        {
-            Ok(result) => result,
-            Err(_) => sync_file_blocking(&path),
-        }
+        .unwrap_or_else(|_| sync_file_blocking(&path))
     }
 
     async fn remove_file(&self, path: &Path) -> std::io::Result<()> {

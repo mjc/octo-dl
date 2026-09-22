@@ -8,35 +8,35 @@ use super::sidecar_store::{
 };
 use super::sidecar_writer::sidecar_tmp_path;
 
-pub(crate) fn part_path(path: &str) -> PathBuf {
+pub fn part_path(path: &str) -> PathBuf {
     let mut part = String::with_capacity(path.len() + ".part".len());
     part.push_str(path);
     part.push_str(".part");
     PathBuf::from(part)
 }
 
-pub(crate) fn sidecar_path(path: &str) -> PathBuf {
+pub fn sidecar_path(path: &str) -> PathBuf {
     let mut sidecar = String::with_capacity(path.len() + ".part.postcard".len());
     sidecar.push_str(path);
     sidecar.push_str(".part.postcard");
     PathBuf::from(sidecar)
 }
 
-pub(crate) fn legacy_binary_sidecar_path(path: &str) -> PathBuf {
+pub fn legacy_binary_sidecar_path(path: &str) -> PathBuf {
     let mut sidecar = String::with_capacity(path.len() + ".part.meta.bin".len());
     sidecar.push_str(path);
     sidecar.push_str(".part.meta.bin");
     PathBuf::from(sidecar)
 }
 
-pub(crate) fn legacy_json_sidecar_path(path: &str) -> PathBuf {
+pub fn legacy_json_sidecar_path(path: &str) -> PathBuf {
     let mut sidecar = String::with_capacity(path.len() + ".part.meta.json".len());
     sidecar.push_str(path);
     sidecar.push_str(".part.meta.json");
     PathBuf::from(sidecar)
 }
 
-pub(crate) fn has_resume_sidecar(path: &str) -> bool {
+pub fn has_resume_sidecar(path: &str) -> bool {
     sidecar_path(path).exists()
         || legacy_binary_sidecar_path(path).exists()
         || legacy_json_sidecar_path(path).exists()
@@ -73,7 +73,7 @@ pub(super) async fn delete_sidecar_pair(
     Ok(())
 }
 
-pub(crate) fn resume_sidecar_verified_bytes(path: &str) -> Option<u64> {
+pub fn resume_sidecar_verified_bytes(path: &str) -> Option<u64> {
     let sidecar = load_sidecar_sync(
         &sidecar_path(path),
         &legacy_binary_sidecar_path(path),

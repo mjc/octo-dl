@@ -754,7 +754,7 @@ impl DownloadState {
     pub(crate) fn reorder_files_by_package_order(&mut self) {
         let mut grouped =
             HashMap::<PackageId, Vec<(FileId, FileState)>, FxBuildHasher>::with_hasher(
-                FxBuildHasher::default(),
+                FxBuildHasher,
             );
         for (file_id, file) in std::mem::take(&mut self.files) {
             grouped
@@ -764,8 +764,8 @@ impl DownloadState {
         }
 
         let mut reordered = FileStateIndex::default();
-        for package_id in self.packages.keys().copied() {
-            if let Some(files) = grouped.remove(&package_id) {
+        for package_id in self.packages.keys() {
+            if let Some(files) = grouped.remove(package_id) {
                 for (file_id, file) in files {
                     reordered.insert(file_id, file);
                 }
@@ -785,14 +785,14 @@ impl DownloadState {
 
     fn reorder_urls_by_package_order(&mut self) {
         let mut source_url_package_ids =
-            HashMap::<&str, PackageId, FxBuildHasher>::with_hasher(FxBuildHasher::default());
+            HashMap::<&str, PackageId, FxBuildHasher>::with_hasher(FxBuildHasher);
         for file in self.files.values() {
             source_url_package_ids
                 .entry(file.source_url.as_str())
                 .or_insert(file.package_id);
         }
         let mut grouped =
-            HashMap::<PackageId, Vec<UrlId>, FxBuildHasher>::with_hasher(FxBuildHasher::default());
+            HashMap::<PackageId, Vec<UrlId>, FxBuildHasher>::with_hasher(FxBuildHasher);
         let mut unresolved = Vec::new();
         for url in std::mem::take(&mut self.url_order) {
             let Some(&package_id) = source_url_package_ids.get(url.as_str()) else {
@@ -803,8 +803,8 @@ impl DownloadState {
         }
 
         let mut reordered = Vec::with_capacity(grouped.len() + unresolved.len());
-        for package_id in self.packages.keys().copied() {
-            if let Some(urls) = grouped.remove(&package_id) {
+        for package_id in self.packages.keys() {
+            if let Some(urls) = grouped.remove(package_id) {
                 reordered.extend(urls);
             }
         }

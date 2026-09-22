@@ -1,3 +1,9 @@
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::large_stack_arrays,
+    clippy::or_fun_call
+)]
+
 use std::path::PathBuf;
 
 use super::super::resume_state::ResumeReuseSource;

@@ -1,3 +1,5 @@
+#![allow(clippy::cast_possible_truncation)]
+
 /// Bytes and chunks reused from resumable state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResumeReuse {
@@ -30,11 +32,12 @@ pub(super) const fn should_reuse_resume_state(
 }
 
 #[must_use]
-pub(crate) fn resume_validation_percent(checked_bytes: u64, total_bytes: u64) -> u64 {
+pub fn resume_validation_percent(checked_bytes: u64, total_bytes: u64) -> u64 {
     if total_bytes == 0 {
         return 0;
     }
-    ((u128::from(checked_bytes.min(total_bytes)) * 100) / u128::from(total_bytes)) as u64
+    u64::try_from((u128::from(checked_bytes.min(total_bytes)) * 100) / u128::from(total_bytes))
+        .unwrap_or(100)
 }
 
 #[cfg(test)]

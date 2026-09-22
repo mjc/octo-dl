@@ -96,7 +96,7 @@ pub struct OwnedDownloadItem {
     pub was_partial: bool,
 }
 
-pub(crate) fn collect_download_items<'a>(nodes: &'a mega::Nodes) -> Vec<DownloadItem<'a>> {
+pub(super) fn collect_download_items(nodes: &mega::Nodes) -> Vec<DownloadItem<'_>> {
     let roots = nodes.roots().collect::<Vec<_>>();
     let single_root_file = roots.len() == 1 && roots[0].kind().is_file();
     roots

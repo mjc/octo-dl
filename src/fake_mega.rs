@@ -62,7 +62,7 @@ impl FakeMegaFixture {
     }
 
     #[must_use]
-    pub fn size(&self) -> u64 {
+    pub const fn size(&self) -> u64 {
         self.size
     }
 
@@ -85,6 +85,12 @@ pub struct FakeMegaServer {
 }
 
 impl FakeMegaServer {
+    /// Starts a local fake MEGA HTTP server for the supplied fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the listener cannot be bound or configured, or
+    /// when the server runtime cannot be created.
     pub fn spawn(fixture: FakeMegaFixture, worker_threads: usize) -> Result<Self> {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
         listener.set_nonblocking(true)?;
@@ -129,15 +135,21 @@ impl FakeMegaServer {
     }
 
     #[must_use]
-    pub fn origin(&self) -> &Url {
+    pub const fn origin(&self) -> &Url {
         &self.origin
     }
 
     #[must_use]
-    pub fn fixture(&self) -> &FakeMegaFixture {
+    pub const fn fixture(&self) -> &FakeMegaFixture {
         &self.fixture
     }
 
+    /// Stops the fake server and joins its worker thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the server thread cannot be joined, panicked, or
+    /// returned an I/O error while shutting down.
     pub async fn shutdown(mut self) -> Result<()> {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
@@ -180,7 +192,7 @@ impl Default for BenchOptions {
             root_dir: std::env::temp_dir().join(format!("octo-fake-mega-{}", Uuid::new_v4())),
             file_name: DEFAULT_FILE_NAME.to_string(),
             size_bytes: 256 * 1024 * 1024,
-            seed: 0x0c70_d1_5eed,
+            seed: 0x000c_70d1_5eed,
             chunks_per_file: 1,
             server_worker_threads: 1,
             mega_chunks_per_request: 2,
@@ -197,6 +209,12 @@ pub struct BenchResult {
     pub elapsed: std::time::Duration,
 }
 
+/// Runs the parallel in-memory fake MEGA download benchmark.
+///
+/// # Errors
+///
+/// Returns an error when fixture creation, server startup, metadata fetching,
+/// downloading, integrity verification, or server shutdown fails.
 pub async fn run_bench(options: &BenchOptions) -> Result<BenchResult> {
     let fixture_dir = options.root_dir.join("fixture");
     let download_dir = options.root_dir.join("download");
@@ -251,6 +269,11 @@ pub async fn run_bench(options: &BenchOptions) -> Result<BenchResult> {
     })
 }
 
+/// Runs the benchmark with one server worker and one MEGA chunk per request.
+///
+/// # Errors
+///
+/// Returns any error produced while running [`run_bench`].
 pub async fn run_single_connection_bench(options: &BenchOptions) -> Result<BenchResult> {
     let mut single_connection = options.clone();
     single_connection.chunks_per_file = 1;
@@ -259,6 +282,12 @@ pub async fn run_single_connection_bench(options: &BenchOptions) -> Result<Bench
     run_bench(&single_connection).await
 }
 
+/// Creates and persists an encrypted fake MEGA fixture.
+///
+/// # Errors
+///
+/// Returns an error when the fixture directory cannot be created or the
+/// encrypted fixture cannot be generated or written.
 pub async fn create_fake_mega_fixture(
     root_dir: &Path,
     file_name: &str,
@@ -271,7 +300,7 @@ pub async fn create_fake_mega_fixture(
     let aes_key = derive_bytes::<16>(seed, 0xA5A5_A5A5_A5A5_A5A5);
     let aes_iv = derive_bytes::<8>(seed, 0x5A5A_5A5A_5A5A_5A5A);
     let (ciphertext, condensed_mac) =
-        build_ciphertext_fixture(size, seed, &aes_key, &aes_iv).map_err(io::Error::other)?;
+        build_ciphertext_fixture(size, seed, &aes_key, aes_iv).map_err(io::Error::other)?;
     tokio::fs::write(&ciphertext_path, ciphertext.as_ref()).await?;
     let attr = pack_public_attributes(file_name, &aes_key)?;
 
@@ -382,7 +411,7 @@ fn build_ciphertext_fixture(
     size: u64,
     seed: u64,
     aes_key: &[u8; 16],
-    aes_iv: &[u8; 8],
+    aes_iv: [u8; 8],
 ) -> Result<(Bytes, [u8; 8])> {
     let mut plain = vec![0u8; FIXTURE_BUFFER_BYTES];
     let mut cipher = vec![0u8; FIXTURE_BUFFER_BYTES];
@@ -390,16 +419,17 @@ fn build_ciphertext_fixture(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "fixture size exceeds usize"))?;
     let mut ciphertext = Vec::with_capacity(ciphertext_capacity);
     let mut ctr_iv = [0u8; 16];
-    ctr_iv[..8].copy_from_slice(aes_iv);
+    ctr_iv[..8].copy_from_slice(&aes_iv);
     let mut ctr = Aes128Ctr::new(aes_key.into(), (&ctr_iv).into());
     let mut condensed = mega::MegaCondensedMac::new(aes_key);
     let mut offset = 0u64;
 
     for chunk in mega::mega_chunk_boundaries(size) {
-        let mut chunk_mac = mega::MegaChunkMac::new(aes_key, aes_iv);
+        let mut chunk_mac = mega::MegaChunkMac::new(aes_key, &aes_iv);
         let mut remaining = chunk.length;
         while remaining > 0 {
-            let step = remaining.min(FIXTURE_BUFFER_BYTES as u64) as usize;
+            let step = usize::try_from(remaining.min(FIXTURE_BUFFER_BYTES as u64))
+                .map_err(io::Error::other)?;
             let plain_slice = &mut plain[..step];
             fill_deterministic_plaintext(seed, offset, plain_slice);
             chunk_mac.update(plain_slice);
@@ -425,15 +455,15 @@ struct MegaChunkRun {
 }
 
 impl MegaChunkRun {
-    fn first(self, chunks: &[mega::MegaChunk]) -> mega::MegaChunk {
+    const fn first(self, chunks: &[mega::MegaChunk]) -> mega::MegaChunk {
         chunks[self.start]
     }
 
-    fn last(self, chunks: &[mega::MegaChunk]) -> mega::MegaChunk {
+    const fn last(self, chunks: &[mega::MegaChunk]) -> mega::MegaChunk {
         chunks[self.end - 1]
     }
 
-    fn total_length(self, chunks: &[mega::MegaChunk]) -> u64 {
+    const fn total_length(self, chunks: &[mega::MegaChunk]) -> u64 {
         let first = self.first(chunks);
         let last = self.last(chunks);
         last.offset + last.length - first.offset
@@ -451,13 +481,17 @@ impl ChunkClaimCursor {
         chunks: &[mega::MegaChunk],
         max_chunks_per_request: usize,
     ) -> Option<MegaChunkRun> {
-        let mut next = self.next.lock();
-        if *next >= chunks.len() {
-            return None;
-        }
-        let start = *next;
-        let end = chunks.len().min(start + max_chunks_per_request.max(1));
-        *next = end;
+        let (start, end) = {
+            let mut next = self.next.lock();
+            if *next >= chunks.len() {
+                return None;
+            }
+            let start = *next;
+            let end = chunks.len().min(start + max_chunks_per_request.max(1));
+            *next = end;
+            drop(next);
+            (start, end)
+        };
         Some(MegaChunkRun { start, end })
     }
 }
@@ -514,11 +548,9 @@ async fn benchmark_parallel_memory_download(
                     url.clear();
                     url.push_str(&base_url);
                     url.push('/');
-                    url.push_str(&format!(
-                        "{}-{}",
-                        first.offset,
-                        last.offset + last.length - 1
-                    ));
+                    url.push_str(&first.offset.to_string());
+                    url.push('-');
+                    url.push_str(&(last.offset + last.length - 1).to_string());
 
                     let body = http
                         .get(url.as_str())
@@ -593,7 +625,7 @@ fn pack_public_attributes(file_name: &str, aes_key: &[u8; 16]) -> Result<String>
 
     let iv = [0u8; 16];
     let mut cbc = Encryptor::<Aes128>::new(aes_key.into(), (&iv).into());
-    for chunk in buffer.chunks_exact_mut(16) {
+    for chunk in buffer.as_chunks_mut::<16>().0 {
         cbc.encrypt_block_mut(chunk.into());
     }
 
@@ -635,7 +667,7 @@ fn derive_bytes<const N: usize>(seed: u64, domain: u64) -> [u8; N] {
     out
 }
 
-fn splitmix64(mut value: u64) -> u64 {
+const fn splitmix64(mut value: u64) -> u64 {
     value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
     value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);

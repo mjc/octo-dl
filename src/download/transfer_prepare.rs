@@ -1,3 +1,5 @@
+#![allow(clippy::struct_field_names, clippy::too_many_arguments)]
+
 use std::path::Path;
 use std::sync::Arc;
 

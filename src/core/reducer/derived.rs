@@ -6,7 +6,7 @@ use crate::core::model::{
 #[cfg(test)]
 use crate::core::model::{FileProgressState, PackageKey, PackageState, PackageStatus};
 
-fn counts_in_run_totals(file: &FileState) -> bool {
+const fn counts_in_run_totals(file: &FileState) -> bool {
     matches!(file.accounting, FileAccounting::CurrentRun)
 }
 
@@ -38,7 +38,7 @@ impl PackageProgressBucket {
         }
     }
 
-    fn add_to(self, progress: &mut PackageProgressState) {
+    const fn add_to(self, progress: &mut PackageProgressState) {
         match self {
             Self::Queued => progress.queued = progress.queued.saturating_add(1),
             Self::Downloading => progress.downloading = progress.downloading.saturating_add(1),
@@ -47,7 +47,7 @@ impl PackageProgressBucket {
         }
     }
 
-    fn remove_from(self, progress: &mut PackageProgressState) {
+    const fn remove_from(self, progress: &mut PackageProgressState) {
         match self {
             Self::Queued => progress.queued = progress.queued.saturating_sub(1),
             Self::Downloading => progress.downloading = progress.downloading.saturating_sub(1),
@@ -70,7 +70,7 @@ impl From<&FileState> for FileDerivedState {
     }
 }
 
-pub(super) fn add_totals_contribution(state: &mut DownloadState, file: FileDerivedState) {
+pub(super) const fn add_totals_contribution(state: &mut DownloadState, file: FileDerivedState) {
     if !file.counts_in_run_totals {
         return;
     }
@@ -92,7 +92,7 @@ pub(super) fn add_totals_contribution(state: &mut DownloadState, file: FileDeriv
     }
 }
 
-pub(super) fn remove_totals_contribution(state: &mut DownloadState, file: FileDerivedState) {
+pub(super) const fn remove_totals_contribution(state: &mut DownloadState, file: FileDerivedState) {
     if !file.counts_in_run_totals {
         return;
     }
@@ -141,10 +141,7 @@ pub(super) fn apply_file_change(
     after: FileDerivedState,
 ) {
     remove_totals_contribution(state, before);
-    if before.package_id != after.package_id {
-        remove_package_progress(state, before.package_id, before.lifecycle_bucket);
-        add_package_progress(state, after.package_id, after.lifecycle_bucket);
-    } else if before.lifecycle_bucket != after.lifecycle_bucket {
+    if before.package_id != after.package_id || before.lifecycle_bucket != after.lifecycle_bucket {
         remove_package_progress(state, before.package_id, before.lifecycle_bucket);
         add_package_progress(state, after.package_id, after.lifecycle_bucket);
     }

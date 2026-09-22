@@ -133,6 +133,10 @@ impl DownloadStatsTracker {
 
     /// Updates the speed tracker with the current speed.
     /// Tracks peak speed and time to reach 80% of peak.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared peak-history mutex is poisoned.
     pub fn update_speed(&self, speed: u64) {
         let prev_peak = self.peak_speed.fetch_max(speed, Ordering::Relaxed);
         if speed > prev_peak {
@@ -174,6 +178,10 @@ impl DownloadStatsTracker {
 
     /// Returns the time to reach 80% of peak speed, if achieved.
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared peak-history mutex is poisoned.
     pub fn time_to_80pct(&self) -> Option<Duration> {
         let peak = self.peak_speed();
         if peak == 0 {
@@ -262,10 +270,17 @@ impl SessionStatsBuilder {
 
     /// Builds the final session statistics.
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics if the ramp-up count is zero while calculating its average.
     pub fn build(self) -> SessionStats {
         let average_ramp_up = if self.ramp_up_count > 0 {
+            let ramp_up_count = self.ramp_up_count;
             Some(Duration::from_millis(
-                self.total_ramp_up_ms / self.ramp_up_count,
+                self.total_ramp_up_ms
+                    .checked_div(ramp_up_count)
+                    .expect("ramp-up count is positive"),
             ))
         } else {
             None
@@ -370,7 +385,9 @@ mod tests {
     #[test]
     fn download_stats_tracker_time_to_80pct() {
         let tracker = DownloadStatsTracker {
-            start_time: Instant::now() - Duration::from_millis(2),
+            start_time: Instant::now()
+                .checked_sub(Duration::from_millis(2))
+                .expect("a newly created instant should support a short subtraction"),
             total_bytes: 1000,
             downloaded: AtomicU64::new(0),
             peak_speed: AtomicU64::new(0),
@@ -475,7 +492,11 @@ mod tests {
             let expected_average_ramp_up = if ramp_up_count == 0 {
                 None
             } else {
-                Some(Duration::from_millis(ramp_up_total_ms / ramp_up_count))
+                Some(Duration::from_millis(
+                    ramp_up_total_ms
+                        .checked_div(ramp_up_count)
+                        .expect("ramp-up count is positive"),
+                ))
             };
 
             prop_assert_eq!(stats.files_downloaded, files.len());

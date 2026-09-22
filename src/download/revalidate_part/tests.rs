@@ -1,3 +1,5 @@
+#![allow(clippy::large_stack_arrays)]
+
 use std::path::Path;
 use std::sync::atomic::Ordering;
 

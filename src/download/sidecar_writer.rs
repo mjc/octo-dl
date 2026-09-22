@@ -1,3 +1,5 @@
+#![allow(clippy::needless_pass_by_value)]
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -76,7 +78,7 @@ struct SidecarWriterWorker {
 }
 
 impl SidecarWriterWorker {
-    fn new(
+    const fn new(
         path: PathBuf,
         part_path: PathBuf,
         #[cfg(test)] persist_event_tx: PersistEventTx,
@@ -128,7 +130,11 @@ impl SidecarWriterWorker {
             }
             match command {
                 SidecarWriterCommand::Persist(request) => {
-                    self.persist_snapshot(request.generation, request.snapshot, request.allow_equal)
+                    self.persist_snapshot(
+                        request.generation,
+                        request.snapshot,
+                        request.allow_equal,
+                    );
                 }
                 SidecarWriterCommand::Finish => break,
             }
@@ -165,7 +171,7 @@ impl LazySidecarWriter {
                     persist_event_tx,
                     worker_abort_requested,
                 )
-                .run(rx)
+                .run(rx);
             })?;
         Ok(Self {
             tx: Mutex::new(Some(tx)),
@@ -223,10 +229,10 @@ impl LazySidecarWriter {
         if matches!(shutdown, SidecarWriterShutdown::Abort) {
             self.abort_requested.store(true, Ordering::Relaxed);
         }
-        if let Some(tx) = self.tx.lock().unwrap().take() {
-            if !matches!(shutdown, SidecarWriterShutdown::Abort) {
-                let _ = tx.send(SidecarWriterCommand::Finish);
-            }
+        if let Some(tx) = self.tx.lock().unwrap().take()
+            && !matches!(shutdown, SidecarWriterShutdown::Abort)
+        {
+            let _ = tx.send(SidecarWriterCommand::Finish);
         }
         let worker = self.worker.lock().unwrap().take();
         if let Some(worker) = worker {

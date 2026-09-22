@@ -125,7 +125,7 @@ pub(super) struct ChunkVerifiedState {
 }
 
 impl ChunkVerifiedState {
-    pub(super) fn new(tracker: ResumeTracker, sidecar_writer: LazySidecarWriter) -> Self {
+    pub(super) const fn new(tracker: ResumeTracker, sidecar_writer: LazySidecarWriter) -> Self {
         Self {
             tracker: Mutex::new(tracker),
             sidecar_writer,

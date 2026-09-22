@@ -24,10 +24,10 @@ where
     let download = Abortable::new(download, abort_registration);
     tokio::pin!(download);
     tokio::select! {
-        result = &mut download => match result {
-            Ok(result) => result.map_err(crate::error::Error::Mega),
-            Err(_) => Err(crate::error::Error::Cancelled),
-        },
+        result = &mut download => result.map_or_else(
+            |_| Err(crate::error::Error::Cancelled),
+            |result| result.map_err(crate::error::Error::Mega),
+        ),
         () = token.cancelled() => {
             abort_handle.abort();
             let _ = (&mut download).await;

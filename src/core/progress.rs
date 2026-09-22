@@ -43,7 +43,7 @@ impl Default for RateEstimator {
 }
 
 impl RateEstimator {
-    pub fn reset(&mut self, total: u64, now: Instant) {
+    pub const fn reset(&mut self, total: u64, now: Instant) {
         self.start_time = Some(now);
         self.last_time = Some(now);
         self.last_total = total;
@@ -70,6 +70,7 @@ impl RateEstimator {
             return;
         }
 
+        #[allow(clippy::cast_precision_loss)]
         let instant_bps = delta_bytes as f64 / delta_secs;
         let weight = throughput_weight(now.duration_since(last_time), self.decay);
         self.smoothed_bytes_per_sec = self

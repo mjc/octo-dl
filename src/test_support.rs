@@ -29,7 +29,7 @@ impl CurrentDirGuard {
         let lock = LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::current_dir().expect("current directory should resolve");
         std::env::set_current_dir(path).expect("current directory should update");
         Self {
@@ -124,7 +124,7 @@ pub fn push_file(
         session.packages.push(PackageSnapshot {
             id: package_id,
             key: PackageKey::new(package_display_name.clone()),
-            display_name: package_display_name.clone(),
+            display_name: package_display_name,
             files: Vec::new(),
             error: None,
         });
@@ -137,9 +137,7 @@ pub fn push_file(
             (FileLifecycle::Complete, FileAccounting::Preexisting, size)
         }
         FileFixtureStatus::Error(message) => (
-            FileLifecycle::Failed {
-                message: message.to_string(),
-            },
+            FileLifecycle::Failed { message },
             FileAccounting::CurrentRun,
             0,
         ),
@@ -148,7 +146,7 @@ pub fn push_file(
     let file = FileSnapshot {
         id: path.to_string().into(),
         package_id,
-        source_url: source_url.clone(),
+        source_url,
         path: path.to_string(),
         size,
         lifecycle,

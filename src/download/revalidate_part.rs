@@ -15,10 +15,10 @@ pub(super) async fn revalidate_candidate_from_part<F: FileSystem>(
     fs: &F,
     input: &SidecarValidationInput<'_>,
     candidate: TrustedResumeChunkCandidate,
-    buffer: &mut [u8; REVALIDATION_BUFFER_BYTES],
+    buffer: &mut [u8],
     cancellation_token: Option<&CancellationToken>,
 ) -> Result<bool> {
-    if cancellation_token.is_some_and(|token| token.is_cancelled()) {
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(Error::Cancelled);
     }
     let Some(boundary) = input.boundaries.get(candidate.index) else {
@@ -29,7 +29,7 @@ pub(super) async fn revalidate_candidate_from_part<F: FileSystem>(
     let end = boundary.offset.saturating_add(boundary.length);
 
     while offset < end {
-        if cancellation_token.is_some_and(|token| token.is_cancelled()) {
+        if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
             return Err(Error::Cancelled);
         }
         let read_len = revalidation_buffer_len(end - offset);
@@ -64,7 +64,7 @@ pub(super) async fn revalidate_candidates_from_part<F: FileSystem>(
         sidecar_loaded: true,
         ..ResumeValidation::empty(input.boundaries.len())
     };
-    if cancellation_token.is_some_and(|token| token.is_cancelled()) {
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
         return Err(Error::Cancelled);
     }
     if !candidates.is_empty()
@@ -77,13 +77,13 @@ pub(super) async fn revalidate_candidates_from_part<F: FileSystem>(
         input.part_path.display(),
         trusted_candidate_bytes
     );
-    let mut buffer = [0; REVALIDATION_BUFFER_BYTES];
+    let mut buffer = vec![0; REVALIDATION_BUFFER_BYTES];
     let mut revalidated = 0usize;
     let mut rejected = 0usize;
     let mut checked_bytes = 0_u64;
     let mut last_progress_report = Instant::now();
     for candidate in candidates {
-        if cancellation_token.is_some_and(|token| token.is_cancelled()) {
+        if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
             return Err(Error::Cancelled);
         }
         if validation

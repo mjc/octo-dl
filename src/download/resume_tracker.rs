@@ -1,3 +1,5 @@
+#![allow(clippy::cast_possible_truncation, clippy::option_if_let_else)]
+
 use super::resume_state::CURRENT_RESUME_SIDECAR_VERSION;
 use super::sidecar_store::{ResumeSidecar, VerifiedChunkRecord, VerifiedChunks};
 
