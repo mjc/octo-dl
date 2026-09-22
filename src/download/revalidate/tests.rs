@@ -60,16 +60,7 @@ async fn revalidate_sidecar_without_part_fingerprint_recomputes_from_part() {
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -99,16 +90,7 @@ async fn revalidate_sidecar_trusts_matching_part_fingerprint_without_reread() {
 
     let validation = mock_downloader(fs)
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -135,16 +117,7 @@ async fn revalidate_sidecar_trusts_matching_fingerprint_without_allocated_bytes(
 
     let validation = mock_downloader(fs)
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -175,16 +148,7 @@ async fn revalidate_sidecar_recomputes_old_fingerprint_chunk_from_part() {
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -220,16 +184,7 @@ async fn revalidate_sidecar_recomputes_chunk_index_at_its_offset() {
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -278,16 +233,7 @@ async fn revalidate_sidecar_trusts_matching_fingerprint_even_with_low_allocation
 
     let validation = mock_downloader(fs)
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -330,16 +276,7 @@ async fn revalidate_sidecar_trusts_multiple_chunks_without_allocated_bytes() {
 
     let validation = mock_downloader(fs)
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -371,16 +308,7 @@ async fn revalidate_sidecar_rejects_matching_allocation_when_device_changes() {
 
     let validation = mock_downloader(fs)
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -407,16 +335,7 @@ async fn revalidate_sidecar_trusts_matching_fingerprint_with_sufficient_allocati
 
     let validation = mock_downloader(fs)
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -444,16 +363,7 @@ async fn revalidate_sidecar_reports_progress_for_fast_trusted_bytes() {
 
     let validation = mock_downloader(fs)
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: Some(("file.bin", &progress)),
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, Some(("file.bin", &progress))),
             None,
         )
         .await
@@ -501,16 +411,7 @@ async fn revalidate_sidecar_reports_progress_for_disk_revalidation_reads() {
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: Some(("file.bin", &progress)),
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, Some(("file.bin", &progress))),
             None,
         )
         .await
@@ -562,16 +463,7 @@ async fn revalidate_sidecar_disk_revalidation_honors_cancellation() {
 
     let err = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: Some(("file.bin", &progress)),
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, Some(("file.bin", &progress))),
             Some(&token),
         )
         .await
@@ -606,16 +498,7 @@ async fn revalidate_sidecar_trusts_nothing_when_part_fingerprint_is_stale() {
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -657,16 +540,7 @@ async fn revalidate_sidecar_trusts_nothing_when_allocated_bytes_hint_is_stale() 
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -705,16 +579,7 @@ async fn revalidate_sidecar_trusts_nothing_when_modified_time_hint_is_stale() {
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -748,16 +613,7 @@ async fn revalidate_sidecar_recomputes_when_later_writes_stale_fingerprint() {
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -790,16 +646,7 @@ async fn revalidate_sidecar_trusts_when_only_modified_time_changes() {
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -835,16 +682,7 @@ async fn revalidate_sidecar_trusts_when_only_allocated_bytes_change() {
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -878,16 +716,7 @@ async fn revalidate_sidecar_revalidates_when_only_modified_time_changes() {
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: Some(("file.bin", &progress)),
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, Some(("file.bin", &progress))),
             None,
         )
         .await
@@ -943,16 +772,7 @@ async fn revalidate_sidecar_revalidates_when_only_allocated_bytes_change() {
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: Some(("file.bin", &progress)),
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, Some(("file.bin", &progress))),
             None,
         )
         .await
@@ -1009,16 +829,7 @@ async fn revalidate_sidecar_revalidates_when_modified_time_and_allocated_bytes_c
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: Some(("file.bin", &progress)),
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, Some(("file.bin", &progress))),
             None,
         )
         .await
@@ -1072,16 +883,7 @@ async fn revalidate_sidecar_fast_trusts_when_saved_fingerprint_lacks_device_and_
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: Some(("file.bin", &progress)),
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, Some(("file.bin", &progress))),
             None,
         )
         .await
@@ -1144,16 +946,7 @@ async fn revalidate_sidecar_with_matching_fingerprint_keeps_first_duplicate_chun
 
     let validation = mock_downloader(fs)
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -1178,16 +971,7 @@ async fn revalidate_sidecar_rejects_bad_chunk_mac() {
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -1219,16 +1003,7 @@ async fn revalidate_sidecar_rejects_short_part_file() {
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -1247,22 +1022,12 @@ async fn revalidate_sidecar_rejects_stale_metadata() {
     let data = test_plaintext(usize_from_u64(file_size));
     tokio::fs::write(&part, &data).await.unwrap();
 
-    let expected = [9u8; 8];
     let boundaries = mega::mega_chunk_boundaries(file_size);
     let sidecar = sidecar_for_chunk(file_size, [0u8; 8], 0, [1u8; 16]);
 
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &sidecar, None),
             None,
         )
         .await
@@ -1304,16 +1069,13 @@ async fn stale_sidecar_without_matching_metadata_trusts_nothing() {
     let loaded_sidecar = load_sidecar(&sidecar).await.unwrap();
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &loaded_sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input_with_expected(
+                &boundaries,
+                &part,
+                &loaded_sidecar,
+                expected,
+                None,
+            ),
             None,
         )
         .await
@@ -1359,16 +1121,7 @@ async fn legacy_v1_sidecar_trusts_nothing() {
     let loaded_sidecar = load_sidecar(&sidecar).await.unwrap();
     let validation = tokio_downloader()
         .revalidate_sidecar_chunks(
-            SidecarValidationInput {
-                boundaries: &boundaries,
-                part_path: &part,
-                sidecar: &loaded_sidecar,
-                file_size,
-                expected_condensed_mac: expected,
-                aes_key: &TEST_AES_KEY,
-                aes_iv: &TEST_AES_IV,
-                progress: None,
-            },
+            sidecar_validation_input(&boundaries, &part, &loaded_sidecar, None),
             None,
         )
         .await

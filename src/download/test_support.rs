@@ -14,6 +14,7 @@ use crate::fake_mega::{FakeMegaFixture, FakeMegaServer, create_fake_mega_fixture
 use crate::fs::{FileFingerprint, FileSystem, TokioFileSystem};
 
 use super::resume_state::CURRENT_RESUME_SIDECAR_VERSION;
+use super::resume_validation::SidecarValidationInput;
 use super::sidecar_store::{
     LegacyJsonResumeSidecar, LegacyJsonVerifiedChunkRecord, ResumeSidecar, VerifiedChunkRecord,
 };
@@ -138,6 +139,67 @@ pub(super) fn tokio_downloader() -> Downloader<TokioFileSystem> {
     let http = mega::http_client_builder().unwrap().build().unwrap();
     let client = mega::Client::builder().build(http).unwrap();
     Downloader::new(client, DownloadConfig::default())
+}
+
+pub(super) fn sidecar_validation_input<'a>(
+    boundaries: &'a [mega::MegaChunk],
+    part_path: &'a Path,
+    sidecar: &'a ResumeSidecar,
+    progress: Option<(&'a str, &'a dyn DownloadProgress)>,
+) -> SidecarValidationInput<'a> {
+    sidecar_validation_input_with_expected(
+        boundaries,
+        part_path,
+        sidecar,
+        sidecar.expected_condensed_mac,
+        progress,
+    )
+}
+
+pub(super) fn sidecar_validation_input_with_expected<'a>(
+    boundaries: &'a [mega::MegaChunk],
+    part_path: &'a Path,
+    sidecar: &'a ResumeSidecar,
+    expected_condensed_mac: [u8; 8],
+    progress: Option<(&'a str, &'a dyn DownloadProgress)>,
+) -> SidecarValidationInput<'a> {
+    SidecarValidationInput {
+        boundaries,
+        part_path,
+        sidecar,
+        file_size: sidecar.file_size,
+        expected_condensed_mac,
+        aes_key: &TEST_AES_KEY,
+        aes_iv: &TEST_AES_IV,
+        progress,
+    }
+}
+
+pub(super) struct TestDownloadPaths {
+    _temp: tempfile::TempDir,
+    pub(super) file: PathBuf,
+    pub(super) file_string: String,
+    pub(super) part: PathBuf,
+    pub(super) sidecar: PathBuf,
+    pub(super) legacy_binary: PathBuf,
+    pub(super) legacy_json: PathBuf,
+}
+
+impl TestDownloadPaths {
+    pub(super) fn new(file_name: &str) -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join(file_name);
+        let file_string = file.to_string_lossy().into_owned();
+        Self {
+            _temp: temp,
+            part: part_path(&file_string),
+            sidecar: sidecar_path(&file_string),
+            legacy_binary: legacy_binary_sidecar_path(&file_string),
+            legacy_json: legacy_json_sidecar_path(&file_string),
+            file,
+            file_string,
+        }
+    }
 }
 
 pub(super) struct FakeMegaDownloadHarness {

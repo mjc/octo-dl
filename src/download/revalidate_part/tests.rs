@@ -5,30 +5,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::Error;
 
-use super::super::callbacks::DownloadProgress;
 use super::super::resume_state::ResumeReuseSource;
-use super::super::resume_validation::{SidecarValidationInput, TrustedResumeChunkCandidate};
-use super::super::sidecar_store::ResumeSidecar;
+use super::super::resume_validation::TrustedResumeChunkCandidate;
 use super::super::test_support::*;
 use super::*;
-
-fn validation_input<'a>(
-    boundaries: &'a [mega::MegaChunk],
-    part_path: &'a Path,
-    sidecar: &'a ResumeSidecar,
-    progress: Option<(&'a str, &'a dyn DownloadProgress)>,
-) -> SidecarValidationInput<'a> {
-    SidecarValidationInput {
-        boundaries,
-        part_path,
-        sidecar,
-        file_size: sidecar.file_size,
-        expected_condensed_mac: sidecar.expected_condensed_mac,
-        aes_key: &TEST_AES_KEY,
-        aes_iv: &TEST_AES_IV,
-        progress,
-    }
-}
 
 #[tokio::test]
 async fn revalidate_candidate_from_part_reads_through_filesystem_trait() {
@@ -41,7 +21,7 @@ async fn revalidate_candidate_from_part_reads_through_filesystem_trait() {
     let first = boundaries[0];
     let mac = mega::compute_mega_chunk_mac(chunk_data(&data, &first), &TEST_AES_KEY, &TEST_AES_IV);
     let sidecar = sidecar_for_chunk(file_size, [9_u8; 8], first.index, mac);
-    let input = validation_input(&boundaries, part_path, &sidecar, None);
+    let input = sidecar_validation_input(&boundaries, part_path, &sidecar, None);
     let mut buffer = [0; REVALIDATION_BUFFER_BYTES];
 
     let trusted = revalidate_candidate_from_part(
@@ -71,7 +51,7 @@ async fn revalidate_candidate_from_part_returns_false_when_filesystem_short_read
     let boundaries = mega::mega_chunk_boundaries(file_size);
     let first = boundaries[0];
     let sidecar = sidecar_for_chunk(file_size, [9_u8; 8], first.index, [4_u8; 16]);
-    let input = validation_input(&boundaries, part_path, &sidecar, None);
+    let input = sidecar_validation_input(&boundaries, part_path, &sidecar, None);
     let mut buffer = [0; REVALIDATION_BUFFER_BYTES];
 
     let trusted = revalidate_candidate_from_part(
@@ -106,7 +86,7 @@ async fn revalidate_candidates_from_part_reports_start_and_trusts_matches() {
 
     let validation = revalidate_candidates_from_part(
         &fs,
-        validation_input(
+        sidecar_validation_input(
             &boundaries,
             part_path,
             &sidecar,
@@ -148,7 +128,7 @@ async fn revalidate_candidates_from_part_honors_pre_cancelled_token() {
 
     let error = revalidate_candidates_from_part(
         &fs,
-        validation_input(&boundaries, part_path, &sidecar, None),
+        sidecar_validation_input(&boundaries, part_path, &sidecar, None),
         vec![TrustedResumeChunkCandidate {
             index: usize_from_u32(first.index),
             length: first.length,
@@ -178,7 +158,7 @@ async fn revalidate_candidates_from_part_ignores_out_of_range_candidate_indexes(
 
     let validation = revalidate_candidates_from_part(
         &fs,
-        validation_input(&boundaries, part_path, &sidecar, None),
+        sidecar_validation_input(&boundaries, part_path, &sidecar, None),
         vec![TrustedResumeChunkCandidate {
             index: boundaries.len(),
             length: first.length,
