@@ -1,3 +1,5 @@
+#![allow(clippy::zero_sized_map_values)]
+
 use super::super::app::{App, FileEntry, FileStatus, UiAction};
 use super::super::event::{DownloadEvent, FileOrigin, QueuedFile};
 use super::*;
@@ -499,12 +501,7 @@ fn resume_priority_targets_block_other_pending_downloads() {
         resume_b.clone(),
     ]);
     let resume_priority_set = HashSet::from([resume_a.clone(), resume_b.clone()]);
-    let available = HashSet::from([
-        resume_a.clone(),
-        resume_b.clone(),
-        new_a.clone(),
-        new_b.clone(),
-    ]);
+    let available = HashSet::from([resume_a.clone(), resume_b.clone(), new_a, new_b]);
 
     let selected = select_startable_file_ids(
         &pending_queue,
@@ -543,7 +540,7 @@ fn unavailable_resume_priority_blocks_new_downloads_until_reverify_finishes() {
         new_b.clone(),
         resume_b.clone(),
     ]);
-    let resume_priority_set = HashSet::from([resume_a.clone(), resume_b.clone()]);
+    let resume_priority_set = HashSet::from([resume_a.clone(), resume_b]);
     let available = HashSet::from([resume_a.clone(), new_a, new_b]);
     let active = HashSet::from([resume_a]);
 
@@ -793,7 +790,7 @@ fn completed_file_cannot_be_duplicated_by_startup_queue_events() {
 
 #[test]
 fn successful_submitted_urls_deduplicates_only_fetched_submissions() {
-    let resolved = vec![
+    let resolved = [
         FetchedNodeSet {
             resolved: ResolvedUrl {
                 source_url: "https://mega.nz/file/one".to_string(),
@@ -874,23 +871,23 @@ fn remote_files_match_prefers_sparse_checksum_then_size_and_date() {
     };
     let same_checksum_different_date = BatchItemSnapshot {
         modified_at: Some(456),
-        ..left.clone()
+        ..left
     };
     let same_size_and_date_without_checksum = BatchItemSnapshot {
         sparse_checksum: None,
-        ..left.clone()
+        ..left
     };
     let different_size = BatchItemSnapshot {
         size: 90,
         sparse_checksum: None,
-        ..left.clone()
+        ..left
     };
 
     assert!(remote_files_match(&left, &same_checksum_different_date));
     assert!(remote_files_match(
         &BatchItemSnapshot {
             sparse_checksum: None,
-            ..left.clone()
+            ..left
         },
         &same_size_and_date_without_checksum
     ));

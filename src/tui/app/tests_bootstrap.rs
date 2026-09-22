@@ -259,7 +259,11 @@ fn deferred_auto_login_waits_for_idle_before_showing_popup() {
     assert_eq!(app.popup, Popup::None);
     assert!(!app.poll_deferred_auto_login());
 
-    app.deferred_login_deadline = Some(Instant::now() - Duration::from_millis(1));
+    app.deferred_login_deadline = Some(
+        Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .unwrap(),
+    );
 
     assert!(app.poll_deferred_auto_login());
     assert_eq!(app.popup, Popup::Login);

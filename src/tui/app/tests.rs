@@ -1,3 +1,9 @@
+#![allow(
+    clippy::default_trait_access,
+    clippy::unchecked_time_subtraction,
+    clippy::used_underscore_binding
+)]
+
 use super::*;
 use crate::tui::event::DownloadEventSender;
 use std::time::{Duration, Instant};
@@ -451,7 +457,7 @@ fn progress_event_updates_visible_file_without_full_visible_sync() {
         package: ResolvedPackage {
             id: package_id("pkg", "https://mega.nz/file/root"),
             source_url: "https://mega.nz/file/root".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string().clone()),
+            key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
                 file_id: "file.bin".to_string().into(),
@@ -1529,7 +1535,7 @@ fn file_queued_without_explicit_package_id_reuses_existing_package_for_url() {
         package: ResolvedPackage {
             id: package_id("batch-folder", "https://mega.nz/folder/root"),
             source_url: "https://mega.nz/folder/root".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string().clone()),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string()),
             display_name: "Batch Folder".to_string(),
             files: vec![ResolvedFile {
                 file_id: "episode-1.mkv".to_string().into(),
@@ -1802,7 +1808,7 @@ fn deleting_pending_url_removes_it_from_core_state_and_session() {
     let url = "https://mega.nz/folder/root".to_string();
 
     app.submit_url(url.clone());
-    app.handle_ui_action(UiAction::DeleteFile(url.clone().into()));
+    app.handle_ui_action(UiAction::DeleteFile(url.into()));
     app.sync_session_for_shutdown();
     app.flush_session_persistence();
 
@@ -1828,7 +1834,7 @@ fn deleting_url_level_error_stays_deleted_after_shutdown_sync() {
         scope: url.clone(),
         error: "bad folder".to_string(),
     });
-    app.handle_ui_action(UiAction::DeleteFile(url.clone().into()));
+    app.handle_ui_action(UiAction::DeleteFile(url.into()));
     app.sync_session_for_shutdown();
     app.flush_session_persistence();
 
@@ -1862,7 +1868,7 @@ fn empty_package_resolution_stays_gone_after_shutdown_restart() {
             collision: None,
         },
     });
-    app.handle_download_event(DownloadEvent::UrlResolved { url: url.clone() });
+    app.handle_download_event(DownloadEvent::UrlResolved { url });
     app.sync_session_for_shutdown();
     app.flush_session_persistence();
 
@@ -1890,7 +1896,7 @@ fn deleting_one_pending_url_preserves_other_pending_urls_across_shutdown() {
 
     app.submit_url(removed.clone());
     app.submit_url(kept.clone());
-    app.handle_ui_action(UiAction::DeleteFile(removed.clone().into()));
+    app.handle_ui_action(UiAction::DeleteFile(removed.into()));
     app.sync_session_for_shutdown();
     app.flush_session_persistence();
 
@@ -1993,7 +1999,7 @@ fn deferred_batch_persistence_waits_for_poll_before_writing_snapshot() {
     assert_eq!(
         app.session
             .as_ref()
-            .map(|session| session.file_count())
+            .map(crate::core::session::SessionSnapshot::file_count)
             .unwrap_or_default(),
         1
     );
@@ -2006,7 +2012,9 @@ fn deferred_batch_persistence_waits_for_poll_before_writing_snapshot() {
     };
     // Simulate the debounce window expiring so poll_session_persistence flushes
     // the queued save without waiting in real time.
-    *queued_at = std::time::Instant::now() - super::persistence::SESSION_SAVE_DEBOUNCE;
+    *queued_at = std::time::Instant::now()
+        .checked_sub(super::persistence::SESSION_SAVE_DEBOUNCE)
+        .unwrap();
     app.poll_session_persistence();
     assert_eq!(app.session_persist_count, 1);
     assert!(crate::core::SessionSnapshot::latest().is_none());
@@ -2060,7 +2068,7 @@ fn core_persisted_session_snapshot_is_saved_to_disk() {
         package: ResolvedPackage {
             id: package_id("pkg", "https://mega.nz/folder/root"),
             source_url: "https://mega.nz/folder/root".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string().clone()),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string()),
             display_name: "Root".to_string(),
             files: vec![ResolvedFile {
                 file_id: "episode-1.mkv".to_string().into(),
@@ -2106,7 +2114,7 @@ fn shutdown_persists_latest_file_progress_after_non_persisted_progress_events() 
     app.flush_session_persistence();
 
     app.handle_file_progress_event(
-        file_id.clone(),
+        file_id,
         crate::core::ProgressDelta {
             total_bytes_delta: 400,
             network_bytes_delta: 400,
@@ -2636,7 +2644,7 @@ fn visible_rows_hide_empty_failed_packages() {
         package_id,
         crate::core::PackageState {
             id: package_id,
-            key: crate::core::PackageKey::new("https://mega.nz/folder/failed".to_string().clone()),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/failed".to_string()),
             display_name: "Failed".to_string(),
             progress: crate::core::model::PackageProgressState::default(),
             error: Some("boom".to_string()),
@@ -2900,7 +2908,7 @@ fn deleted_package_with_no_remaining_visible_files_is_hidden() {
         package: ResolvedPackage {
             id: package_id("pkg", "https://mega.nz/folder/root"),
             source_url: "https://mega.nz/folder/root".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string().clone()),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string()),
             display_name: "https://mega.nz/folder/root".to_string(),
             files: vec![ResolvedFile {
                 file_id: "ghost.bin".to_string().into(),
@@ -2925,7 +2933,7 @@ fn overlay_error_remains_visible_alongside_core_package_rows() {
         package: ResolvedPackage {
             id: package_id("pkg", "https://mega.nz/folder/good"),
             source_url: "https://mega.nz/folder/good".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/folder/good".to_string().clone()),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/good".to_string()),
             display_name: "Good Package".to_string(),
             files: vec![ResolvedFile {
                 file_id: "good.bin".to_string().into(),
@@ -3424,7 +3432,7 @@ fn session_adapter_replace_state_replaces_stale_package_rows() {
     let mut session = session_snapshot(vec![("https://mega.nz/file/a", UrlFixtureStatus::Pending)]);
     session.packages.push(crate::core::PackageSnapshot {
         id: package_id("batch-stale", "https://mega.nz/file/a"),
-        key: crate::core::PackageKey::new("https://mega.nz/file/a".to_string().clone()),
+        key: crate::core::PackageKey::new("https://mega.nz/file/a".to_string()),
         display_name: "Stale Batch".to_string(),
         files: Vec::new(),
         error: None,
@@ -3560,7 +3568,7 @@ fn sorted_file_indices_group_by_package_before_status() {
         package: ResolvedPackage {
             id: package_id("pkg-a", "https://mega.nz/folder/a"),
             source_url: "https://mega.nz/folder/a".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/folder/a".to_string().clone()),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/a".to_string()),
             display_name: "Package A".to_string(),
             files: vec![
                 ResolvedFile {
@@ -3581,7 +3589,7 @@ fn sorted_file_indices_group_by_package_before_status() {
         package: ResolvedPackage {
             id: package_id("pkg-b", "https://mega.nz/folder/b"),
             source_url: "https://mega.nz/folder/b".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/folder/b".to_string().clone()),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/b".to_string()),
             display_name: "Package B".to_string(),
             files: vec![ResolvedFile {
                 file_id: "b-downloading.bin".to_string().into(),
@@ -3626,7 +3634,7 @@ fn expanded_package_orders_files_failed_downloading_queued_complete() {
         package: ResolvedPackage {
             id: package_id,
             source_url: "https://mega.nz/folder/root".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string().clone()),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string()),
             display_name: "Package".to_string(),
             files: vec![
                 ResolvedFile {
@@ -3701,7 +3709,7 @@ fn pause_downloads_queues_core_backed_active_files() {
         package: ResolvedPackage {
             id: package_id("pkg", "https://mega.nz/folder/root"),
             source_url: "https://mega.nz/folder/root".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string().clone()),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/root".to_string()),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
                 file_id: "episode.bin".to_string().into(),
@@ -3745,7 +3753,7 @@ fn sync_visible_files_prunes_stale_file_ui_state() {
         package: ResolvedPackage {
             id: package_id("pkg", "https://mega.nz/file/test"),
             source_url: "https://mega.nz/file/test".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/file/test".to_string().clone()),
+            key: crate::core::PackageKey::new("https://mega.nz/file/test".to_string()),
             display_name: "Package".to_string(),
             files: vec![ResolvedFile {
                 file_id: "kept.bin".to_string().into(),
@@ -3787,7 +3795,7 @@ fn sync_visible_files_keeps_package_row_selected_when_failed_package_auto_expand
         package: ResolvedPackage {
             id: package_id("pkg", "https://mega.nz/folder/test"),
             source_url: "https://mega.nz/folder/test".to_string(),
-            key: crate::core::PackageKey::new("https://mega.nz/folder/test".to_string().clone()),
+            key: crate::core::PackageKey::new("https://mega.nz/folder/test".to_string()),
             display_name: "Package".to_string(),
             files: vec![
                 ResolvedFile {

@@ -1,3 +1,9 @@
+#![allow(
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::redundant_clone
+)]
+
 use super::super::app::{SharedAppState, UiAction};
 use super::super::dashboard::{
     DashboardFileRow, DashboardFileStatus, DashboardPackageRow, DashboardUiMode,
@@ -563,7 +569,7 @@ async fn target_action_dispatch_preserves_file_and_package_actions() {
         };
         let response = dispatch_target_action(
             &state,
-            TargetRequest {
+            &TargetRequest {
                 id: Some(id.to_string()),
                 name: None,
             },
@@ -574,28 +580,28 @@ async fn target_action_dispatch_preserves_file_and_package_actions() {
         let received = rx.try_recv().expect("target action should be dispatched");
         match (action, target_kind, received) {
             (TargetAction::Delete, "file", UiAction::DeleteFile(id)) => {
-                assert_eq!(id, "file-id")
+                assert_eq!(id, "file-id");
             }
             (TargetAction::Retry, "file", UiAction::RetryFile(id)) => {
-                assert_eq!(id, "file-id")
+                assert_eq!(id, "file-id");
             }
             (TargetAction::Reset, "file", UiAction::ResetFile(id)) => {
-                assert_eq!(id, "file-id")
+                assert_eq!(id, "file-id");
             }
             (TargetAction::Reverify, "file", UiAction::ReverifyFile(id)) => {
-                assert_eq!(id, "file-id")
+                assert_eq!(id, "file-id");
             }
             (TargetAction::Delete, "package", UiAction::DeletePackage(id)) => {
-                assert_eq!(id.to_string(), package_id_str)
+                assert_eq!(id.to_string(), package_id_str);
             }
             (TargetAction::Retry, "package", UiAction::RetryPackage(id)) => {
-                assert_eq!(id.to_string(), package_id_str)
+                assert_eq!(id.to_string(), package_id_str);
             }
             (TargetAction::Reset, "package", UiAction::ResetPackage(id)) => {
-                assert_eq!(id.to_string(), package_id_str)
+                assert_eq!(id.to_string(), package_id_str);
             }
             (TargetAction::Reverify, "package", UiAction::ReverifyPackage(id)) => {
-                assert_eq!(id.to_string(), package_id_str)
+                assert_eq!(id.to_string(), package_id_str);
             }
             (action, target_kind, other) => {
                 panic!("unexpected action for {action:?} {target_kind}: {other:?}")
@@ -878,7 +884,9 @@ async fn parse_api_extracts_url_from_syntax_highlighted_code_html() {
         State(state),
         HeaderMap::new(),
         axum::Json(ParseRequest {
-            page: r#"<pre><code><span>https://mega.nz/</span><span>file/abc123#key</span></code></pre>"#.to_string(),
+            page:
+                r"<pre><code><span>https://mega.nz/</span><span>file/abc123#key</span></code></pre>"
+                    .to_string(),
             fallback: String::new(),
         }),
     )
@@ -891,7 +899,7 @@ async fn parse_api_extracts_url_from_syntax_highlighted_code_html() {
             assert_eq!(
                 received,
                 vec!["https://mega.nz/file/abc123#key".to_string()]
-            )
+            );
         }
         other => panic!("unexpected UI action: {other:?}"),
     }
@@ -907,10 +915,10 @@ async fn parse_api_extracts_multiple_folder_urls_from_pre_code_html() {
         State(state),
         HeaderMap::new(),
         axum::Json(ParseRequest {
-            page: r#"<pre><code>
+            page: r"<pre><code>
 https://mega.nz/folder/first#first-key
 https://mega.nz/folder/second#second-key
-</code></pre>"#
+</code></pre>"
                 .to_string(),
             fallback: String::new(),
         }),
@@ -927,7 +935,7 @@ https://mega.nz/folder/second#second-key
                     "https://mega.nz/folder/first#first-key".to_string(),
                     "https://mega.nz/folder/second#second-key".to_string(),
                 ]
-            )
+            );
         }
         other => panic!("unexpected UI action: {other:?}"),
     }
@@ -943,7 +951,7 @@ async fn parse_api_extracts_code_url_with_numeric_html_entities() {
         State(state),
         HeaderMap::new(),
         axum::Json(ParseRequest {
-            page: r#"<pre><code>https&#58;&#47;&#47;mega.nz&#47;folder&#47;abc123&#35;key456</code></pre>"#
+            page: r"<pre><code>https&#58;&#47;&#47;mega.nz&#47;folder&#47;abc123&#35;key456</code></pre>"
                 .to_string(),
             fallback: String::new(),
         }),
@@ -954,7 +962,7 @@ async fn parse_api_extracts_code_url_with_numeric_html_entities() {
     assert_eq!(response.status(), StatusCode::OK);
     match rx.try_recv().expect("UI action should be sent") {
         UiAction::AddUrls(received) => {
-            assert_eq!(received, vec!["https://mega.nz/folder/abc123#key456"])
+            assert_eq!(received, vec!["https://mega.nz/folder/abc123#key456"]);
         }
         other => panic!("unexpected UI action: {other:?}"),
     }
