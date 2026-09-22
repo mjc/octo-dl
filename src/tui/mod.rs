@@ -25,6 +25,7 @@ use self::app::App;
 pub use self::dashboard::{DashboardUiMode, DownloadDashboardState};
 use self::event::DownloadEventSender;
 pub use self::remote::AttachConfig;
+use crate::config::ApiKey;
 
 async fn run_with_api_server<F>(mut server: Option<ApiServerHandle>, run: F) -> io::Result<()>
 where
@@ -208,17 +209,22 @@ pub async fn run_attach(addr: SocketAddr, config: AttachConfig) -> io::Result<()
 
 /// Resolve the credentials used by an attached TUI without creating or
 /// modifying the service configuration.
-pub fn attach_api_key(config_path: Option<&Path>) -> io::Result<Option<String>> {
+pub fn attach_api_key(config_path: Option<&Path>) -> io::Result<Option<ApiKey>> {
     if let Some(key) = std::env::var_os("OCTO_API_KEY").and_then(|value| {
         let value = value.to_string_lossy().trim().to_string();
         (!value.is_empty()).then_some(value)
     }) {
-        return Ok(Some(key));
+        return ApiKey::new(key)
+            .map(Some)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error));
     }
 
     if let Some(path) = std::env::var_os("OCTO_API_KEY_FILE") {
         let key = std::fs::read_to_string(&path)?.trim().to_string();
-        return Ok((!key.is_empty()).then_some(key));
+        return (!key.is_empty())
+            .then(|| ApiKey::new(key))
+            .transpose()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error));
     }
 
     let path = config_path.map(PathBuf::from).or_else(|| {

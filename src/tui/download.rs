@@ -32,20 +32,6 @@ use super::event::{
 const PACKAGE_REVERIFY_CONCURRENCY: usize = 4;
 const VERIFICATION_PROGRESS_EVENT_BYTES: u64 = 8 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct FileIdPtrKey {
-    ptr: usize,
-    len: usize,
-}
-
-fn file_id_ptr_key(file_id: &FileId) -> FileIdPtrKey {
-    let id = file_id.as_str().as_bytes();
-    FileIdPtrKey {
-        ptr: id.as_ptr() as usize,
-        len: id.len(),
-    }
-}
-
 pub(crate) fn schedule_resume_artifact_delete(path: String) {
     for artifact in resume_artifact_paths(&path) {
         if let Err(error) = std::fs::remove_file(&artifact)
@@ -271,9 +257,7 @@ struct SchedulerState {
     pending_queue: VecDeque<FileId>,
     resume_priority_set: HashSet<FileId, FxBuildHasher>,
     available_downloads: HashMap<FileId, QueuedDownload, FxBuildHasher>,
-    available_download_ptrs: HashSet<FileIdPtrKey>,
     active_downloads: HashSet<FileId, FxBuildHasher>,
-    active_download_ptrs: HashSet<FileIdPtrKey>,
     active_task_files: HashMap<tokio::task::Id, (FileId, DownloadAttemptId)>,
     join_set: tokio::task::JoinSet<DownloadTaskResult>,
 }
@@ -286,24 +270,42 @@ impl SchedulerState {
             pending_queue: VecDeque::new(),
             resume_priority_set: HashSet::with_hasher(FxBuildHasher::default()),
             available_downloads: HashMap::with_hasher(FxBuildHasher::default()),
-            available_download_ptrs: HashSet::new(),
             active_downloads: HashSet::with_hasher(FxBuildHasher::default()),
-            active_download_ptrs: HashSet::new(),
             active_task_files: HashMap::new(),
             join_set: tokio::task::JoinSet::new(),
         }
     }
 
     fn has_available_download(&self, file_id: &FileId) -> bool {
-        self.available_download_ptrs
-            .contains(&file_id_ptr_key(file_id))
-            || self.available_downloads.contains_key(file_id)
+        self.available_downloads.contains_key(file_id)
     }
 
     fn has_active_download(&self, file_id: &FileId) -> bool {
-        self.active_download_ptrs
-            .contains(&file_id_ptr_key(file_id))
-            || self.active_downloads.contains(file_id)
+        self.active_downloads.contains(file_id)
+    }
+
+    /// Atomically moves a queued file into the active state.
+    ///
+    /// The scheduler still owns the queue and task map for now, but callers
+    /// must use this transition so the value-keyed active state cannot diverge
+    /// from the pending queue when a task is started.
+    fn claim_download(&mut self, file_id: &FileId) -> bool {
+        if self.has_active_download(file_id) {
+            return false;
+        }
+
+        self.pending_queue.retain(|pending| pending != file_id);
+        self.resume_priority_set.remove(file_id);
+        self.active_downloads.insert(file_id.clone());
+        true
+    }
+
+    /// Releases a claim when task setup fails before a task is spawned.
+    fn release_download_claim(&mut self, file_id: FileId) {
+        self.active_downloads.remove(&file_id);
+        if !self.pending_queue.contains(&file_id) {
+            self.pending_queue.push_front(file_id);
+        }
     }
 
     fn sync_pending_order(&mut self, file_ids: Vec<FileId>) {
@@ -330,8 +332,6 @@ impl SchedulerState {
     fn register_resolved_batch(&mut self, batch: CollectedBatch) -> CollectedBatch {
         for item in &batch.queued_items {
             let file_id = FileId::from(item.item.path.as_str());
-            self.available_download_ptrs
-                .insert(file_id_ptr_key(&file_id));
             self.available_downloads.insert(file_id, item.clone());
         }
         batch
@@ -339,22 +339,16 @@ impl SchedulerState {
 
     fn finish_download(&mut self, file_id: &FileId, result: &crate::Result<crate::FileStats>) {
         self.active_downloads.remove(file_id);
-        self.active_download_ptrs.remove(&file_id_ptr_key(file_id));
         if matches!(result, Err(crate::Error::Cancelled)) {
             self.rebuild_pending_queue();
             return;
         }
         self.available_downloads.remove(file_id);
-        self.available_download_ptrs
-            .remove(&file_id_ptr_key(file_id));
     }
 
     fn discard_download(&mut self, file_id: &FileId) {
         self.active_downloads.remove(file_id);
-        self.active_download_ptrs.remove(&file_id_ptr_key(file_id));
         self.available_downloads.remove(file_id);
-        self.available_download_ptrs
-            .remove(&file_id_ptr_key(file_id));
         self.resume_priority_set.remove(file_id);
         self.pending_queue.retain(|pending| pending != file_id);
     }
@@ -368,8 +362,6 @@ impl SchedulerState {
         for file_id in file_ids {
             let active = self.has_active_download(file_id);
             if let Some(download) = self.available_downloads.remove(file_id) {
-                self.available_download_ptrs
-                    .remove(&file_id_ptr_key(file_id));
                 paused.push(download);
             }
             self.resume_priority_set.remove(file_id);
@@ -390,8 +382,6 @@ impl SchedulerState {
     fn unpause_downloads(&mut self, downloads: impl IntoIterator<Item = QueuedDownload>) {
         for download in downloads {
             let file_id = FileId::from(download.item.path.as_str());
-            self.available_download_ptrs
-                .insert(file_id_ptr_key(&file_id));
             self.available_downloads.insert(file_id.clone(), download);
             if self.desired_pending_set.insert(file_id.clone()) {
                 self.desired_pending_order.push(file_id.clone());
@@ -415,17 +405,12 @@ impl SchedulerState {
 
     fn rebuild_pending_queue(&mut self) {
         let desired_pending_order = &self.desired_pending_order;
-        let available_download_ptrs = &self.available_download_ptrs;
         let available_downloads = &self.available_downloads;
-        let active_download_ptrs = &self.active_download_ptrs;
         let active_downloads = &self.active_downloads;
         self.pending_queue.clear();
         for file_id in desired_pending_order {
-            let key = file_id_ptr_key(file_id);
-            let is_available =
-                available_download_ptrs.contains(&key) || available_downloads.contains_key(file_id);
-            let is_active =
-                active_download_ptrs.contains(&key) || active_downloads.contains(file_id);
+            let is_available = available_downloads.contains_key(file_id);
+            let is_active = active_downloads.contains(file_id);
             if is_available && !is_active {
                 self.pending_queue.push_back(file_id.clone());
             }
@@ -437,15 +422,6 @@ impl SchedulerState {
         self.desired_pending_set
             .extend(self.desired_pending_order.iter().cloned());
     }
-}
-
-#[cfg(test)]
-fn contains_file_id_map_key<V>(
-    ptrs: &HashSet<FileIdPtrKey>,
-    ids: &HashMap<FileId, V>,
-    file_id: &FileId,
-) -> bool {
-    ptrs.contains(&file_id_ptr_key(file_id)) || ids.contains_key(file_id)
 }
 
 #[cfg(test)]
@@ -653,13 +629,14 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
         });
         return;
     };
-    let Ok((mega_client, http)) = rx.await else {
+    let Ok(authenticated_client) = rx.await else {
         let _ = tx.send(DownloadEvent::ScopeError {
             scope: "setup".to_string(),
             error: "Login task dropped before sending client".to_string(),
         });
         return;
     };
+    let (mega_client, http) = authenticated_client.into_parts();
 
     let dlc_cache = DlcKeyCache::new();
 
@@ -1453,19 +1430,14 @@ async fn start_pending_downloads(
         let Some(item) = scheduler.available_downloads.get(&file_id).cloned() else {
             continue;
         };
-        scheduler
-            .pending_queue
-            .retain(|pending| pending != &file_id);
-        scheduler.resume_priority_set.remove(&file_id);
-        if !scheduler.active_downloads.insert(file_id.clone()) {
+        if !scheduler.claim_download(&file_id) {
             continue;
         }
         let cancel_token =
             match register_download_token(item.item.path.clone().into(), token_tx).await {
                 Ok(cancel_token) => cancel_token,
                 Err(error) => {
-                    scheduler.active_downloads.remove(&file_id);
-                    scheduler.pending_queue.push_front(file_id);
+                    scheduler.release_download_claim(file_id);
                     log::warn!("Unable to register download cancellation token: {error}");
                     return false;
                 }

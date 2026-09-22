@@ -298,7 +298,8 @@ fn implicit_cwd_template_falls_back_to_state_config_credentials() {
         saved_session: None,
     };
     state_config.credentials.encrypt_in_place();
-    state_config.api.api_key = Some("state-api-key".to_string());
+    state_config.api.api_key =
+        Some(crate::config::ApiKey::new("state-api-key").expect("test API key"));
     state_config
         .save(&state_config_path)
         .expect("state config should save");

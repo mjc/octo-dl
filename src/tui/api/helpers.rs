@@ -125,7 +125,7 @@ pub(super) fn require_api_key(
     headers: &HeaderMap,
 ) -> Option<axum::response::Response> {
     let expected_key = state.api_key.as_ref()?;
-    if provided_api_key(headers).is_some_and(|provided| provided == expected_key) {
+    if provided_api_key(headers).is_some_and(|provided| provided == expected_key.expose_secret()) {
         return None;
     }
 

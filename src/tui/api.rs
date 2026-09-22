@@ -37,6 +37,7 @@ use self::selection::{ActionTarget, resolve_action_target};
 use super::app::{SharedAppState, UiAction};
 use super::bookmarklet;
 use super::event::DownloadEventSender;
+use crate::config::ApiKey;
 pub const DEFAULT_API_PORT: u16 = 9723;
 const API_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -98,7 +99,7 @@ pub(super) struct ApiState {
     shared: Option<SharedAppState>,
     remote_tui_stream: bool,
     bookmarklet_host: Option<String>,
-    api_key: Option<String>,
+    api_key: Option<ApiKey>,
 }
 
 #[derive(Deserialize)]
@@ -236,7 +237,7 @@ async fn bookmarklet_page(State(state): State<ApiState>, headers: HeaderMap) -> 
         || "{}".to_string(),
         |key| {
             serde_json::to_string(&serde_json::json!({
-                "x-api-key": key,
+                "x-api-key": key.expose_secret(),
             }))
             .unwrap_or_else(|error| {
                 log::error!("Failed to serialize API key header for bookmarklet: {error}");
@@ -476,14 +477,14 @@ pub(crate) async fn start_api_server(
     bookmarklet_host: Option<&str>,
     shared: Option<SharedAppState>,
     remote_tui_stream: bool,
-    api_key: Option<String>,
+    api_key: Option<ApiKey>,
 ) -> io::Result<ApiServerHandle> {
     let host_for_parse = host.trim_matches(['[', ']']);
     let requires_key = host_for_parse
         .parse::<IpAddr>()
         .map_or(true, |ip| !ip.is_loopback())
         && !host.eq_ignore_ascii_case("localhost");
-    if requires_key && api_key.as_deref().is_none_or(str::is_empty) {
+    if requires_key && api_key.is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "an API key is required when binding the API outside loopback",
@@ -527,7 +528,7 @@ pub async fn run_api_server(
     bookmarklet_host: Option<&str>,
     shared: Option<SharedAppState>,
     remote_tui_stream: bool,
-    api_key: Option<String>,
+    api_key: Option<ApiKey>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     start_api_server(
         tx,

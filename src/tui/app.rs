@@ -34,6 +34,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::config::ApiKey;
 use crate::core::{
     DownloadState, FileId, PackageId, ProgressDelta, SavedMegaSession, SessionSnapshot,
 };
@@ -267,7 +268,7 @@ pub struct App {
     /// Taken by `start_download_task` to give the sender to the download task.
     pub(super) token_tx: Option<mpsc::Sender<TokenMessage>>,
     /// Receives the authenticated client from the login task.
-    pub client_rx: Option<tokio::sync::oneshot::Receiver<(mega::Client, reqwest::Client)>>,
+    pub client_rx: Option<tokio::sync::oneshot::Receiver<super::event::AuthenticatedClient>>,
     pub(super) download_task_running: bool,
     // Cancellation tokens for active downloads (maps file path to token)
     pub cancellation_tokens: FileIdMap<CancellationToken>,
@@ -294,7 +295,7 @@ pub struct App {
     // API port for display
     pub api_port: u16,
     // API key for authentication
-    pub api_key: Option<String>,
+    pub api_key: Option<ApiKey>,
     pub(crate) persist_config_path: Option<PathBuf>,
     // Resource usage
     pub cpu_usage: f32,

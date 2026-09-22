@@ -132,6 +132,33 @@ async fn register_download_token_reports_closed_application_channel() {
     assert!(result.is_err());
 }
 
+#[test]
+fn scheduler_claim_moves_a_file_to_active_state_as_one_transition() {
+    let mut scheduler = SchedulerState::new();
+    let file_id: FileId = "claimed.bin".into();
+    scheduler.pending_queue.push_back(file_id.clone());
+    scheduler.resume_priority_set.insert(file_id.clone());
+
+    assert!(scheduler.claim_download(&file_id));
+    assert!(!scheduler.pending_queue.contains(&file_id));
+    assert!(!scheduler.resume_priority_set.contains(&file_id));
+    assert!(scheduler.active_downloads.contains(&file_id));
+    assert!(!scheduler.claim_download(&file_id));
+}
+
+#[test]
+fn scheduler_claim_release_restores_queue_and_clears_both_active_indexes() {
+    let mut scheduler = SchedulerState::new();
+    let file_id: FileId = "released.bin".into();
+    scheduler.pending_queue.push_back(file_id.clone());
+
+    assert!(scheduler.claim_download(&file_id));
+    scheduler.release_download_claim(file_id.clone());
+
+    assert_eq!(scheduler.pending_queue, VecDeque::from([file_id.clone()]));
+    assert!(!scheduler.active_downloads.contains(&file_id));
+}
+
 #[tokio::test]
 async fn panicked_download_task_releases_its_scheduler_slot() {
     let mut scheduler = SchedulerState::new();
@@ -176,10 +203,7 @@ async fn panicked_download_task_releases_its_scheduler_slot() {
 async fn panicked_download_task_is_removed_from_available_and_pending_state() {
     let mut scheduler = SchedulerState::new();
     let file_id: FileId = "panic-queued.bin".into();
-    let file_id_ptr = file_id_ptr_key(&file_id);
     scheduler.active_downloads.insert(file_id.clone());
-    scheduler.active_download_ptrs.insert(file_id_ptr);
-    scheduler.available_download_ptrs.insert(file_id_ptr);
     scheduler.desired_pending_order.push(file_id.clone());
     scheduler.desired_pending_set.insert(file_id.clone());
     scheduler.pending_queue.push_back(file_id.clone());
@@ -215,8 +239,6 @@ async fn panicked_download_task_is_removed_from_available_and_pending_state() {
     handle_download_join_result(result, &mut scheduler, &event_tx);
 
     assert!(!scheduler.active_downloads.contains(&file_id));
-    assert!(!scheduler.active_download_ptrs.contains(&file_id_ptr));
-    assert!(!scheduler.available_download_ptrs.contains(&file_id_ptr));
     assert!(!scheduler.pending_queue.contains(&file_id));
     assert!(scheduler.active_task_files.is_empty());
 }
@@ -431,9 +453,6 @@ fn pausing_active_reverify_keeps_desired_download_for_requeue() {
     scheduler.desired_pending_order.push(file_id.clone());
     scheduler.desired_pending_set.insert(file_id.clone());
     scheduler.active_downloads.insert(file_id.clone());
-    scheduler
-        .active_download_ptrs
-        .insert(file_id_ptr_key(&file_id));
 
     let paused = scheduler.pause_file_ids(std::slice::from_ref(&file_id));
 
@@ -558,13 +577,12 @@ fn reverify_for_unavailable_file_does_not_leave_ghost_resume_priority_entry() {
 }
 
 #[test]
-fn file_id_map_lookup_falls_back_when_ptr_key_differs() {
+fn scheduler_uses_value_identity_for_file_ids() {
     let stored = FileId::from(String::from("file.bin"));
     let lookup = FileId::from(String::from("file.bin"));
-    let ptrs = HashSet::new();
     let ids = HashMap::from([(stored, ())]);
 
-    assert!(contains_file_id_map_key(&ptrs, &ids, &lookup));
+    assert!(ids.contains_key(&lookup));
 }
 
 #[test]

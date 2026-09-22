@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Borders};
 use tui_input::backend::crossterm::to_input_request;
 use tui_input::{Input, InputRequest};
 
-use crate::extract_urls;
+use crate::{extract_urls, url::DownloadSource};
 
 use self::popup::handle_popup_input;
 use self::selection::{
@@ -153,7 +153,14 @@ fn handle_url_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Enter => {
             let trimmed = app.url_input.trim();
-            let extracted = extract_urls(trimmed);
+            let extracted = extract_urls(trimmed)
+                .into_iter()
+                .filter_map(|candidate| {
+                    DownloadSource::parse(&candidate)
+                        .ok()
+                        .map(DownloadSource::into_string)
+                })
+                .collect::<Vec<_>>();
             if !extracted.is_empty() {
                 app.handle_ui_action(UiAction::AddUrls(extracted));
                 app.url_input.clear();

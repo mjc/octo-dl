@@ -14,6 +14,7 @@ use ratatui::widgets::ListState;
 use rustc_hash::FxHashSet;
 use tokio::sync::{mpsc, watch};
 
+use crate::config::ApiKey;
 use crate::{
     DownloadConfig, ServiceConfig,
     core::{
@@ -372,7 +373,7 @@ impl App {
         shared_state: Option<SharedAppState>,
         remote_tui_stream: bool,
     ) -> io::Result<super::super::api::ApiServerHandle> {
-        if api_host_requires_api_key(&host) && self.api_key.as_deref().is_none_or(str::is_empty) {
+        if api_host_requires_api_key(&host) && self.api_key.is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "an API key is required when binding the API outside loopback",
@@ -460,7 +461,10 @@ impl App {
                             .await
                             .ok()
                             .map(|session| SavedMegaSession::encrypt(&session_email, &session));
-                        let _ = client_tx.send((mega_client, http));
+                        let _ = client_tx.send(super::super::event::AuthenticatedClient::new(
+                            mega_client,
+                            http,
+                        ));
                         let _ = tx.send(DownloadEvent::LoginResult {
                             success: true,
                             error: None,
@@ -513,7 +517,10 @@ impl App {
                 .await
                 .ok()
                 .map(|session| SavedMegaSession::encrypt(&email, &session));
-            let _ = client_tx.send((mega_client, http));
+            let _ = client_tx.send(super::super::event::AuthenticatedClient::new(
+                mega_client,
+                http,
+            ));
             let _ = tx.send(DownloadEvent::LoginResult {
                 success: true,
                 error: None,
@@ -666,7 +673,8 @@ impl App {
                 });
 
         if service_config.api.api_key.is_none() {
-            let key = uuid::Uuid::new_v4().simple().to_string();
+            let key = ApiKey::new(uuid::Uuid::new_v4().simple().to_string())
+                .expect("generated API key must be non-empty");
             log::info!("Generated new API key");
             service_config.api.api_key = Some(key);
             self.api_key.clone_from(&service_config.api.api_key);

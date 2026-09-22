@@ -7,6 +7,7 @@ use super::super::event::{DownloadEvent, DownloadEventSender};
 use super::helpers::{self, infer_host, require_api_key};
 use super::selection;
 use super::*;
+use crate::config::ApiKey;
 use crate::test_support::package_id;
 use axum::body::to_bytes;
 use axum::http::{HeaderValue, StatusCode};
@@ -15,6 +16,10 @@ use serde::Deserialize;
 use std::net::TcpListener;
 use tempfile::tempdir;
 use tokio::sync::{mpsc, watch};
+
+fn api_key(value: &str) -> ApiKey {
+    ApiKey::new(value).expect("test API key should be non-empty")
+}
 
 #[derive(Deserialize)]
 struct TestSnapshotFile {
@@ -89,7 +94,7 @@ fn state_with_dashboard(
     files: Vec<DashboardFileRow>,
     packages: Vec<DashboardPackageRow>,
     bookmarklet_host: Option<String>,
-    api_key: Option<String>,
+    api_key: Option<ApiKey>,
 ) -> (ApiState, mpsc::Receiver<UiAction>) {
     let (event_tx, _event_rx) = DownloadEventSender::channel();
     let (action_tx, action_rx) = mpsc::channel(64);
@@ -169,7 +174,7 @@ fn state_with_package_rows(
 fn state_with_snapshot_options(
     snapshot: &str,
     bookmarklet_host: Option<String>,
-    api_key: Option<String>,
+    api_key: Option<ApiKey>,
 ) -> (ApiState, mpsc::Receiver<UiAction>) {
     let (event_tx, _event_rx) = DownloadEventSender::channel();
     let (action_tx, action_rx) = mpsc::channel(64);
@@ -602,7 +607,7 @@ async fn target_action_dispatch_preserves_file_and_package_actions() {
 #[tokio::test]
 async fn control_api_rejects_missing_api_key_before_dispatching() {
     let (mut state, mut rx) =
-        state_with_snapshot_options(r#"{"files":[]}"#, None, Some("secret".to_string()));
+        state_with_snapshot_options(r#"{"files":[]}"#, None, Some(api_key("secret")));
     state.remote_tui_stream = true;
 
     let response = api_pause(State(state), HeaderMap::new())
@@ -618,7 +623,7 @@ async fn reset_api_dispatches_file_action_with_api_key() {
     let (state, mut rx) = state_with_snapshot_options(
         r#"{"files":[{"id":"file-id","name":"file.mkv"}]}"#,
         None,
-        Some("secret".to_string()),
+        Some(api_key("secret")),
     );
     let mut headers = HeaderMap::new();
     headers.insert("x-api-key", HeaderValue::from_static("secret"));
@@ -694,7 +699,7 @@ async fn dashboard_url_submission_still_requires_configured_api_key() {
     let (state, mut rx) = state_with_snapshot_options(
         r#"{"files":[]}"#,
         Some("127.0.0.1".to_string()),
-        Some("secret".to_string()),
+        Some(api_key("secret")),
     );
 
     let response = api_post_urls(
@@ -716,7 +721,7 @@ async fn mutation_routes_require_the_configured_api_key() {
     let (state, mut action_rx) = state_with_snapshot_options(
         r#"{"files":[]}"#,
         Some("127.0.0.1".to_string()),
-        Some("secret".to_string()),
+        Some(api_key("secret")),
     );
     let port = TcpListener::bind("127.0.0.1:0")
         .expect("test port should be available")
@@ -971,7 +976,7 @@ fn resolve_file_id_by_name_requires_valid_shared_state() {
 #[test]
 fn require_api_key_accepts_header_and_bearer_token() {
     let (mut state, _rx) = state_without_shared();
-    state.api_key = Some("secret".to_string());
+    state.api_key = Some(api_key("secret"));
 
     let mut headers = HeaderMap::new();
     headers.insert("x-api-key", HeaderValue::from_static("secret"));
@@ -988,7 +993,7 @@ fn require_api_key_accepts_header_and_bearer_token() {
 #[test]
 fn require_api_key_rejects_missing_or_wrong_key() {
     let (mut state, _rx) = state_without_shared();
-    state.api_key = Some("secret".to_string());
+    state.api_key = Some(api_key("secret"));
 
     let headers = HeaderMap::new();
     let missing = require_api_key(&state, &headers).expect("missing key should reject");
@@ -1002,7 +1007,7 @@ fn require_api_key_rejects_missing_or_wrong_key() {
 
 #[tokio::test]
 async fn bookmarklet_discloses_configured_api_key_for_client_bootstrap() {
-    let (state, _rx) = state_with_dashboard(Vec::new(), Vec::new(), None, Some("secret".into()));
+    let (state, _rx) = state_with_dashboard(Vec::new(), Vec::new(), None, Some(api_key("secret")));
 
     let response = bookmarklet_page(State(state), HeaderMap::new())
         .await

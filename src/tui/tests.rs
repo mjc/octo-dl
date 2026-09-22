@@ -35,7 +35,10 @@ fn attach_api_key_reads_explicit_service_config_without_creating_state() {
     .unwrap();
 
     assert_eq!(
-        attach_api_key(Some(&config_path)).unwrap().as_deref(),
+        attach_api_key(Some(&config_path))
+            .unwrap()
+            .as_ref()
+            .map(crate::config::ApiKey::expose_secret),
         Some("secret")
     );
 }

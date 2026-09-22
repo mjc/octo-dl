@@ -30,6 +30,8 @@ use super::terminal_support::{
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::config::ApiKey;
+
 const DASHBOARD_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const DASHBOARD_READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -44,12 +46,12 @@ enum DashboardReaderMessage {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AttachConfig {
-    pub api_key: Option<String>,
+    pub api_key: Option<ApiKey>,
 }
 
 impl AttachConfig {
     #[must_use]
-    pub fn from_api_key(api_key: Option<String>) -> Self {
+    pub fn from_api_key(api_key: Option<ApiKey>) -> Self {
         Self { api_key }
     }
 }
@@ -316,7 +318,7 @@ fn handle_attached_input_result(
     app: &mut AttachedDashboard,
     result: Result<Event, TerminalInputError>,
     addr: SocketAddr,
-    api_key: Option<String>,
+    api_key: Option<ApiKey>,
     status_tx: tokio::sync::mpsc::UnboundedSender<DashboardReaderMessage>,
 ) -> io::Result<()> {
     match result {
@@ -337,8 +339,8 @@ fn dashboard_request(ws_url: &str, config: &AttachConfig) -> io::Result<Request<
     let mut request = ws_url
         .into_client_request()
         .map_err(|error| io::Error::other(error.to_string()))?;
-    if let Some(api_key) = config.api_key.as_deref() {
-        let header = HeaderValue::from_str(api_key).map_err(|error| {
+    if let Some(api_key) = config.api_key.as_ref() {
+        let header = HeaderValue::from_str(api_key.expose_secret()).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("invalid API key for dashboard attach: {error}"),
@@ -403,7 +405,7 @@ fn handle_attached_input(
     app: &mut AttachedDashboard,
     event: Event,
     addr: SocketAddr,
-    api_key: Option<String>,
+    api_key: Option<ApiKey>,
     status_tx: tokio::sync::mpsc::UnboundedSender<DashboardReaderMessage>,
 ) {
     let Event::Key(KeyEvent {
@@ -467,7 +469,7 @@ fn spawn_remote_action(
     addr: SocketAddr,
     action: &'static str,
     id: Option<String>,
-    api_key: Option<String>,
+    api_key: Option<ApiKey>,
     app: &mut AttachedDashboard,
     status_tx: tokio::sync::mpsc::UnboundedSender<DashboardReaderMessage>,
 ) {
@@ -487,9 +489,9 @@ fn spawn_remote_action(
                 return;
             }
         };
-        let request = api_key.as_deref().map_or_else(
+        let request = api_key.as_ref().map_or_else(
             || client.post(&url),
-            |key| client.post(&url).header("x-api-key", key),
+            |key| client.post(&url).header("x-api-key", key.expose_secret()),
         );
         let result = match id {
             Some(id) => request.json(&serde_json::json!({ "id": id })).send().await,
@@ -510,10 +512,10 @@ fn spawn_remote_action(
 }
 
 #[cfg(test)]
-fn api_headers(api_key: Option<&str>) -> io::Result<HeaderMap> {
+fn api_headers(api_key: Option<&ApiKey>) -> io::Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     if let Some(api_key) = api_key {
-        let value = HeaderValue::from_str(api_key)
+        let value = HeaderValue::from_str(api_key.expose_secret())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
         headers.insert("x-api-key", value);
     }
@@ -535,7 +537,8 @@ mod tests {
 
     #[test]
     fn api_headers_include_the_attach_api_key() {
-        let headers = api_headers(Some("secret")).expect("valid API key should make a header");
+        let key = ApiKey::new("secret").expect("valid API key");
+        let headers = api_headers(Some(&key)).expect("valid API key should make a header");
         assert_eq!(headers.get("x-api-key").unwrap(), "secret");
     }
 

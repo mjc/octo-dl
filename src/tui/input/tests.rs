@@ -1449,6 +1449,24 @@ fn handle_main_input_url_submit() {
 }
 
 #[test]
+fn handle_main_input_normalizes_legacy_url_before_submission() {
+    let mut app = test_app();
+    let (url_tx, mut url_rx) = mpsc::channel(64);
+    app.url_tx = url_tx;
+    app.url_input = "https://mega.nz/#!test123!secret".to_string();
+    activate_url_input(&mut app);
+
+    handle_input(&mut app, key(KeyCode::Enter));
+
+    assert_eq!(
+        url_rx.try_recv().unwrap(),
+        DownloadRequest::SubmitUrl {
+            url: "https://mega.nz/file/test123#secret".to_string()
+        }
+    );
+}
+
+#[test]
 fn handle_main_input_empty_url_submit_sets_guidance_status() {
     let mut app = test_app();
     app.url_input = "   ".to_string();

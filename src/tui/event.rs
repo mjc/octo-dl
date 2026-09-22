@@ -452,8 +452,23 @@ fn download_event_name(event: &DownloadEvent) -> &'static str {
 }
 
 /// Channel endpoints consumed by the background download task.
+pub(crate) struct AuthenticatedClient {
+    mega: mega::Client,
+    http: reqwest::Client,
+}
+
+impl AuthenticatedClient {
+    pub(crate) fn new(mega: mega::Client, http: reqwest::Client) -> Self {
+        Self { mega, http }
+    }
+
+    pub(crate) fn into_parts(self) -> (mega::Client, reqwest::Client) {
+        (self.mega, self.http)
+    }
+}
+
 pub struct DownloadChannels {
-    pub client_rx: Option<tokio::sync::oneshot::Receiver<(mega::Client, reqwest::Client)>>,
+    pub client_rx: Option<tokio::sync::oneshot::Receiver<AuthenticatedClient>>,
     pub event_tx: DownloadEventSender,
     pub url_rx: mpsc::Receiver<DownloadRequest>,
     pub token_tx: mpsc::Sender<TokenMessage>,
@@ -729,6 +744,21 @@ impl DownloadProgress for TuiProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authenticated_client_is_owned_until_the_download_task_consumes_it() {
+        let http = mega::http_client_builder()
+            .expect("the MEGA HTTP client builder should be available")
+            .build()
+            .expect("the MEGA HTTP client should be constructible");
+        let mega = mega::Client::builder()
+            .build(http.clone())
+            .expect("a client built from the HTTP transport should be valid");
+        let authenticated = AuthenticatedClient::new(mega, http);
+        let (mega, http) = authenticated.into_parts();
+
+        drop((mega, http));
+    }
 
     fn file_id_ptr_key(file_id: &FileId) -> (usize, usize) {
         let raw = file_id.as_str().as_bytes();
