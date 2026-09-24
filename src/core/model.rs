@@ -569,6 +569,16 @@ pub enum FileLifecycle {
 }
 
 impl FileLifecycle {
+    /// Whether a download-attempt update may still change this file's state.
+    /// The reducer and asynchronous event ingress share this rule.
+    #[must_use]
+    pub const fn accepts_download_attempt_update(&self) -> bool {
+        match self {
+            Self::Planned | Self::Queued | Self::Downloading => true,
+            Self::Complete | Self::Failed { .. } => false,
+        }
+    }
+
     #[must_use]
     pub const fn is_terminal(&self) -> bool {
         match self {

@@ -7,7 +7,35 @@ use crate::core::{CoreEvent, FileLifecycle, ProgressDelta};
 use crate::test_support::StateDirectoryGuard;
 use std::collections::{HashMap, HashSet, VecDeque};
 use tempfile::tempdir;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, watch};
+
+#[tokio::test]
+async fn download_supervisor_cancellation_interrupts_client_wait() {
+    let (_client_tx, client_rx) = oneshot::channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
+    let (_url_tx, url_rx) = mpsc::channel(1);
+    let (token_tx, _token_rx) = mpsc::channel(1);
+    let (_pause_tx, pause_rx) = watch::channel(false);
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task = tokio::spawn(run_download(
+        DownloadChannels {
+            client_rx: Some(client_rx),
+            event_tx,
+            url_rx,
+            token_tx,
+            pause_rx,
+            task_cancellation,
+        },
+        DownloadConfig::default(),
+    ));
+
+    cancellation.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .expect("supervisor should acknowledge cancellation")
+        .expect("supervisor should exit without panicking");
+}
 
 #[tokio::test]
 async fn verification_executor_limits_parallel_work_to_four() {
@@ -233,7 +261,8 @@ async fn register_download_token_delivers_token_to_application_channel() {
     let (token_tx, mut token_rx) = mpsc::channel(1);
     let file_id: FileId = "episode.mkv".into();
 
-    let cancel_token = register_download_token(file_id.clone(), &token_tx)
+    let attempt_id = DownloadAttemptId::new(7);
+    let cancel_token = register_download_token(file_id.clone(), attempt_id, &token_tx)
         .await
         .expect("a live token channel should accept registration");
     let message = token_rx
@@ -242,6 +271,7 @@ async fn register_download_token_delivers_token_to_application_channel() {
         .expect("registered token should arrive at the application");
 
     assert_eq!(message.file_id, file_id);
+    assert_eq!(message.attempt_id, attempt_id);
     assert!(!message.token.is_cancelled());
     cancel_token.cancel();
     assert!(message.token.is_cancelled());
@@ -252,7 +282,8 @@ async fn register_download_token_reports_closed_application_channel() {
     let (token_tx, token_rx) = mpsc::channel(1);
     drop(token_rx);
 
-    let result = register_download_token("episode.mkv".into(), &token_tx).await;
+    let result =
+        register_download_token("episode.mkv".into(), DownloadAttemptId::new(0), &token_tx).await;
 
     assert!(result.is_err());
 }

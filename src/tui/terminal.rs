@@ -208,6 +208,8 @@ async fn run_interactive_tui_loop(
                 }
             }
 
+            app.poll_download_task().await;
+
             if state_sync_enabled && dashboard_dirty && publish_dashboard_now {
                 app.mark_dashboard_dirty();
                 let _ = app.publish_snapshot_if_observed(state_tx);
@@ -216,6 +218,8 @@ async fn run_interactive_tui_loop(
 
             if finish_interactive_shutdown_if_ready(app, &mut shutting_down) {
                 drain_late_shutdown_tokens(app).await;
+                app.await_download_task_stop(INTERACTIVE_SHUTDOWN_GRACE_PERIOD)
+                    .await;
                 break;
             }
 
@@ -345,6 +349,7 @@ mod tests {
             token_tx
                 .try_send(crate::tui::event::TokenMessage {
                     file_id: "late.bin".into(),
+                    attempt_id: crate::tui::event::DownloadAttemptId::new(0),
                     token: late_token,
                 })
                 .expect("late token should queue");
