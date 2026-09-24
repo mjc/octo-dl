@@ -34,6 +34,10 @@ fn relative_service_download_root_supports_output_io() {
     let mut app = App::new(9723, event_tx, true);
     app.apply_service_config(&config_path).unwrap();
 
+    assert_eq!(
+        std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap(),
+        std::fs::canonicalize(directory.path()).unwrap()
+    );
     let root = app.config.config.path.as_ref().unwrap();
     assert!(std::path::Path::new(root).is_absolute());
     let fs = crate::TokioFileSystem::new().with_download_root(Some(root.into()));
@@ -97,7 +101,7 @@ fn apply_service_config_reports_download_directory_path() {
 }
 
 #[test]
-fn explicit_relative_config_path_remains_rooted_after_download_directory_change() {
+fn explicit_relative_config_path_remains_rooted_without_changing_cwd() {
     let root = tempdir().expect("root directory should exist");
     let downloads = tempdir().expect("download directory should exist");
     let _cwd = CurrentDirGuard::set(root.path());
@@ -111,6 +115,10 @@ fn explicit_relative_config_path_remains_rooted_after_download_directory_change(
     let _app = App::new_with_optional_service_config(tx, true, Some(relative_path), 9723)
         .expect("app should initialize");
 
+    assert_eq!(
+        std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap(),
+        std::fs::canonicalize(root.path()).unwrap()
+    );
     let saved = ServiceConfig::load(&config_path).expect("original config should remain readable");
     assert!(saved.api.api_key.is_some());
     assert!(!downloads.path().join("config.toml").exists());

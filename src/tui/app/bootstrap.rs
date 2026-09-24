@@ -620,9 +620,6 @@ impl App {
                 None => error,
             })?;
         if let Some(ref download_dir) = download_root {
-            std::env::set_current_dir(download_dir).map_err(|error| {
-                path_io_error("Failed to change directory to", download_dir, error)
-            })?;
             log::info!("Download directory: {}", download_dir.display());
         }
 
