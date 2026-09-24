@@ -573,7 +573,10 @@ impl FileLifecycle {
     /// The reducer and asynchronous event ingress share this rule.
     #[must_use]
     pub const fn accepts_download_attempt_update(&self) -> bool {
-        matches!(self, Self::Planned | Self::Queued | Self::Downloading)
+        match self {
+            Self::Planned | Self::Queued | Self::Downloading => true,
+            Self::Complete | Self::Failed { .. } => false,
+        }
     }
 
     #[must_use]
