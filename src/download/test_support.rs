@@ -81,6 +81,14 @@ impl FileSystem for MockFileSystem {
         self.fingerprints.lock().unwrap().get(path).copied()
     }
 
+    async fn path_matches_open_file(
+        &self,
+        _path: &Path,
+        _file: &tokio::fs::File,
+    ) -> io::Result<bool> {
+        Ok(true)
+    }
+
     async fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
         Ok(())
     }

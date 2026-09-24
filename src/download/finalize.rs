@@ -17,6 +17,7 @@ pub(super) struct DownloadFinishContext<'a> {
     pub(super) node: &'a mega::Node,
     pub(super) path: &'a str,
     pub(super) part_path: &'a Path,
+    pub(super) part_file: &'a tokio::fs::File,
     pub(super) sidecar_path: &'a Path,
     pub(super) reused_bytes: u64,
     pub(super) stats: &'a DownloadStatsTracker,
@@ -47,63 +48,91 @@ pub(super) const fn should_delete_resume_state_on_error(
 }
 
 impl<F: FileSystem> Downloader<F> {
+    async fn ensure_part_path_matches_handle(
+        &self,
+        path: &Path,
+        file: &tokio::fs::File,
+    ) -> Result<()> {
+        if self.fs.path_matches_open_file(path, file).await? {
+            Ok(())
+        } else {
+            Err(Error::Io(io::Error::other(format!(
+                "part file path was replaced during download: {}",
+                path.display()
+            ))))
+        }
+    }
+
+    fn report_part_path_mismatch(ctx: &DownloadFinishContext<'_>, error: Error) -> Error {
+        ctx.progress.on_error(ctx.name, &error.to_string());
+        error
+    }
+
+    async fn finish_verified_download(&self, ctx: DownloadFinishContext<'_>) -> Result<FileStats> {
+        if let Err(error) = ctx
+            .chunk_verified
+            .finish_sidecar_writer(SidecarWriterShutdown::Abort)
+            .await
+        {
+            log::warn!("Resume sidecar writer reported an earlier failure: {error}");
+        }
+        if let Err(error) = self
+            .ensure_part_path_matches_handle(ctx.part_path, ctx.part_file)
+            .await
+        {
+            return Err(Self::report_part_path_mismatch(&ctx, error));
+        }
+        self.fs
+            .rename_file(ctx.part_path, Path::new(ctx.path))
+            .await?;
+        // Rename publishes the output path; this sync is the separate
+        // durability acknowledgement required before completion.
+        let output_parent = Path::new(ctx.path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        self.fs
+            .sync_directory(output_parent)
+            .await
+            .map_err(|error| {
+                Error::Io(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "output rename completed but durability acknowledgement failed for {}: {error}",
+                        ctx.path
+                    ),
+                ))
+            })?;
+        delete_sidecar(ctx.sidecar_path).await.map_err(|error| {
+            Error::Io(io::Error::new(
+                error.kind(),
+                format!(
+                    "output {} is durable, but resume sidecar cleanup failed: {error}",
+                    ctx.path
+                ),
+            ))
+        })?;
+
+        let file_stats = FileStats {
+            size: ctx.node.size(),
+            network_bytes: ctx.stats.downloaded_bytes(),
+            reused_bytes: ctx.reused_bytes,
+            elapsed: ctx.stats.elapsed(),
+            average_speed: ctx.stats.average_speed(),
+            peak_speed: ctx.stats.peak_speed(),
+            ramp_up_time: ctx.stats.time_to_80pct(),
+        };
+        ctx.progress.on_file_complete(ctx.name, &file_stats);
+        Ok(file_stats)
+    }
+
     pub(super) async fn finish_download_result(
         &self,
         ctx: DownloadFinishContext<'_>,
         download_result: Result<()>,
     ) -> Result<FileStats> {
         match download_result {
-            Ok(()) => {
-                if let Err(error) = ctx
-                    .chunk_verified
-                    .finish_sidecar_writer(SidecarWriterShutdown::Abort)
-                    .await
-                {
-                    log::warn!("Resume sidecar writer reported an earlier failure: {error}");
-                }
-                self.fs
-                    .rename_file(ctx.part_path, Path::new(ctx.path))
-                    .await?;
-                // Rename publishes the output path; this sync is the separate
-                // durability acknowledgement required before completion.
-                let output_parent = Path::new(ctx.path)
-                    .parent()
-                    .filter(|parent| !parent.as_os_str().is_empty())
-                    .unwrap_or_else(|| Path::new("."));
-                self.fs
-                    .sync_directory(output_parent)
-                    .await
-                    .map_err(|error| {
-                        Error::Io(io::Error::new(
-                            error.kind(),
-                            format!(
-                                "output rename completed but durability acknowledgement failed for {}: {error}",
-                                ctx.path
-                            ),
-                        ))
-                    })?;
-                delete_sidecar(ctx.sidecar_path).await.map_err(|error| {
-                    Error::Io(io::Error::new(
-                        error.kind(),
-                        format!(
-                            "output {} is durable, but resume sidecar cleanup failed: {error}",
-                            ctx.path
-                        ),
-                    ))
-                })?;
-
-                let file_stats = FileStats {
-                    size: ctx.node.size(),
-                    network_bytes: ctx.stats.downloaded_bytes(),
-                    reused_bytes: ctx.reused_bytes,
-                    elapsed: ctx.stats.elapsed(),
-                    average_speed: ctx.stats.average_speed(),
-                    peak_speed: ctx.stats.peak_speed(),
-                    ramp_up_time: ctx.stats.time_to_80pct(),
-                };
-                ctx.progress.on_file_complete(ctx.name, &file_stats);
-                Ok(file_stats)
-            }
+            Ok(()) => self.finish_verified_download(ctx).await,
             Err(e) => {
                 if should_delete_resume_state_on_error(&self.config, &e) {
                     if let Err(error) = ctx
@@ -219,6 +248,7 @@ mod tests {
                 let sidecar_path = super::super::sidecar::sidecar_path(&output_path_string);
                 let old_contents = b"keep this valid destination";
                 tokio::fs::write(&output_path, old_contents).await.unwrap();
+                let part_file = tokio::fs::File::open(&output_path).await.unwrap();
                 let node = harness.node();
                 let chunk_verified = super::super::callbacks::ChunkVerifiedState::new(
                     super::super::resume_tracker::ResumeTracker::new(
@@ -243,6 +273,7 @@ mod tests {
                             node,
                             path: &output_path_string,
                             part_path: &part_path,
+                            part_file: &part_file,
                             sidecar_path: &sidecar_path,
                             reused_bytes: 0,
                             stats: &stats,
@@ -262,6 +293,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finalize_rejects_a_replaced_part_path() {
+        let harness = super::super::test_support::FakeMegaDownloadHarness::new(
+            64,
+            300_000,
+            DownloadConfig::default(),
+        )
+        .await;
+        tokio::fs::create_dir_all(&harness.output_dir)
+            .await
+            .unwrap();
+        let output_path = harness.output_path("result.bin");
+        let output = output_path.to_string_lossy().into_owned();
+        let part_path = super::super::sidecar::part_path(&output);
+        let sidecar_path = super::super::sidecar::sidecar_path(&output);
+        tokio::fs::write(&part_path, b"downloaded through open handle")
+            .await
+            .unwrap();
+        let part_file = tokio::fs::File::open(&part_path).await.unwrap();
+        tokio::fs::remove_file(&part_path).await.unwrap();
+        tokio::fs::write(&part_path, b"replacement at part path")
+            .await
+            .unwrap();
+
+        let node = harness.node();
+        let chunk_verified = super::super::callbacks::ChunkVerifiedState::new(
+            super::super::resume_tracker::ResumeTracker::new(
+                node.size(),
+                *node.condensed_mac().unwrap(),
+                vec![None; mega::mega_chunk_boundaries(node.size()).len()],
+            ),
+            super::super::sidecar_writer::LazySidecarWriter::new(
+                sidecar_path.clone(),
+                part_path.clone(),
+            )
+            .expect("sidecar writer should start"),
+        );
+        let progress: Arc<dyn super::super::callbacks::DownloadProgress> =
+            Arc::new(super::super::callbacks::NoProgress);
+        let stats = DownloadStatsTracker::new(node.size());
+
+        let result = harness
+            .downloader
+            .finish_download_result(
+                DownloadFinishContext {
+                    node,
+                    path: &output,
+                    part_path: &part_path,
+                    part_file: &part_file,
+                    sidecar_path: &sidecar_path,
+                    reused_bytes: 0,
+                    stats: &stats,
+                    chunk_verified: &chunk_verified,
+                    progress: &progress,
+                    name: &output,
+                },
+                Ok(()),
+            )
+            .await;
+
+        let error = result.expect_err("a replaced part path must not be published");
+        assert!(error.to_string().contains("part file path was replaced"));
+        assert_eq!(
+            tokio::fs::read(&part_path).await.unwrap(),
+            b"replacement at part path"
+        );
+        assert!(!tokio::fs::try_exists(&output_path).await.unwrap());
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn output_directory_sync_failure_is_not_reported_as_completion() {
         let harness = super::super::test_support::FakeMegaDownloadHarness::new(
             62,
@@ -274,6 +375,12 @@ mod tests {
         let output = output_path.to_string_lossy().into_owned();
         let part_path = super::super::sidecar::part_path(&output);
         let sidecar_path = super::super::sidecar::sidecar_path(&output);
+        let part_file_path = harness.output_path("result.bin.part");
+        tokio::fs::create_dir_all(part_file_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&part_file_path, b"part").await.unwrap();
+        let part_file = tokio::fs::File::open(&part_file_path).await.unwrap();
         let fs = super::super::test_support::MockFileSystem::new();
         fs.fail_directory_sync("injected output directory sync failure");
         let downloader = super::super::test_support::mock_downloader(fs);
@@ -300,6 +407,7 @@ mod tests {
                     node,
                     path: &output,
                     part_path: &part_path,
+                    part_file: &part_file,
                     sidecar_path: &sidecar_path,
                     reused_bytes: 0,
                     stats: &stats,
@@ -337,6 +445,8 @@ mod tests {
         tokio::fs::create_dir_all(output_path.parent().unwrap())
             .await
             .expect("output parent should be available for sidecar setup");
+        tokio::fs::write(&part_path, b"part").await.unwrap();
+        let part_file = tokio::fs::File::open(&part_path).await.unwrap();
         tokio::fs::create_dir(&sidecar_path)
             .await
             .expect("directory at sidecar path should force cleanup failure");
@@ -365,6 +475,7 @@ mod tests {
                     node,
                     path: &output,
                     part_path: &part_path,
+                    part_file: &part_file,
                     sidecar_path: &sidecar_path,
                     reused_bytes: 0,
                     stats: &stats,

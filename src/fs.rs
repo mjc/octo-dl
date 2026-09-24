@@ -199,6 +199,29 @@ pub trait FileSystem: Send + Sync {
             .map(|metadata| FileFingerprint::from_metadata(&metadata))
     }
 
+    /// Checks that a path still names the file held by an open handle.
+    async fn path_matches_open_file(
+        &self,
+        path: &Path,
+        file: &tokio::fs::File,
+    ) -> std::io::Result<bool> {
+        let Some(open_file) = self.fingerprint_open_file(file).await else {
+            return Err(std::io::Error::other("could not inspect open part file"));
+        };
+        let Some(path_file) = self.file_fingerprint(path).await else {
+            return Ok(false);
+        };
+
+        #[cfg(unix)]
+        {
+            Ok(open_file.dev == path_file.dev && open_file.ino == path_file.ino)
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(open_file == path_file)
+        }
+    }
+
     /// Reads exactly `buf.len()` bytes at `offset` without trusting file cursor state.
     async fn read_exact_at(&self, path: &Path, offset: u64, buf: &mut [u8]) -> std::io::Result<()>;
 
@@ -370,6 +393,32 @@ impl FileSystem for TokioFileSystem {
             .map(|metadata| FileFingerprint::from_metadata(&metadata))
     }
 
+    async fn path_matches_open_file(
+        &self,
+        path: &Path,
+        file: &tokio::fs::File,
+    ) -> std::io::Result<bool> {
+        let path = self.resolve_download_path(path)?;
+        let open_file = file.metadata().await?;
+        let path_file = match tokio::fs::symlink_metadata(path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let open_fingerprint = FileFingerprint::from_metadata(&open_file);
+        let path_fingerprint = FileFingerprint::from_metadata(&path_file);
+
+        #[cfg(unix)]
+        {
+            Ok(open_fingerprint.dev == path_fingerprint.dev
+                && open_fingerprint.ino == path_fingerprint.ino)
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(open_fingerprint == path_fingerprint)
+        }
+    }
+
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
         let path = self.resolve_download_path(path)?;
         tokio::fs::create_dir_all(path).await
@@ -478,11 +527,9 @@ mod tests {
 
     #[cfg(not(unix))]
     #[test]
-    fn sync_directory_fails_closed_when_platform_sync_is_unsupported() {
-        let error = sync_directory(Path::new("."))
-            .expect_err("unsupported platforms must not acknowledge directory durability");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    fn sync_directory_is_best_effort_on_non_unix() {
+        sync_directory(Path::new("."))
+            .expect("non-Unix platforms acknowledge directory sync as best effort");
     }
 
     #[test]

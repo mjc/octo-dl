@@ -108,6 +108,7 @@ impl<F: FileSystem> Downloader<F> {
             trusted_for_download,
             trusted_bytes,
         } = prepared;
+        let validated_part_file = part_file.try_clone().await?;
         let callbacks: Arc<dyn mega::ParallelDownloadCallbacks> = callback_state.clone();
 
         let download_result = if let Some(token) = cancellation_token {
@@ -141,6 +142,7 @@ impl<F: FileSystem> Downloader<F> {
                     node,
                     path,
                     part_path: &pp,
+                    part_file: &validated_part_file,
                     sidecar_path: &sp,
                     reused_bytes: trusted_bytes,
                     stats: &callback_state.progress.stats,
