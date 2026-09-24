@@ -22,7 +22,7 @@ use ratatui::widgets::ListState;
 use rustc_hash::FxHashSet;
 use tokio::sync::{mpsc, watch};
 
-use crate::config::{ApiKey, CredentialKey};
+use crate::config::{ApiKey, CredentialKey, prepare_download_root};
 use crate::{
     DownloadConfig, ServiceConfig,
     core::{DownloadState, SavedMegaSession, SessionMeta, SessionSnapshot},
@@ -44,18 +44,6 @@ fn path_io_error(action: &str, path: &Path, error: io::Error) -> io::Error {
         error.kind(),
         format!("{action} {}: {error}", path.display()),
     )
-}
-
-fn config_credential_key(config: &mut ServiceConfig) -> CredentialKey {
-    if let Some(encoded) = config.credential_key.as_deref()
-        && let Some(key) = CredentialKey::decode(encoded)
-    {
-        return key;
-    }
-
-    let key = CredentialKey::generate();
-    config.credential_key = Some(key.encode());
-    key
 }
 
 fn decrypt_service_credentials(
@@ -110,18 +98,7 @@ impl App {
             .persist_config_path
             .clone()
             .unwrap_or_else(state_dir_service_config_path);
-        let mut config = ServiceConfig::load_or_create(&config_path)?;
-        let had_key = config
-            .credential_key
-            .as_deref()
-            .and_then(CredentialKey::decode)
-            .is_some();
-        let key = config_credential_key(&mut config);
-        if !had_key {
-            config.save(&config_path)?;
-        }
-        key.persist_for_sessions()?;
-        Ok(key)
+        ServiceConfig::load_or_create_credential_key(&config_path)
     }
 
     pub(crate) fn session_credential_key(
@@ -134,16 +111,7 @@ impl App {
                 .clone()
                 .unwrap_or_else(state_dir_service_config_path);
             let config = ServiceConfig::load(&path)?;
-            config
-                .credential_key
-                .as_deref()
-                .and_then(CredentialKey::decode)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "original config credential key is missing",
-                    )
-                })
+            config.require_credential_key()
         })
     }
 
@@ -469,7 +437,7 @@ impl App {
                 "Logging in...".to_string()
             }));
 
-            let http = match super::super::download::build_http_client() {
+            let http = match crate::download::build_http_client() {
                 Ok(http) => http,
                 Err(e) => {
                     let _ = tx.send(DownloadEvent::LoginResult {
@@ -616,7 +584,7 @@ impl App {
             return Ok(());
         }
 
-        let key = config_credential_key(&mut service_config);
+        let key = service_config.ensure_credential_key();
         if let Some((email, password, mfa)) = decrypt_service_credentials(&service_config, &key) {
             log::info!("Loaded fallback credentials from {}", config_path.display());
             self.login
@@ -641,22 +609,17 @@ impl App {
             .as_deref()
             .and_then(CredentialKey::decode)
             .is_some();
-        let key = config_credential_key(&mut service_config);
+        let key = service_config.ensure_credential_key();
         let mut config_dirty = !had_valid_credential_key;
         log::info!("Loaded config from {}", config_path.display());
 
-        let download_root = service_config
-            .download
-            .path
-            .as_deref()
-            .map(std::path::absolute)
-            .transpose()?;
+        let requested_root = service_config.download.path.as_deref().map(Path::new);
+        let download_root =
+            prepare_download_root(requested_root).map_err(|error| match requested_root {
+                Some(path) => path_io_error("Failed to create download directory", path, error),
+                None => error,
+            })?;
         if let Some(ref download_dir) = download_root {
-            if !download_dir.exists() {
-                std::fs::create_dir_all(download_dir).map_err(|error| {
-                    path_io_error("Failed to create download directory", download_dir, error)
-                })?;
-            }
             std::env::set_current_dir(download_dir).map_err(|error| {
                 path_io_error("Failed to change directory to", download_dir, error)
             })?;
@@ -747,7 +710,7 @@ impl App {
         };
 
         let mut service_config = ServiceConfig::load_or_create(config_path)?;
-        let key = config_credential_key(&mut service_config);
+        let key = service_config.ensure_credential_key();
         if self.login.has_credentials() {
             service_config.credentials = crate::ServiceCredentials {
                 encrypted: false,

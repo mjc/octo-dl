@@ -17,6 +17,7 @@ use crate::tui::dashboard::{
     DashboardUiMode, DownloadDashboardState, aggregate_transfer_label as dashboard_transfer_label,
     clamp_selection, file_detail as dashboard_file_detail,
 };
+use crate::tui::package_name::PackageName;
 
 pub(super) fn draw_dashboard_file_list(
     frame: &mut Frame,
@@ -387,23 +388,7 @@ pub(super) fn status_spans(segments: Vec<StatusSegment>) -> Vec<Span<'static>> {
 }
 
 fn display_dashboard_package_name(package: &DashboardPackageRow) -> String {
-    if !package.display_name.starts_with("http://") && !package.display_name.starts_with("https://")
-    {
-        return compact_label(&package.display_name);
-    }
-    if let Some(label) = &package.folder_label {
-        return label.clone();
-    }
-    if let Some(label) = mega_url_label(&package.display_name) {
-        return label;
-    }
-    compact_label(
-        package
-            .display_name
-            .split('#')
-            .next()
-            .unwrap_or(&package.display_name),
-    )
+    PackageName::new(&package.display_name, package.folder_label.as_deref()).to_string()
 }
 
 fn package_prefix_label(label: &str) -> String {
@@ -420,7 +405,6 @@ pub(super) fn dashboard_status_line(
     width: u16,
     selected: Option<usize>,
 ) -> Vec<Span<'static>> {
-    let status = dashboard_effective_status(state);
     let error_count = state
         .files
         .iter()
@@ -437,13 +421,41 @@ pub(super) fn dashboard_status_line(
         .iter()
         .filter(|file| file.status.is_queued())
         .count();
-    let width = usize::from(width);
+    status_line_policy(
+        width,
+        state.authenticated,
+        state.logging_in,
+        &state.status,
+        state.files.is_empty(),
+        state.files.len(),
+        state.totals.files_total,
+        state.totals.files_completed,
+        error_count,
+        downloading,
+        queued,
+        selected_error.as_deref(),
+    )
+}
 
+pub(super) fn status_line_policy(
+    width: u16,
+    authenticated: bool,
+    logging_in: bool,
+    status: &str,
+    files_empty: bool,
+    file_count: usize,
+    files_total: usize,
+    files_completed: usize,
+    error_count: usize,
+    downloading: usize,
+    queued: usize,
+    selected_error: Option<&str>,
+) -> Vec<Span<'static>> {
+    let width = usize::from(width);
     if width <= 16 && error_count > 0 {
         let failure = failed_count_label(error_count);
         return status_spans(fit_status_segments(None, None, Some(&failure), width));
     }
-
     if width <= 32 && downloading > 0 {
         let activity = compact_activity_label(downloading, queued);
         let failure = (error_count > 0).then(|| failed_count_label(error_count));
@@ -455,17 +467,30 @@ pub(super) fn dashboard_status_line(
         ));
     }
 
-    let authenticated = if state.authenticated {
+    let status = effective_status(
+        status,
+        files_empty,
+        file_count,
+        files_total,
+        files_completed,
+        downloading,
+        queued,
+    );
+    let authenticated = if authenticated {
         Some("Logged in \u{2713}")
-    } else if state.logging_in {
+    } else if logging_in {
         Some("Logging in...")
     } else {
         None
     };
     let error_text = (error_count > 0)
-        .then(|| selected_error.unwrap_or_else(|| failed_count_label(error_count)));
-    let segments = fit_status_segments(authenticated, Some(&status), error_text.as_deref(), width);
-    status_spans(segments)
+        .then(|| selected_error.map_or_else(|| failed_count_label(error_count), str::to_owned));
+    status_spans(fit_status_segments(
+        authenticated,
+        Some(&status),
+        error_text.as_deref(),
+        width,
+    ))
 }
 
 fn selected_error_message(state: &DownloadDashboardState, index: usize) -> Option<String> {
@@ -487,36 +512,33 @@ fn selected_error_message(state: &DownloadDashboardState, index: usize) -> Optio
     }
 }
 
-fn dashboard_effective_status(state: &DownloadDashboardState) -> String {
-    if !is_processing_status(&state.status) || state.files.is_empty() {
-        return state.status.clone();
+fn effective_status(
+    status: &str,
+    files_empty: bool,
+    file_count: usize,
+    files_total: usize,
+    files_completed: usize,
+    downloading: usize,
+    queued: usize,
+) -> String {
+    if !is_processing_status(status) || files_empty {
+        return status.to_string();
     }
-    let downloading = state
-        .files
-        .iter()
-        .filter(|file| file.status.is_downloading())
-        .count();
-    let queued = state
-        .files
-        .iter()
-        .filter(|file| file.status.is_queued())
-        .count();
     if downloading > 0 {
         let mut status = String::with_capacity(40);
         let _ = write!(status, "Downloading {downloading} file(s), {queued} queued");
         return status;
     }
-    if state.totals.files_total > 0 {
+    if files_total > 0 {
         let mut status = String::with_capacity(40);
         let _ = write!(
             status,
-            "Queued {} file(s), {}/{} complete",
-            queued, state.totals.files_completed, state.totals.files_total
+            "Queued {queued} file(s), {files_completed}/{files_total} complete"
         );
         return status;
     }
     let mut status = String::with_capacity(24);
-    let _ = write!(status, "Queued {} file(s)", state.files.len());
+    let _ = write!(status, "Queued {file_count} file(s)");
     status
 }
 
@@ -683,28 +705,6 @@ const fn package_progress_icon(percent: u64) -> &'static str {
         25..=74 => "\u{25d1}",
         75..=99 => "\u{25d5}",
         _ => "\u{25cf}",
-    }
-}
-
-pub(super) fn mega_url_label(value: &str) -> Option<String> {
-    let marker = "mega.nz/";
-    let start = value.find(marker)? + marker.len();
-    let path = &value[start..];
-    let mut parts = path.split(['/', '#']);
-    match (parts.next(), parts.next()) {
-        (Some("folder"), Some(id)) if !id.is_empty() => {
-            let mut label = String::with_capacity("Folder ".len() + id.len());
-            label.push_str("Folder ");
-            label.push_str(id);
-            Some(label)
-        }
-        (Some("file"), Some(id)) if !id.is_empty() => {
-            let mut label = String::with_capacity("File ".len() + id.len());
-            label.push_str("File ");
-            label.push_str(id);
-            Some(label)
-        }
-        _ => None,
     }
 }
 

@@ -19,18 +19,21 @@ mod popup;
 
 use std::fmt::Write as _;
 
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
+use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 
 use self::dashboard::{
-    compact_label, controls_label_from_snapshot, dashboard_aggregate_progress_label,
-    dashboard_status_line, draw_dashboard_file_list, fit_status_segments, focused_url_input_view,
-    package_status_style, status_spans, text_width, truncate_end,
+    controls_label_from_snapshot, dashboard_aggregate_progress_label, dashboard_status_line,
+    draw_dashboard_file_list, focused_url_input_view, package_status_style, status_line_policy,
+    text_width, truncate_end,
 };
 use super::app::{App, FileEntry, FileStatus, Popup};
-use super::dashboard::{DashboardChrome, DashboardUiMode, DownloadDashboardState, clamp_selection};
+use super::dashboard::{
+    DashboardChrome, DashboardUiMode, DownloadDashboardState, clamp_selection, dashboard_layout,
+};
+use super::package_name::{PackageName, compact_label};
 use super::package_stats::PackageDisplayStats;
 use super::visible::TuiRow;
 use crate::core::PackageStatus;
@@ -66,7 +69,7 @@ fn draw_interactive_dashboard(frame: &mut ratatui::Frame, app: &mut App) {
         } else {
             Color::Cyan
         }));
-    let inner = outer.inner(area);
+    let layout = dashboard_layout(area);
     frame.render_widget(outer, area);
 
     let right_x = area
@@ -89,29 +92,19 @@ fn draw_interactive_dashboard(frame: &mut ratatui::Frame, app: &mut App) {
         );
     }
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
     if app.popup == Popup::None && app.url_input_active {
         let url_block = Block::default()
             .title(" Add URL(s): editing ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow));
-        let url_inner = url_block.inner(chunks[0]);
+        let url_inner = url_block.inner(layout.progress);
         let (url_value, cursor_col) =
             focused_url_input_view(&app.url_input, app.url_input_cursor, url_inner.width);
         frame.render_widget(
             Paragraph::new(url_value)
                 .block(url_block)
                 .style(Style::default().fg(Color::White)),
-            chunks[0],
+            layout.progress,
         );
         if let Some(cursor_col) = cursor_col
             && url_inner.height > 0
@@ -119,24 +112,24 @@ fn draw_interactive_dashboard(frame: &mut ratatui::Frame, app: &mut App) {
             frame.set_cursor_position(Position::new(url_inner.x + cursor_col, url_inner.y));
         }
     } else {
-        render_aggregate_progress_app(frame, app, chunks[0]);
+        render_aggregate_progress_app(frame, app, layout.progress);
     }
 
-    draw_dashboard_file_list_app(frame, app, chunks[1]);
+    draw_dashboard_file_list_app(frame, app, layout.list);
 
     let status_line = Paragraph::new(Line::from(dashboard_status_line_app(
         app,
-        chunks[2].width,
+        layout.status.width,
         app.file_list_state.selected(),
     )))
     .style(Style::default().fg(Color::White));
-    frame.render_widget(status_line, chunks[2]);
+    frame.render_widget(status_line, layout.status);
 
-    let controls = controls_label_app(app, chunks[3].width);
+    let controls = controls_label_app(app, layout.controls.width);
     let controls_bar = Paragraph::new(controls)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
-    frame.render_widget(controls_bar, chunks[3]);
+    frame.render_widget(controls_bar, layout.controls);
 }
 
 pub fn draw_dashboard(
@@ -176,7 +169,7 @@ pub fn draw_dashboard(
         } else {
             Color::Cyan
         }));
-    let inner = outer.inner(area);
+    let layout = dashboard_layout(area);
     frame.render_widget(outer, area);
 
     let right_x = area
@@ -199,30 +192,20 @@ pub fn draw_dashboard(
         );
     }
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
     let show_url_input = !state.read_only && state.popup == Popup::None && chrome.url_input_active;
     if show_url_input {
         let url_block = Block::default()
             .title(" Add URL(s): editing ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow));
-        let url_inner = url_block.inner(chunks[0]);
+        let url_inner = url_block.inner(layout.progress);
         let (url_value, cursor_col) =
             focused_url_input_view(chrome.url_input, chrome.url_input_cursor, url_inner.width);
         frame.render_widget(
             Paragraph::new(url_value)
                 .block(url_block)
                 .style(Style::default().fg(Color::White)),
-            chunks[0],
+            layout.progress,
         );
         if let Some(cursor_col) = cursor_col
             && url_inner.height > 0
@@ -230,31 +213,31 @@ pub fn draw_dashboard(
             frame.set_cursor_position(Position::new(url_inner.x + cursor_col, url_inner.y));
         }
     } else {
-        render_aggregate_progress(frame, state, chunks[0]);
+        render_aggregate_progress(frame, state, layout.progress);
     }
 
-    draw_dashboard_file_list(frame, state, list_state, chunks[1]);
+    draw_dashboard_file_list(frame, state, list_state, layout.list);
 
     let status_line = Paragraph::new(Line::from(dashboard_status_line(
         state,
-        chunks[2].width,
+        layout.status.width,
         list_state.selected(),
     )))
     .style(Style::default().fg(Color::White));
-    frame.render_widget(status_line, chunks[2]);
+    frame.render_widget(status_line, layout.status);
 
     let controls = if state.read_only {
         truncate_end(
             "up/down:select  q:quit  read-only",
-            usize::from(chunks[3].width),
+            usize::from(layout.controls.width),
         )
     } else {
-        controls_label_from_snapshot(state, chrome, chunks[3].width)
+        controls_label_from_snapshot(state, chrome, layout.controls.width)
     };
     let controls_bar = Paragraph::new(controls)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
-    frame.render_widget(controls_bar, chunks[3]);
+    frame.render_widget(controls_bar, layout.controls);
 }
 
 fn render_aggregate_progress(
@@ -459,7 +442,7 @@ fn prefixed_file_label(prefix_label: &str, file_name: &str) -> String {
     let compact = compact_label(prefix_label);
     let mut prefixed = String::with_capacity(compact.len() + file_name.len() + 3);
     prefixed.push('[');
-    prefixed.push_str(&compact);
+    prefixed.push_str(compact);
     prefixed.push_str("] ");
     prefixed.push_str(file_name);
     prefixed
@@ -520,7 +503,7 @@ fn render_package_row_app(
     render_text(frame, &mut cursor, y, " ", row_style);
     render_text(frame, &mut cursor, y, icon, row_style);
     render_text(frame, &mut cursor, y, " ", row_style);
-    name.render(frame, &mut cursor, y, slots.name_width, row_style);
+    render_package_name(frame, &name, &mut cursor, y, slots.name_width, row_style);
     cursor = cursor.saturating_add(u16::try_from(slots.filler_width).unwrap_or(u16::MAX));
     detail.render(frame, &mut cursor, y, slots.detail_width, detail_style);
 }
@@ -949,78 +932,21 @@ impl PackageDetail<'_> {
     }
 }
 
-enum PackageName<'a> {
-    Borrowed(&'a str),
-    Prefixed {
-        prefix: &'static str,
-        value: &'a str,
-    },
-}
-
-impl<'a> PackageName<'a> {
-    fn new(display_name: &'a str, folder_label: Option<&'a str>) -> Self {
-        if !display_name.starts_with("http://") && !display_name.starts_with("https://") {
-            return Self::Borrowed(compact_label_ref(display_name));
-        }
-        if let Some(label) = folder_label {
-            return Self::Borrowed(label);
-        }
-        if let Some(name) = mega_url_name(display_name) {
-            return name;
-        }
-        Self::Borrowed(compact_label_ref(
-            display_name.split('#').next().unwrap_or(display_name),
-        ))
-    }
-
-    fn width(&self) -> usize {
-        match self {
-            Self::Borrowed(value) => text_width(value),
-            Self::Prefixed { prefix, value } => text_width(prefix) + text_width(value),
-        }
-    }
-
-    fn render(
-        &self,
-        frame: &mut ratatui::Frame,
-        x: &mut u16,
-        y: u16,
-        max_width: usize,
-        style: Style,
-    ) {
-        match self {
-            Self::Borrowed(value) => render_truncated_text(frame, x, y, value, max_width, style),
-            Self::Prefixed { prefix, value } => {
-                let mut remaining = max_width;
-                render_clipped_text(frame, x, y, &mut remaining, prefix, style);
-                render_clipped_text(frame, x, y, &mut remaining, value, style);
-            }
-        }
-    }
-}
-
-fn compact_label_ref(value: &str) -> &str {
-    value
-        .rsplit(['/', '\\'])
-        .find(|part| !part.is_empty())
-        .unwrap_or(value)
-}
-
-fn mega_url_name(value: &str) -> Option<PackageName<'_>> {
-    let marker = "mega.nz/";
-    let start = value.find(marker)? + marker.len();
-    let path = &value[start..];
-    let mut parts = path.split(['/', '#']);
-    match (parts.next(), parts.next()) {
-        (Some("folder"), Some(id)) if !id.is_empty() => Some(PackageName::Prefixed {
-            prefix: "Folder ",
-            value: id,
-        }),
-        (Some("file"), Some(id)) if !id.is_empty() => Some(PackageName::Prefixed {
-            prefix: "File ",
-            value: id,
-        }),
-        _ => None,
+fn render_package_name(
+    frame: &mut ratatui::Frame,
+    name: &PackageName<'_>,
+    x: &mut u16,
+    y: u16,
+    max_width: usize,
+    style: Style,
+) {
+    let (prefix, value) = name.parts();
+    if prefix.is_empty() {
+        render_truncated_text(frame, x, y, value, max_width, style);
+    } else {
+        let mut remaining = max_width;
+        render_clipped_text(frame, x, y, &mut remaining, prefix, style);
+        render_clipped_text(frame, x, y, &mut remaining, value, style);
     }
 }
 
@@ -1236,35 +1162,20 @@ fn dashboard_status_line_app(app: &App, width: u16, selected: Option<usize>) -> 
         .filter(|file| matches!(file.status, FileStatus::Queued))
         .count();
     let selected_error = selected.and_then(|index| selected_error_message_app(app, index));
-    let width = usize::from(width);
-
-    if width <= 16 && error_count > 0 {
-        let failure = failed_count_label_app(error_count);
-        return status_spans(fit_status_segments(None, None, Some(&failure), width));
-    }
-    if width <= 32 && downloading > 0 {
-        let activity = compact_activity_label_app(downloading, queued);
-        let failure = (error_count > 0).then(|| failed_count_label_app(error_count));
-        return status_spans(fit_status_segments(
-            None,
-            Some(&activity),
-            failure.as_deref(),
-            width,
-        ));
-    }
-
-    let status = effective_status_app(app);
-    let authenticated = if app.authenticated {
-        Some("Logged in \u{2713}")
-    } else if app.login.logging_in {
-        Some("Logging in...")
-    } else {
-        None
-    };
-    let error_text = (error_count > 0)
-        .then(|| selected_error.unwrap_or_else(|| failed_count_label_app(error_count)));
-    let segments = fit_status_segments(authenticated, Some(&status), error_text.as_deref(), width);
-    status_spans(segments)
+    status_line_policy(
+        width,
+        app.authenticated,
+        app.login.logging_in,
+        &app.status,
+        app.files.is_empty(),
+        app.files.len(),
+        app.files_total,
+        app.files_completed,
+        error_count,
+        downloading,
+        queued,
+        selected_error.as_deref(),
+    )
 }
 
 fn selected_error_message_app(app: &App, index: usize) -> Option<String> {
@@ -1283,51 +1194,6 @@ fn selected_error_message_app(app: &App, index: usize) -> Option<String> {
             .get(package_id)
             .and_then(|package| package.error.clone()),
     }
-}
-
-fn effective_status_app(app: &App) -> String {
-    if !app.status.starts_with("Processing ") || app.files.is_empty() {
-        return app.status.clone();
-    }
-    let downloading = app
-        .files
-        .iter()
-        .filter(|file| matches!(file.status, FileStatus::Downloading))
-        .count();
-    let queued = app
-        .files
-        .iter()
-        .filter(|file| matches!(file.status, FileStatus::Queued))
-        .count();
-    if downloading > 0 {
-        let mut status = String::with_capacity(40);
-        let _ = write!(status, "Downloading {downloading} file(s), {queued} queued");
-        return status;
-    }
-    if app.files_total > 0 {
-        let mut status = String::with_capacity(40);
-        let _ = write!(
-            status,
-            "Queued {} file(s), {}/{} complete",
-            queued, app.files_completed, app.files_total
-        );
-        return status;
-    }
-    let mut status = String::with_capacity(24);
-    let _ = write!(status, "Queued {} file(s)", app.files.len());
-    status
-}
-
-fn failed_count_label_app(error_count: usize) -> String {
-    let mut label = String::with_capacity(16);
-    let _ = write!(label, "{error_count} failed");
-    label
-}
-
-fn compact_activity_label_app(downloading: usize, queued: usize) -> String {
-    let mut label = String::with_capacity(16);
-    let _ = write!(label, "Dl {downloading}, {queued} q");
-    label
 }
 
 fn controls_label_app(app: &App, width: u16) -> String {
@@ -1562,7 +1428,7 @@ mod tests {
 
     fn render_package_name_text(name: &PackageName<'_>, width: usize) -> String {
         render_single_line(width as u16, |frame, x| {
-            name.render(frame, x, 0, width, Style::default());
+            render_package_name(frame, name, x, 0, width, Style::default());
         })
     }
 

@@ -36,16 +36,6 @@ pub(crate) fn build_http_client() -> mega::Result<reqwest::Client> {
         .build()?)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::build_http_client;
-
-    #[test]
-    fn shared_http_client_constructor_builds() {
-        assert!(build_http_client().is_ok());
-    }
-}
-
 /// Returns unused glibc heap pages to the OS after a large transfer.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(crate) fn trim_allocator() {
@@ -82,3 +72,13 @@ pub(crate) use self::sidecar::{
     legacy_binary_sidecar_path, legacy_json_sidecar_path, sidecar_path,
 };
 pub use self::verify::CompletedFileVerify;
+
+#[cfg(test)]
+mod tests {
+    use super::build_http_client;
+
+    #[test]
+    fn shared_http_client_constructor_builds() {
+        assert!(build_http_client().is_ok());
+    }
+}

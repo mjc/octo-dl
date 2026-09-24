@@ -11,19 +11,49 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use indexmap::IndexMap;
-use ratatui::widgets::ListState;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::{Block, Borders, ListState};
 use serde::ser::{SerializeSeq, SerializeStruct, SerializeStructVariant};
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use std::cell::Cell;
 
-use crate::core::{FileId, FileLifecycle, PackageId, PackageStatus};
+use crate::core::{FileId, PackageId, PackageStatus};
 use crate::{DownloadConfig, format_bytes, format_duration};
 
 use super::app::{App, FileStatus, Popup};
 use super::package_stats::PackageDisplayStats;
 use super::visible::TuiRow;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DashboardLayout {
+    pub(super) progress: Rect,
+    pub(super) list: Rect,
+    pub(super) status: Rect,
+    pub(super) controls: Rect,
+    pub(super) list_inner: Rect,
+}
+
+pub(super) fn dashboard_layout(area: Rect) -> DashboardLayout {
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    let panels = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    DashboardLayout {
+        progress: panels[0],
+        list: panels[1],
+        status: panels[2],
+        controls: panels[3],
+        list_inner: Block::default().borders(Borders::ALL).inner(panels[1]),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1670,60 +1700,27 @@ impl App {
                         .iter()
                         .map(|file| file.id.to_string())
                         .collect::<Vec<_>>();
-                    let mut present = 0_usize;
-                    let mut complete = 0_usize;
-                    let mut downloaded = 0_u64;
-                    let mut size = 0_u64;
-                    let mut source_url = None;
-                    let mut common_folder = None;
-                    let mut folder_conflict = false;
-                    let mut package_downloading = false;
-                    let mut package_verifying = false;
-
-                    for file in package_files {
-                        source_url = source_url.or_else(|| Some(file.source_url.clone()));
-                        package_downloading |= matches!(file.lifecycle, FileLifecycle::Downloading);
-                        package_verifying |= self.is_verification_active(&file.id);
-                        let folder = file.path.split('/').next().filter(|part| !part.is_empty());
-                        match (common_folder, folder) {
-                            (None, Some(folder)) => common_folder = Some(folder),
-                            (Some(existing), Some(folder)) if existing == folder => {}
-                            (Some(_), Some(_)) => folder_conflict = true,
-                            _ => {}
-                        }
-
-                        let file_complete = matches!(file.lifecycle, FileLifecycle::Complete);
-                        let visible = if file_complete {
-                            file.size
-                        } else {
-                            crate::core::visible_completed_bytes_for_display(file)
-                        };
-                        present += 1;
-                        complete += usize::from(file_complete);
-                        downloaded = downloaded.saturating_add(visible);
-                        size = size.saturating_add(file.size);
-                    }
+                    let stats =
+                        PackageDisplayStats::from_files(self, package_files.iter().copied());
 
                     Some(DashboardPackageRow {
                         id: package.id.to_string(),
-                        source_url: source_url.unwrap_or_default(),
+                        source_url: stats.source_url.to_string(),
                         display_name: package.display_name.clone(),
-                        status: if package_downloading || package_verifying {
+                        status: if stats.active() {
                             PackageStatus::Downloading
                         } else {
                             package.status()
                         },
                         file_ids,
-                        present_files: present,
-                        completed_files: complete,
-                        downloaded_bytes: downloaded,
-                        total_bytes: size,
-                        percent: percent(downloaded, size),
+                        present_files: stats.present_files,
+                        completed_files: stats.completed_files,
+                        downloaded_bytes: stats.downloaded_bytes,
+                        total_bytes: stats.total_bytes,
+                        percent: percent(stats.downloaded_bytes, stats.total_bytes),
                         expanded: self.expanded_packages.contains(&package.id)
                             || matches!(package.status(), PackageStatus::Failed),
-                        folder_label: (!folder_conflict)
-                            .then(|| common_folder.map(str::to_string))
-                            .flatten(),
+                        folder_label: stats.folder_label().map(str::to_string),
                         error: package.error.clone(),
                     })
                 })

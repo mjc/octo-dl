@@ -95,12 +95,16 @@ impl App {
 
     fn clear_verification_state(&mut self, id: &FileId) {
         self.verifying_files.remove(id);
-        self.verification_inflight_files.remove(id);
+        self.retire_inflight_verification(id);
         self.verification_operation_ids.remove(id);
-        self.verification_targets.remove(id);
-        self.shutdown_blocking_verifications.remove(id);
         self.startup_resume_pending_files.remove(id);
         self.reverify_pending_files.remove(id);
+    }
+
+    fn retire_inflight_verification(&mut self, id: &FileId) {
+        self.verification_inflight_files.remove(id);
+        self.verification_targets.remove(id);
+        self.shutdown_blocking_verifications.remove(id);
     }
 
     fn verification_operation_matches(
@@ -321,9 +325,7 @@ impl App {
         }
 
         self.verifying_files.remove(&id);
-        self.verification_inflight_files.remove(&id);
-        self.verification_targets.remove(&id);
-        self.shutdown_blocking_verifications.remove(&id);
+        self.retire_inflight_verification(&id);
         self.cancellation_tokens.remove(&id);
         self.resolve_shutdown_pending_file(&id);
         self.apply_core_event(CoreEvent::FileFailed {
@@ -458,9 +460,7 @@ impl App {
             return;
         }
         self.verifying_files.remove(&id);
-        self.verification_inflight_files.remove(&id);
-        self.verification_targets.remove(&id);
-        self.shutdown_blocking_verifications.remove(&id);
+        self.retire_inflight_verification(&id);
         self.reset_pending_files.remove(&id);
         let preserve_resume_progress = self.reverify_pending_files.remove(&id)
             || self.startup_resume_pending_files.remove(&id);
@@ -522,9 +522,7 @@ impl App {
         self.reset_pending_files.remove(&id);
         if delta.network_bytes_delta > 0 {
             self.verifying_files.remove(&id);
-            self.verification_inflight_files.remove(&id);
-            self.verification_targets.remove(&id);
-            self.shutdown_blocking_verifications.remove(&id);
+            self.retire_inflight_verification(&id);
         }
         self.apply_core_progress_event(CoreEvent::FileProgress {
             file_id: id.clone(),
@@ -618,9 +616,7 @@ impl App {
             verified_bytes: bytes,
             verified_chunks: chunks,
         });
-        self.verification_inflight_files.remove(&id);
-        self.verification_targets.remove(&id);
-        self.shutdown_blocking_verifications.remove(&id);
+        self.retire_inflight_verification(&id);
         if !self.reverify_pending_files.contains(&id) {
             self.verifying_files.remove(&id);
         }
@@ -654,9 +650,7 @@ impl App {
             return;
         }
         self.verifying_files.remove(&id);
-        self.verification_inflight_files.remove(&id);
-        self.verification_targets.remove(&id);
-        self.shutdown_blocking_verifications.remove(&id);
+        self.retire_inflight_verification(&id);
         self.resolve_shutdown_pending_file(&id);
         if !self.core_state.files.contains_key(&id) {
             log::info!("Ignoring completed-file verification for untracked file: {id}");
@@ -764,9 +758,7 @@ impl App {
             return;
         }
         self.verifying_files.remove(&id);
-        self.verification_inflight_files.remove(&id);
-        self.verification_targets.remove(&id);
-        self.shutdown_blocking_verifications.remove(&id);
+        self.retire_inflight_verification(&id);
         self.cancellation_tokens.remove(&id);
         self.resolve_shutdown_pending_file(&id);
         self.apply_core_event(CoreEvent::FileCompleted {

@@ -9,8 +9,7 @@ mod tests;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
-use ratatui::widgets::{Block, Borders};
+use ratatui::layout::{Position, Rect};
 use tui_input::backend::crossterm::to_input_request;
 use tui_input::{Input, InputRequest};
 
@@ -23,6 +22,7 @@ use self::selection::{
     select_next_file, select_previous_file, toggle_selected_package,
 };
 use super::app::{App, Popup, UiAction};
+use super::dashboard::dashboard_layout;
 
 pub fn handle_input(app: &mut App, key: KeyEvent) {
     if key.kind == KeyEventKind::Release {
@@ -77,18 +77,7 @@ fn list_row_at(app: &App, column: u16, row: u16, terminal_area: Rect) -> Option<
         return None;
     }
 
-    let outer = Block::default().borders(Borders::ALL);
-    let inner = outer.inner(terminal_area);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-    let list_inner = Block::default().borders(Borders::ALL).inner(chunks[1]);
+    let list_inner = dashboard_layout(terminal_area).list_inner;
 
     if !list_inner.contains(Position::new(column, row)) {
         return None;

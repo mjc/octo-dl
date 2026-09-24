@@ -114,7 +114,7 @@ async fn resubmitted_deleted_download_uses_current_file_attempt_through_request_
             .await
             .unwrap();
     let server = crate::fake_mega::FakeMegaServer::spawn(fixture.clone(), 1).unwrap();
-    let http = Arc::new(build_http_client().unwrap());
+    let http = Arc::new(crate::download::build_http_client().unwrap());
     let client = mega::Client::builder()
         .origin(server.origin().clone())
         .build((*http).clone())

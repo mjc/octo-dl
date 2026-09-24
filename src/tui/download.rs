@@ -13,7 +13,6 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::Duration;
 
 use indexmap::{IndexMap, IndexSet};
 use rustc_hash::FxBuildHasher;
@@ -67,14 +66,6 @@ fn resume_artifact_paths(path: &str) -> [std::path::PathBuf; 4] {
         crate::download::legacy_binary_sidecar_path(path),
         crate::download::legacy_json_sidecar_path(path),
     ]
-}
-
-pub(super) fn build_http_client() -> mega::Result<reqwest::Client> {
-    Ok(mega::http_client_builder()?
-        .pool_idle_timeout(Duration::from_secs(60))
-        .pool_max_idle_per_host(8)
-        .tcp_keepalive(Duration::from_secs(30))
-        .build()?)
 }
 
 fn describe_panic(panic: &(dyn std::any::Any + Send)) -> String {
