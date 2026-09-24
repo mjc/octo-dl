@@ -74,6 +74,8 @@ in
     "CARGO_TARGET_DIR=target/devenv-test-cli cargo test --all-targets --no-default-features --features cli --locked";
   tasks."check:test:tui".exec =
     "CARGO_TARGET_DIR=target/devenv-test-tui cargo test --all-targets --no-default-features --features tui --locked";
+  tasks."check:test:release:attempt-generation".exec =
+    "CARGO_TARGET_DIR=target/devenv-test-release-attempt-generation cargo test --release --lib --all-features --locked reverify_active_file_bumps_attempt_generation";
   tasks."check:dependencies".exec = "./scripts/check-dependencies.sh";
   tasks."check:flake".exec = "nix flake check --no-build --no-write-lock-file";
   tasks."check:all" = {

@@ -102,14 +102,17 @@ all-targets compilation, strict all-targets Clippy with `-D warnings`,
 all-feature tests, and the supported feature matrix: no default features,
 `cli` only, and `tui` only. Normal checks use the debug profile; run an
 explicit release-profile check only when a change needs optimized-profile
-coverage. It then runs dependency and flake checks. The individual task names are
-available with `devenv tasks list`; for example:
+coverage. The opt-in `check:test:release:attempt-generation` task checks that
+attempt generations still advance in release builds. The normal matrix then
+runs dependency and flake checks. Individual task names are available with
+`devenv tasks list`; for example:
 
 ```sh
 devenv tasks run check:clippy
 devenv tasks run check:test:no-default
 devenv tasks run check:test:cli
 devenv tasks run check:test:tui
+devenv tasks run check:test:release:attempt-generation
 ```
 
 Use the cross-compilation profile for release builds:
