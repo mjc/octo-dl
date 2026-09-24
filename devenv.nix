@@ -62,16 +62,22 @@ in
   };
 
   tasks."check:fmt".exec = "cargo fmt --all -- --check";
-  tasks."check:check".exec = "cargo check --all-targets --all-features --locked";
-  tasks."check:clippy".exec = "cargo clippy --all-targets --all-features --locked -- -D warnings";
-  tasks."check:test".exec = "cargo test --all-targets --all-features --locked";
-  tasks."check:test:no-default".exec = "cargo test --all-targets --no-default-features --locked";
-  tasks."check:test:cli".exec = "cargo test --all-targets --no-default-features --features cli --locked";
-  tasks."check:test:tui".exec = "cargo test --all-targets --no-default-features --features tui --locked";
+  tasks."check:check".exec =
+    "CARGO_TARGET_DIR=target/devenv-check-check cargo check --all-targets --all-features --locked";
+  tasks."check:clippy".exec =
+    "CARGO_TARGET_DIR=target/devenv-check-clippy cargo clippy --all-targets --all-features --locked -- -D warnings";
+  tasks."check:test".exec =
+    "CARGO_TARGET_DIR=target/devenv-test-all cargo test --all-targets --all-features --locked";
+  tasks."check:test:no-default".exec =
+    "CARGO_TARGET_DIR=target/devenv-test-no-default cargo test --all-targets --no-default-features --locked";
+  tasks."check:test:cli".exec =
+    "CARGO_TARGET_DIR=target/devenv-test-cli cargo test --all-targets --no-default-features --features cli --locked";
+  tasks."check:test:tui".exec =
+    "CARGO_TARGET_DIR=target/devenv-test-tui cargo test --all-targets --no-default-features --features tui --locked";
   tasks."check:test:release:resume".exec =
-    "cargo test --release --all-targets --all-features --locked resume";
+    "CARGO_TARGET_DIR=target/devenv-test-release-resume cargo test --release --all-targets --all-features --locked resume";
   tasks."check:test:release:lifecycle".exec =
-    "cargo test --release --all-targets --all-features --locked lifecycle";
+    "CARGO_TARGET_DIR=target/devenv-test-release-lifecycle cargo test --release --all-targets --all-features --locked lifecycle";
   tasks."check:dependencies".exec = "./scripts/check-dependencies.sh";
   tasks."check:flake".exec = "nix flake check --no-build --no-write-lock-file";
   tasks."check:all" = {
