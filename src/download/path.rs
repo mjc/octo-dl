@@ -77,14 +77,14 @@ impl RelativeOutputPath {
         }
 
         for component in path.components() {
-            if matches!(
-                component,
+            match component {
                 Component::CurDir
-                    | Component::ParentDir
-                    | Component::RootDir
-                    | Component::Prefix(_)
-            ) {
-                return Err("relative output path contains an unsafe component");
+                | Component::ParentDir
+                | Component::RootDir
+                | Component::Prefix(_) => {
+                    return Err("relative output path contains an unsafe component");
+                }
+                Component::Normal(_) => {}
             }
         }
 

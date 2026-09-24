@@ -231,10 +231,10 @@ impl DownloadEventSender {
         // URL submissions are API commands, not worker lifecycle state. They
         // must preserve the caller's immediate backpressure result instead of
         // being accepted into the durable worker-event backlog.
-        if matches!(
-            event,
-            DownloadEvent::StatusMessage(_) | DownloadEvent::UrlsReceived { .. }
-        ) {
+        if let DownloadEvent::StatusMessage(_) = &event {
+            return self.tx.try_send(event);
+        }
+        if let DownloadEvent::UrlsReceived { .. } = &event {
             return self.tx.try_send(event);
         }
 

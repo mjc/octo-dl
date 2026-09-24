@@ -24,6 +24,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 
+#[cfg(test)]
+use crate::core::PackageStatus;
+
 use self::dashboard::{
     controls_label_from_snapshot, dashboard_aggregate_progress_label, dashboard_status_line,
     draw_dashboard_file_list, focused_url_input_view, package_status_style, status_line_policy,
@@ -36,7 +39,6 @@ use super::dashboard::{
 use super::package_name::{PackageName, compact_label};
 use super::package_stats::PackageDisplayStats;
 use super::visible::TuiRow;
-use crate::core::PackageStatus;
 
 pub fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     draw_interactive_dashboard(frame, app);
@@ -386,7 +388,7 @@ fn render_file_row_app(
     };
     let detail_color = if app.is_verification_active(file_id) {
         Color::Blue
-    } else if matches!(status, FileStatus::Downloading) {
+    } else if status.is_downloading() {
         Color::Yellow
     } else {
         Color::DarkGray
@@ -466,8 +468,7 @@ fn render_package_row_app(
     let stats = PackageDisplayStats::new(app, package_id);
     let percent = percent(stats.downloaded_bytes, stats.total_bytes);
     let package_status = package.status();
-    let expanded = app.expanded_packages.contains(&package_id)
-        || matches!(package_status, PackageStatus::Failed);
+    let expanded = app.expanded_packages.contains(&package_id) || package_status.is_failed();
     let (icon, mut color) = package_status_style(package_status, percent);
     if stats.active() {
         color = Color::Yellow;
@@ -645,7 +646,7 @@ enum ActiveDetailSuffix {
 impl<'a> FileDetail<'a> {
     fn new(app: &App, file: &'a FileEntry, status: &'a FileStatus) -> Self {
         let verifying = app.is_verification_active(&file.id);
-        if verifying || matches!(status, FileStatus::Downloading) {
+        if verifying || status.is_downloading() {
             #[allow(
                 clippy::cast_precision_loss,
                 clippy::cast_possible_truncation,
@@ -1126,16 +1127,17 @@ fn aggregate_transfer_label_app(app: &App) -> String {
 
 fn aggregate_activity_label_app(app: &App) -> String {
     if app.current_speed > 0
-        || app.files.iter().any(|file| {
-            matches!(file.status, FileStatus::Downloading) || app.is_verification_active(&file.id)
-        })
+        || app
+            .files
+            .iter()
+            .any(|file| file.status.is_downloading() || app.is_verification_active(&file.id))
     {
         return "active".to_string();
     }
     let queued = app
         .files
         .iter()
-        .filter(|file| matches!(file.status, FileStatus::Queued))
+        .filter(|file| file.status == FileStatus::Queued)
         .count();
     if queued > 0 {
         let mut label = String::with_capacity(16);
@@ -1149,17 +1151,17 @@ fn dashboard_status_line_app(app: &App, width: u16, selected: Option<usize>) -> 
     let error_count = app
         .files
         .iter()
-        .filter(|file| matches!(file.status, FileStatus::Error(_)))
+        .filter(|file| file.status.is_error())
         .count();
     let downloading = app
         .files
         .iter()
-        .filter(|file| matches!(file.status, FileStatus::Downloading))
+        .filter(|file| file.status.is_downloading())
         .count();
     let queued = app
         .files
         .iter()
-        .filter(|file| matches!(file.status, FileStatus::Queued))
+        .filter(|file| file.status == FileStatus::Queued)
         .count();
     let selected_error = selected.and_then(|index| selected_error_message_app(app, index));
     status_line_policy(

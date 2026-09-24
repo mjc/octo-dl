@@ -41,5 +41,21 @@ pub enum Error {
     Cancelled,
 }
 
+impl Error {
+    #[must_use]
+    pub const fn is_cancelled(&self) -> bool {
+        match self {
+            Self::Cancelled => true,
+            Self::Mega(_)
+            | Self::Dlc(_)
+            | Self::Io(_)
+            | Self::FileExists { .. }
+            | Self::Download(_)
+            | Self::InvalidDownloadConfig(_)
+            | Self::Http(_) => false,
+        }
+    }
+}
+
 /// A specialized `Result` type for octo-dl operations.
 pub type Result<T> = std::result::Result<T, Error>;

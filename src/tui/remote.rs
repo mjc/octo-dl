@@ -341,7 +341,7 @@ fn dashboard_request(ws_url: &str, config: &AttachConfig) -> io::Result<Request<
 
 fn dashboard_connection_error(error: &WebSocketError, api_key_supplied: bool) -> io::Error {
     if let WebSocketError::Http(response) = &error
-        && matches!(response.status().as_u16(), 401 | 403)
+        && (response.status().as_u16() == 401 || response.status().as_u16() == 403)
     {
         let message = if api_key_supplied {
             "dashboard authentication failed: the supplied API key was rejected"

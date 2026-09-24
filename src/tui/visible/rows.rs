@@ -433,13 +433,16 @@ fn package_is_auto_expanded_for(
         || core_state
             .packages
             .get(package_id)
-            .is_some_and(|package| matches!(package.status(), PackageStatus::Failed))
+            .is_some_and(|package| package.status().is_failed())
 }
 
 fn overlay_row_is_hidden_placeholder(file: &FileEntry, overlay: Option<&TransientRow>) -> bool {
-    matches!(file.status, FileStatus::Queued)
+    file.status == FileStatus::Queued
         && file.size == 0
-        && overlay.is_some_and(|overlay| matches!(overlay, TransientRow::UiError { .. }))
+        && overlay.is_some_and(|overlay| match overlay {
+            TransientRow::UiError { .. } => true,
+            TransientRow::PendingUrl { .. } | TransientRow::UrlError { .. } => false,
+        })
 }
 
 fn package_has_visible_content(
@@ -471,7 +474,7 @@ pub(super) fn visible_rows_for(
             })
             .collect();
     }
-    let package_percents = matches!(sort.key, SortKey::Percent).then(|| {
+    let package_percents = (sort.key == SortKey::Percent).then(|| {
         package_projections
             .iter()
             .map(|(package_id, package)| (*package_id, package_percent(package)))
@@ -498,7 +501,7 @@ pub(super) fn visible_rows_for(
                 }),
         };
 
-        let ordering = if matches!(sort.key, SortKey::Queue) {
+        let ordering = if sort.key == SortKey::Queue {
             ordering
         } else {
             ordering

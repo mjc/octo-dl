@@ -331,7 +331,7 @@ impl SchedulerState {
         result: &crate::Result<crate::FileStats>,
     ) {
         self.active_downloads.remove(file_id);
-        if matches!(result, Err(crate::Error::Cancelled)) {
+        if result.as_ref().is_err_and(crate::Error::is_cancelled) {
             self.rebuild_pending_queue();
             return;
         }
@@ -1364,7 +1364,7 @@ fn handle_download_join_result(
             scheduler.active_task_files.remove(&task.task_id);
             scheduler.finish_download(&task.id, task.attempt_id, &task.result);
             if let Err(error) = task.result
-                && !matches!(error, crate::Error::Cancelled)
+                && !error.is_cancelled()
             {
                 let _ = tx.send(DownloadEvent::FileError {
                     id: task.id,
@@ -1505,7 +1505,7 @@ fn emit_pause_cancellation_if_needed(
     pause_rx: &watch::Receiver<bool>,
     event_tx: &DownloadEventSender,
 ) {
-    if matches!(result, Err(crate::Error::Cancelled)) && *pause_rx.borrow() {
+    if result.as_ref().is_err_and(crate::Error::is_cancelled) && *pause_rx.borrow() {
         let _ = event_tx.send(DownloadEvent::FileCancelled {
             id: file_id.clone(),
             attempt_id,
@@ -1917,10 +1917,10 @@ fn visible_downloads(
                 .get(item.path.as_str())
                 .copied()
                 .unwrap_or(DownloadAttemptId::new(0)),
-            trust_resume_state: matches!(
-                requested_files,
-                RequestedFiles::Only(file_ids) if file_ids.contains(item.path.as_str())
-            ),
+            trust_resume_state: match requested_files {
+                RequestedFiles::Only(file_ids) => file_ids.contains(item.path.as_str()),
+                RequestedFiles::All => false,
+            },
             item,
         })
         .collect()

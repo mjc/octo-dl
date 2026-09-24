@@ -421,7 +421,7 @@ fn reduce_impl(
             if state
                 .files
                 .get(&file_id)
-                .is_some_and(|file| !matches!(file.lifecycle, FileLifecycle::Complete))
+                .is_some_and(|file| !file.lifecycle.is_terminal())
             {
                 mutate_file(state, &file_id, |file| {
                     file.lifecycle = FileLifecycle::Queued;
@@ -432,7 +432,7 @@ fn reduce_impl(
             if state
                 .files
                 .get(&file_id)
-                .is_some_and(|file| !matches!(file.lifecycle, FileLifecycle::Complete))
+                .is_some_and(|file| !file.lifecycle.is_terminal())
             {
                 mutate_file(state, &file_id, |file| {
                     file.size = size;
@@ -446,7 +446,7 @@ fn reduce_impl(
             if state
                 .files
                 .get(&file_id)
-                .is_some_and(|file| !matches!(file.lifecycle, FileLifecycle::Complete))
+                .is_some_and(|file| !file.lifecycle.is_terminal())
             {
                 mutate_file(state, &file_id, |file| {
                     let preserved_verified = file.progress.verified_existing_bytes.min(size);
@@ -470,10 +470,9 @@ fn reduce_impl(
         } => {
             if state.files.contains_key(&file_id) {
                 mutate_file(state, &file_id, |file| {
-                    if matches!(
-                        file.lifecycle,
-                        FileLifecycle::Downloading | FileLifecycle::Queued
-                    ) {
+                    if file.lifecycle == FileLifecycle::Downloading
+                        || file.lifecycle == FileLifecycle::Queued
+                    {
                         file.progress.visible_completed_bytes = file
                             .progress
                             .visible_completed_bytes
@@ -484,7 +483,7 @@ fn reduce_impl(
                             .downloaded_network_bytes
                             .saturating_add(network_bytes_delta)
                             .min(file.size);
-                        if matches!(file.lifecycle, FileLifecycle::Queued) {
+                        if file.lifecycle == FileLifecycle::Queued {
                             file.lifecycle = FileLifecycle::Downloading;
                         }
                     }
@@ -590,7 +589,7 @@ fn reduce_impl(
             if state.files.contains_key(&file_id) {
                 mutate_file(state, &file_id, |file| {
                     if !file.lifecycle.is_terminal() {
-                        let was_downloading = matches!(file.lifecycle, FileLifecycle::Downloading);
+                        let was_downloading = file.lifecycle.is_downloading();
                         if file.progress.verification_origin_complete {
                             file.lifecycle = FileLifecycle::Complete;
                             normalize_completed_file_progress(&mut file.progress, file.size);
@@ -612,8 +611,7 @@ fn reduce_impl(
             if let Some(file) = state.files.shift_remove(&file_id) {
                 let before = FileDerivedState::from(&file);
                 let source_url = file.source_url.clone();
-                let resume_path =
-                    (!matches!(file.lifecycle, FileLifecycle::Complete)).then(|| file.path.clone());
+                let resume_path = (!file.lifecycle.is_terminal()).then(|| file.path.clone());
                 remove_totals_contribution(&mut state.totals, before);
                 remove_package_progress(state, before.package_id, before.lifecycle_bucket);
                 if !state.package_has_files(&before.package_id) {
@@ -635,7 +633,7 @@ fn reduce_impl(
                     if file.package_id == package_id {
                         let before = FileDerivedState::from(&file);
                         removed_source_urls.insert(file.source_url.clone());
-                        if !matches!(file.lifecycle, FileLifecycle::Complete) {
+                        if !file.lifecycle.is_terminal() {
                             resume_paths.push(file.path.clone());
                         }
                         remove_totals_contribution(&mut state.totals, before);
@@ -659,7 +657,7 @@ fn reduce_impl(
             if state
                 .files
                 .get(&file_id)
-                .is_some_and(|file| matches!(file.lifecycle, FileLifecycle::Failed { .. }))
+                .is_some_and(|file| file.lifecycle.is_failed())
             {
                 mutate_file(state, &file_id, |file| {
                     file.lifecycle = FileLifecycle::Queued;

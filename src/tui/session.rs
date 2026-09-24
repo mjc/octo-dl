@@ -1,9 +1,12 @@
 use std::collections::HashSet;
 
 use crate::core::{
-    FileLifecycle, FileSnapshot, PackageId, PackageKey, SessionCompletionFacts, SessionMeta,
-    SessionRunStatus, SessionSnapshot, SessionUrlSnapshot, validate_snapshot,
+    FileSnapshot, PackageId, PackageKey, SessionCompletionFacts, SessionMeta, SessionRunStatus,
+    SessionSnapshot, SessionUrlSnapshot, validate_snapshot,
 };
+
+#[cfg(test)]
+use crate::core::FileLifecycle;
 
 pub(super) struct SessionAdapter;
 
@@ -120,22 +123,18 @@ impl SessionAdapter {
                 || !session
                     .iter_files()
                     .any(|file| file.source_url == tracked_url.url)
-                || session.iter_files().any(|file| {
-                    file.source_url == tracked_url.url
-                        && !matches!(file.lifecycle, FileLifecycle::Complete)
-                })
+                || session
+                    .iter_files()
+                    .any(|file| file.source_url == tracked_url.url && !file.lifecycle.is_terminal())
         });
 
         let has_files = session.iter_files().next().is_some();
         if !has_files && !has_pending_urls {
             session.status = SessionRunStatus::InProgress;
         } else if SessionCompletionFacts::from_parts(
-            session.iter_files().map(|file| {
-                (
-                    file.source_url.as_str(),
-                    matches!(file.lifecycle, FileLifecycle::Complete),
-                )
-            }),
+            session
+                .iter_files()
+                .map(|file| (file.source_url.as_str(), file.lifecycle.is_terminal())),
             session
                 .urls
                 .iter()

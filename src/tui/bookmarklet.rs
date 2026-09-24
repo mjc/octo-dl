@@ -86,7 +86,7 @@ mod tests {
                 Just('>'),
                 proptest::char::range(' ', '~')
                     .prop_filter("exclude duplicated special chars", |ch| {
-                        !matches!(ch, '&' | '"' | '<' | '>')
+                        !"&\"<>".contains(*ch)
                     }),
             ],
             0..32,

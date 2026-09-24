@@ -2,9 +2,9 @@
 
 use std::time::{Duration, Instant};
 
-use crate::core::{FileAccounting, FileLifecycle, PackageId};
+use crate::core::{FileAccounting, PackageId};
 
-use super::{App, FileStatus};
+use super::App;
 
 const MIN_RATE_SAMPLE_SPAN: Duration = Duration::from_secs(1);
 const THROUGHPUT_DECAY: Duration = Duration::from_secs(30);
@@ -128,9 +128,7 @@ impl App {
         let mut preexisting_complete_bytes = 0_u64;
         let mut preexisting_complete_files = 0_usize;
         for file in self.core_state.files.values() {
-            if matches!(file.accounting, FileAccounting::Preexisting)
-                && matches!(file.lifecycle, FileLifecycle::Complete)
-            {
+            if file.accounting == FileAccounting::Preexisting && file.lifecycle.is_terminal() {
                 preexisting_complete_bytes = preexisting_complete_bytes.saturating_add(file.size);
                 preexisting_complete_files = preexisting_complete_files.saturating_add(1);
             }
@@ -215,7 +213,7 @@ impl App {
         for file in self
             .files
             .iter()
-            .filter(|file| matches!(file.status, FileStatus::Downloading))
+            .filter(|file| file.status.is_downloading())
         {
             let state = self.file_ui.entry(file.id.clone()).or_default();
             state.speed = state.rate.bytes_per_sec(now);

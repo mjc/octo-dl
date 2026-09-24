@@ -141,13 +141,15 @@ fn session_encoding_for_path(path: &Path) -> SessionEncoding {
 }
 
 pub(super) fn is_canonical_session_path(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|extension| extension.to_str()),
-        Some(SESSION_POSTCARD_EXTENSION | SESSION_TOML_EXTENSION)
-    ) && path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with(SESSION_FILE_PREFIX))
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension == SESSION_POSTCARD_EXTENSION || extension == SESSION_TOML_EXTENSION
+        })
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(SESSION_FILE_PREFIX))
 }
 
 fn session_path_preference(path: &Path) -> u8 {
@@ -169,10 +171,9 @@ pub(super) fn should_replace_session_candidate(
         return candidate_preference > existing_preference;
     }
 
-    matches!(
-        (candidate_modified, existing_modified),
-        (Some(candidate), Some(existing)) if candidate > existing
-    )
+    candidate_modified
+        .zip(existing_modified)
+        .is_some_and(|(candidate, existing)| candidate > existing)
 }
 
 pub(super) fn temporary_save_path(path: &Path) -> PathBuf {

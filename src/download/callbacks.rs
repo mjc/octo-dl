@@ -150,15 +150,18 @@ impl ChunkVerifiedState {
     }
 
     pub(super) async fn finish_sidecar_writer(&self, shutdown: SidecarWriterShutdown) {
-        if matches!(shutdown, SidecarWriterShutdown::Flush) {
-            let snapshot = {
-                let guard = self.tracker.lock().unwrap();
-                let generation =
-                    SidecarGeneration::new(self.next_generation.load(Ordering::Relaxed));
-                (generation, guard.snapshot())
-            };
-            self.sidecar_writer
-                .persist_final_snapshot(snapshot.0, snapshot.1);
+        match &shutdown {
+            SidecarWriterShutdown::Flush => {
+                let snapshot = {
+                    let guard = self.tracker.lock().unwrap();
+                    let generation =
+                        SidecarGeneration::new(self.next_generation.load(Ordering::Relaxed));
+                    (generation, guard.snapshot())
+                };
+                self.sidecar_writer
+                    .persist_final_snapshot(snapshot.0, snapshot.1);
+            }
+            SidecarWriterShutdown::Abort => {}
         }
         self.sidecar_writer.finish(shutdown).await;
     }

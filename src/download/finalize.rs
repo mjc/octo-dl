@@ -25,15 +25,24 @@ pub(super) struct DownloadFinishContext<'a> {
 }
 
 const fn is_condensed_mac_mismatch(error: &Error) -> bool {
-    matches!(error, Error::Mega(mega::Error::CondensedMacMismatch))
+    match error {
+        Error::Mega(mega::Error::CondensedMacMismatch) => true,
+        Error::Mega(_)
+        | Error::Dlc(_)
+        | Error::Io(_)
+        | Error::FileExists { .. }
+        | Error::Download(_)
+        | Error::InvalidDownloadConfig(_)
+        | Error::Http(_)
+        | Error::Cancelled => false,
+    }
 }
 
 pub(super) const fn should_delete_resume_state_on_error(
     config: &DownloadConfig,
     error: &Error,
 ) -> bool {
-    is_condensed_mac_mismatch(error)
-        || (config.cleanup_on_error && !matches!(error, Error::Cancelled))
+    is_condensed_mac_mismatch(error) || (config.cleanup_on_error && !error.is_cancelled())
 }
 
 impl<F: FileSystem> Downloader<F> {
@@ -89,7 +98,7 @@ impl<F: FileSystem> Downloader<F> {
                         }
                     }
                 }
-                if !matches!(e, Error::Cancelled) {
+                if !e.is_cancelled() {
                     ctx.progress.on_error(ctx.name, &e.to_string());
                 }
                 Err(e)

@@ -226,11 +226,15 @@ impl LazySidecarWriter {
     }
 
     pub(super) async fn finish(&self, shutdown: SidecarWriterShutdown) {
-        if matches!(shutdown, SidecarWriterShutdown::Abort) {
+        let abort = match &shutdown {
+            SidecarWriterShutdown::Abort => true,
+            SidecarWriterShutdown::Flush => false,
+        };
+        if abort {
             self.abort_requested.store(true, Ordering::Relaxed);
         }
         if let Some(tx) = self.tx.lock().unwrap().take()
-            && !matches!(shutdown, SidecarWriterShutdown::Abort)
+            && !abort
         {
             let _ = tx.send(SidecarWriterCommand::Finish);
         }

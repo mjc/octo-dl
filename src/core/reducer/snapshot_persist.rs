@@ -22,19 +22,37 @@ thread_local! {
 }
 
 pub(crate) const fn should_persist_session(event: &CoreEvent) -> bool {
-    !matches!(
-        event,
-        CoreEvent::FileProgress { .. }
-            | CoreEvent::FileQueued { .. }
-            | CoreEvent::FileStarted { .. }
-            | CoreEvent::FileResumeStarted { .. }
-            | CoreEvent::FileReuseDetected { .. }
-            | CoreEvent::FileResumeReverified { .. }
-            | CoreEvent::FileVerificationStarted { .. }
-            | CoreEvent::FileVerificationProgress { .. }
-            | CoreEvent::FileVerificationCompleted { .. }
-            | CoreEvent::Tick { .. }
-    )
+    if let CoreEvent::FileProgress { .. } = event {
+        return false;
+    }
+    if let CoreEvent::FileQueued { .. } = event {
+        return false;
+    }
+    if let CoreEvent::FileStarted { .. } = event {
+        return false;
+    }
+    if let CoreEvent::FileResumeStarted { .. } = event {
+        return false;
+    }
+    if let CoreEvent::FileReuseDetected { .. } = event {
+        return false;
+    }
+    if let CoreEvent::FileResumeReverified { .. } = event {
+        return false;
+    }
+    if let CoreEvent::FileVerificationStarted { .. } = event {
+        return false;
+    }
+    if let CoreEvent::FileVerificationProgress { .. } = event {
+        return false;
+    }
+    if let CoreEvent::FileVerificationCompleted { .. } = event {
+        return false;
+    }
+    if let CoreEvent::Tick { .. } = event {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]

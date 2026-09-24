@@ -14,7 +14,6 @@ use crate::{
     format_bytes,
 };
 
-use super::state::RequestDispatchOutcome;
 use super::{
     App, ConfigActivation, ConfigPersistence, ConfigUpdateOutcome, ConfigUpdateRejection,
     ProgressDelta, QueuedFile, SessionAdapter, UiAction, VerificationTarget, VisibleFileContext,
@@ -75,13 +74,13 @@ impl App {
 
     pub(crate) fn retry_target(&self, id: &FileId) -> Option<RetryTarget> {
         if let Some(row) = self.overlay_files.get(id)
-            && matches!(row.file().status, super::FileStatus::Error(_))
+            && row.file().status.is_error()
             && let Some(source_url) = row.source_url()
         {
             return Some(RetryTarget::Url(source_url.to_string()));
         }
         self.visible_file_context(id)
-            .filter(|context| matches!(context.status, super::FileStatus::Error(_)))
+            .filter(|context| context.status.is_error())
             .map(|_| RetryTarget::File(id.clone()))
     }
 
@@ -193,7 +192,7 @@ impl App {
         let downloading_ids: Vec<_> = self
             .files
             .iter()
-            .filter(|file| matches!(file.status, super::FileStatus::Downloading))
+            .filter(|file| file.status.is_downloading())
             .map(|file| file.id.clone())
             .collect();
         self.set_paused(true);
@@ -282,7 +281,7 @@ impl App {
     }
 
     fn is_tracked_error_scope(&self, scope: &str) -> bool {
-        matches!(scope, "setup" | "download")
+        (scope == "setup" || scope == "download")
             || self.core_state.url_order.iter().any(|url| url == scope)
             || self.overlay_files.contains_key(scope)
     }
@@ -369,7 +368,7 @@ impl App {
             .core_state
             .files
             .get(&file.id)
-            .is_some_and(|existing| matches!(existing.lifecycle, FileLifecycle::Complete))
+            .is_some_and(|existing| existing.lifecycle.is_terminal())
         {
             return false;
         }
@@ -660,7 +659,7 @@ impl App {
             .core_state
             .files
             .get(&id)
-            .is_some_and(|file| matches!(file.lifecycle, FileLifecycle::Complete));
+            .is_some_and(|file| file.lifecycle.is_terminal());
         self.apply_core_event(CoreEvent::FileResumeReverified {
             file_id: id.clone(),
             verified_bytes: bytes,
@@ -909,8 +908,7 @@ impl App {
             return;
         };
         let package_key = package.key.clone();
-        let package_failed = package.error.is_some()
-            || matches!(package.status(), crate::core::PackageStatus::Failed);
+        let package_failed = package.error.is_some() || package.status().is_failed();
         let package_files: Vec<_> = self
             .core_state
             .package_files(&package_id)
@@ -918,7 +916,7 @@ impl App {
                 (
                     file.id.clone(),
                     file.source_url.clone(),
-                    matches!(file.lifecycle, crate::core::FileLifecycle::Failed { .. }),
+                    file.lifecycle.is_failed(),
                 )
             })
             .collect();
@@ -930,7 +928,7 @@ impl App {
             let retryable = core_failed
                 || self
                     .visible_file_context(&file_id)
-                    .is_some_and(|context| matches!(context.status, super::FileStatus::Error(_)));
+                    .is_some_and(|context| context.status.is_error());
             if retryable {
                 self.perform_retry_file_action(&file_id);
                 retried_file = true;
@@ -1002,7 +1000,7 @@ impl App {
             }
         };
         let outcome = self.try_dispatch_request(request);
-        if !matches!(outcome, RequestDispatchOutcome::Accepted) {
+        if !outcome.is_accepted() {
             self.report_request_dispatch_failure(&outcome, "Verification");
             return;
         }
@@ -1011,7 +1009,7 @@ impl App {
             id,
             target,
             operation_id,
-            matches!(context.status, super::FileStatus::Downloading),
+            context.status.is_downloading(),
         );
         self.status = if target == VerificationTarget::Completed {
             format!("Verifying completed file {id}...")
@@ -1061,9 +1059,7 @@ impl App {
         let verification_request_count = request_keys.len();
         let cancellation_sync_count = files
             .iter()
-            .filter(|(_, _, lifecycle, _)| {
-                matches!(lifecycle, crate::core::FileLifecycle::Downloading)
-            })
+            .filter(|(_, _, lifecycle, _)| lifecycle.is_downloading())
             .count();
         let required_queue_slots =
             verification_request_count.saturating_add(cancellation_sync_count);
@@ -1089,7 +1085,7 @@ impl App {
                 &file_id,
                 target,
                 operation_id,
-                matches!(lifecycle, crate::core::FileLifecycle::Downloading),
+                lifecycle.is_downloading(),
             );
 
             let grouped = if target == VerificationTarget::Completed {
@@ -1129,7 +1125,7 @@ impl App {
                     operation_ids,
                 },
             );
-            if !matches!(outcome, RequestDispatchOutcome::Accepted) {
+            if !outcome.is_accepted() {
                 self.report_request_dispatch_failure(&outcome, "Verification");
                 return;
             }
@@ -1142,7 +1138,7 @@ impl App {
                     operation_ids,
                 },
             );
-            if !matches!(outcome, RequestDispatchOutcome::Accepted) {
+            if !outcome.is_accepted() {
                 self.report_request_dispatch_failure(&outcome, "Verification");
                 return;
             }

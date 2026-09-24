@@ -49,7 +49,7 @@ impl RestartSnapshot {
                         continue;
                     }
                     saw_file_for_url = true;
-                    if !matches!(file.lifecycle, FileLifecycle::Complete) {
+                    if !file.lifecycle.is_terminal() {
                         has_remaining = true;
                         break;
                     }
@@ -211,7 +211,7 @@ pub fn reconcile_restart(
                 progress: file.progress.clone(),
                 accounting: file.accounting,
             };
-            if matches!(file.lifecycle, FileLifecycle::Complete) {
+            if file.lifecycle.is_terminal() {
                 files.insert(file.id.clone(), file);
                 continue;
             }
@@ -227,7 +227,7 @@ pub fn reconcile_restart(
                     .map_or(0, |partial| partial.verified_bytes),
             };
             let local = crate::download::classify_observed_local_file(observed, file.size, false);
-            if matches!(local.status, crate::download::FileStatus::Complete) {
+            if local.status == crate::download::FileStatus::Complete {
                 file.lifecycle = FileLifecycle::Complete;
                 file.progress.visible_completed_bytes = file.size;
                 file.accounting = FileAccounting::Preexisting;
@@ -235,7 +235,7 @@ pub fn reconcile_restart(
                 files.insert(file.id.clone(), file);
                 continue;
             }
-            if matches!(local.status, crate::download::FileStatus::Partial) {
+            if local.status == crate::download::FileStatus::Partial {
                 file.lifecycle = FileLifecycle::Queued;
                 file.progress = FileProgressState {
                     verified_existing_bytes: 0,

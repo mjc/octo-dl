@@ -495,6 +495,26 @@ pub enum PackageStatus {
     Failed,
 }
 
+impl PackageStatus {
+    #[must_use]
+    pub const fn is_downloading(self) -> bool {
+        match self {
+            Self::Downloading => true,
+            Self::Pending | Self::Queued | Self::Partial | Self::Complete | Self::Failed => false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_failed(self) -> bool {
+        match self {
+            Self::Failed => true,
+            Self::Pending | Self::Queued | Self::Downloading | Self::Partial | Self::Complete => {
+                false
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PackageProgressState {
     pub queued: usize,
@@ -551,7 +571,34 @@ pub enum FileLifecycle {
 impl FileLifecycle {
     #[must_use]
     pub const fn is_terminal(&self) -> bool {
-        matches!(self, Self::Complete)
+        match self {
+            Self::Complete => true,
+            Self::Planned | Self::Queued | Self::Downloading | Self::Failed { .. } => false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_pending(&self) -> bool {
+        match self {
+            Self::Planned | Self::Queued => true,
+            Self::Downloading | Self::Complete | Self::Failed { .. } => false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_downloading(&self) -> bool {
+        match self {
+            Self::Downloading => true,
+            Self::Planned | Self::Queued | Self::Complete | Self::Failed { .. } => false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_failed(&self) -> bool {
+        match self {
+            Self::Failed { .. } => true,
+            Self::Planned | Self::Queued | Self::Downloading | Self::Complete => false,
+        }
     }
 
     #[must_use]
@@ -714,14 +761,7 @@ impl DownloadState {
         PENDING_FILE_IDS_CALLS.with(|count| count.set(count.get().saturating_add(1)));
         self.files
             .values()
-            .filter(|file| {
-                !matches!(
-                    file.lifecycle,
-                    FileLifecycle::Downloading
-                        | FileLifecycle::Complete
-                        | FileLifecycle::Failed { .. }
-                )
-            })
+            .filter(|file| file.lifecycle.is_pending())
             .map(|file| file.id.clone())
             .collect()
     }

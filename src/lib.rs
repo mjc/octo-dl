@@ -34,6 +34,7 @@
 
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
+#![cfg_attr(test, allow(clippy::disallowed_macros))]
 
 pub mod config;
 pub mod core;

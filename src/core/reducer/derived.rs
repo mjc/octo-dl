@@ -7,7 +7,10 @@ use crate::core::model::{
 use crate::core::model::{PackageKey, PackageState, PackageStatus};
 
 const fn counts_in_run_totals(file: &FileState) -> bool {
-    matches!(file.accounting, FileAccounting::CurrentRun)
+    match file.accounting {
+        FileAccounting::CurrentRun => true,
+        FileAccounting::Preexisting => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -26,6 +29,22 @@ pub(super) enum PackageProgressBucket {
     Downloading,
     Complete,
     Failed,
+}
+
+impl PackageProgressBucket {
+    const fn is_downloading(self) -> bool {
+        match self {
+            Self::Downloading => true,
+            Self::Queued | Self::Complete | Self::Failed => false,
+        }
+    }
+
+    const fn is_complete(self) -> bool {
+        match self {
+            Self::Complete => true,
+            Self::Queued | Self::Downloading | Self::Failed => false,
+        }
+    }
 }
 
 impl PackageProgressBucket {
@@ -82,10 +101,10 @@ pub(super) const fn add_totals_contribution(totals: &mut TotalsState, file: File
         .displayed_network_bytes
         .saturating_add(file.downloaded_network_bytes);
     totals.run_file_total = totals.run_file_total.saturating_add(1);
-    if matches!(file.lifecycle_bucket, PackageProgressBucket::Downloading) {
+    if file.lifecycle_bucket.is_downloading() {
         totals.run_file_downloading = totals.run_file_downloading.saturating_add(1);
     }
-    if matches!(file.lifecycle_bucket, PackageProgressBucket::Complete) {
+    if file.lifecycle_bucket.is_complete() {
         totals.run_file_completed = totals.run_file_completed.saturating_add(1);
     }
 }
@@ -102,10 +121,10 @@ pub(super) const fn remove_totals_contribution(totals: &mut TotalsState, file: F
         .displayed_network_bytes
         .saturating_sub(file.downloaded_network_bytes);
     totals.run_file_total = totals.run_file_total.saturating_sub(1);
-    if matches!(file.lifecycle_bucket, PackageProgressBucket::Downloading) {
+    if file.lifecycle_bucket.is_downloading() {
         totals.run_file_downloading = totals.run_file_downloading.saturating_sub(1);
     }
-    if matches!(file.lifecycle_bucket, PackageProgressBucket::Complete) {
+    if file.lifecycle_bucket.is_complete() {
         totals.run_file_completed = totals.run_file_completed.saturating_sub(1);
     }
 }

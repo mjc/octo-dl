@@ -41,7 +41,7 @@ impl App {
         pending.extend(
             self.files
                 .iter()
-                .filter(|file| matches!(file.status, FileStatus::Downloading))
+                .filter(|file| file.status.is_downloading())
                 .map(|file| file.id.clone()),
         );
         pending.extend(self.shutdown_blocking_verifications.iter().cloned());
@@ -496,12 +496,12 @@ impl App {
     fn handle_token_message(&mut self, msg: super::TokenMessage) {
         let file_id = msg.file_id;
         let token = msg.token;
-        if self.core_state.files.get(&file_id).is_some_and(|file| {
-            matches!(
-                &file.lifecycle,
-                crate::core::FileLifecycle::Complete | crate::core::FileLifecycle::Failed { .. }
-            )
-        }) {
+        if self
+            .core_state
+            .files
+            .get(&file_id)
+            .is_some_and(|file| file.lifecycle.is_terminal() || file.lifecycle.is_failed())
+        {
             token.cancel();
             return;
         }
@@ -572,9 +572,7 @@ impl App {
     }
 
     pub(crate) fn has_active_dashboard_transfer(&self) -> bool {
-        self.files
-            .iter()
-            .any(|file| matches!(file.status, FileStatus::Downloading))
+        self.files.iter().any(|file| file.status.is_downloading())
             || !self.verification_targets.is_empty()
     }
 

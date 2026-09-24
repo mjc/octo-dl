@@ -20,28 +20,50 @@ use crate::tui::event::DownloadRequest;
 // internal-only marker in the existing pending-effect map. It is removed
 // before a ResumeFileIds request is constructed.
 const fn core_event_requires_visible_sync(event: &CoreEvent) -> bool {
-    !matches!(
-        event,
-        CoreEvent::FileProgress { .. }
-            | CoreEvent::FileReuseDetected { .. }
-            | CoreEvent::Tick { .. }
-    )
+    if let CoreEvent::FileProgress { .. } = event {
+        return false;
+    }
+    if let CoreEvent::FileReuseDetected { .. } = event {
+        return false;
+    }
+    if let CoreEvent::Tick { .. } = event {
+        return false;
+    }
+    true
 }
 
 const fn core_event_requires_pending_sync(event: &CoreEvent) -> bool {
-    matches!(
-        event,
-        CoreEvent::PackageResolved { .. }
-            | CoreEvent::FileQueued { .. }
-            | CoreEvent::FileCancelled { .. }
-            | CoreEvent::FileDeleted { .. }
-            | CoreEvent::PackageDeleted { .. }
-            | CoreEvent::FileRetryRequested { .. }
-            | CoreEvent::FileResetRequested { .. }
-            | CoreEvent::PackageMoveRequested { .. }
-            | CoreEvent::FileMoveRequested { .. }
-            | CoreEvent::RestartReconciled { .. }
-    )
+    if let CoreEvent::PackageResolved { .. } = event {
+        return true;
+    }
+    if let CoreEvent::FileQueued { .. } = event {
+        return true;
+    }
+    if let CoreEvent::FileCancelled { .. } = event {
+        return true;
+    }
+    if let CoreEvent::FileDeleted { .. } = event {
+        return true;
+    }
+    if let CoreEvent::PackageDeleted { .. } = event {
+        return true;
+    }
+    if let CoreEvent::FileRetryRequested { .. } = event {
+        return true;
+    }
+    if let CoreEvent::FileResetRequested { .. } = event {
+        return true;
+    }
+    if let CoreEvent::PackageMoveRequested { .. } = event {
+        return true;
+    }
+    if let CoreEvent::FileMoveRequested { .. } = event {
+        return true;
+    }
+    if let CoreEvent::RestartReconciled { .. } = event {
+        return true;
+    }
+    false
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -49,6 +71,15 @@ pub enum RequestDispatchOutcome {
     Accepted,
     Backpressured(DownloadRequest),
     Closed(DownloadRequest),
+}
+
+impl RequestDispatchOutcome {
+    pub(crate) const fn is_accepted(&self) -> bool {
+        match self {
+            Self::Accepted => true,
+            Self::Backpressured(_) | Self::Closed(_) => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -147,7 +178,7 @@ impl App {
             crate::core::FileLifecycle::Complete => FileStatus::Complete,
             crate::core::FileLifecycle::Failed { message } => FileStatus::Error(message.clone()),
         };
-        if !matches!(visible_file.status, FileStatus::Downloading)
+        if !visible_file.status.is_downloading()
             && let Some(state) = self.file_ui.get_mut(file_id)
         {
             state.speed = 0;
@@ -166,7 +197,7 @@ impl App {
             _ => crate::core::visible_completed_bytes_for_display(core_file),
         };
         let network_downloaded = Self::core_file_network_downloaded(core_file);
-        let complete = matches!(core_file.lifecycle, crate::core::FileLifecycle::Complete);
+        let complete = core_file.lifecycle.is_terminal();
         let failure_message = core_file.lifecycle.failure_message().map(str::to_owned);
 
         let &visible_index = self.visible_file_positions.get(file_id)?;
@@ -183,7 +214,7 @@ impl App {
 
         let accepted = downloaded.saturating_sub(previous_downloaded);
         let state = self.file_ui.entry(file_id.clone()).or_default();
-        if matches!(visible_file.status, FileStatus::Downloading) {
+        if visible_file.status.is_downloading() {
             state.rate.record(network_downloaded, now);
             state.speed = state.rate.bytes_per_sec(now);
         } else {
@@ -245,7 +276,7 @@ impl App {
                         url: url.clone(),
                         attempt_ids: self.file_attempt_ids.clone(),
                     });
-                    if !matches!(outcome, RequestDispatchOutcome::Accepted) {
+                    if !outcome.is_accepted() {
                         self.pending_url_submissions.insert(url);
                         self.report_request_dispatch_failure(&outcome, "URL submission");
                     }
@@ -335,7 +366,7 @@ impl App {
                 file_ids: file_ids.clone(),
                 attempt_ids,
             });
-            if matches!(outcome, RequestDispatchOutcome::Accepted) {
+            if outcome.is_accepted() {
                 file_ids.clear();
             } else {
                 self.report_request_dispatch_failure(&outcome, "File download");
@@ -552,7 +583,7 @@ impl App {
                     url: url.clone(),
                     attempt_ids: self.file_attempt_ids.clone(),
                 });
-                if !matches!(outcome, RequestDispatchOutcome::Accepted) {
+                if !outcome.is_accepted() {
                     self.pending_url_submissions.insert(url.clone());
                     self.report_request_dispatch_failure(&outcome, "URL resume");
                 }

@@ -400,9 +400,9 @@ fn looks_like_base64_token(token: &str) -> bool {
     if token.len() < 8 || token.len() % 4 == 1 {
         return false;
     }
-    token.bytes().all(|byte| {
-        byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'-' | b'_' | b'=')
-    })
+    token
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"+/-_=".contains(&byte))
 }
 
 #[must_use]

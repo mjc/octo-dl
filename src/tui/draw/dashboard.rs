@@ -77,9 +77,9 @@ pub(super) fn draw_dashboard_file_list(
                         frame,
                         package,
                         package.file_ids.iter().any(|file_id| {
-                            files_by_id.get(file_id).is_some_and(|file| {
-                                matches!(file.status, DashboardFileStatus::Verifying)
-                            })
+                            files_by_id
+                                .get(file_id)
+                                .is_some_and(|file| file.status.is_verifying())
                         }),
                         inner.x,
                         y,
@@ -200,7 +200,7 @@ fn render_dashboard_package_row(
     };
     let speed_label = if verifying {
         "verify"
-    } else if matches!(package.status, PackageStatus::Downloading) {
+    } else if package.status.is_downloading() {
         "active"
     } else {
         ""
@@ -339,7 +339,7 @@ pub(super) fn fit_status_segments(
     let mut budgets = vec![0; segments.len()];
     let error_index = segments
         .iter()
-        .position(|(kind, _)| matches!(kind, StatusSegmentKind::Error));
+        .position(|(kind, _)| *kind == StatusSegmentKind::Error);
     let final_index = error_index.unwrap_or(segments.len());
 
     if let Some(index) = error_index {

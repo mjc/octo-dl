@@ -249,6 +249,29 @@ pub enum FileStatus {
     Error(String),
 }
 
+impl FileStatus {
+    pub(crate) const fn is_downloading(&self) -> bool {
+        match self {
+            Self::Downloading => true,
+            Self::Queued | Self::Complete | Self::Error(_) => false,
+        }
+    }
+
+    pub(crate) const fn is_complete(&self) -> bool {
+        match self {
+            Self::Complete => true,
+            Self::Queued | Self::Downloading | Self::Error(_) => false,
+        }
+    }
+
+    pub(crate) const fn is_error(&self) -> bool {
+        match self {
+            Self::Error(_) => true,
+            Self::Queued | Self::Downloading | Self::Complete => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FileEntry {
     pub id: FileId,
@@ -317,7 +340,10 @@ impl QuitPolicy {
     }
 
     pub const fn is_enabled(self) -> bool {
-        matches!(self, Self::Enabled)
+        match self {
+            Self::Enabled => true,
+            Self::Disabled => false,
+        }
     }
 }
 

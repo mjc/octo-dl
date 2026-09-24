@@ -330,7 +330,7 @@ impl App {
                 continue;
             }
             saw_file_for_url = true;
-            if !matches!(file.lifecycle, crate::core::FileLifecycle::Complete) {
+            if !file.lifecycle.is_terminal() {
                 return true;
             }
         }

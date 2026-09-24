@@ -139,10 +139,13 @@ impl SessionCompletionFacts {
     ) -> SessionRunStatus {
         if self.is_complete() {
             SessionRunStatus::Completed
-        } else if matches!(current, SessionRunStatus::Paused) {
-            SessionRunStatus::Paused
         } else {
-            SessionRunStatus::InProgress
+            match current {
+                SessionRunStatus::Paused => SessionRunStatus::Paused,
+                SessionRunStatus::InProgress | SessionRunStatus::Completed => {
+                    SessionRunStatus::InProgress
+                }
+            }
         }
     }
 }
@@ -326,7 +329,7 @@ impl SessionSnapshot {
     #[must_use]
     pub fn completed_count(&self) -> usize {
         self.iter_files()
-            .filter(|file| matches!(file.lifecycle, FileLifecycle::Complete))
+            .filter(|file| file.lifecycle.is_terminal())
             .count()
     }
 
@@ -338,7 +341,7 @@ impl SessionSnapshot {
     #[must_use]
     pub fn remaining_count(&self) -> usize {
         self.iter_files()
-            .filter(|file| !matches!(file.lifecycle, FileLifecycle::Complete))
+            .filter(|file| !file.lifecycle.is_terminal())
             .count()
     }
 

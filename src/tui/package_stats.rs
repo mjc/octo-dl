@@ -1,5 +1,5 @@
 use super::app::App;
-use crate::core::{FileLifecycle, FileState, PackageId, PackageStatus};
+use crate::core::{FileState, PackageId, PackageStatus};
 
 #[derive(Clone, Copy)]
 pub(super) struct PackageDisplayStats<'a> {
@@ -48,7 +48,7 @@ impl<'a> PackageDisplayStats<'a> {
         if self.source_url.is_empty() {
             self.source_url = &file.source_url;
         }
-        self.downloading |= matches!(file.lifecycle, FileLifecycle::Downloading);
+        self.downloading |= file.lifecycle.is_downloading();
         self.verifying |= app.is_verification_active(&file.id);
 
         let folder = file.path.split('/').next().filter(|part| !part.is_empty());
@@ -59,7 +59,7 @@ impl<'a> PackageDisplayStats<'a> {
             _ => {}
         }
 
-        let complete = matches!(file.lifecycle, FileLifecycle::Complete);
+        let complete = file.lifecycle.is_terminal();
         let visible = if complete {
             file.size
         } else {
@@ -78,7 +78,7 @@ impl<'a> PackageDisplayStats<'a> {
     pub(super) const fn activity_label(&self, status: PackageStatus) -> &'static str {
         if self.verifying {
             "verify"
-        } else if self.downloading || matches!(status, PackageStatus::Downloading) {
+        } else if self.downloading || status.is_downloading() {
             "active"
         } else {
             ""

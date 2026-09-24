@@ -104,7 +104,7 @@ impl Serialize for BinaryCorePackageRowRef<'_> {
             self.package.status()
         };
         let expanded = self.app.expanded_packages.contains(&self.package.id)
-            || matches!(self.package.status(), PackageStatus::Failed);
+            || self.package.status().is_failed();
         let folder_label = (!self.stats.folder_conflict)
             .then_some(self.stats.folder_label)
             .flatten();
@@ -144,16 +144,16 @@ impl Serialize for BinaryLegacyPackageRowRef<'_> {
     where
         S: serde::Serializer,
     {
-        let status = if matches!(self.file.status, FileStatus::Error(_)) {
+        let status = if self.file.status.is_error() {
             PackageStatus::Failed
-        } else if matches!(self.file.status, FileStatus::Downloading) {
+        } else if self.file.status.is_downloading() {
             PackageStatus::Downloading
-        } else if matches!(self.file.status, FileStatus::Complete) {
+        } else if self.file.status.is_complete() {
             PackageStatus::Complete
         } else {
             PackageStatus::Queued
         };
-        let downloaded = if matches!(self.file.status, FileStatus::Complete) {
+        let downloaded = if self.file.status.is_complete() {
             self.file.size
         } else if self.file.size > 0 && self.file.downloaded >= self.file.size {
             self.file.size.saturating_sub(1)
@@ -178,7 +178,7 @@ impl Serialize for BinaryLegacyPackageRowRef<'_> {
         row.serialize_field("present_files", &1_usize)?;
         row.serialize_field(
             "completed_files",
-            &usize::from(matches!(self.file.status, FileStatus::Complete)),
+            &usize::from(self.file.status.is_complete()),
         )?;
         row.serialize_field("downloaded_bytes", &downloaded)?;
         row.serialize_field("total_bytes", &self.file.size)?;
@@ -197,22 +197,39 @@ impl Serialize for BinaryLegacyPackageRowRef<'_> {
 impl DashboardFileStatus {
     #[must_use]
     pub const fn is_downloading(&self) -> bool {
-        matches!(self, Self::Downloading)
+        match self {
+            Self::Downloading => true,
+            Self::Queued | Self::Verifying | Self::Complete | Self::Error { .. } => false,
+        }
     }
 
     #[must_use]
     pub const fn is_active(&self) -> bool {
-        matches!(self, Self::Downloading | Self::Verifying)
+        self.is_downloading() || self.is_verifying()
     }
 
     #[must_use]
     pub const fn is_queued(&self) -> bool {
-        matches!(self, Self::Queued)
+        match self {
+            Self::Queued => true,
+            Self::Downloading | Self::Verifying | Self::Complete | Self::Error { .. } => false,
+        }
     }
 
     #[must_use]
     pub const fn is_error(&self) -> bool {
-        matches!(self, Self::Error { .. })
+        match self {
+            Self::Error { .. } => true,
+            Self::Queued | Self::Downloading | Self::Verifying | Self::Complete => false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_verifying(&self) -> bool {
+        match self {
+            Self::Verifying => true,
+            Self::Queued | Self::Downloading | Self::Complete | Self::Error { .. } => false,
+        }
     }
 }
 
@@ -1022,7 +1039,7 @@ impl Serialize for CorePackageRowRef<'_> {
             self.package.status()
         };
         let expanded = self.app.expanded_packages.contains(&self.package.id)
-            || matches!(self.package.status(), PackageStatus::Failed);
+            || self.package.status().is_failed();
         let folder_label = (!self.stats.folder_conflict)
             .then_some(self.stats.folder_label)
             .flatten();
@@ -1059,16 +1076,16 @@ impl Serialize for LegacyPackageRowRef<'_> {
     where
         S: serde::Serializer,
     {
-        let status = if matches!(self.file.status, FileStatus::Error(_)) {
+        let status = if self.file.status.is_error() {
             PackageStatus::Failed
-        } else if matches!(self.file.status, FileStatus::Downloading) {
+        } else if self.file.status.is_downloading() {
             PackageStatus::Downloading
-        } else if matches!(self.file.status, FileStatus::Complete) {
+        } else if self.file.status.is_complete() {
             PackageStatus::Complete
         } else {
             PackageStatus::Queued
         };
-        let downloaded = if matches!(self.file.status, FileStatus::Complete) {
+        let downloaded = if self.file.status.is_complete() {
             self.file.size
         } else if self.file.size > 0 && self.file.downloaded >= self.file.size {
             self.file.size.saturating_sub(1)
@@ -1090,7 +1107,7 @@ impl Serialize for LegacyPackageRowRef<'_> {
         row.serialize_field("present_files", &1_usize)?;
         row.serialize_field(
             "completed_files",
-            &usize::from(matches!(self.file.status, FileStatus::Complete)),
+            &usize::from(self.file.status.is_complete()),
         )?;
         row.serialize_field("downloaded_bytes", &downloaded)?;
         row.serialize_field("total_bytes", &self.file.size)?;
@@ -1719,7 +1736,7 @@ impl App {
                         total_bytes: stats.total_bytes,
                         percent: percent(stats.downloaded_bytes, stats.total_bytes),
                         expanded: self.expanded_packages.contains(&package.id)
-                            || matches!(package.status(), PackageStatus::Failed),
+                            || package.status().is_failed(),
                         folder_label: stats.folder_label().map(str::to_string),
                         error: package.error.clone(),
                     })
@@ -1730,16 +1747,16 @@ impl App {
         self.files
             .iter()
             .map(|file| {
-                let status = if matches!(file.status, FileStatus::Error(_)) {
+                let status = if file.status.is_error() {
                     PackageStatus::Failed
-                } else if matches!(file.status, FileStatus::Downloading) {
+                } else if file.status.is_downloading() {
                     PackageStatus::Downloading
-                } else if matches!(file.status, FileStatus::Complete) {
+                } else if file.status.is_complete() {
                     PackageStatus::Complete
                 } else {
                     PackageStatus::Queued
                 };
-                let downloaded = if matches!(file.status, FileStatus::Complete) {
+                let downloaded = if file.status.is_complete() {
                     file.size
                 } else if file.size > 0 && file.downloaded >= file.size {
                     file.size.saturating_sub(1)
@@ -1757,7 +1774,7 @@ impl App {
                     status,
                     file_ids: vec![file.id.to_string()],
                     present_files: 1,
-                    completed_files: usize::from(matches!(file.status, FileStatus::Complete)),
+                    completed_files: usize::from(file.status.is_complete()),
                     downloaded_bytes: downloaded,
                     total_bytes: file.size,
                     percent: percent(downloaded, file.size),
@@ -1841,7 +1858,7 @@ pub fn file_detail(file: &DashboardFileRow) -> String {
                 0
             };
             let bar = progress_bar(file.downloaded, file.size, 10);
-            let speed = if matches!(file.status, DashboardFileStatus::Verifying) {
+            let speed = if file.status.is_verifying() {
                 "  verify".to_string()
             } else if file.speed > 0 {
                 let mut speed = String::with_capacity(18);

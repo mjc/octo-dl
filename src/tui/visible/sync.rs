@@ -32,7 +32,7 @@ fn project_core_file(
         FileLifecycle::Complete => FileStatus::Complete,
         FileLifecycle::Failed { message } => FileStatus::Error(message.clone()),
     };
-    let downloading = matches!(status, FileStatus::Downloading);
+    let downloading = status.is_downloading();
 
     let downloaded = match &file.lifecycle {
         FileLifecycle::Complete => file.size,
@@ -146,7 +146,7 @@ pub(super) fn sync_visible_files(
                 ));
             }
             state.package_id = None;
-            if !matches!(entry.file().status, FileStatus::Downloading) {
+            if !entry.file().status.is_downloading() {
                 state.speed = 0;
             }
             if let Some(mut existing) = existing {
@@ -212,7 +212,8 @@ fn fallback_selection_row(
         return None;
     };
 
-    visible_rows
-        .iter()
-        .position(|row| matches!(row, TuiRow::Package(id) if id == package_id))
+    visible_rows.iter().position(|row| match row {
+        TuiRow::Package(id) => id == package_id,
+        TuiRow::File { .. } => false,
+    })
 }

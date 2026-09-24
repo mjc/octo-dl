@@ -1,0 +1,3 @@
+# Keep `matches!` available to test assertions while preventing it in runtime
+# code, where domain predicates should live on the relevant types instead.
+disallowed-macros = ["std::matches"]
