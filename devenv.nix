@@ -62,33 +62,36 @@ in
   };
 
   tasks."check:fmt".exec = "cargo fmt --all -- --check";
-  tasks."check:check".exec = "cargo check --all-targets --all-features --locked";
-  tasks."check:clippy".exec = "cargo clippy --all-targets --all-features --locked -- -D warnings";
-  tasks."check:test".exec = "cargo test --all-targets --all-features --locked";
-  tasks."check:test:no-default".exec = "cargo test --all-targets --no-default-features --locked";
-  tasks."check:test:cli".exec = "cargo test --all-targets --no-default-features --features cli --locked";
-  tasks."check:test:tui".exec = "cargo test --all-targets --no-default-features --features tui --locked";
-  tasks."check:test:release:resume".exec =
-    "cargo test --release --all-targets --all-features --locked resume";
-  tasks."check:test:release:lifecycle".exec =
-    "cargo test --release --all-targets --all-features --locked lifecycle";
+  tasks."check:check".exec =
+    "CARGO_TARGET_DIR=target/devenv-check-check cargo check --all-targets --all-features --locked";
+  tasks."check:clippy".exec =
+    "CARGO_TARGET_DIR=target/devenv-check-clippy cargo clippy --all-targets --all-features --locked -- -D warnings";
+  tasks."check:test".exec =
+    "CARGO_TARGET_DIR=target/devenv-test-all cargo test --all-targets --all-features --locked";
+  tasks."check:test:no-default".exec =
+    "CARGO_TARGET_DIR=target/devenv-test-no-default cargo test --all-targets --no-default-features --locked";
+  tasks."check:test:cli".exec =
+    "CARGO_TARGET_DIR=target/devenv-test-cli cargo test --all-targets --no-default-features --features cli --locked";
+  tasks."check:test:tui".exec =
+    "CARGO_TARGET_DIR=target/devenv-test-tui cargo test --all-targets --no-default-features --features tui --locked";
+  tasks."check:test:release:attempt-generation".exec =
+    "CARGO_TARGET_DIR=target/devenv-test-release-attempt-generation cargo test --release --lib --all-features --locked reverify_active_file_bumps_attempt_generation";
   tasks."check:dependencies".exec = "./scripts/check-dependencies.sh";
   tasks."check:flake".exec = "nix flake check --no-build --no-write-lock-file";
   tasks."check:all" = {
     # Independent prerequisites are scheduled in parallel by devenv. The
     # feature matrix uses test invocations because they compile the exact
-    # targets they execute; the release checks stay focused on lifecycle and
-    # resume regressions instead of repeating the entire suite.
+    # targets they execute. Focus on the debug profile for normal checks;
+    # release-profile checks are opt-in when a change specifically needs them.
     exec = "true";
     after = [
       "check:fmt"
+      "check:check"
       "check:clippy"
       "check:test"
       "check:test:no-default"
       "check:test:cli"
       "check:test:tui"
-      "check:test:release:resume"
-      "check:test:release:lifecycle"
       "check:dependencies"
       "check:flake"
     ];
