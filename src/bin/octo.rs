@@ -713,6 +713,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "tui")]
     fn attach_config_loads_api_key_from_explicit_config() {
         let directory = tempfile::tempdir().expect("temporary directory should exist");
         let config_path = directory.path().join("config.toml");
@@ -736,6 +737,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "tui")]
     fn explicit_attach_api_key_takes_precedence_over_config() {
         let directory = tempfile::tempdir().expect("temporary directory should exist");
         let config_path = directory.path().join("config.toml");

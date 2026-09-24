@@ -32,6 +32,7 @@ pub(super) const fn should_reuse_resume_state(
 }
 
 #[must_use]
+#[cfg(any(feature = "cli", test))]
 pub fn resume_validation_percent(checked_bytes: u64, total_bytes: u64) -> u64 {
     if total_bytes == 0 {
         return 0;
