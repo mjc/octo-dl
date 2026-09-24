@@ -97,6 +97,23 @@ the development shell and cross-compilation environment are defined in
 devenv tasks run check:all
 ```
 
+`check:all` schedules independent checks in parallel. It runs formatting,
+strict all-targets Clippy with `-D warnings`, all-feature tests, and the
+supported feature matrix: no default features, `cli` only, and `tui` only.
+It also runs release-mode tests filtered to `resume` and `lifecycle` so
+release-only behavior is checked without repeating the full release suite,
+then runs the dependency and flake checks. The individual task names are
+available with `devenv tasks list`; for example:
+
+```sh
+devenv tasks run check:clippy
+devenv tasks run check:test:no-default
+devenv tasks run check:test:cli
+devenv tasks run check:test:tui
+devenv tasks run check:test:release:resume
+devenv tasks run check:test:release:lifecycle
+```
+
 Use the cross-compilation profile for release builds:
 
 ```sh
