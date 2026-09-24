@@ -245,7 +245,7 @@ impl TokioFileSystem {
         let candidate = if path.is_absolute() {
             path.to_path_buf()
         } else {
-            std::env::current_dir()?.join(path)
+            root.join(path)
         };
         resolve_within_root(root, &candidate).map_err(|error| {
             if error.kind() == std::io::ErrorKind::PermissionDenied {
