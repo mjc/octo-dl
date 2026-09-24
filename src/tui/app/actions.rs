@@ -812,7 +812,9 @@ impl App {
         } else {
             self.forget_visible_file(id);
             self.sync_visible_files();
-            if let Some(path) = overlay_artifact_path {
+            if let Some(path) = overlay_artifact_path
+                && let Some(path) = self.rooted_download_path(&path)
+            {
                 super::super::download::schedule_output_artifact_delete(path.clone());
                 super::super::download::schedule_resume_artifact_delete(path);
             }

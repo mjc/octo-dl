@@ -644,7 +644,16 @@ impl App {
     fn handle_token_message(&mut self, msg: super::TokenMessage) {
         let file_id = msg.file_id;
         let token = msg.token;
-        if !self.accepts_current_attempt_update(&file_id, msg.attempt_id) {
+        let current_attempt = self
+            .file_attempt_ids
+            .get(&file_id)
+            .is_some_and(|attempt_id| *attempt_id == msg.attempt_id);
+        let lifecycle_accepts_update = self
+            .core_state
+            .files
+            .get(&file_id)
+            .is_some_and(|file| file.lifecycle.accepts_download_attempt_update());
+        if !current_attempt || !lifecycle_accepts_update {
             token.cancel();
             return;
         }
@@ -886,6 +895,43 @@ mod tests {
     };
     use tempfile::tempdir;
     use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn reset_attempt_token_is_accepted_before_file_start() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
+        let mut app = App::new(9723, event_tx, true);
+        let file_id = FileId::from("episode.bin");
+        let source_url = "https://mega.nz/folder/root";
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", source_url),
+                source_url: source_url.to_string(),
+                key: PackageKey::new(source_url),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.clone(),
+                    path: file_id.to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        let attempt_id = crate::tui::event::DownloadAttemptId::new(1);
+        app.file_attempt_ids.insert(file_id.clone(), attempt_id);
+        app.reset_pending_files.insert(file_id.clone());
+
+        let token = CancellationToken::new();
+        app.handle_token_message(TokenMessage {
+            file_id: file_id.clone(),
+            attempt_id,
+            token: token.clone(),
+        });
+
+        assert!(!token.is_cancelled());
+        assert!(app.cancellation_tokens.contains_key(&file_id));
+    }
 
     #[tokio::test]
     async fn download_task_stop_waits_for_cleanup_acknowledgement() {

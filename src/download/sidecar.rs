@@ -111,9 +111,14 @@ pub(super) async fn delete_sidecar_pair(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
-    tokio::task::spawn_blocking(move || crate::fs::sync_directory(&parent))
+    let sync_result = tokio::task::spawn_blocking(move || crate::fs::sync_directory(&parent))
         .await
-        .map_err(io::Error::other)??;
+        .map_err(io::Error::other)?;
+    match sync_result {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     Ok(())
 }
 

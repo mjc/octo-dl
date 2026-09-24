@@ -128,7 +128,7 @@ impl App {
         let mut preexisting_complete_bytes = 0_u64;
         let mut preexisting_complete_files = 0_usize;
         for file in self.core_state.files.values() {
-            if file.accounting == FileAccounting::Preexisting && file.lifecycle.is_terminal() {
+            if file.accounting == FileAccounting::Preexisting && file.lifecycle.is_complete() {
                 preexisting_complete_bytes = preexisting_complete_bytes.saturating_add(file.size);
                 preexisting_complete_files = preexisting_complete_files.saturating_add(1);
             }

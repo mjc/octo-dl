@@ -78,8 +78,8 @@ pub(crate) fn write_durable_temp_file(
 
 /// Syncs directory-entry changes where the platform supports directory syncing.
 ///
-/// Returns [`std::io::ErrorKind::Unsupported`] on non-Unix platforms rather
-/// than claiming durability without performing a directory sync.
+/// On non-Unix platforms, returns success as a best-effort acknowledgement
+/// because portable directory syncing is not available.
 pub(crate) fn sync_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -90,10 +90,7 @@ pub(crate) fn sync_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(not(unix))]
     {
         let _ = path;
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "directory syncing is not supported on this platform",
-        ))
+        Ok(())
     }
 }
 
@@ -312,6 +309,35 @@ impl TokioFileSystem {
             }
         })
     }
+
+    fn resolve_part_file_path(&self, path: &Path) -> std::io::Result<PathBuf> {
+        let Some(root) = &self.download_root else {
+            return Ok(path.to_path_buf());
+        };
+        let root = canonicalize_allow_missing(root)?;
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        let name = candidate.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "part path has no file name",
+            )
+        })?;
+        let parent = candidate.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "part path has no parent")
+        })?;
+        let parent = canonicalize_allow_missing(parent)?;
+        if !parent.starts_with(&root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "part file parent resolves outside configured download root",
+            ));
+        }
+        Ok(parent.join(name))
+    }
 }
 
 fn sync_file_blocking(path: &Path) -> std::io::Result<()> {
@@ -362,7 +388,17 @@ impl FileSystem for TokioFileSystem {
         size: u64,
         preserve_existing: bool,
     ) -> std::io::Result<tokio::fs::File> {
-        if let Ok(metadata) = tokio::fs::symlink_metadata(path).await
+        let path = self.resolve_part_file_path(path)?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(!preserve_existing);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW);
+        #[cfg(not(unix))]
+        if let Ok(metadata) = tokio::fs::symlink_metadata(&path).await
             && metadata.file_type().is_symlink()
         {
             return Err(std::io::Error::new(
@@ -370,20 +406,19 @@ impl FileSystem for TokioFileSystem {
                 format!("refusing to open symlink as part file: {}", path.display()),
             ));
         }
-        let path = self.resolve_download_path(path)?;
-        let file = tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(!preserve_existing)
-            .open(&path)
-            .await?;
+        let file = options.open(&path).await?;
         file.set_len(size).await?;
         Ok(file)
     }
 
     async fn open_part_file_for_resume(&self, path: &Path) -> std::io::Result<tokio::fs::File> {
-        if let Ok(metadata) = tokio::fs::symlink_metadata(path).await
+        let path = self.resolve_part_file_path(path)?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW);
+        #[cfg(not(unix))]
+        if let Ok(metadata) = tokio::fs::symlink_metadata(&path).await
             && metadata.file_type().is_symlink()
         {
             return Err(std::io::Error::new(
@@ -391,14 +426,7 @@ impl FileSystem for TokioFileSystem {
                 format!("refusing to open symlink as part file: {}", path.display()),
             ));
         }
-        let path = self.resolve_download_path(path)?;
-        tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .await
+        options.open(path).await
     }
 
     async fn read_exact_at(&self, path: &Path, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
@@ -586,7 +614,7 @@ mod tests {
             .await
             .expect_err("a pre-existing part symlink must be rejected");
 
-        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.raw_os_error().is_some());
         assert_eq!(std::fs::read(&target).unwrap(), b"keep target");
     }
 

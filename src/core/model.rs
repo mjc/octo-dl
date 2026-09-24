@@ -253,6 +253,17 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_completion_predicate_does_not_count_failed_files() {
+        assert!(FileLifecycle::Complete.is_complete());
+        assert!(
+            !FileLifecycle::Failed {
+                message: "failed".to_string(),
+            }
+            .is_complete()
+        );
+    }
+
+    #[test]
     fn download_state_files_support_borrowed_str_lookups() {
         let mut state = DownloadState::new(SessionMeta::default());
         let package_id = PackageId::new_v4();
@@ -581,6 +592,14 @@ impl FileLifecycle {
 
     #[must_use]
     pub const fn is_terminal(&self) -> bool {
+        match self {
+            Self::Complete => true,
+            Self::Planned | Self::Queued | Self::Downloading | Self::Failed { .. } => false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
         match self {
             Self::Complete => true,
             Self::Planned | Self::Queued | Self::Downloading | Self::Failed { .. } => false,

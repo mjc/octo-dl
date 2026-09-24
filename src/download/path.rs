@@ -27,21 +27,21 @@ impl DownloadRoot {
         Ok(Self(path))
     }
 
-    pub(super) fn resolve(&self, output: &RelativeOutputPath) -> PathBuf {
-        self.0.join(output.as_path())
+    pub(super) fn resolve_absolute(&self, output: &RelativeOutputPath) -> std::io::Result<PathBuf> {
+        let root = if self.0.is_absolute() {
+            self.0.clone()
+        } else {
+            std::env::current_dir()?.join(&self.0)
+        };
+        let candidate = root.join(output.as_path());
+        resolve_within_root(&root, &candidate)
     }
 
     pub(super) fn validate_existing_ancestors(
         &self,
         output: &RelativeOutputPath,
     ) -> std::io::Result<()> {
-        let root_path = if self.0.is_absolute() {
-            self.0.clone()
-        } else {
-            std::env::current_dir()?.join(&self.0)
-        };
-        let candidate = self.resolve(output);
-        resolve_within_root(&root_path, &candidate).map_err(|error| {
+        self.resolve_absolute(output).map_err(|error| {
             if error.kind() == std::io::ErrorKind::PermissionDenied {
                 std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -100,6 +100,14 @@ impl RelativeOutputPath {
     }
 }
 
+pub fn resolve_output_path_under_root(root: &Path, path: &str) -> std::io::Result<PathBuf> {
+    let root = DownloadRoot::new(root.to_path_buf())
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+    let output = RelativeOutputPath::new(path)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+    root.resolve_absolute(&output)
+}
+
 pub(super) fn artifact_path(path: &str) -> PathBuf {
     let digest = sha2::Sha256::digest(path.as_bytes());
     let mut name = String::with_capacity(ARTIFACT_PREFIX.len() + digest.len() * 2);
@@ -134,7 +142,7 @@ mod tests {
         let output = RelativeOutputPath::new("package/file.bin").unwrap();
 
         assert_eq!(
-            root.resolve(&output),
+            root.resolve_absolute(&output).unwrap(),
             PathBuf::from("/downloads/package/file.bin")
         );
     }

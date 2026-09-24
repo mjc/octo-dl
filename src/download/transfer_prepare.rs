@@ -44,6 +44,7 @@ impl<F: FileSystem> Downloader<F> {
         &self,
         node: &mega::Node,
         path: &str,
+        direct_output_path: &str,
         progress: &Arc<dyn DownloadProgress>,
         trust_resume_state: bool,
         part_path: &Path,
@@ -56,7 +57,7 @@ impl<F: FileSystem> Downloader<F> {
             &self.fs,
             node.size(),
             expected_condensed_mac,
-            path,
+            direct_output_path,
             part_path,
             sidecar_path,
         )
@@ -257,6 +258,7 @@ mod tests {
                 .prepare_transfer_resume(
                     node,
                     &output_path_string,
+                    &output_path_string,
                     &progress_obj,
                     true,
                     &part_path,
@@ -315,6 +317,7 @@ mod tests {
                 .downloader
                 .prepare_transfer_resume(
                     node,
+                    &output_path_string,
                     &output_path_string,
                     &progress_obj,
                     true,
@@ -384,6 +387,7 @@ mod tests {
                     .prepare_transfer_resume(
                         node,
                         &output_path_string,
+                        &output_path_string,
                         &progress_obj,
                         true,
                         &new_part_path,
@@ -444,6 +448,7 @@ mod tests {
                 .downloader
                 .prepare_transfer_resume(
                     node,
+                    &output_path_string,
                     &output_path_string,
                     &progress_obj,
                     true,

@@ -230,9 +230,29 @@ pub(super) struct FakeMegaDownloadHarness {
 
 impl FakeMegaDownloadHarness {
     pub(super) async fn new(seed: u64, file_size: u64, config: DownloadConfig) -> Self {
+        Self::build(seed, file_size, config, false).await
+    }
+
+    pub(super) async fn new_with_download_root(
+        seed: u64,
+        file_size: u64,
+        config: DownloadConfig,
+    ) -> Self {
+        Self::build(seed, file_size, config, true).await
+    }
+
+    async fn build(
+        seed: u64,
+        file_size: u64,
+        mut config: DownloadConfig,
+        use_output_dir_as_root: bool,
+    ) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let fixture_dir = temp.path().join("fixture");
         let output_dir = temp.path().join("output");
+        if use_output_dir_as_root {
+            config.path = Some(output_dir.to_string_lossy().into_owned());
+        }
         let fixture = create_fake_mega_fixture(&fixture_dir, "payload.bin", file_size, seed)
             .await
             .unwrap();

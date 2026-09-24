@@ -54,9 +54,13 @@ impl<F: FileSystem> Downloader<F> {
     ) -> Result<FileStats> {
         match download_result {
             Ok(()) => {
-                ctx.chunk_verified
+                if let Err(error) = ctx
+                    .chunk_verified
                     .finish_sidecar_writer(SidecarWriterShutdown::Abort)
-                    .await?;
+                    .await
+                {
+                    log::warn!("Resume sidecar writer reported an earlier failure: {error}");
+                }
                 self.fs
                     .rename_file(ctx.part_path, Path::new(ctx.path))
                     .await?;

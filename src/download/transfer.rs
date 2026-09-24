@@ -84,12 +84,15 @@ impl<F: FileSystem> Downloader<F> {
         self.ensure_parent_dir(path).await?;
         progress.on_file_start(path, node.size());
 
-        let pp = part_path(path);
-        let sp = sidecar_path(path);
+        let direct_output_path = self.resolve_output_path_for_direct_io(path)?;
+        let direct_output_path = direct_output_path.to_string_lossy();
+        let pp = part_path(&direct_output_path);
+        let sp = sidecar_path(&direct_output_path);
         let prepared = self
             .prepare_transfer_resume(
                 node,
                 path,
+                &direct_output_path,
                 progress,
                 trust_resume_state,
                 &pp,

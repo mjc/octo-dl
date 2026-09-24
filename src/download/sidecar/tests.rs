@@ -323,3 +323,13 @@ async fn sidecar_save_and_delete_round_trip() {
     delete_sidecar(&paths.sidecar).await.unwrap();
     assert!(load_sidecar(&paths.sidecar).await.is_none());
 }
+
+#[tokio::test]
+async fn deleting_sidecar_succeeds_when_parent_directory_is_missing() {
+    let path = std::env::temp_dir()
+        .join(format!("octo-missing-{}", uuid::Uuid::new_v4()))
+        .join("nested")
+        .join("file.part.postcard");
+
+    delete_sidecar(&path).await.unwrap();
+}

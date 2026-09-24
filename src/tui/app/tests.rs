@@ -36,6 +36,25 @@ fn test_app() -> App {
     App::new(9723, tx, true)
 }
 
+#[test]
+fn rooted_download_paths_resolve_under_configured_root_and_reject_traversal() {
+    let root = tempdir().expect("download root should exist");
+    let mut app = test_app();
+    app.config.config.path = Some(root.path().to_string_lossy().into_owned());
+
+    assert_eq!(
+        app.rooted_download_path("nested/file.bin"),
+        Some(
+            std::fs::canonicalize(root.path())
+                .unwrap()
+                .join("nested/file.bin")
+                .to_string_lossy()
+                .into_owned()
+        )
+    );
+    assert!(app.rooted_download_path("../outside.bin").is_none());
+}
+
 fn resolve_package(
     app: &mut App,
     source_url: &str,

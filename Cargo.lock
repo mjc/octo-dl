@@ -2270,6 +2270,7 @@ dependencies = [
  "hostname",
  "indexmap",
  "indicatif",
+ "libc",
  "log",
  "mega",
  "parking_lot",
