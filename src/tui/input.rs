@@ -7,7 +7,7 @@ mod selection;
 mod tests;
 
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::widgets::{Block, Borders};
@@ -25,6 +25,10 @@ use self::selection::{
 use super::app::{App, Popup, UiAction};
 
 pub fn handle_input(app: &mut App, key: KeyEvent) {
+    if key.kind == KeyEventKind::Release {
+        return;
+    }
+
     // Global quit
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         request_quit(app);

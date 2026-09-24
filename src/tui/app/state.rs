@@ -241,8 +241,10 @@ impl App {
                     let _ = self.persist_core_session_snapshot(snapshot);
                 }
                 CoreEffect::EnqueueUrlResolution { url } => {
-                    let outcome =
-                        self.try_dispatch_request(DownloadRequest::SubmitUrl { url: url.clone() });
+                    let outcome = self.try_dispatch_request(DownloadRequest::SubmitUrl {
+                        url: url.clone(),
+                        attempt_ids: self.file_attempt_ids.clone(),
+                    });
                     if !matches!(outcome, RequestDispatchOutcome::Accepted) {
                         self.pending_url_submissions.insert(url);
                         self.report_request_dispatch_failure(&outcome, "URL submission");
@@ -287,7 +289,10 @@ impl App {
             .cloned()
             .collect::<Vec<_>>();
         for url in pending {
-            match self.try_dispatch_request(DownloadRequest::SubmitUrl { url: url.clone() }) {
+            match self.try_dispatch_request(DownloadRequest::SubmitUrl {
+                url: url.clone(),
+                attempt_ids: self.file_attempt_ids.clone(),
+            }) {
                 RequestDispatchOutcome::Accepted => {
                     self.pending_url_submissions.remove(&url);
                 }
@@ -543,8 +548,10 @@ impl App {
                 .any(|file| file.source_url == *url);
             if !has_files_for_url {
                 self.queue_url_placeholder(url.clone());
-                let outcome =
-                    self.try_dispatch_request(DownloadRequest::SubmitUrl { url: url.clone() });
+                let outcome = self.try_dispatch_request(DownloadRequest::SubmitUrl {
+                    url: url.clone(),
+                    attempt_ids: self.file_attempt_ids.clone(),
+                });
                 if !matches!(outcome, RequestDispatchOutcome::Accepted) {
                     self.pending_url_submissions.insert(url.clone());
                     self.report_request_dispatch_failure(&outcome, "URL resume");

@@ -106,6 +106,129 @@ fn test_app() -> App {
 }
 
 #[tokio::test]
+async fn resubmitted_deleted_download_uses_current_file_attempt_through_request_path() {
+    let directory = tempdir().unwrap();
+    let _guard = StateDirectoryGuard::set(directory.path());
+    let fixture =
+        crate::fake_mega::create_fake_mega_fixture(directory.path(), "resubmit.bin", 32, 8)
+            .await
+            .unwrap();
+    let server = crate::fake_mega::FakeMegaServer::spawn(fixture.clone(), 1).unwrap();
+    let http = Arc::new(build_http_client().unwrap());
+    let client = mega::Client::builder()
+        .origin(server.origin().clone())
+        .build((*http).clone())
+        .unwrap();
+    let config = DownloadConfig {
+        path: Some(
+            directory
+                .path()
+                .join("downloads")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        ..DownloadConfig::default()
+    };
+    let downloader = Arc::new(crate::Downloader::new(client, config));
+    let cache = Arc::new(DlcKeyCache::new());
+    let (event_tx, mut event_rx) = DownloadEventSender::channel();
+    let mut app = App::new(9723, event_tx.clone(), true);
+    let mut requests = app.url_rx.take().unwrap();
+    let url = fixture.public_url();
+    let mut scheduler = SchedulerState::new();
+    let mut previous_item: Option<QueuedDownload> = None;
+
+    // Resolve, delete, and submit repeatedly: URL retries must preserve the
+    // app's per-file generation without assigning it to newly discovered files.
+    for generation in 0..3 {
+        if generation == 2 {
+            let (request_tx, request_rx) = mpsc::channel(1);
+            app.url_tx = request_tx;
+            requests = request_rx;
+            app.url_tx
+                .try_send(DownloadRequest::SyncPendingOrder {
+                    file_ids: Vec::new(),
+                })
+                .unwrap();
+        }
+        app.submit_url(url.clone());
+        if generation == 2 {
+            assert!(app.pending_url_submissions.contains(&url));
+            assert!(matches!(
+                requests.try_recv().unwrap(),
+                DownloadRequest::SyncPendingOrder { .. }
+            ));
+            app.retry_pending_requests();
+        }
+        let request = requests.try_recv().unwrap();
+        if let Some(stale) = &previous_item {
+            event_tx
+                .send(DownloadEvent::FileQueued(
+                    stale.queued_event(crate::core::FileAccounting::CurrentRun),
+                ))
+                .unwrap();
+            app.drain_download_events(&mut event_rx);
+            assert!(
+                app.core_state.files.is_empty(),
+                "stale events must be rejected after resubmission too"
+            );
+        }
+        queue_download_request_events(&request, &event_tx);
+        let resolved = resolve_download_requests_with_fetch(
+            &[request],
+            DownloadAttemptId::new(0),
+            &http,
+            &cache,
+            &event_tx,
+            |source| {
+                let downloader = &downloader;
+                async move {
+                    downloader
+                        .client()
+                        .fetch_public_nodes(&source.source_url)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+            },
+        )
+        .await;
+        let progress = collection_progress(&event_tx, &resolved);
+        let batch = collect_batch(&resolved, &downloader, &progress).await;
+        assert_eq!(batch.queued_items.len(), 1);
+        let item = batch.queued_items[0].clone();
+        let id = FileId::from(item.item.path.as_str());
+        let batch = scheduler.register_resolved_batch(batch);
+        batch.emit_events(&event_tx);
+        app.drain_download_events(&mut event_rx);
+        assert!(
+            app.core_state.files.contains_key(&id),
+            "generation {generation} should be restored by real queued events"
+        );
+        assert_eq!(item.attempt_id, DownloadAttemptId::new(generation));
+        scheduler.sync_pending_order(app.core_state.pending_file_ids());
+        assert!(scheduler.pending_queue.contains(&id));
+
+        if generation == 0 {
+            app.perform_delete_file_action(&id);
+        } else {
+            let package_id = app.core_state.files[&id].package_id;
+            app.perform_delete_package_action(package_id);
+        }
+        // Late events from the deleted generation must remain rejected.
+        event_tx
+            .send(DownloadEvent::FileQueued(
+                item.queued_event(crate::core::FileAccounting::CurrentRun),
+            ))
+            .unwrap();
+        app.drain_download_events(&mut event_rx);
+        assert!(!app.core_state.files.contains_key(&id));
+        previous_item = Some(item);
+    }
+    app.flush_session_persistence();
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn register_download_token_delivers_token_to_application_channel() {
     let (token_tx, mut token_rx) = mpsc::channel(1);
     let file_id: FileId = "episode.mkv".into();
@@ -132,6 +255,54 @@ async fn register_download_token_reports_closed_application_channel() {
     let result = register_download_token("episode.mkv".into(), &token_tx).await;
 
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn url_submission_attempt_is_not_used_as_a_new_file_attempt() {
+    let directory = tempdir().expect("fixture directory should exist");
+    let fixture =
+        crate::fake_mega::create_fake_mega_fixture(directory.path(), "payload.bin", 32, 8)
+            .await
+            .expect("fake MEGA fixture should be created");
+    let server = crate::fake_mega::FakeMegaServer::spawn(fixture.clone(), 1)
+        .expect("fake MEGA server should start");
+    let http = mega::http_client_builder()
+        .expect("MEGA HTTP builder should exist")
+        .build()
+        .expect("HTTP client should build");
+    let client = mega::Client::builder()
+        .origin(server.origin().clone())
+        .build(http)
+        .expect("MEGA client should build");
+    let nodes = client
+        .fetch_public_nodes(&fixture.public_url())
+        .await
+        .expect("fake public node should resolve");
+    let node = nodes
+        .roots()
+        .next()
+        .expect("fixture should have one root node")
+        .clone();
+    let item = crate::OwnedDownloadItem {
+        path: "payload.bin".to_string(),
+        node,
+        was_partial: false,
+    };
+
+    let queued = visible_downloads(
+        vec![item],
+        &ResolvedUrl::direct(&fixture.public_url()),
+        &RequestedFiles::All,
+        &HashMap::new(),
+        crate::tui::event::DownloadAttemptId::new(1),
+    );
+
+    assert_eq!(
+        queued[0].attempt_id,
+        crate::tui::event::DownloadAttemptId::new(0),
+        "a URL retry generation must not masquerade as a file retry generation"
+    );
+    server.shutdown().await.expect("fake server should stop");
 }
 
 #[test]
@@ -199,6 +370,97 @@ async fn panicked_download_task_releases_its_scheduler_slot() {
     assert!(!scheduler.active_downloads.contains(&file_id));
     assert!(!scheduler.available_downloads.contains_key(&file_id));
     assert!(scheduler.active_task_files.is_empty());
+}
+
+#[tokio::test]
+async fn finishing_old_attempt_keeps_newer_resolved_download_available() {
+    let directory = tempdir().expect("fixture directory should exist");
+    let fixture =
+        crate::fake_mega::create_fake_mega_fixture(directory.path(), "payload.bin", 32, 7)
+            .await
+            .expect("fake MEGA fixture should be created");
+    let server = crate::fake_mega::FakeMegaServer::spawn(fixture.clone(), 1)
+        .expect("fake MEGA server should start");
+    let http = mega::http_client_builder()
+        .expect("MEGA HTTP builder should exist")
+        .build()
+        .expect("HTTP client should build");
+    let client = mega::Client::builder()
+        .origin(server.origin().clone())
+        .build(http)
+        .expect("MEGA client should build");
+    let nodes = client
+        .fetch_public_nodes(&fixture.public_url())
+        .await
+        .expect("fake public node should resolve");
+    let node = nodes
+        .roots()
+        .next()
+        .expect("fixture should have one root node")
+        .clone();
+    let file_id = FileId::from("payload.bin");
+    let replacement = QueuedDownload {
+        resolved: ResolvedUrl::direct("https://mega.nz/file/retry"),
+        item: crate::OwnedDownloadItem {
+            path: file_id.to_string(),
+            node,
+            was_partial: false,
+        },
+        attempt_id: crate::tui::event::DownloadAttemptId::new(1),
+        trust_resume_state: false,
+    };
+    let mut scheduler = SchedulerState::new();
+    scheduler.active_downloads.insert(file_id.clone());
+    scheduler
+        .available_downloads
+        .insert(file_id.clone(), replacement);
+    scheduler.desired_pending_order.push(file_id.clone());
+    scheduler.desired_pending_set.insert(file_id.clone());
+    let task_file_id = file_id.clone();
+    let handle = scheduler.join_set.spawn(async move {
+        DownloadTaskResult {
+            task_id: tokio::task::id(),
+            id: task_file_id,
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
+            result: Ok(crate::FileStats {
+                size: 32,
+                network_bytes: 32,
+                reused_bytes: 0,
+                elapsed: std::time::Duration::ZERO,
+                average_speed: 0,
+                peak_speed: 0,
+                ramp_up_time: None,
+            }),
+        }
+    });
+    scheduler.active_task_files.insert(
+        handle.id(),
+        (
+            FileId::from("payload.bin"),
+            crate::tui::event::DownloadAttemptId::new(0),
+        ),
+    );
+    let (event_tx, _event_rx) = super::super::event::DownloadEventSender::channel();
+
+    handle_download_join_result(
+        scheduler
+            .join_set
+            .join_next()
+            .await
+            .expect("task should join"),
+        &mut scheduler,
+        &event_tx,
+    );
+
+    assert_eq!(
+        scheduler
+            .available_downloads
+            .get("payload.bin")
+            .map(|item| item.attempt_id),
+        Some(crate::tui::event::DownloadAttemptId::new(1))
+    );
+    assert_eq!(scheduler.pending_queue, VecDeque::from([file_id]));
+    server.shutdown().await.expect("fake server should stop");
 }
 
 #[tokio::test]

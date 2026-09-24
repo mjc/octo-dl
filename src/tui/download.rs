@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
@@ -238,17 +238,6 @@ struct DownloadRuntime {
     http: Arc<reqwest::Client>,
     dlc_cache: Arc<DlcKeyCache>,
     concurrent_files: usize,
-    submission_attempts: Mutex<HashMap<String, u64>>,
-}
-
-impl DownloadRuntime {
-    fn next_submission_attempt(&self, url: &str) -> u64 {
-        let mut attempts = self.submission_attempts.lock().unwrap();
-        let attempt = attempts.entry(url.to_string()).or_default();
-        let current = *attempt;
-        *attempt = attempt.saturating_add(1);
-        current
-    }
 }
 
 struct DownloadTaskResult {
@@ -344,20 +333,39 @@ impl SchedulerState {
         batch
     }
 
-    fn finish_download(&mut self, file_id: &FileId, result: &crate::Result<crate::FileStats>) {
+    fn finish_download(
+        &mut self,
+        file_id: &FileId,
+        attempt_id: DownloadAttemptId,
+        result: &crate::Result<crate::FileStats>,
+    ) {
         self.active_downloads.remove(file_id);
         if matches!(result, Err(crate::Error::Cancelled)) {
             self.rebuild_pending_queue();
             return;
         }
-        self.available_downloads.remove(file_id);
+        let finished_attempt_is_available = self
+            .available_downloads
+            .get(file_id)
+            .is_some_and(|available| available.attempt_id == attempt_id);
+        if finished_attempt_is_available {
+            self.available_downloads.remove(file_id);
+        }
+        self.rebuild_pending_queue();
     }
 
-    fn discard_download(&mut self, file_id: &FileId) {
+    fn discard_download(&mut self, file_id: &FileId, attempt_id: DownloadAttemptId) {
         self.active_downloads.remove(file_id);
-        self.available_downloads.remove(file_id);
-        self.resume_priority_set.remove(file_id);
-        self.pending_queue.retain(|pending| pending != file_id);
+        let failed_attempt_is_available = self
+            .available_downloads
+            .get(file_id)
+            .is_some_and(|available| available.attempt_id == attempt_id);
+        if failed_attempt_is_available {
+            self.available_downloads.remove(file_id);
+            self.resume_priority_set.remove(file_id);
+            self.pending_queue.retain(|pending| pending != file_id);
+        }
+        self.rebuild_pending_queue();
     }
 
     fn pause_file_ids(&mut self, file_ids: &[FileId]) -> Vec<QueuedDownload> {
@@ -654,7 +662,6 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
         http: Arc::new(http),
         dlc_cache: Arc::new(dlc_cache),
         concurrent_files: config.concurrent_files.max(1),
-        submission_attempts: Mutex::new(HashMap::new()),
     };
     let mut scheduler = SchedulerState::new();
     let mut pause_rx = pause_rx;
@@ -779,7 +786,7 @@ async fn flush_ready_download_requests(
 
 fn queue_download_request_events(request: &DownloadRequest, tx: &DownloadEventSender) {
     match request {
-        DownloadRequest::SubmitUrl { url } => {
+        DownloadRequest::SubmitUrl { url, .. } => {
             let _ = tx.send(DownloadEvent::UrlQueued { url: url.clone() });
             let _ = tx.send(DownloadEvent::StatusMessage(
                 "Processing 1 URL(s)...".to_string(),
@@ -818,17 +825,10 @@ async fn handle_download_request(
     match request {
         DownloadRequest::SubmitUrl { .. } | DownloadRequest::ResumeFileIds { .. } => {
             queue_download_request_events(&request, tx);
-            let submission_attempt_id = match &request {
-                DownloadRequest::SubmitUrl { url } => {
-                    DownloadAttemptId::new(runtime.next_submission_attempt(url))
-                }
-                DownloadRequest::ResumeFileIds { .. } => DownloadAttemptId::new(0),
-                _ => unreachable!(),
-            };
             let batch = vec![request];
             let resolved = resolve_download_requests(
                 &batch,
-                submission_attempt_id,
+                DownloadAttemptId::new(0),
                 &runtime.http,
                 &runtime.dlc_cache,
                 tx,
@@ -932,6 +932,29 @@ async fn resolve_download_requests(
     dlc_cache: &Arc<DlcKeyCache>,
     tx: &DownloadEventSender,
 ) -> Vec<FetchedNodeSet> {
+    resolve_download_requests_with_fetch(
+        requests,
+        submission_attempt_id,
+        http,
+        dlc_cache,
+        tx,
+        |source| async move { fetch_node_set(&source, http).await },
+    )
+    .await
+}
+
+async fn resolve_download_requests_with_fetch<F, Fut>(
+    requests: &[DownloadRequest],
+    submission_attempt_id: DownloadAttemptId,
+    http: &Arc<reqwest::Client>,
+    dlc_cache: &Arc<DlcKeyCache>,
+    tx: &DownloadEventSender,
+    fetch: F,
+) -> Vec<FetchedNodeSet>
+where
+    F: Fn(ResolvedUrl) -> Fut,
+    Fut: Future<Output = Result<mega::Nodes, String>>,
+{
     let mut by_source: IndexMap<
         String,
         (RequestedFiles, HashMap<FileId, DownloadAttemptId>, bool),
@@ -939,15 +962,15 @@ async fn resolve_download_requests(
 
     for request in requests {
         match request {
-            DownloadRequest::SubmitUrl { url } => {
+            DownloadRequest::SubmitUrl { url, attempt_ids } => {
                 by_source
                     .entry(url.clone())
                     .and_modify(|entry| {
                         entry.0 = RequestedFiles::All;
-                        entry.1.clear();
+                        entry.1.clone_from(attempt_ids);
                         entry.2 = true;
                     })
-                    .or_insert_with(|| (RequestedFiles::All, HashMap::new(), true));
+                    .or_insert_with(|| (RequestedFiles::All, attempt_ids.clone(), true));
             }
             DownloadRequest::ResumeFileIds {
                 source_url,
@@ -982,7 +1005,7 @@ async fn resolve_download_requests(
         for source in sources {
             let requested_files = file_ids.clone();
             let requested_attempt_ids = attempt_ids.clone();
-            let nodes = match fetch_node_set(&source, http).await {
+            let nodes = match fetch(source.clone()).await {
                 Ok(nodes) => Some(nodes),
                 Err(error) => {
                     let _ = tx.send(DownloadEvent::ScopeError {
@@ -1351,7 +1374,7 @@ fn handle_download_join_result(
     match result {
         Ok(task) => {
             scheduler.active_task_files.remove(&task.task_id);
-            scheduler.finish_download(&task.id, &task.result);
+            scheduler.finish_download(&task.id, task.attempt_id, &task.result);
             if let Err(error) = task.result
                 && !matches!(error, crate::Error::Cancelled)
             {
@@ -1364,7 +1387,7 @@ fn handle_download_join_result(
         }
         Err(error) => {
             if let Some((file_id, attempt_id)) = scheduler.active_task_files.remove(&error.id()) {
-                scheduler.discard_download(&file_id);
+                scheduler.discard_download(&file_id, attempt_id);
                 let _ = tx.send(DownloadEvent::FileError {
                     id: file_id,
                     error: format!("Download task failed: {error}"),
@@ -1929,7 +1952,7 @@ fn visible_downloads(
     resolved: &ResolvedUrl,
     requested_files: &RequestedFiles,
     requested_attempt_ids: &HashMap<FileId, DownloadAttemptId>,
-    submission_attempt_id: DownloadAttemptId,
+    _submission_attempt_id: DownloadAttemptId,
 ) -> Vec<QueuedDownload> {
     items
         .into_iter()
@@ -1938,7 +1961,7 @@ fn visible_downloads(
             attempt_id: requested_attempt_ids
                 .get(item.path.as_str())
                 .copied()
-                .unwrap_or(submission_attempt_id),
+                .unwrap_or(DownloadAttemptId::new(0)),
             trust_resume_state: matches!(
                 requested_files,
                 RequestedFiles::Only(file_ids) if file_ids.contains(item.path.as_str())

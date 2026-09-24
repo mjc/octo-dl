@@ -92,8 +92,8 @@ const LIFECYCLE_BACKLOG_CAPACITY: usize = 256;
 
 /// A bounded event ingress for the download worker.
 ///
-/// Progress is deliberately accumulated by file and attempt before it enters
-/// the bounded control queue. Lifecycle events use the queue directly when
+/// Progress is accumulated by file and attempt, then sealed into the ordered
+/// queue before each lifecycle event. Lifecycle events use the queue directly when
 /// possible and otherwise enter a durable FIFO. The FIFO is separate from the
 /// bounded channel so state-changing lifecycle events remain available for
 /// the application instead of being dropped while the channel is full.
@@ -245,7 +245,29 @@ impl DownloadEventSender {
         &self,
         event: DownloadEvent,
     ) -> Result<(), mpsc::error::TrySendError<DownloadEvent>> {
+        // Seal accumulated progress before the lifecycle boundary. Holding
+        // both locks prevents a later delta from overtaking its start, or an
+        // earlier delta from arriving after completion/cancellation/failure.
+        let mut values = self.progress.values.lock().unwrap();
         let mut lifecycle = self.lifecycle.events.lock().unwrap();
+        for ((id, attempt_id), delta) in values.drain() {
+            self.send_ordered_event_locked(
+                DownloadEvent::Progress {
+                    id,
+                    delta,
+                    attempt_id,
+                },
+                &mut lifecycle,
+            )?;
+        }
+        self.send_ordered_event_locked(event, &mut lifecycle)
+    }
+
+    fn send_ordered_event_locked(
+        &self,
+        event: DownloadEvent,
+        lifecycle: &mut PendingLifecycleState,
+    ) -> Result<(), mpsc::error::TrySendError<DownloadEvent>> {
         if !lifecycle.events.is_empty() {
             lifecycle.events.push_back(event);
             return Ok(());
@@ -258,11 +280,7 @@ impl DownloadEventSender {
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Closed(event)) => {
-                self.record_failure_locked(
-                    &mut lifecycle,
-                    &event,
-                    DeliveryFailureReason::ChannelClosed,
-                );
+                self.record_failure_locked(lifecycle, &event, DeliveryFailureReason::ChannelClosed);
                 Err(mpsc::error::TrySendError::Closed(event))
             }
         }
@@ -386,8 +404,15 @@ impl DownloadEventSender {
 
     pub(crate) fn take_pending_progress(
         &self,
+        receiver: &mpsc::Receiver<DownloadEvent>,
     ) -> Vec<(FileId, crate::core::ProgressDelta, DownloadAttemptId)> {
         let mut values = self.progress.values.lock().unwrap();
+        let lifecycle = self.lifecycle.events.lock().unwrap();
+        // Check while holding the sender locks: a worker must not enqueue a
+        // start and its progress between the empty check and the drain.
+        if !lifecycle.events.is_empty() || !receiver.is_empty() {
+            return Vec::new();
+        }
         let pending = values
             .drain()
             .map(|((id, attempt_id), delta)| (id, delta, attempt_id))
@@ -485,6 +510,8 @@ pub struct DownloadChannels {
 pub enum DownloadRequest {
     SubmitUrl {
         url: String,
+        /// Retained file generations, including deleted paths. New paths start at zero.
+        attempt_ids: HashMap<FileId, DownloadAttemptId>,
     },
     ResumeFileIds {
         source_url: String,
@@ -924,7 +951,7 @@ mod tests {
             DownloadEvent::FileComplete { .. }
         ));
         assert_eq!(
-            tx.take_pending_progress(),
+            tx.take_pending_progress(&rx),
             vec![(
                 progress_id,
                 ProgressDelta {
@@ -980,7 +1007,7 @@ mod tests {
             DownloadEvent::ProgressWakeup
         ));
         assert_eq!(
-            tx.take_pending_progress(),
+            tx.take_pending_progress(&rx),
             vec![(
                 first_id,
                 ProgressDelta {
@@ -990,6 +1017,39 @@ mod tests {
                 crate::tui::event::DownloadAttemptId::new(7),
             )]
         );
+    }
+
+    #[test]
+    fn pending_progress_waits_for_starts_already_in_the_channel() {
+        let (tx, mut rx) = DownloadEventSender::channel();
+        let attempt_id = DownloadAttemptId::new(0);
+        tx.send(DownloadEvent::FileStart {
+            id: "file.bin".into(),
+            size: 10,
+            attempt_id,
+        })
+        .unwrap();
+        tx.send(DownloadEvent::Progress {
+            id: "file.bin".into(),
+            delta: ProgressDelta {
+                total_bytes_delta: 5,
+                network_bytes_delta: 5,
+            },
+            attempt_id,
+        })
+        .unwrap();
+
+        assert!(tx.take_pending_progress(&rx).is_empty());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            DownloadEvent::FileStart { .. }
+        ));
+        assert!(tx.take_pending_progress(&rx).is_empty());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            DownloadEvent::ProgressWakeup
+        ));
+        assert_eq!(tx.take_pending_progress(&rx)[0].1.network_bytes_delta, 5);
     }
 
     #[test]
@@ -1018,7 +1078,7 @@ mod tests {
             DownloadEvent::StatusMessage(message) if message == "occupy queue"
         ));
         assert_eq!(
-            tx.take_pending_progress(),
+            tx.take_pending_progress(&rx),
             vec![(
                 id,
                 ProgressDelta {
@@ -1032,8 +1092,8 @@ mod tests {
 
     #[test]
     fn closed_event_queue_reports_control_and_progress_failures() {
-        let (tx, rx) = DownloadEventSender::channel_with_capacity(1);
-        drop(rx);
+        let (tx, mut rx) = DownloadEventSender::channel_with_capacity(1);
+        rx.close();
 
         assert!(matches!(
             tx.send(DownloadEvent::StatusMessage("closed".to_string())),
@@ -1063,7 +1123,7 @@ mod tests {
                 DownloadEvent::FileStart { .. }
             ))
         ));
-        assert!(tx.take_pending_progress().is_empty());
+        assert!(tx.take_pending_progress(&rx).is_empty());
         assert_eq!(
             tx.take_delivery_failure(),
             Some(DownloadEventDeliveryFailure {

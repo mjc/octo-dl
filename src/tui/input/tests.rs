@@ -259,6 +259,26 @@ fn handle_main_input_pause_toggle() {
 }
 
 #[test]
+fn key_release_is_ignored_but_key_repeat_is_processed() {
+    let mut app = test_app();
+    handle_input(&mut app, key(KeyCode::Char('p')));
+    assert!(app.paused);
+
+    let mut release = key(KeyCode::Char('p'));
+    release.kind = KeyEventKind::Release;
+    handle_input(&mut app, release);
+    assert!(app.paused, "release must not toggle pause back on");
+
+    let mut repeat = key(KeyCode::Char('p'));
+    repeat.kind = KeyEventKind::Repeat;
+    handle_input(&mut app, repeat);
+    assert!(
+        !app.paused,
+        "repeat events retain their deliberate behavior"
+    );
+}
+
+#[test]
 fn handle_main_input_config_popup() {
     let mut app = test_app();
     handle_input(&mut app, key(KeyCode::Char('c')));
@@ -1366,7 +1386,8 @@ fn add_url_deduplicates() {
     assert_eq!(
         url_rx.try_recv().unwrap(),
         DownloadRequest::SubmitUrl {
-            url: "https://mega.nz/file/abc".to_string()
+            url: "https://mega.nz/file/abc".to_string(),
+            attempt_ids: std::collections::HashMap::new(),
         }
     );
     assert!(url_rx.try_recv().is_err());
@@ -1402,7 +1423,8 @@ fn retry_recomputes_totals_for_errored_file() {
     assert_eq!(
         url_rx.try_recv().unwrap(),
         DownloadRequest::SubmitUrl {
-            url: "https://mega.nz/file/error".to_string()
+            url: "https://mega.nz/file/error".to_string(),
+            attempt_ids: std::collections::HashMap::new(),
         }
     );
 }
@@ -1421,7 +1443,10 @@ fn retrying_url_resolution_error_requeues_url_work() {
 
     assert_eq!(
         url_rx.try_recv().unwrap(),
-        DownloadRequest::SubmitUrl { url: url.clone() }
+        DownloadRequest::SubmitUrl {
+            url: url.clone(),
+            attempt_ids: std::collections::HashMap::new()
+        }
     );
     assert!(matches!(
         app.overlay_files.get(url.as_str()),
@@ -1446,7 +1471,8 @@ fn handle_main_input_url_submit() {
     assert_eq!(
         received,
         DownloadRequest::SubmitUrl {
-            url: "https://mega.nz/file/test123".to_string()
+            url: "https://mega.nz/file/test123".to_string(),
+            attempt_ids: std::collections::HashMap::new(),
         }
     );
 }
@@ -1464,7 +1490,8 @@ fn handle_main_input_normalizes_legacy_url_before_submission() {
     assert_eq!(
         url_rx.try_recv().unwrap(),
         DownloadRequest::SubmitUrl {
-            url: "https://mega.nz/file/test123#secret".to_string()
+            url: "https://mega.nz/file/test123#secret".to_string(),
+            attempt_ids: std::collections::HashMap::new(),
         }
     );
 }

@@ -1215,7 +1215,7 @@ fn full_request_queue_surfaces_url_backpressure_without_losing_tracked_url() {
     assert!(!app.pending_url_submissions.contains(&url));
     assert!(matches!(
         url_rx.try_recv().expect("URL request should be retried"),
-        crate::tui::event::DownloadRequest::SubmitUrl { url: request_url }
+        crate::tui::event::DownloadRequest::SubmitUrl { url: request_url, .. }
             if request_url == url
     ));
 }
@@ -1252,6 +1252,84 @@ fn full_request_queue_rejects_reverify_before_mutating_file_state() {
     assert!(!app.verification_inflight_files.contains(&file_id));
     assert!(!app.file_attempt_ids.contains_key(&file_id));
     assert_eq!(app.status, "Verification is waiting: request queue is full");
+}
+
+#[test]
+fn package_reverify_rejects_when_cancellation_and_verification_cannot_both_be_queued() {
+    let mut app = test_app();
+    let source_url = "https://mega.nz/folder/package-reverify-saturated";
+    let package_id = resolve_package(&mut app, source_url, &[("episode.mkv", 128)]);
+    let file_id = crate::core::FileId::from("episode.mkv");
+    app.apply_core_event(CoreEvent::FileStarted {
+        file_id: file_id.clone(),
+        size: 128,
+    });
+    app.apply_core_event(CoreEvent::FileProgress {
+        file_id: file_id.clone(),
+        total_bytes_delta: 32,
+        network_bytes_delta: 32,
+    });
+    let token = CancellationToken::new();
+    app.cancellation_tokens
+        .insert(file_id.clone(), token.clone());
+    app.download_task_running = true;
+
+    let (url_tx, mut url_rx) = mpsc::channel(1);
+    app.url_tx = url_tx;
+
+    app.perform_reverify_package_action(package_id);
+
+    assert!(
+        !token.is_cancelled(),
+        "rejected request must leave transfer running"
+    );
+    assert!(!app.verifying_files.contains(&file_id));
+    assert!(!app.verification_inflight_files.contains(&file_id));
+    assert_eq!(app.file_attempt_ids.get(&file_id), None);
+    assert!(matches!(
+        app.core_state
+            .files
+            .get(&file_id)
+            .map(|file| &file.lifecycle),
+        Some(FileLifecycle::Downloading)
+    ));
+    assert!(url_rx.try_recv().is_err());
+    assert_eq!(app.status, "Verification is waiting: request queue is full");
+}
+
+#[test]
+fn queued_file_from_url_retry_establishes_its_first_file_attempt() {
+    let mut app = test_app();
+    let url = "https://mega.nz/file/retry-discovered";
+    app.install_session(session_snapshot(vec![(url, UrlFixtureStatus::Pending)]));
+    app.handle_scope_error_event(url.to_string(), "initial resolution failed".to_string());
+
+    app.handle_file_queued_event(QueuedFile {
+        id: "newly-discovered.bin".into(),
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
+        size: 100,
+        accounting: crate::core::FileAccounting::CurrentRun,
+        origin: FileOrigin {
+            package_id: None,
+            package_display_name: None,
+            source_url: url.to_string(),
+            submitted_url: url.to_string(),
+        },
+    });
+
+    assert!(app.core_state.files.contains_key("newly-discovered.bin"));
+    app.handle_file_start_event(
+        "newly-discovered.bin".into(),
+        100,
+        crate::tui::event::DownloadAttemptId::new(0),
+    );
+    assert!(matches!(
+        app.core_state
+            .files
+            .get("newly-discovered.bin")
+            .map(|file| &file.lifecycle),
+        Some(FileLifecycle::Downloading)
+    ));
 }
 
 #[test]

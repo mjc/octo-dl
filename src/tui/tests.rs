@@ -108,13 +108,15 @@ fn resume_session_requeues_urls() {
     assert_eq!(
         url_rx.try_recv().unwrap(),
         DownloadRequest::SubmitUrl {
-            url: expected_urls[0].clone()
+            url: expected_urls[0].clone(),
+            attempt_ids: std::collections::HashMap::new(),
         }
     );
     assert_eq!(
         url_rx.try_recv().unwrap(),
         DownloadRequest::SubmitUrl {
-            url: expected_urls[1].clone()
+            url: expected_urls[1].clone(),
+            attempt_ids: std::collections::HashMap::new(),
         }
     );
     assert!(url_rx.try_recv().is_err());
@@ -160,7 +162,8 @@ fn resume_session_clears_empty_failed_package_errors_and_requeues_urls() {
     assert_eq!(
         url_rx.try_recv().unwrap(),
         DownloadRequest::SubmitUrl {
-            url: "https://mega.nz/file/stale-error".to_string()
+            url: "https://mega.nz/file/stale-error".to_string(),
+            attempt_ids: std::collections::HashMap::new(),
         }
     );
     assert!(url_rx.try_recv().is_err());
@@ -587,13 +590,15 @@ fn ui_add_urls_enqueues_each_unique_url_once() {
     assert_eq!(
         url_rx.try_recv().unwrap(),
         DownloadRequest::SubmitUrl {
-            url: "https://mega.nz/file/one".to_string()
+            url: "https://mega.nz/file/one".to_string(),
+            attempt_ids: std::collections::HashMap::new(),
         }
     );
     assert_eq!(
         url_rx.try_recv().unwrap(),
         DownloadRequest::SubmitUrl {
-            url: "https://mega.nz/file/two".to_string()
+            url: "https://mega.nz/file/two".to_string(),
+            attempt_ids: std::collections::HashMap::new(),
         }
     );
     assert!(url_rx.try_recv().is_err());
@@ -838,7 +843,8 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
     assert_eq!(
         url_rx.try_recv().unwrap(),
         DownloadRequest::SubmitUrl {
-            url: source_url.clone()
+            url: source_url.clone(),
+            attempt_ids: std::collections::HashMap::new(),
         }
     );
     let session = app.session.as_ref().expect("session should remain");

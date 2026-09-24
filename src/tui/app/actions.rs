@@ -1051,7 +1051,16 @@ impl App {
                 request_keys.push((source_url.as_str(), *target));
             }
         }
-        if self.url_tx.is_closed() || self.url_tx.capacity() < request_keys.len() {
+        let verification_request_count = request_keys.len();
+        let cancellation_sync_count = files
+            .iter()
+            .filter(|(_, _, lifecycle, _)| {
+                matches!(lifecycle, crate::core::FileLifecycle::Downloading)
+            })
+            .count();
+        let required_queue_slots =
+            verification_request_count.saturating_add(cancellation_sync_count);
+        if self.url_tx.is_closed() || self.url_tx.capacity() < required_queue_slots {
             self.status = if self.url_tx.is_closed() {
                 "Verification unavailable: download worker is stopped".to_string()
             } else {

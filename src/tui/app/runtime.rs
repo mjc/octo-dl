@@ -409,11 +409,9 @@ impl App {
                 self.handle_ui_action(UiAction::AddUrls(urls));
             }
             DownloadEvent::ProgressWakeup => {
-                if !self.event_tx.has_pending_lifecycle_events() {
-                    for (id, delta, attempt_id) in self.event_tx.take_pending_progress() {
-                        self.handle_file_progress_event(id, delta, attempt_id);
-                    }
-                }
+                // The wakeup shares the channel with lifecycle events. Drain
+                // coalesced deltas only after the receiver has processed all
+                // events that were queued behind this wakeup.
             }
         }
     }
@@ -475,11 +473,9 @@ impl App {
             }
             handled |= app.flush_pending_progress_events(&mut pending_progress);
             app.event_tx.flush_lifecycle_events();
-            if !app.event_tx.has_pending_lifecycle_events() {
-                for (id, delta, attempt_id) in app.event_tx.take_pending_progress() {
-                    app.handle_file_progress_event(id, delta, attempt_id);
-                    handled = true;
-                }
+            for (id, delta, attempt_id) in app.event_tx.take_pending_progress(download_rx) {
+                app.handle_file_progress_event(id, delta, attempt_id);
+                handled = true;
             }
             handled |= app.handle_event_delivery_failure();
             handled
@@ -500,6 +496,15 @@ impl App {
     fn handle_token_message(&mut self, msg: super::TokenMessage) {
         let file_id = msg.file_id;
         let token = msg.token;
+        if self.core_state.files.get(&file_id).is_some_and(|file| {
+            matches!(
+                &file.lifecycle,
+                crate::core::FileLifecycle::Complete | crate::core::FileLifecycle::Failed { .. }
+            )
+        }) {
+            token.cancel();
+            return;
+        }
         if self.paused {
             token.cancel();
             if !self.shutdown_pending_files.contains(&file_id) {
@@ -1574,5 +1579,207 @@ mod tests {
         assert!(app.drain_download_events(&mut download_rx));
         assert!(!app.verifying_files.contains("file.bin"));
         assert!(!app.verification_inflight_files.contains("file.bin"));
+    }
+
+    #[test]
+    fn progress_wakeup_does_not_move_later_progress_before_file_start() {
+        for capacity in [256, 1] {
+            let (event_tx, mut download_rx) = DownloadEventSender::channel_with_capacity(capacity);
+            let mut app = App::new(9723, event_tx.clone(), true);
+            let file_id = FileId::from("file-b.bin");
+            app.apply_core_event(CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: crate::test_support::package_id("pkg", "https://mega.nz/file/root"),
+                    source_url: "https://mega.nz/file/root".to_string(),
+                    key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+                    display_name: "Package".to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: file_id.clone(),
+                        path: file_id.to_string(),
+                        size: 100,
+                    }],
+                    collision: None,
+                },
+            });
+            let attempt_id = crate::tui::event::DownloadAttemptId::new(0);
+
+            event_tx
+                .send(DownloadEvent::Progress {
+                    id: "file-a.bin".into(),
+                    delta: crate::core::ProgressDelta {
+                        total_bytes_delta: 1,
+                        network_bytes_delta: 1,
+                    },
+                    attempt_id,
+                })
+                .expect("first transfer should enqueue a progress wakeup");
+            event_tx
+                .send(DownloadEvent::FileStart {
+                    id: file_id.clone(),
+                    size: 100,
+                    attempt_id,
+                })
+                .expect("file start should remain ordered after the wakeup");
+            event_tx
+                .send(DownloadEvent::Progress {
+                    id: file_id.clone(),
+                    delta: crate::core::ProgressDelta {
+                        total_bytes_delta: 10,
+                        network_bytes_delta: 10,
+                    },
+                    attempt_id,
+                })
+                .expect("second transfer progress should be retained");
+
+            for _ in 0..8 {
+                if !app.drain_download_events(&mut download_rx) {
+                    break;
+                }
+            }
+
+            let file = app
+                .core_state
+                .files
+                .get(&file_id)
+                .expect("file should remain tracked");
+            assert_eq!(file.progress.downloaded_network_bytes, 10);
+            assert_eq!(file.progress.visible_completed_bytes, 10);
+        }
+    }
+
+    #[test]
+    fn token_for_completed_file_does_not_create_shutdown_work() {
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
+        let mut app = App::new(9723, event_tx, true);
+        let file_id = FileId::from("already-complete.bin");
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: crate::test_support::package_id("pkg", "https://mega.nz/file/root"),
+                source_url: "https://mega.nz/file/root".to_string(),
+                key: crate::core::PackageKey::new("https://mega.nz/file/root".to_string()),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.clone(),
+                    path: file_id.to_string(),
+                    size: 100,
+                }],
+                collision: None,
+            },
+        });
+        app.handle_file_start_event(
+            file_id.clone(),
+            100,
+            crate::tui::event::DownloadAttemptId::new(0),
+        );
+        app.handle_file_complete_event(
+            file_id.clone(),
+            crate::tui::event::DownloadAttemptId::new(0),
+        );
+
+        app.handle_token_message(super::super::TokenMessage {
+            file_id: file_id.clone(),
+            token: tokio_util::sync::CancellationToken::new(),
+        });
+
+        assert!(!app.cancellation_tokens.contains_key(&file_id));
+        assert!(!app.begin_shutdown());
+    }
+
+    fn check_sender_progress_before_terminal(terminal: &str) {
+        for capacity in [256, 1] {
+            let (event_tx, mut download_rx) = DownloadEventSender::channel_with_capacity(capacity);
+            let mut app = App::new(9723, event_tx.clone(), true);
+            let file_id = FileId::from("ordered.bin");
+            app.apply_core_event(CoreEvent::PackageResolved {
+                package: ResolvedPackage {
+                    id: crate::test_support::package_id("pkg", "https://mega.nz/file/root"),
+                    source_url: "https://mega.nz/file/root".to_string(),
+                    key: crate::core::PackageKey::new("https://mega.nz/file/root"),
+                    display_name: "Package".to_string(),
+                    files: vec![ResolvedFile {
+                        file_id: file_id.clone(),
+                        path: file_id.to_string(),
+                        size: 100,
+                    }],
+                    collision: None,
+                },
+            });
+            let attempt_id = crate::tui::event::DownloadAttemptId::new(0);
+            event_tx
+                .send(DownloadEvent::FileStart {
+                    id: file_id.clone(),
+                    size: 100,
+                    attempt_id,
+                })
+                .unwrap();
+            // A full channel still retains this delta in the real sender.
+            let _ = event_tx.send(DownloadEvent::Progress {
+                id: file_id.clone(),
+                delta: crate::core::ProgressDelta {
+                    total_bytes_delta: 25,
+                    network_bytes_delta: 25,
+                },
+                attempt_id,
+            });
+            event_tx
+                .send(match terminal {
+                    "complete" => DownloadEvent::FileComplete {
+                        id: file_id.clone(),
+                        attempt_id,
+                    },
+                    "cancel" => DownloadEvent::FileCancelled {
+                        id: file_id.clone(),
+                        attempt_id,
+                    },
+                    "error" => DownloadEvent::FileError {
+                        id: file_id.clone(),
+                        attempt_id,
+                        error: "failed".to_string(),
+                    },
+                    _ => unreachable!(),
+                })
+                .unwrap();
+            for _ in 0..8 {
+                if !app.drain_download_events(&mut download_rx) {
+                    break;
+                }
+            }
+            let file = &app.core_state.files[&file_id];
+            assert_eq!(
+                file.progress.downloaded_network_bytes, 25,
+                "{terminal}, channel capacity {capacity}"
+            );
+            let expected = match terminal {
+                "complete" => crate::core::FileLifecycle::Complete,
+                "cancel" => crate::core::FileLifecycle::Queued,
+                "error" => crate::core::FileLifecycle::Failed {
+                    message: "failed".to_string(),
+                },
+                _ => unreachable!(),
+            };
+            assert_eq!(file.lifecycle, expected, "channel capacity {capacity}");
+            let snapshot = crate::core::snapshot_from_state(&app.core_state);
+            assert_eq!(
+                snapshot.packages[0].files[0]
+                    .progress
+                    .downloaded_network_bytes,
+                25
+            );
+        }
+    }
+
+    #[test]
+    fn sender_progress_precedes_completion() {
+        check_sender_progress_before_terminal("complete");
+    }
+
+    #[test]
+    fn sender_progress_precedes_cancellation() {
+        check_sender_progress_before_terminal("cancel");
+    }
+
+    #[test]
+    fn sender_progress_precedes_failure() {
+        check_sender_progress_before_terminal("error");
     }
 }
