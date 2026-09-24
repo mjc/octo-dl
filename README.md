@@ -98,11 +98,11 @@ devenv tasks run check:all
 ```
 
 `check:all` schedules independent checks in parallel. It runs formatting,
-all-targets release compilation, strict release Clippy with `-D warnings`,
-all-feature release tests, and the supported feature matrix: no default
-features, `cli` only, and `tui` only. Release mode checks optimized-profile
-behavior while avoiding large debug-symbol build trees.
-The task then runs dependency and flake checks. The individual task names are
+all-targets compilation, strict all-targets Clippy with `-D warnings`,
+all-feature tests, and the supported feature matrix: no default features,
+`cli` only, and `tui` only. It also runs focused release-mode tests filtered
+to `resume` and `lifecycle`, then dependency and flake checks. The individual
+task names are
 available with `devenv tasks list`; for example:
 
 ```sh
@@ -110,6 +110,8 @@ devenv tasks run check:clippy
 devenv tasks run check:test:no-default
 devenv tasks run check:test:cli
 devenv tasks run check:test:tui
+devenv tasks run check:test:release:resume
+devenv tasks run check:test:release:lifecycle
 ```
 
 Use the cross-compilation profile for release builds:
