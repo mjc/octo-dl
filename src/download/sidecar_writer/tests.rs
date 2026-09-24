@@ -4,8 +4,8 @@ use crate::download::{part_path, sidecar_path};
 use crate::fs::{FileFingerprint, FileSystem, TokioFileSystem};
 
 use super::{
-    LazySidecarWriter, ResumeSidecar, SidecarGeneration, SidecarWriterShutdown,
-    fingerprint_part_sync,
+    LazySidecarWriter, ResumeSidecar, SidecarFailurePoint, SidecarGeneration,
+    SidecarWriterShutdown, fingerprint_part_sync,
 };
 
 #[tokio::test]
@@ -21,7 +21,7 @@ async fn malformed_path_cannot_panic_worker_startup() {
         Ok(writer) => writer,
         Err(error) => panic!("worker thread should start: {error}"),
     };
-    writer.finish(SidecarWriterShutdown::Abort).await;
+    writer.finish(SidecarWriterShutdown::Abort).await.unwrap();
 }
 
 fn sidecar_with_chunks(file_size: u64, chunks: &[(u32, [u8; 16])]) -> ResumeSidecar {
@@ -52,7 +52,7 @@ async fn sidecar_writer_persists_verified_snapshots_in_order() {
 
     writer.persist_verified_snapshot(SidecarGeneration::new(1), first);
     writer.persist_verified_snapshot(SidecarGeneration::new(2), second.clone());
-    writer.finish(SidecarWriterShutdown::Flush).await;
+    writer.finish(SidecarWriterShutdown::Flush).await.unwrap();
 
     let loaded = load_sidecar(&sidecar_path).await.unwrap();
     assert_eq!(loaded.verified_chunks, second.verified_chunks);
@@ -79,7 +79,7 @@ async fn sidecar_writer_saves_snapshot_without_fingerprint_when_part_is_missing(
     });
 
     writer.persist_verified_snapshot(SidecarGeneration::new(1), snapshot);
-    writer.finish(SidecarWriterShutdown::Flush).await;
+    writer.finish(SidecarWriterShutdown::Flush).await.unwrap();
 
     let loaded = load_sidecar(&sidecar_path).await.unwrap();
     assert_eq!(loaded.verified_chunks.len(), 1);
@@ -99,7 +99,7 @@ async fn sidecar_writer_allows_equal_generation_for_final_flush() {
 
     writer.persist_verified_snapshot(SidecarGeneration::new(2), first);
     writer.persist_final_snapshot(SidecarGeneration::new(2), final_snapshot.clone());
-    writer.finish(SidecarWriterShutdown::Flush).await;
+    writer.finish(SidecarWriterShutdown::Flush).await.unwrap();
 
     let loaded = load_sidecar(&sidecar_path).await.unwrap();
     assert_eq!(loaded.verified_chunks, final_snapshot.verified_chunks);
@@ -118,7 +118,7 @@ async fn sidecar_writer_rejects_older_final_snapshot_after_newer_generation() {
 
     writer.persist_verified_snapshot(SidecarGeneration::new(3), newer.clone());
     writer.persist_final_snapshot(SidecarGeneration::new(2), older);
-    writer.finish(SidecarWriterShutdown::Flush).await;
+    writer.finish(SidecarWriterShutdown::Flush).await.unwrap();
 
     let loaded = load_sidecar(&sidecar_path).await.unwrap();
     assert_eq!(loaded.verified_chunks, newer.verified_chunks);
@@ -139,7 +139,7 @@ async fn sidecar_writer_rejects_older_verified_snapshot_after_newer_generation()
 
     writer.persist_verified_snapshot(SidecarGeneration::new(2), second_snapshot);
     writer.persist_verified_snapshot(SidecarGeneration::new(1), first_snapshot);
-    writer.finish(SidecarWriterShutdown::Flush).await;
+    writer.finish(SidecarWriterShutdown::Flush).await.unwrap();
 
     let loaded = load_sidecar(&sidecar_path)
         .await
@@ -167,7 +167,7 @@ async fn sidecar_writer_ignores_persist_requests_after_finish() {
     let second = sidecar_with_chunks(42, &[(0, [1u8; 16]), (1, [2u8; 16])]);
 
     writer.persist_verified_snapshot(SidecarGeneration::new(1), first.clone());
-    writer.finish(SidecarWriterShutdown::Flush).await;
+    writer.finish(SidecarWriterShutdown::Flush).await.unwrap();
     writer.persist_verified_snapshot(SidecarGeneration::new(2), second);
 
     let loaded = load_sidecar(&sidecar_path).await.unwrap();
@@ -202,8 +202,71 @@ async fn sidecar_writer_rejects_preexisting_temp_symlink() {
     let writer = LazySidecarWriter::new(sidecar_path.clone(), part_path)
         .expect("sidecar writer should start");
     writer.persist_verified_snapshot(SidecarGeneration::new(1), snapshot);
-    writer.finish(SidecarWriterShutdown::Flush).await;
+    writer
+        .finish(SidecarWriterShutdown::Flush)
+        .await
+        .expect_err("pre-existing temp symlink should fail the durable flush");
 
     assert!(!sidecar_path.exists());
     assert_eq!(tokio::fs::read(&target_path).await.unwrap(), b"keep target");
+}
+
+#[tokio::test]
+async fn sidecar_publication_failures_are_reported_and_restart_can_persist() {
+    for failpoint in [
+        SidecarFailurePoint::Write,
+        SidecarFailurePoint::FileSync,
+        SidecarFailurePoint::Rename,
+        SidecarFailurePoint::DirectorySync,
+        SidecarFailurePoint::WorkerDisconnect,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar_path = dir.path().join("file.bin.part.postcard");
+        let part_path = dir.path().join("file.bin.part");
+        tokio::fs::write(&part_path, b"partial").await.unwrap();
+        let snapshot = sidecar_for_chunk(42, [9u8; 8], 0, [1u8; 16]);
+        let writer = LazySidecarWriter::new_with_failpoint(
+            sidecar_path.clone(),
+            part_path.clone(),
+            failpoint,
+        )
+        .unwrap();
+        writer.persist_verified_snapshot(SidecarGeneration::new(1), snapshot.clone());
+        writer
+            .finish(SidecarWriterShutdown::Flush)
+            .await
+            .expect_err("injected publication boundary must fail the flush acknowledgement");
+
+        // Before restarting, the failed write may expose no sidecar or one
+        // complete atomically-published generation, never a partial record.
+        let published = tokio::fs::try_exists(&sidecar_path).await.unwrap();
+        assert_eq!(
+            published,
+            failpoint == SidecarFailurePoint::DirectorySync,
+            "unexpected visible publication after {failpoint:?}"
+        );
+        if published {
+            let visible = load_sidecar(&sidecar_path)
+                .await
+                .expect("a visible sidecar after failed durability sync must parse");
+            assert_eq!(visible.verified_chunks, snapshot.verified_chunks);
+        }
+
+        // A fresh worker can publish a new durable generation after each
+        // failure boundary, including after an uncertain directory sync.
+        let restarted = LazySidecarWriter::new(sidecar_path.clone(), part_path)
+            .expect("restart worker should start");
+        restarted.persist_verified_snapshot(SidecarGeneration::new(2), snapshot.clone());
+        restarted
+            .finish(SidecarWriterShutdown::Flush)
+            .await
+            .expect("restarted worker should durably publish a snapshot");
+        let loaded = load_sidecar(&sidecar_path)
+            .await
+            .expect("restart must leave a readable sidecar");
+        assert_eq!(
+            loaded.verified_chunks, snapshot.verified_chunks,
+            "{failpoint:?}"
+        );
+    }
 }

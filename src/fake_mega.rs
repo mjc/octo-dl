@@ -1,6 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::JoinHandle as ThreadJoinHandle;
 
 use aes::Aes128;
@@ -80,6 +81,7 @@ impl FakeMegaFixture {
 pub struct FakeMegaServer {
     origin: Url,
     fixture: FakeMegaFixture,
+    download_failures: Arc<AtomicUsize>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     server_thread: Option<ThreadJoinHandle<io::Result<()>>>,
 }
@@ -97,12 +99,14 @@ impl FakeMegaServer {
         let addr = listener.local_addr()?;
         let origin = Url::parse(&format!("http://{addr}/"))
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let download_failures = Arc::new(AtomicUsize::new(0));
         let state = FakeMegaState {
             handle: fixture.handle.clone(),
             attr: fixture.attr.clone(),
             size: fixture.size,
             ciphertext: fixture.ciphertext.clone(),
             download_base_url: format!("http://{addr}/download/{}", fixture.handle),
+            download_failures: Arc::clone(&download_failures),
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let server_thread = std::thread::spawn(move || -> io::Result<()> {
@@ -129,6 +133,7 @@ impl FakeMegaServer {
         Ok(Self {
             origin,
             fixture,
+            download_failures,
             shutdown_tx: Some(shutdown_tx),
             server_thread: Some(server_thread),
         })
@@ -142,6 +147,11 @@ impl FakeMegaServer {
     #[must_use]
     pub const fn fixture(&self) -> &FakeMegaFixture {
         &self.fixture
+    }
+
+    /// Causes the next download range request to return an HTTP failure.
+    pub fn fail_next_download_request(&self) {
+        self.download_failures.fetch_add(1, Ordering::Release);
     }
 
     /// Stops the fake server and joins its worker thread.
@@ -330,6 +340,7 @@ struct FakeMegaState {
     size: u64,
     ciphertext: Bytes,
     download_base_url: String,
+    download_failures: Arc<AtomicUsize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,6 +395,15 @@ async fn handle_download_range(
 ) -> Response {
     if handle != state.handle {
         return StatusCode::NOT_FOUND.into_response();
+    }
+    if state
+        .download_failures
+        .fetch_update(Ordering::Acquire, Ordering::Relaxed, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+    {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     let Some((offset, length)) = parse_inclusive_range(&range, state.size) else {
         return StatusCode::RANGE_NOT_SATISFIABLE.into_response();

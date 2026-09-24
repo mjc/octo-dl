@@ -76,15 +76,22 @@ pub(crate) fn write_durable_temp_file(
     Ok(())
 }
 
+/// Syncs directory-entry changes where the platform supports directory syncing.
+///
+/// On non-Unix platforms, returns success as a best-effort acknowledgement
+/// because portable directory syncing is not available.
 pub(crate) fn sync_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         let directory = std::fs::File::open(path)?;
         directory.sync_all()?;
+        Ok(())
     }
     #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,11 +166,75 @@ pub trait FileSystem: Send + Sync {
         preserve_existing: bool,
     ) -> std::io::Result<tokio::fs::File>;
 
+    /// Opens a resumable part file without truncating or resizing it.
+    async fn open_part_file_for_resume(&self, path: &Path) -> std::io::Result<tokio::fs::File> {
+        tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .await
+    }
+
+    /// Reads from the already-open part file, so path replacement cannot
+    /// redirect resume validation to a different file.
+    async fn read_exact_at_open_file(
+        &self,
+        file: &tokio::fs::File,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> std::io::Result<()> {
+        let mut file = file.try_clone().await?;
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        file.read_exact(buf).await?;
+        Ok(())
+    }
+
+    /// Returns metadata for the open part file rather than its current path.
+    async fn fingerprint_open_file(&self, file: &tokio::fs::File) -> Option<FileFingerprint> {
+        file.metadata()
+            .await
+            .ok()
+            .map(|metadata| FileFingerprint::from_metadata(&metadata))
+    }
+
+    /// Checks that a path still names the file held by an open handle.
+    async fn path_matches_open_file(
+        &self,
+        path: &Path,
+        file: &tokio::fs::File,
+    ) -> std::io::Result<bool> {
+        let Some(open_file) = self.fingerprint_open_file(file).await else {
+            return Err(std::io::Error::other("could not inspect open part file"));
+        };
+        let Some(path_file) = self.file_fingerprint(path).await else {
+            return Ok(false);
+        };
+
+        #[cfg(unix)]
+        {
+            Ok(open_file.dev == path_file.dev && open_file.ino == path_file.ino)
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(open_file == path_file)
+        }
+    }
+
     /// Reads exactly `buf.len()` bytes at `offset` without trusting file cursor state.
     async fn read_exact_at(&self, path: &Path, offset: u64, buf: &mut [u8]) -> std::io::Result<()>;
 
-    /// Renames a file from one path to another.
+    /// Makes a file visible at another path by renaming it.
     async fn rename_file(&self, from: &Path, to: &Path) -> std::io::Result<()>;
+
+    /// Acknowledges durability of directory-entry changes in this directory.
+    async fn sync_directory(&self, path: &Path) -> std::io::Result<()> {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::fs::sync_directory(&path))
+            .await
+            .map_err(std::io::Error::other)?
+    }
 
     /// Flushes a file's contents and metadata to stable storage.
     async fn sync_file(&self, path: &Path) -> std::io::Result<()>;
@@ -245,7 +316,7 @@ impl TokioFileSystem {
         let candidate = if path.is_absolute() {
             path.to_path_buf()
         } else {
-            std::env::current_dir()?.join(path)
+            root.join(path)
         };
         resolve_within_root(root, &candidate).map_err(|error| {
             if error.kind() == std::io::ErrorKind::PermissionDenied {
@@ -260,6 +331,35 @@ impl TokioFileSystem {
                 error
             }
         })
+    }
+
+    fn resolve_part_file_path(&self, path: &Path) -> std::io::Result<PathBuf> {
+        let Some(root) = &self.download_root else {
+            return Ok(path.to_path_buf());
+        };
+        let root = canonicalize_allow_missing(root)?;
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        let name = candidate.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "part path has no file name",
+            )
+        })?;
+        let parent = candidate.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "part path has no parent")
+        })?;
+        let parent = canonicalize_allow_missing(parent)?;
+        if !parent.starts_with(&root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "part file parent resolves outside configured download root",
+            ));
+        }
+        Ok(parent.join(name))
     }
 }
 
@@ -293,6 +393,32 @@ impl FileSystem for TokioFileSystem {
             .map(|metadata| FileFingerprint::from_metadata(&metadata))
     }
 
+    async fn path_matches_open_file(
+        &self,
+        path: &Path,
+        file: &tokio::fs::File,
+    ) -> std::io::Result<bool> {
+        let path = self.resolve_download_path(path)?;
+        let open_file = file.metadata().await?;
+        let path_file = match tokio::fs::symlink_metadata(path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let open_fingerprint = FileFingerprint::from_metadata(&open_file);
+        let path_fingerprint = FileFingerprint::from_metadata(&path_file);
+
+        #[cfg(unix)]
+        {
+            Ok(open_fingerprint.dev == path_fingerprint.dev
+                && open_fingerprint.ino == path_fingerprint.ino)
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(open_fingerprint == path_fingerprint)
+        }
+    }
+
     async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
         let path = self.resolve_download_path(path)?;
         tokio::fs::create_dir_all(path).await
@@ -311,7 +437,17 @@ impl FileSystem for TokioFileSystem {
         size: u64,
         preserve_existing: bool,
     ) -> std::io::Result<tokio::fs::File> {
-        if let Ok(metadata) = tokio::fs::symlink_metadata(path).await
+        let path = self.resolve_part_file_path(path)?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(!preserve_existing);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW);
+        #[cfg(not(unix))]
+        if let Ok(metadata) = tokio::fs::symlink_metadata(&path).await
             && metadata.file_type().is_symlink()
         {
             return Err(std::io::Error::new(
@@ -319,16 +455,27 @@ impl FileSystem for TokioFileSystem {
                 format!("refusing to open symlink as part file: {}", path.display()),
             ));
         }
-        let path = self.resolve_download_path(path)?;
-        let file = tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(!preserve_existing)
-            .open(&path)
-            .await?;
+        let file = options.open(&path).await?;
         file.set_len(size).await?;
         Ok(file)
+    }
+
+    async fn open_part_file_for_resume(&self, path: &Path) -> std::io::Result<tokio::fs::File> {
+        let path = self.resolve_part_file_path(path)?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW);
+        #[cfg(not(unix))]
+        if let Ok(metadata) = tokio::fs::symlink_metadata(&path).await
+            && metadata.file_type().is_symlink()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("refusing to open symlink as part file: {}", path.display()),
+            ));
+        }
+        options.open(path).await
     }
 
     async fn read_exact_at(&self, path: &Path, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
@@ -343,6 +490,13 @@ impl FileSystem for TokioFileSystem {
         let from = self.resolve_download_path(from)?;
         let to = self.resolve_download_path(to)?;
         tokio::fs::rename(from, to).await
+    }
+
+    async fn sync_directory(&self, path: &Path) -> std::io::Result<()> {
+        let path = self.resolve_download_path(path)?;
+        tokio::task::spawn_blocking(move || crate::fs::sync_directory(&path))
+            .await
+            .map_err(std::io::Error::other)?
     }
 
     async fn sync_file(&self, path: &Path) -> std::io::Result<()> {
@@ -370,6 +524,13 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
+
+    #[cfg(not(unix))]
+    #[test]
+    fn sync_directory_is_best_effort_on_non_unix() {
+        sync_directory(Path::new("."))
+            .expect("non-Unix platforms acknowledge directory sync as best effort");
+    }
 
     #[test]
     fn resolve_within_root_accepts_missing_descendants_and_rejects_sibling_prefixes() {
@@ -500,7 +661,7 @@ mod tests {
             .await
             .expect_err("a pre-existing part symlink must be rejected");
 
-        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.raw_os_error().is_some());
         assert_eq!(std::fs::read(&target).unwrap(), b"keep target");
     }
 
@@ -538,6 +699,24 @@ mod tests {
 
         let fs = TokioFileSystem::new();
         fs.sync_file(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rooted_tokio_fs_rejects_sync_outside_download_root() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("downloads");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fs = TokioFileSystem::new().with_download_root(Some(root.clone()));
+        fs.sync_directory(&root).await.unwrap();
+        let error = fs
+            .sync_directory(&outside)
+            .await
+            .expect_err("directory sync must remain inside the configured root");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     mod property_tests {

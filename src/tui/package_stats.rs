@@ -59,7 +59,7 @@ impl<'a> PackageDisplayStats<'a> {
             _ => {}
         }
 
-        let complete = file.lifecycle.is_terminal();
+        let complete = file.lifecycle.is_complete();
         let visible = if complete {
             file.size
         } else {

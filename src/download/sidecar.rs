@@ -106,6 +106,19 @@ pub(super) async fn delete_sidecar_pair(
         remove_file_if_exists(legacy_json_path).await?;
     }
     remove_file_if_exists(&sidecar_tmp_path(&postcard_path)).await?;
+    let parent = postcard_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let sync_result = tokio::task::spawn_blocking(move || crate::fs::sync_directory(&parent))
+        .await
+        .map_err(io::Error::other)?;
+    match sync_result {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     Ok(())
 }
 

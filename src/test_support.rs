@@ -27,6 +27,7 @@ pub struct CurrentDirGuard {
 }
 
 impl CurrentDirGuard {
+    #[allow(clippy::disallowed_methods)]
     pub fn set(path: &Path) -> Self {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let lock = LOCK
@@ -43,6 +44,7 @@ impl CurrentDirGuard {
 }
 
 impl Drop for CurrentDirGuard {
+    #[allow(clippy::disallowed_methods)]
     fn drop(&mut self) {
         let _ = std::env::set_current_dir(&self.previous);
     }

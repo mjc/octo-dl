@@ -67,6 +67,14 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
+    scan_filesystem_with_root(file_ids, None)
+}
+
+fn scan_filesystem_with_root<I, S>(file_ids: I, root: Option<&Path>) -> FilesystemSnapshot
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let mut snapshot = FilesystemSnapshot::default();
     let mut seen = HashSet::<String>::new();
     for file_id in file_ids {
@@ -74,8 +82,19 @@ where
         if !seen.insert(file_id.clone()) {
             continue;
         }
-        let path = Path::new(&file_id);
-        if let Ok(metadata) = std::fs::metadata(path)
+        let path = match root {
+            Some(root) if !Path::new(&file_id).is_absolute() => {
+                match crate::download::resolve_output_path_under_root(root, &file_id) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        log::warn!("Skipping unsafe restart path {file_id}: {error}");
+                        continue;
+                    }
+                }
+            }
+            _ => Path::new(&file_id).to_path_buf(),
+        };
+        if let Ok(metadata) = std::fs::metadata(&path)
             && metadata.is_file()
         {
             snapshot.complete_files.push(FilesystemFile {
@@ -85,17 +104,18 @@ where
             continue;
         }
 
-        let part_path = crate::download::part_path(&file_id);
+        let rooted_path = path.to_string_lossy();
+        let part_path = crate::download::part_path(&rooted_path);
         let metadata = std::fs::metadata(&part_path)
-            .or_else(|_| std::fs::metadata(crate::download::legacy_part_path(&file_id)));
+            .or_else(|_| std::fs::metadata(crate::download::legacy_part_path(&rooted_path)));
         if let Ok(metadata) = metadata
             && metadata.is_file()
         {
             snapshot.partial_files.push(PartialFileSnapshot {
                 file_id: file_id.clone().into(),
                 bytes: metadata.len(),
-                has_sidecar: crate::download::has_resume_sidecar(&file_id),
-                verified_bytes: crate::download::resume_sidecar_verified_bytes(&file_id)
+                has_sidecar: crate::download::has_resume_sidecar(&rooted_path),
+                verified_bytes: crate::download::resume_sidecar_verified_bytes(&rooted_path)
                     .unwrap_or(0),
             });
         }
@@ -105,9 +125,13 @@ where
 
 #[must_use]
 pub fn build_restart_snapshot(session: &SessionSnapshot) -> RestartSnapshot {
+    let download_root = session.config.path.as_deref().map(Path::new);
     reconcile_restart(
         Some(canonical_restart_session(session.clone())),
-        scan_filesystem(session.iter_files().map(|file| file.path.clone())),
+        scan_filesystem_with_root(
+            session.iter_files().map(|file| file.path.clone()),
+            download_root,
+        ),
         session.urls.iter().map(|entry| entry.url.clone()).collect(),
     )
 }
@@ -384,6 +408,20 @@ mod tests {
         assert!(snapshot.partial_files[0].has_sidecar);
         assert_eq!(snapshot.partial_files[0].verified_bytes, 0);
         assert!(legacy_sidecar.exists());
+    }
+
+    #[test]
+    fn restart_scan_resolves_relative_outputs_under_download_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("downloads");
+        let nested_output = root.join("nested").join("file.bin");
+        std::fs::create_dir_all(nested_output.parent().unwrap()).unwrap();
+        std::fs::write(&nested_output, b"complete").unwrap();
+
+        let snapshot = scan_filesystem_with_root(["nested/file.bin"], Some(&root));
+
+        assert_eq!(snapshot.complete_files.len(), 1);
+        assert_eq!(snapshot.complete_files[0].size, 8);
     }
 
     #[test]

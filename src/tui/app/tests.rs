@@ -36,6 +36,25 @@ fn test_app() -> App {
     App::new(9723, tx, true)
 }
 
+#[test]
+fn rooted_download_paths_resolve_under_configured_root_and_reject_traversal() {
+    let root = tempdir().expect("download root should exist");
+    let mut app = test_app();
+    app.config.config.path = Some(root.path().to_string_lossy().into_owned());
+
+    assert_eq!(
+        app.rooted_download_path("nested/file.bin"),
+        Some(
+            std::fs::canonicalize(root.path())
+                .unwrap()
+                .join("nested/file.bin")
+                .to_string_lossy()
+                .into_owned()
+        )
+    );
+    assert!(app.rooted_download_path("../outside.bin").is_none());
+}
+
 fn resolve_package(
     app: &mut App,
     source_url: &str,
@@ -122,7 +141,7 @@ fn config_update_is_explicitly_next_run_and_survives_core_events() {
         "https://mega.nz/file/config",
         UrlFixtureStatus::Pending,
     )]));
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
 
     app.handle_ui_action(UiAction::UpdateConfig {
         chunks_per_file: Some(9),
@@ -1335,7 +1354,7 @@ fn package_reverify_rejects_when_cancellation_and_verification_cannot_both_be_qu
     let token = CancellationToken::new();
     app.cancellation_tokens
         .insert(file_id.clone(), token.clone());
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
 
     let (url_tx, mut url_rx) = mpsc::channel(1);
     app.url_tx = url_tx;
@@ -1405,7 +1424,7 @@ fn full_request_queue_retries_pending_order_sync_on_the_next_core_tick() {
         })
         .expect("queue filler should be admitted");
     app.url_tx = url_tx;
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
 
     resolve_package(
         &mut app,
@@ -2597,7 +2616,7 @@ fn pending_order_sync_is_immediate_outside_batch() {
     let mut app = test_app();
     let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
     crate::core::model::reset_pending_file_ids_call_count();
 
     resolve_package(
@@ -2621,7 +2640,7 @@ fn pending_order_sync_collapses_for_nested_batches() {
     let mut app = test_app();
     let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
     crate::core::model::reset_pending_file_ids_call_count();
 
     app.with_deferred_batch_updates(|app| {
@@ -2675,7 +2694,7 @@ fn pending_order_sync_skips_noop_batches() {
     let mut app = test_app();
     let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
     resolve_package(
         &mut app,
         "https://mega.nz/folder/root",
@@ -3316,6 +3335,195 @@ fn downloading_file_can_reach_full_progress_before_complete_event() {
     assert_eq!(file.downloaded, 100);
     assert_eq!(file.status, FileStatus::Complete);
     assert_eq!(app.total_downloaded, 100);
+}
+
+#[test]
+fn duplicate_terminal_events_and_progress_after_completion_are_ignored() {
+    let mut app = test_app();
+    let file_id = crate::core::FileId::from("file-id");
+    app.ensure_core_file(
+        &file_id,
+        "https://mega.nz/file/root",
+        "file-id",
+        100,
+        crate::core::FileAccounting::CurrentRun,
+    );
+    let attempt_id = crate::tui::event::DownloadAttemptId::new(0);
+    app.handle_file_start_event(file_id.clone(), 100, attempt_id);
+    app.handle_file_progress_event(
+        file_id.clone(),
+        crate::core::ProgressDelta {
+            total_bytes_delta: 40,
+            network_bytes_delta: 40,
+        },
+        attempt_id,
+    );
+    app.handle_file_complete_event(file_id.clone(), attempt_id);
+
+    app.handle_file_error_event(file_id.clone(), "late failure".to_string(), attempt_id);
+    app.handle_file_cancelled_event(file_id.clone(), attempt_id);
+    app.handle_file_progress_event(
+        file_id.clone(),
+        crate::core::ProgressDelta {
+            total_bytes_delta: 30,
+            network_bytes_delta: 30,
+        },
+        attempt_id,
+    );
+
+    let file = app
+        .core_state
+        .files
+        .get(&file_id)
+        .expect("file should remain tracked");
+    assert_eq!(file.lifecycle, FileLifecycle::Complete);
+    assert_eq!(file.progress.visible_completed_bytes, 100);
+    assert_eq!(file.progress.downloaded_network_bytes, 40);
+}
+
+#[test]
+fn failed_attempt_ignores_late_completion_and_progress() {
+    let mut app = test_app();
+    let file_id = crate::core::FileId::from("failed-file");
+    app.ensure_core_file(
+        &file_id,
+        "https://mega.nz/file/root",
+        "failed-file",
+        100,
+        crate::core::FileAccounting::CurrentRun,
+    );
+    let attempt_id = crate::tui::event::DownloadAttemptId::new(0);
+    app.handle_file_start_event(file_id.clone(), 100, attempt_id);
+    app.handle_file_progress_event(
+        file_id.clone(),
+        crate::core::ProgressDelta {
+            total_bytes_delta: 40,
+            network_bytes_delta: 40,
+        },
+        attempt_id,
+    );
+    app.handle_file_error_event(file_id.clone(), "transfer failed".to_string(), attempt_id);
+
+    let failed = app
+        .core_state
+        .files
+        .get(&file_id)
+        .expect("failed file should remain tracked")
+        .clone();
+    app.handle_file_complete_event(file_id.clone(), attempt_id);
+    app.handle_file_progress_event(
+        file_id.clone(),
+        crate::core::ProgressDelta {
+            total_bytes_delta: 20,
+            network_bytes_delta: 20,
+        },
+        attempt_id,
+    );
+
+    let after_late_events = app
+        .core_state
+        .files
+        .get(&file_id)
+        .expect("failed file should remain tracked");
+    assert_eq!(after_late_events.lifecycle, failed.lifecycle);
+    assert_eq!(after_late_events.progress, failed.progress);
+}
+
+#[test]
+fn same_attempt_late_start_does_not_resurrect_failed_file() {
+    let mut app = test_app();
+    let file_id = crate::core::FileId::from("failed-start-file");
+    app.ensure_core_file(
+        &file_id,
+        "https://mega.nz/file/root",
+        "failed-start-file",
+        100,
+        crate::core::FileAccounting::CurrentRun,
+    );
+    let attempt_id = crate::tui::event::DownloadAttemptId::new(0);
+    app.handle_file_start_event(file_id.clone(), 100, attempt_id);
+    app.handle_file_error_event(file_id.clone(), "transfer failed".to_string(), attempt_id);
+
+    let failed = app
+        .core_state
+        .files
+        .get(&file_id)
+        .expect("failed file should remain tracked")
+        .clone();
+    app.handle_file_start_event(file_id.clone(), 200, attempt_id);
+
+    let after_late_start = app
+        .core_state
+        .files
+        .get(&file_id)
+        .expect("failed file should remain tracked");
+    assert_eq!(after_late_start.lifecycle, failed.lifecycle);
+    assert_eq!(after_late_start.progress, failed.progress);
+    assert_eq!(after_late_start.size, failed.size);
+}
+
+#[test]
+fn same_attempt_late_resume_validation_start_is_ignored_after_terminal_state() {
+    let mut app = test_app();
+    let completed_id = crate::core::FileId::from("completed-file");
+    app.ensure_core_file(
+        &completed_id,
+        "https://mega.nz/file/root",
+        "completed-file",
+        100,
+        crate::core::FileAccounting::CurrentRun,
+    );
+    app.apply_core_event(CoreEvent::FileCompleted {
+        file_id: completed_id.clone(),
+    });
+    let attempt_id = crate::tui::event::DownloadAttemptId::new(0);
+    let completed = app
+        .core_state
+        .files
+        .get(&completed_id)
+        .expect("completed file should remain tracked")
+        .clone();
+
+    app.handle_resume_validation_started_event(completed_id.clone(), attempt_id);
+
+    let after_late_validation = app
+        .core_state
+        .files
+        .get(&completed_id)
+        .expect("completed file should remain tracked");
+    assert_eq!(after_late_validation.lifecycle, completed.lifecycle);
+    assert_eq!(after_late_validation.progress, completed.progress);
+    assert!(!app.verifying_files.contains(&completed_id));
+    assert!(!app.verification_inflight_files.contains(&completed_id));
+
+    let failed_id = crate::core::FileId::from("failed-validation-file");
+    app.ensure_core_file(
+        &failed_id,
+        "https://mega.nz/file/root",
+        "failed-validation-file",
+        100,
+        crate::core::FileAccounting::CurrentRun,
+    );
+    app.handle_file_start_event(failed_id.clone(), 100, attempt_id);
+    app.handle_file_error_event(failed_id.clone(), "transfer failed".to_string(), attempt_id);
+    let failed = app
+        .core_state
+        .files
+        .get(&failed_id)
+        .expect("failed file should remain tracked")
+        .clone();
+
+    app.handle_resume_validation_started_event(failed_id.clone(), attempt_id);
+
+    let after_late_validation = app
+        .core_state
+        .files
+        .get(&failed_id)
+        .expect("failed file should remain tracked");
+    assert_eq!(after_late_validation.lifecycle, failed.lifecycle);
+    assert_eq!(after_late_validation.progress, failed.progress);
+    assert!(!app.verifying_files.contains(&failed_id));
+    assert!(!app.verification_inflight_files.contains(&failed_id));
 }
 
 #[test]
@@ -3985,7 +4193,7 @@ fn drain_download_events_collapses_visible_syncs_for_batched_files() {
     crate::core::model::reset_pending_file_ids_call_count();
     let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
     app.core_state
         .url_order
         .push("https://mega.nz/folder/resolved".to_string());

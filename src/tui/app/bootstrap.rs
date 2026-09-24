@@ -174,7 +174,7 @@ impl App {
             token_rx,
             token_tx: Some(token_tx),
             client_rx: None,
-            download_task_running: false,
+            download_task: super::runtime::DownloadTaskLifecycle::new(),
             cancellation_tokens: FileIdMap::default(),
             shutdown_pending_files: FileIdSet::default(),
             shutdown_blocking_verifications: FileIdSet::default(),
@@ -309,7 +309,7 @@ impl App {
     }
 
     pub(crate) fn schedule_auto_login(&mut self, fallback: NoCredentialsFallback) {
-        if self.authenticated || self.login.logging_in || self.download_task_running {
+        if self.authenticated || self.login.logging_in || self.download_task.has_started() {
             return;
         }
         self.deferred_login_fallback = Some(match (self.deferred_login_fallback, fallback) {
@@ -322,7 +322,7 @@ impl App {
     }
 
     pub(crate) fn poll_deferred_auto_login(&mut self) -> bool {
-        if self.authenticated || self.login.logging_in || self.download_task_running {
+        if self.authenticated || self.login.logging_in || self.download_task.has_started() {
             self.deferred_login_fallback = None;
             self.deferred_login_deadline = None;
             return false;
@@ -620,9 +620,6 @@ impl App {
                 None => error,
             })?;
         if let Some(ref download_dir) = download_root {
-            std::env::set_current_dir(download_dir).map_err(|error| {
-                path_io_error("Failed to change directory to", download_dir, error)
-            })?;
             log::info!("Download directory: {}", download_dir.display());
         }
 

@@ -108,7 +108,7 @@ async fn revalidate_sidecar_trusts_matching_part_fingerprint_without_reread() {
 }
 
 #[tokio::test]
-async fn revalidate_sidecar_trusts_matching_fingerprint_without_allocated_bytes() {
+async fn revalidate_sidecar_rejects_incomplete_fingerprint_without_disk_match() {
     let part = PathBuf::from("file.bin.part");
     let file_size = 300_000_u64;
     let expected = [9u8; 8];
@@ -129,9 +129,9 @@ async fn revalidate_sidecar_trusts_matching_fingerprint_without_allocated_bytes(
         .await
         .unwrap();
 
-    assert_eq!(validation.trusted_count, 1);
-    assert_eq!(validation.trusted_bytes, first.length);
-    assert_eq!(validation.trusted_chunks[0], Some([4u8; 16]));
+    assert_eq!(validation.trusted_count, 0);
+    assert_eq!(validation.trusted_bytes, 0);
+    assert_eq!(validation.trusted_chunks[0], None);
 }
 
 #[tokio::test]
@@ -252,7 +252,7 @@ async fn revalidate_sidecar_trusts_matching_fingerprint_even_with_low_allocation
 }
 
 #[tokio::test]
-async fn revalidate_sidecar_trusts_multiple_chunks_without_allocated_bytes() {
+async fn revalidate_sidecar_rejects_multiple_chunks_with_incomplete_fingerprint() {
     let part = PathBuf::from("file.bin.part");
     let file_size = 300_000_u64;
     let expected = [9u8; 8];
@@ -288,10 +288,10 @@ async fn revalidate_sidecar_trusts_multiple_chunks_without_allocated_bytes() {
         .await
         .unwrap();
 
-    assert_eq!(validation.trusted_count, 2);
-    assert_eq!(validation.trusted_bytes, first.length + second.length);
-    assert_eq!(validation.trusted_chunks[0], Some([4u8; 16]));
-    assert_eq!(validation.trusted_chunks[1], Some([5u8; 16]));
+    assert_eq!(validation.trusted_count, 0);
+    assert_eq!(validation.trusted_bytes, 0);
+    assert_eq!(validation.trusted_chunks[0], None);
+    assert_eq!(validation.trusted_chunks[1], None);
 }
 
 #[tokio::test]
@@ -866,7 +866,7 @@ async fn revalidate_sidecar_revalidates_when_modified_time_and_allocated_bytes_c
 }
 
 #[tokio::test]
-async fn revalidate_sidecar_fast_trusts_when_saved_fingerprint_lacks_device_and_inode() {
+async fn revalidate_sidecar_disk_validates_when_saved_fingerprint_lacks_device_and_inode() {
     let dir = tempfile::tempdir().unwrap();
     let part = dir.path().join("file.bin.part");
     let file_size = 300_000_u64;
@@ -896,6 +896,12 @@ async fn revalidate_sidecar_fast_trusts_when_saved_fingerprint_lacks_device_and_
         .unwrap();
 
     assert_eq!(validation.trusted_count, 1);
+    assert_eq!(
+        progress
+            .validation_starts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
     assert_eq!(validation.trusted_bytes, second.length);
     assert_eq!(
         validation.trusted_chunks[usize_from_u32(second.index)],
@@ -909,10 +915,12 @@ async fn revalidate_sidecar_fast_trusts_when_saved_fingerprint_lacks_device_and_
         progress.network.load(std::sync::atomic::Ordering::SeqCst),
         0
     );
-    assert_eq!(progress.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(progress.calls.load(std::sync::atomic::Ordering::SeqCst) > 1);
     assert_eq!(
         progress.max_delta.load(std::sync::atomic::Ordering::SeqCst),
-        second.length
+        second
+            .length
+            .min(u64::try_from(REVALIDATION_BUFFER_BYTES).unwrap())
     );
 }
 

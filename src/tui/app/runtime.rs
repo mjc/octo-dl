@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use sysinfo::{ProcessesToUpdate, System};
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     DownloadConfig,
@@ -21,6 +22,124 @@ use super::{App, DownloadEvent, FileEntry, FileIdSet, FileStatus, UiAction};
 const MAX_DOWNLOAD_EVENTS_PER_TICK: usize = 256;
 const MAX_TOKEN_MESSAGES_PER_TICK: usize = 256;
 const HEADLESS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::tui) enum DownloadTaskState {
+    NotStarted,
+    Running,
+    Stopping,
+    Stopped,
+    Failed(String),
+}
+
+struct OwnedDownloadTask {
+    cancellation: CancellationToken,
+    join: tokio::task::JoinHandle<()>,
+}
+
+pub(in crate::tui) struct DownloadTaskLifecycle {
+    state: DownloadTaskState,
+    task: Option<OwnedDownloadTask>,
+}
+
+impl DownloadTaskLifecycle {
+    pub(super) const fn new() -> Self {
+        Self {
+            state: DownloadTaskState::NotStarted,
+            task: None,
+        }
+    }
+
+    pub(super) const fn running(
+        cancellation: CancellationToken,
+        join: tokio::task::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            state: DownloadTaskState::Running,
+            task: Some(OwnedDownloadTask { cancellation, join }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_running_for_test(&mut self) {
+        self.state = DownloadTaskState::Running;
+    }
+
+    pub(super) fn has_started(&self) -> bool {
+        self.state != DownloadTaskState::NotStarted
+    }
+
+    pub(super) fn is_finished(&self) -> bool {
+        self.task
+            .as_ref()
+            .is_some_and(|task| task.join.is_finished())
+    }
+
+    pub(super) fn request_stop(&mut self) {
+        if self.state != DownloadTaskState::Running {
+            return;
+        }
+        if let Some(task) = &self.task {
+            task.cancellation.cancel();
+        }
+        self.state = DownloadTaskState::Stopping;
+    }
+
+    pub(super) async fn await_stop(&mut self) -> Result<(), String> {
+        if self.task.is_some() {
+            let result = {
+                let task = self.task.as_mut().expect("task presence checked");
+                (&mut task.join).await
+            };
+            self.task = None;
+            match result {
+                Ok(()) => {
+                    self.state = DownloadTaskState::Stopped;
+                    Ok(())
+                }
+                Err(error) => {
+                    let error = format!("download task failed: {error}");
+                    self.state = DownloadTaskState::Failed(error.clone());
+                    Err(error)
+                }
+            }
+        } else if self.state == DownloadTaskState::NotStarted {
+            self.state = DownloadTaskState::Stopped;
+            Ok(())
+        } else {
+            match &self.state {
+                DownloadTaskState::Stopped => Ok(()),
+                DownloadTaskState::Failed(error) => Err(error.clone()),
+                _ => Err("download task has no join handle".to_string()),
+            }
+        }
+    }
+
+    pub(super) async fn abort_and_reap(&mut self) -> Result<(), String> {
+        if let Some(task) = self.task.take() {
+            task.cancellation.cancel();
+            task.join.abort();
+            match task.join.await {
+                Ok(()) => {
+                    self.state = DownloadTaskState::Stopped;
+                    Ok(())
+                }
+                Err(error) if error.is_cancelled() => {
+                    let error = "download task did not acknowledge shutdown before deadline";
+                    self.state = DownloadTaskState::Failed(error.to_string());
+                    Err(error.to_string())
+                }
+                Err(error) => {
+                    let error = format!("download task failed while being stopped: {error}");
+                    self.state = DownloadTaskState::Failed(error.clone());
+                    Err(error)
+                }
+            }
+        } else {
+            self.await_stop().await
+        }
+    }
+}
 
 fn progress_summary_pct(
     files_total: usize,
@@ -88,7 +207,34 @@ impl App {
             token.cancel();
             self.track_shutdown_pending_file(&id);
         }
+        self.download_task.request_stop();
         !self.shutdown_pending_files.is_empty()
+    }
+
+    pub(crate) async fn await_download_task_stop(&mut self, timeout: Duration) {
+        let result = match tokio::time::timeout(timeout, self.download_task.await_stop()).await {
+            Ok(result) => result,
+            Err(_) => self.download_task.abort_and_reap().await,
+        };
+        self.report_download_task_failure(result);
+    }
+
+    pub(crate) async fn poll_download_task(&mut self) {
+        if self.download_task.is_finished() {
+            let result = self.download_task.await_stop().await;
+            self.report_download_task_failure(result);
+        }
+    }
+
+    fn report_download_task_failure(&mut self, result: Result<(), String>) {
+        if let Err(error) = result {
+            log::error!("{error}");
+            self.status = format!("Download task error: {error}");
+            let _ = self.event_tx.send(DownloadEvent::ScopeError {
+                scope: "download task".to_string(),
+                error,
+            });
+        }
     }
 
     fn flush_pending_progress_events(
@@ -180,7 +326,7 @@ impl App {
             .expect("start_download_task called twice");
 
         self.ensure_download_session(&config);
-        self.download_task_running = true;
+        let task_cancellation = CancellationToken::new();
 
         let channels = super::super::event::DownloadChannels {
             client_rx: self.client_rx.take(),
@@ -188,11 +334,13 @@ impl App {
             url_rx,
             token_tx,
             pause_rx,
+            task_cancellation: task_cancellation.clone(),
         };
 
-        tokio::spawn(async move {
+        let join = tokio::spawn(async move {
             super::super::download::run_download(channels, config).await;
         });
+        self.download_task = DownloadTaskLifecycle::running(task_cancellation, join);
     }
 
     fn ensure_download_session(&mut self, config: &DownloadConfig) {
@@ -496,12 +644,16 @@ impl App {
     fn handle_token_message(&mut self, msg: super::TokenMessage) {
         let file_id = msg.file_id;
         let token = msg.token;
-        if self
+        let current_attempt = self
+            .file_attempt_ids
+            .get(&file_id)
+            .is_some_and(|attempt_id| *attempt_id == msg.attempt_id);
+        let lifecycle_accepts_update = self
             .core_state
             .files
             .get(&file_id)
-            .is_some_and(|file| file.lifecycle.is_terminal() || file.lifecycle.is_failed())
-        {
+            .is_some_and(|file| file.lifecycle.accepts_download_attempt_update());
+        if !current_attempt || !lifecycle_accepts_update {
             token.cancel();
             return;
         }
@@ -710,6 +862,7 @@ impl App {
                 self.drain_download_events(download_rx) | self.drain_ui_actions(action_rx);
             self.drain_token_messages();
             self.poll_session_persistence();
+            self.poll_download_task().await;
             if shutting_down && self.shutdown_pending_files.is_empty() {
                 break;
             }
@@ -723,6 +876,11 @@ impl App {
             }
         }
         self.flush_session_persistence();
+        self.download_task.request_stop();
+        self.await_download_task_stop(shutdown_timeout).await;
+        while let Ok(event) = download_rx.try_recv() {
+            self.handle_download_event(event);
+        }
     }
 }
 
@@ -737,6 +895,136 @@ mod tests {
     };
     use tempfile::tempdir;
     use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn reset_attempt_token_is_accepted_before_file_start() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
+        let mut app = App::new(9723, event_tx, true);
+        let file_id = FileId::from("episode.bin");
+        let source_url = "https://mega.nz/folder/root";
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", source_url),
+                source_url: source_url.to_string(),
+                key: PackageKey::new(source_url),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.clone(),
+                    path: file_id.to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        let attempt_id = crate::tui::event::DownloadAttemptId::new(1);
+        app.file_attempt_ids.insert(file_id.clone(), attempt_id);
+        app.reset_pending_files.insert(file_id.clone());
+
+        let token = CancellationToken::new();
+        app.handle_token_message(TokenMessage {
+            file_id: file_id.clone(),
+            attempt_id,
+            token: token.clone(),
+        });
+
+        assert!(!token.is_cancelled());
+        assert!(app.cancellation_tokens.contains_key(&file_id));
+    }
+
+    #[tokio::test]
+    async fn download_task_stop_waits_for_cleanup_acknowledgement() {
+        let (cleanup_started_tx, cleanup_started_rx) = oneshot::channel();
+        let (finish_cleanup_tx, finish_cleanup_rx) = oneshot::channel();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let join = tokio::spawn(async move {
+            task_cancellation.cancelled().await;
+            cleanup_started_tx.send(()).unwrap();
+            finish_cleanup_rx.await.unwrap();
+        });
+        let mut task = DownloadTaskLifecycle::running(cancellation, join);
+
+        task.request_stop();
+        cleanup_started_rx.await.unwrap();
+        assert!(matches!(task.state, DownloadTaskState::Stopping));
+
+        finish_cleanup_tx.send(()).unwrap();
+        task.await_stop().await.unwrap();
+
+        assert!(matches!(task.state, DownloadTaskState::Stopped));
+    }
+
+    #[tokio::test]
+    async fn download_task_stop_failure_is_retained_and_reportable() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let join = tokio::spawn(async { panic!("cleanup failed") });
+        let mut task = DownloadTaskLifecycle::running(cancellation, join);
+
+        task.request_stop();
+        let error = task.await_stop().await.unwrap_err();
+
+        assert!(error.contains("cleanup failed"));
+        assert!(matches!(task.state, DownloadTaskState::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn timed_out_download_task_stop_is_aborted_and_reaped() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let join = tokio::spawn(std::future::pending::<()>());
+        let mut task = DownloadTaskLifecycle::running(cancellation, join);
+
+        task.request_stop();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), task.await_stop())
+                .await
+                .is_err()
+        );
+        let error = task.abort_and_reap().await.unwrap_err();
+
+        assert!(error.contains("did not acknowledge shutdown"));
+        assert!(matches!(task.state, DownloadTaskState::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn failed_download_task_stop_is_visible_to_the_app() {
+        let (event_tx, mut event_rx) = DownloadEventSender::channel();
+        let mut app = App::new(9723, event_tx, true);
+        let join = tokio::spawn(async { panic!("cleanup failed") });
+        app.download_task =
+            DownloadTaskLifecycle::running(tokio_util::sync::CancellationToken::new(), join);
+
+        app.download_task.request_stop();
+        app.await_download_task_stop(Duration::from_secs(1)).await;
+
+        assert!(app.status.contains("cleanup failed"));
+        let event = event_rx.recv().await.expect("shutdown failure is emitted");
+        assert!(
+            matches!(event, DownloadEvent::ScopeError { scope, .. } if scope == "download task")
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_download_task_failure_is_reported_before_shutdown() {
+        let (event_tx, mut event_rx) = DownloadEventSender::channel();
+        let mut app = App::new(9723, event_tx, true);
+        let join = tokio::spawn(async { panic!("download supervisor failed") });
+        app.download_task =
+            DownloadTaskLifecycle::running(tokio_util::sync::CancellationToken::new(), join);
+
+        while !app.download_task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        app.poll_download_task().await;
+
+        assert!(app.status.contains("download supervisor failed"));
+        assert!(app.download_task.has_started());
+        let event = event_rx.recv().await.expect("task failure is emitted");
+        assert!(
+            matches!(event, DownloadEvent::ScopeError { scope, .. } if scope == "download task")
+        );
+    }
 
     fn shared_snapshot(shared_state: &crate::tui::app::SharedAppState) -> DownloadDashboardState {
         crate::tui::dashboard::dashboard_state_from_postcard(
@@ -892,6 +1180,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn headless_shutdown_waits_for_download_task_cleanup_acknowledgement() {
+        let (event_tx, mut download_rx) = DownloadEventSender::channel();
+        let (_action_tx, mut action_rx) = mpsc::channel(64);
+        let mut app = App::new(9723, event_tx, true);
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let (cleanup_started_tx, cleanup_started_rx) = oneshot::channel();
+        let (finish_cleanup_tx, finish_cleanup_rx) = oneshot::channel();
+        let join = tokio::spawn(async move {
+            task_cancellation.cancelled().await;
+            cleanup_started_tx.send(()).unwrap();
+            finish_cleanup_rx.await.unwrap();
+        });
+        app.download_task = DownloadTaskLifecycle::running(cancellation, join);
+
+        let handle = tokio::spawn(async move {
+            app.run_headless_until_shutdown(
+                &mut download_rx,
+                &mut action_rx,
+                None,
+                std::future::ready(()),
+            )
+            .await;
+            app
+        });
+
+        cleanup_started_rx.await.unwrap();
+        assert_task_stays_pending(&handle).await;
+        finish_cleanup_tx.send(()).unwrap();
+        let app = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("shutdown waits for task cleanup, then completes")
+            .expect("headless runtime joins");
+
+        assert!(matches!(
+            app.download_task.state,
+            DownloadTaskState::Stopped
+        ));
+    }
+
+    #[tokio::test]
     async fn headless_shutdown_forces_completion_after_workers_miss_deadline() {
         let (event_tx, mut download_rx) = DownloadEventSender::channel();
         let (_action_tx, mut action_rx) = mpsc::channel(64);
@@ -961,6 +1290,7 @@ mod tests {
             let _ = token_tx
                 .send(TokenMessage {
                     file_id: sent_id.clone(),
+                    attempt_id: crate::tui::event::DownloadAttemptId::new(0),
                     token: sent_token,
                 })
                 .await;
@@ -1001,6 +1331,77 @@ mod tests {
         assert!(app.shutdown_pending_files.is_empty());
         assert!(app.cancellation_tokens.is_empty());
         assert!(app.paused);
+    }
+
+    #[tokio::test]
+    async fn delayed_token_and_result_from_deleted_attempt_cannot_affect_readded_file() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
+        let mut app = App::new(9723, event_tx, true);
+        let file_id = FileId::from("episode.bin");
+        let source_url = "https://mega.nz/folder/root";
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", source_url),
+                source_url: source_url.to_string(),
+                key: PackageKey::new(source_url),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.clone(),
+                    path: file_id.to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        app.handle_file_start_event(
+            file_id.clone(),
+            128,
+            crate::tui::event::DownloadAttemptId::new(0),
+        );
+        let old_token = tokio_util::sync::CancellationToken::new();
+
+        app.perform_delete_file_action(&file_id);
+        app.ensure_core_file(
+            &file_id,
+            source_url,
+            file_id.as_str(),
+            128,
+            crate::core::FileAccounting::CurrentRun,
+        );
+        app.handle_file_start_event(
+            file_id.clone(),
+            128,
+            crate::tui::event::DownloadAttemptId::new(1),
+        );
+
+        let current_token = tokio_util::sync::CancellationToken::new();
+        app.handle_token_message(TokenMessage {
+            file_id: file_id.clone(),
+            attempt_id: crate::tui::event::DownloadAttemptId::new(1),
+            token: current_token.clone(),
+        });
+        app.handle_token_message(TokenMessage {
+            file_id: file_id.clone(),
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
+            token: old_token.clone(),
+        });
+
+        assert!(old_token.is_cancelled());
+        assert!(!current_token.is_cancelled());
+        assert!(app.cancellation_tokens.contains_key(&file_id));
+
+        app.handle_file_complete_event(
+            file_id.clone(),
+            crate::tui::event::DownloadAttemptId::new(0),
+        );
+        let file = app
+            .core_state
+            .files
+            .get(&file_id)
+            .expect("file should remain tracked");
+        assert_eq!(file.lifecycle, crate::core::FileLifecycle::Downloading);
     }
 
     #[tokio::test]
@@ -1047,6 +1448,7 @@ mod tests {
             let _ = token_tx
                 .send(TokenMessage {
                     file_id: sent_id.clone(),
+                    attempt_id: crate::tui::event::DownloadAttemptId::new(0),
                     token: sent_token,
                 })
                 .await;
@@ -1676,6 +2078,7 @@ mod tests {
 
         app.handle_token_message(super::super::TokenMessage {
             file_id: file_id.clone(),
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
             token: tokio_util::sync::CancellationToken::new(),
         });
 

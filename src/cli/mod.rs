@@ -201,40 +201,25 @@ fn resume_mfa(saved: Option<String>, fresh: Option<String>) -> Result<Option<Str
     }
 }
 
-struct DownloadRootGuard {
-    previous_dir: PathBuf,
-}
-
-impl DownloadRootGuard {
-    fn enter(config: &mut DownloadConfig) -> crate::Result<Option<Self>> {
-        let Some(root) = config.path.as_deref() else {
-            return Ok(None);
-        };
-        let previous_dir = std::env::current_dir()?;
-        let requested = PathBuf::from(root);
-        let absolute_root = crate::config::prepare_download_root(Some(&requested))
-            .map_err(|error| {
-                crate::Error::Download(format!(
-                    "cannot create download root {}: {error}",
-                    previous_dir.join(&requested).display()
-                ))
-            })?
-            .expect("a configured download root produces a path");
-        std::env::set_current_dir(&absolute_root).map_err(|error| {
+fn prepare_cli_download_root(config: &mut DownloadConfig) -> crate::Result<()> {
+    let Some(root) = config.path.as_deref() else {
+        return Ok(());
+    };
+    let requested = PathBuf::from(root);
+    let display_path = if requested.is_absolute() {
+        requested.clone()
+    } else {
+        std::env::current_dir()?.join(&requested)
+    };
+    let absolute_root =
+        crate::config::prepare_download_root(Some(&requested)).map_err(|error| {
             crate::Error::Download(format!(
-                "cannot enter download root {}: {error}",
-                absolute_root.display()
+                "cannot create download root {}: {error}",
+                display_path.display()
             ))
         })?;
-        config.path = Some(absolute_root.to_string_lossy().into_owned());
-        Ok(Some(Self { previous_dir }))
-    }
-}
-
-impl Drop for DownloadRootGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.previous_dir);
-    }
+    config.path = absolute_root.map(|path| path.to_string_lossy().into_owned());
+    Ok(())
 }
 
 // ============================================================================
@@ -886,7 +871,7 @@ pub async fn run() -> crate::Result<()> {
 
     // Shared downloader owns collection and all payload writes.
     let mut fresh_download_config = effective_resume_config(&config.download_config, &config);
-    let _download_root = DownloadRootGuard::enter(&mut fresh_download_config)?;
+    prepare_cli_download_root(&mut fresh_download_config)?;
     let downloader = crate::Downloader::new(client, fresh_download_config.clone());
     let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
@@ -1024,7 +1009,7 @@ async fn resume_session(
     credential_key: &CredentialKey,
 ) -> crate::Result<()> {
     let mut resume_config = effective_resume_config(&session.config, config);
-    let _download_root = DownloadRootGuard::enter(&mut resume_config)?;
+    prepare_cli_download_root(&mut resume_config)?;
     session.config.clone_from(&resume_config);
     let restart = build_restart_snapshot(&session);
     // Decrypt credentials
@@ -1423,7 +1408,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_root_guard_enters_the_configured_root_and_restores_cwd() {
+    fn configured_download_root_is_absolute_without_changing_cwd() {
         let temp = tempfile::tempdir().unwrap();
         let _cwd = CurrentDirGuard::set(temp.path());
         let root = temp.path().join("saved-root");
@@ -1431,20 +1416,14 @@ mod tests {
             path: Some("saved-root".into()),
             ..DownloadConfig::default()
         };
-        {
-            let _root = DownloadRootGuard::enter(&mut config).unwrap();
-            assert_eq!(
-                std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap(),
-                std::fs::canonicalize(&root).unwrap()
-            );
-            assert_eq!(
-                std::fs::canonicalize(config.path.as_deref().unwrap()).unwrap(),
-                std::fs::canonicalize(&root).unwrap()
-            );
-        }
+        prepare_cli_download_root(&mut config).unwrap();
         assert_eq!(
             std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap(),
             std::fs::canonicalize(temp.path()).unwrap()
+        );
+        assert_eq!(
+            std::fs::canonicalize(config.path.as_deref().unwrap()).unwrap(),
+            std::fs::canonicalize(&root).unwrap()
         );
     }
 

@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::time::Instant;
 
 use indexmap::IndexMap;
@@ -20,50 +21,61 @@ use crate::tui::event::DownloadRequest;
 // internal-only marker in the existing pending-effect map. It is removed
 // before a ResumeFileIds request is constructed.
 const fn core_event_requires_visible_sync(event: &CoreEvent) -> bool {
-    if let CoreEvent::FileProgress { .. } = event {
-        return false;
+    match event {
+        CoreEvent::FileProgress { .. }
+        | CoreEvent::FileReuseDetected { .. }
+        | CoreEvent::Tick { .. } => false,
+        CoreEvent::UrlSubmitted { .. }
+        | CoreEvent::UrlResolved { .. }
+        | CoreEvent::UrlFailed { .. }
+        | CoreEvent::PackageResolved { .. }
+        | CoreEvent::FileQueued { .. }
+        | CoreEvent::FileStarted { .. }
+        | CoreEvent::FileResumeStarted { .. }
+        | CoreEvent::FileVerificationStarted { .. }
+        | CoreEvent::FileVerificationProgress { .. }
+        | CoreEvent::FileVerificationCompleted { .. }
+        | CoreEvent::FileResumeReverified { .. }
+        | CoreEvent::FileCompleted { .. }
+        | CoreEvent::FileFailed { .. }
+        | CoreEvent::FileCancelled { .. }
+        | CoreEvent::FileDeleted { .. }
+        | CoreEvent::PackageDeleted { .. }
+        | CoreEvent::FileRetryRequested { .. }
+        | CoreEvent::FileResetRequested { .. }
+        | CoreEvent::PackageMoveRequested { .. }
+        | CoreEvent::FileMoveRequested { .. }
+        | CoreEvent::RestartReconciled { .. } => true,
     }
-    if let CoreEvent::FileReuseDetected { .. } = event {
-        return false;
-    }
-    if let CoreEvent::Tick { .. } = event {
-        return false;
-    }
-    true
 }
 
 const fn core_event_requires_pending_sync(event: &CoreEvent) -> bool {
-    if let CoreEvent::PackageResolved { .. } = event {
-        return true;
+    match event {
+        CoreEvent::PackageResolved { .. }
+        | CoreEvent::FileQueued { .. }
+        | CoreEvent::FileCancelled { .. }
+        | CoreEvent::FileDeleted { .. }
+        | CoreEvent::PackageDeleted { .. }
+        | CoreEvent::FileRetryRequested { .. }
+        | CoreEvent::FileResetRequested { .. }
+        | CoreEvent::PackageMoveRequested { .. }
+        | CoreEvent::FileMoveRequested { .. }
+        | CoreEvent::RestartReconciled { .. } => true,
+        CoreEvent::UrlSubmitted { .. }
+        | CoreEvent::UrlResolved { .. }
+        | CoreEvent::UrlFailed { .. }
+        | CoreEvent::FileStarted { .. }
+        | CoreEvent::FileResumeStarted { .. }
+        | CoreEvent::FileProgress { .. }
+        | CoreEvent::FileVerificationStarted { .. }
+        | CoreEvent::FileVerificationProgress { .. }
+        | CoreEvent::FileVerificationCompleted { .. }
+        | CoreEvent::FileReuseDetected { .. }
+        | CoreEvent::FileResumeReverified { .. }
+        | CoreEvent::FileCompleted { .. }
+        | CoreEvent::FileFailed { .. }
+        | CoreEvent::Tick { .. } => false,
     }
-    if let CoreEvent::FileQueued { .. } = event {
-        return true;
-    }
-    if let CoreEvent::FileCancelled { .. } = event {
-        return true;
-    }
-    if let CoreEvent::FileDeleted { .. } = event {
-        return true;
-    }
-    if let CoreEvent::PackageDeleted { .. } = event {
-        return true;
-    }
-    if let CoreEvent::FileRetryRequested { .. } = event {
-        return true;
-    }
-    if let CoreEvent::FileResetRequested { .. } = event {
-        return true;
-    }
-    if let CoreEvent::PackageMoveRequested { .. } = event {
-        return true;
-    }
-    if let CoreEvent::FileMoveRequested { .. } = event {
-        return true;
-    }
-    if let CoreEvent::RestartReconciled { .. } = event {
-        return true;
-    }
-    false
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -108,6 +120,22 @@ impl CoreApplyPolicy {
 }
 
 impl App {
+    pub(crate) fn rooted_download_path(&self, path: &str) -> Option<String> {
+        let Some(root) = self.config.config.path.as_deref() else {
+            return Some(path.to_string());
+        };
+        if Path::new(path).is_absolute() {
+            return Some(path.to_string());
+        }
+        match crate::download::resolve_output_path_under_root(Path::new(root), path) {
+            Ok(path) => Some(path.to_string_lossy().into_owned()),
+            Err(error) => {
+                log::warn!("Skipping unsafe download-root path {path}: {error}");
+                None
+            }
+        }
+    }
+
     pub(crate) fn try_dispatch_request(&self, request: DownloadRequest) -> RequestDispatchOutcome {
         match self.url_tx.try_send(request) {
             Ok(()) => RequestDispatchOutcome::Accepted,
@@ -197,7 +225,7 @@ impl App {
             _ => crate::core::visible_completed_bytes_for_display(core_file),
         };
         let network_downloaded = Self::core_file_network_downloaded(core_file);
-        let complete = core_file.lifecycle.is_terminal();
+        let complete = core_file.lifecycle.is_complete();
         let failure_message = core_file.lifecycle.failure_message().map(str::to_owned);
 
         let &visible_index = self.visible_file_positions.get(file_id)?;
@@ -282,10 +310,14 @@ impl App {
                     }
                 }
                 CoreEffect::DeleteOutputArtifacts { path } => {
-                    super::super::download::schedule_output_artifact_delete(path);
+                    if let Some(path) = self.rooted_download_path(&path) {
+                        super::super::download::schedule_output_artifact_delete(path);
+                    }
                 }
                 CoreEffect::DeleteResumeArtifacts { path } => {
-                    super::super::download::schedule_resume_artifact_delete(path);
+                    if let Some(path) = self.rooted_download_path(&path) {
+                        super::super::download::schedule_resume_artifact_delete(path);
+                    }
                 }
                 CoreEffect::PublishStatusMessage(message) => {
                     self.status = message;
@@ -387,7 +419,7 @@ impl App {
     }
 
     pub(super) fn flush_scheduler_pending_order(&mut self) {
-        if self.download_task_running {
+        if self.download_task.has_started() {
             let outcome = self.try_dispatch_request(DownloadRequest::SyncPendingOrder {
                 file_ids: self.core_state.pending_file_ids(),
             });
@@ -558,6 +590,7 @@ impl App {
             return;
         }
 
+        session.config.path.clone_from(&self.config.config.path);
         let restart = build_restart_snapshot(&session);
 
         self.resume_from_restart(session, &restart);

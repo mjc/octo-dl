@@ -97,6 +97,47 @@ the development shell and cross-compilation environment are defined in
 devenv tasks run check:all
 ```
 
+`check:all` runs independent debug-profile checks in parallel: formatting,
+all-targets compilation, strict all-targets Clippy, all-feature tests, and
+the no-default-features, `cli`-only, and `tui`-only test configurations. It
+also checks dependencies and evaluates the Nix flake. Release tests are
+opt-in; `check:test:release:attempt-generation` verifies that attempt
+generations still advance in optimized builds.
+
+The reliability regression tests exercise these failure boundaries:
+
+- API selection uses the production resolver to check explicit file IDs,
+  package-row lookup, transient URL names, ambiguous name collisions, and
+  missing or invalid shared state.
+- Attempt identity rejects delayed tokens, results, progress, and duplicate
+  terminal events from completed or replaced downloads, including a failed
+  attempt followed by a new attempt for the same file.
+- Cancellation tests ensure the supervisor acknowledges cleanup before
+  shutdown completes, aborts and reaps workers that exceed the deadline, and
+  reports worker failures instead of silently dropping them.
+- Lifecycle and scheduler tests generate event sequences and inject failed
+  transfers to verify terminal state, scheduler-slot release, and continued
+  server usability.
+- Durable-publication tests inject directory-sync and sidecar-cleanup failures
+  to ensure errors are returned instead of reporting false completion; they
+  also check restart recovery, download-root containment, and fail-closed
+  behavior where directory syncing is unsupported.
+- Resume tests require disk MAC validation when saved fingerprints are
+  incomplete, retain the same open part file if its path is replaced after
+  validation, and clear untrusted bytes before starting a fresh transfer.
+- Path-configuration tests verify relative download and config paths resolve
+  without changing the process working directory.
+
+Individual task names are available with `devenv tasks list`; for example:
+
+```sh
+devenv tasks run check:clippy
+devenv tasks run check:check
+devenv tasks run check:test:no-default
+devenv tasks run check:test:cli
+devenv tasks run check:test:tui
+devenv tasks run check:test:release:attempt-generation
+```
 Use the cross-compilation profile for release builds:
 
 ```sh

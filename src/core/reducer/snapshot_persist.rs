@@ -22,37 +22,32 @@ thread_local! {
 }
 
 pub(crate) const fn should_persist_session(event: &CoreEvent) -> bool {
-    if let CoreEvent::FileProgress { .. } = event {
-        return false;
+    match event {
+        CoreEvent::FileProgress { .. }
+        | CoreEvent::FileQueued { .. }
+        | CoreEvent::FileStarted { .. }
+        | CoreEvent::FileResumeStarted { .. }
+        | CoreEvent::FileReuseDetected { .. }
+        | CoreEvent::FileResumeReverified { .. }
+        | CoreEvent::FileVerificationStarted { .. }
+        | CoreEvent::FileVerificationProgress { .. }
+        | CoreEvent::FileVerificationCompleted { .. }
+        | CoreEvent::Tick { .. } => false,
+        CoreEvent::UrlSubmitted { .. }
+        | CoreEvent::UrlResolved { .. }
+        | CoreEvent::UrlFailed { .. }
+        | CoreEvent::PackageResolved { .. }
+        | CoreEvent::FileCompleted { .. }
+        | CoreEvent::FileFailed { .. }
+        | CoreEvent::FileCancelled { .. }
+        | CoreEvent::FileDeleted { .. }
+        | CoreEvent::PackageDeleted { .. }
+        | CoreEvent::FileRetryRequested { .. }
+        | CoreEvent::FileResetRequested { .. }
+        | CoreEvent::PackageMoveRequested { .. }
+        | CoreEvent::FileMoveRequested { .. }
+        | CoreEvent::RestartReconciled { .. } => true,
     }
-    if let CoreEvent::FileQueued { .. } = event {
-        return false;
-    }
-    if let CoreEvent::FileStarted { .. } = event {
-        return false;
-    }
-    if let CoreEvent::FileResumeStarted { .. } = event {
-        return false;
-    }
-    if let CoreEvent::FileReuseDetected { .. } = event {
-        return false;
-    }
-    if let CoreEvent::FileResumeReverified { .. } = event {
-        return false;
-    }
-    if let CoreEvent::FileVerificationStarted { .. } = event {
-        return false;
-    }
-    if let CoreEvent::FileVerificationProgress { .. } = event {
-        return false;
-    }
-    if let CoreEvent::FileVerificationCompleted { .. } = event {
-        return false;
-    }
-    if let CoreEvent::Tick { .. } = event {
-        return false;
-    }
-    true
 }
 
 #[cfg(test)]

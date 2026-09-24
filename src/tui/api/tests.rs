@@ -256,7 +256,7 @@ mod property_tests {
 
     proptest! {
         #[test]
-        fn resolve_file_id_returns_unique_exact_name_match(
+        fn resolve_action_target_returns_unique_file_name_match(
             target_id in target_name_strategy("target-id-"),
             target_name in target_name_strategy("target-name-"),
             other_files in prop::collection::vec(
@@ -269,14 +269,14 @@ mod property_tests {
             let (state, _rx) = state_with_file_rows(files);
             let expected: crate::core::FileId = target_id.into();
 
-            let resolved = selection::resolve_file_id(&state, None, Some(target_name))
+            let resolved = selection::resolve_action_target(&state, None, Some(&target_name))
                 .expect("unique file name should resolve");
 
-            prop_assert_eq!(resolved, expected);
+            prop_assert_eq!(resolved, ActionTarget::File(expected));
         }
 
         #[test]
-        fn resolve_file_id_rejects_duplicate_name_matches(
+        fn resolve_action_target_rejects_duplicate_file_name_matches(
             first_id in target_name_strategy("first-id-"),
             second_id in target_name_strategy("second-id-"),
             duplicate_name in target_name_strategy("dup-name-"),
@@ -292,14 +292,14 @@ mod property_tests {
             files.extend(other_files);
             let (state, _rx) = state_with_file_rows(files);
 
-            let duplicate = selection::resolve_file_id(&state, None, Some(duplicate_name))
+            let duplicate = selection::resolve_action_target(&state, None, Some(&duplicate_name))
                 .expect_err("duplicate file names should conflict");
 
             prop_assert_eq!(duplicate.status(), StatusCode::CONFLICT);
         }
 
         #[test]
-        fn resolve_package_id_matches_unique_package_by_name_and_id(
+        fn resolve_action_target_matches_unique_package_by_name_and_id(
             target_slug in target_name_strategy("pkg-"),
             target_display_name in target_name_strategy("Package "),
             other_suffixes in prop::collection::vec(target_name_strategy("other-"), 0..8),
@@ -308,7 +308,7 @@ mod property_tests {
             let target_package_id = package_id(&target_slug, &target_source_url).to_string();
             let mut packages = vec![(
                 target_package_id.clone(),
-                target_source_url,
+                target_source_url.clone(),
                 target_display_name.clone(),
             )];
             packages.extend(other_suffixes.into_iter().map(|suffix| {
@@ -321,19 +321,26 @@ mod property_tests {
             }));
             let (state, _rx) = state_with_package_rows(packages);
 
-            let by_name = selection::resolve_package_id(&state, None, Some(&target_display_name))
-                .expect("package lookup should succeed")
-                .expect("package should resolve by name");
-            let by_id = selection::resolve_package_id(&state, Some(&target_package_id), None)
-                .expect("package lookup should succeed")
-                .expect("package should resolve by id");
-
-            prop_assert_eq!(by_name.to_string(), target_package_id.clone());
-            prop_assert_eq!(by_id.to_string(), target_package_id);
+            let by_name = selection::resolve_action_target(
+                &state,
+                None,
+                Some(&target_display_name),
+            )
+                .expect("package lookup should succeed");
+            let by_id = selection::resolve_action_target(&state, Some(&target_package_id), None)
+                .expect("package lookup should succeed");
+            prop_assert_eq!(
+                by_name,
+                ActionTarget::Package(package_id(&target_slug, &target_source_url))
+            );
+            prop_assert_eq!(
+                by_id,
+                ActionTarget::Package(package_id(&target_slug, &target_source_url))
+            );
         }
 
         #[test]
-        fn resolve_package_id_rejects_duplicate_display_names(
+        fn resolve_action_target_rejects_duplicate_package_display_names(
             left_slug in target_name_strategy("left-"),
             right_slug in target_name_strategy("right-"),
             display_name in target_name_strategy("Package "),
@@ -363,7 +370,7 @@ mod property_tests {
             }));
             let (state, _rx) = state_with_package_rows(packages);
 
-            let duplicate = selection::resolve_package_id(&state, None, Some(&display_name))
+            let duplicate = selection::resolve_action_target(&state, None, Some(&display_name))
                 .expect_err("duplicate package names should conflict");
 
             prop_assert_eq!(duplicate.status(), StatusCode::CONFLICT);
@@ -443,54 +450,55 @@ fn dispatch_urls_with_shared_state_sends_ui_action() {
 }
 
 #[test]
-fn resolve_file_id_by_id_does_not_require_shared_state() {
-    let (state, _rx) = state_without_shared();
+fn resolve_action_target_matches_explicit_file_id() {
+    let (state, _rx) =
+        state_with_snapshot(r#"{"files":[{"id":"file-id","name":"file.mkv"}],"packages":[]}"#);
 
-    let id = selection::resolve_file_id(&state, Some("file-id".to_string()), None)
+    let target = selection::resolve_action_target(&state, Some("file-id"), None)
         .expect("explicit id should resolve");
 
-    assert_eq!(id, "file-id");
+    assert_eq!(target, ActionTarget::File("file-id".into()));
 }
 
 #[test]
-fn resolve_file_id_by_name_reports_all_lookup_cases() {
+fn resolve_action_target_reports_all_lookup_cases() {
     let (state, _rx) = state_with_snapshot(
         r#"{"files":[{"id":"one","name":"unique.mkv"},{"id":"two","name":"dup.mkv"},{"id":"three","name":"dup.mkv"}]}"#,
     );
 
-    let id = selection::resolve_file_id(&state, None, Some("unique.mkv".to_string()))
+    let target = selection::resolve_action_target(&state, None, Some("unique.mkv"))
         .expect("unique name should resolve");
-    assert_eq!(id, "one");
+    assert_eq!(target, ActionTarget::File("one".into()));
 
-    let missing = selection::resolve_file_id(&state, None, None).expect_err("missing selector");
+    let missing =
+        selection::resolve_action_target(&state, None, None).expect_err("missing selector");
     assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
 
-    let not_found = selection::resolve_file_id(&state, None, Some("missing.mkv".to_string()))
-        .expect_err("not found");
+    let not_found =
+        selection::resolve_action_target(&state, None, Some("missing.mkv")).expect_err("not found");
     assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
 
-    let duplicate = selection::resolve_file_id(&state, None, Some("dup.mkv".to_string()))
-        .expect_err("duplicate");
+    let duplicate =
+        selection::resolve_action_target(&state, None, Some("dup.mkv")).expect_err("duplicate");
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
 }
 
 #[test]
-fn resolve_package_id_matches_package_rows() {
+fn resolve_action_target_matches_package_rows() {
     let package_id_str = package_id("pkg", "https://mega.nz/folder/pkg").to_string();
     let other_package_id_str = package_id("other", "https://mega.nz/folder/other").to_string();
     let (state, _rx) = state_with_snapshot(&format!(
         r#"{{"packages":[{{"id":"{package_id_str}","source_url":"https://mega.nz/folder/pkg","display_name":"Package"}},{{"id":"{other_package_id_str}","source_url":"https://mega.nz/folder/other","display_name":"Other"}}],"files":[]}}"#
     ));
 
-    let by_id = selection::resolve_package_id(&state, Some(&package_id_str), None)
-        .expect("package lookup should succeed")
-        .expect("package should resolve");
-    assert_eq!(by_id.to_string(), package_id_str);
+    let expected = ActionTarget::Package(package_id("pkg", "https://mega.nz/folder/pkg"));
+    let by_id = selection::resolve_action_target(&state, Some(&package_id_str), None)
+        .expect("package lookup should succeed");
+    assert_eq!(by_id, expected);
 
-    let by_name = selection::resolve_package_id(&state, None, Some("Package"))
-        .expect("package lookup should succeed")
-        .expect("package should resolve");
-    assert_eq!(by_name.to_string(), package_id_str);
+    let by_name = selection::resolve_action_target(&state, None, Some("Package"))
+        .expect("package lookup should succeed");
+    assert_eq!(by_name, expected);
 }
 
 #[tokio::test]
@@ -955,6 +963,87 @@ fn transient_url_id_resolves_to_its_file_action_target() {
     );
 }
 
+#[test]
+fn transient_url_name_resolves_to_its_file_action_target() {
+    let url = "https://mega.nz/file/transient#key";
+    let (state, _rx) = state_with_dashboard(
+        vec![DashboardFileRow {
+            id: url.to_string(),
+            package_id: url.to_string(),
+            name: "transient".to_string(),
+            size: 0,
+            downloaded: 0,
+            speed: 0,
+            status: DashboardFileStatus::Error {
+                message: "source unavailable".to_string(),
+            },
+            package_label: None,
+        }],
+        vec![DashboardPackageRow {
+            id: url.to_string(),
+            source_url: url.to_string(),
+            display_name: "transient".to_string(),
+            status: crate::core::PackageStatus::Failed,
+            file_ids: vec![url.to_string()],
+            present_files: 1,
+            completed_files: 0,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            percent: 0,
+            expanded: false,
+            folder_label: None,
+            error: Some("source unavailable".to_string()),
+        }],
+        None,
+        None,
+    );
+
+    assert_eq!(
+        selection::resolve_action_target(&state, None, Some("transient"))
+            .expect("transient URL name should resolve to its file"),
+        ActionTarget::File(url.to_string().into())
+    );
+}
+
+#[test]
+fn resolve_action_target_rejects_package_file_name_collision() {
+    let package_id_str = package_id("pkg", "https://mega.nz/folder/pkg").to_string();
+    let (state, _rx) = state_with_dashboard(
+        vec![DashboardFileRow {
+            id: "file-id".to_string(),
+            package_id: package_id_str.clone(),
+            name: "same-name".to_string(),
+            size: 0,
+            downloaded: 0,
+            speed: 0,
+            status: DashboardFileStatus::Queued,
+            package_label: None,
+        }],
+        vec![DashboardPackageRow {
+            id: package_id_str,
+            source_url: "https://mega.nz/folder/pkg".to_string(),
+            display_name: "same-name".to_string(),
+            status: crate::core::PackageStatus::Pending,
+            file_ids: vec!["file-id".to_string()],
+            present_files: 1,
+            completed_files: 0,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            percent: 0,
+            expanded: false,
+            folder_label: None,
+            error: None,
+        }],
+        None,
+        None,
+    );
+
+    let collision = selection::resolve_action_target(&state, None, Some("same-name"))
+        .expect_err("a name shared by a package and file should conflict");
+
+    assert_eq!(collision.status(), StatusCode::CONFLICT);
+}
+
 #[tokio::test]
 async fn parse_api_extracts_url_from_syntax_highlighted_code_html() {
     let dir = tempdir().unwrap();
@@ -1144,15 +1233,15 @@ async fn parse_api_extracts_code_url_with_numeric_html_entities() {
 }
 
 #[test]
-fn resolve_file_id_by_name_requires_valid_shared_state() {
+fn resolve_action_target_requires_valid_shared_state() {
     let (state, _rx) = state_without_shared();
-    let unavailable = selection::resolve_file_id(&state, None, Some("file.mkv".to_string()))
-        .expect_err("no dashboard");
+    let unavailable =
+        selection::resolve_action_target(&state, None, Some("file.mkv")).expect_err("no dashboard");
     assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let (state, _rx) = state_with_snapshot("{not-json");
-    let invalid = selection::resolve_file_id(&state, None, Some("file.mkv".to_string()))
-        .expect_err("bad state");
+    let invalid =
+        selection::resolve_action_target(&state, None, Some("file.mkv")).expect_err("bad state");
     assert_eq!(invalid.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 

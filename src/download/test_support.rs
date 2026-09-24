@@ -29,6 +29,7 @@ pub(super) struct MockFileSystem {
     files: Mutex<HashMap<PathBuf, u64>>,
     file_bytes: Mutex<HashMap<PathBuf, Vec<u8>>>,
     fingerprints: Mutex<HashMap<PathBuf, FileFingerprint>>,
+    directory_sync_error: Mutex<Option<String>>,
 }
 
 impl MockFileSystem {
@@ -37,6 +38,7 @@ impl MockFileSystem {
             files: Mutex::new(HashMap::new()),
             file_bytes: Mutex::new(HashMap::new()),
             fingerprints: Mutex::new(HashMap::new()),
+            directory_sync_error: Mutex::new(None),
         }
     }
 
@@ -59,6 +61,10 @@ impl MockFileSystem {
             .unwrap()
             .insert(path.into(), fingerprint);
     }
+
+    pub(super) fn fail_directory_sync(&self, message: impl Into<String>) {
+        *self.directory_sync_error.lock().unwrap() = Some(message.into());
+    }
 }
 
 #[async_trait::async_trait]
@@ -73,6 +79,14 @@ impl FileSystem for MockFileSystem {
 
     async fn file_fingerprint(&self, path: &Path) -> Option<FileFingerprint> {
         self.fingerprints.lock().unwrap().get(path).copied()
+    }
+
+    async fn path_matches_open_file(
+        &self,
+        _path: &Path,
+        _file: &tokio::fs::File,
+    ) -> io::Result<bool> {
+        Ok(true)
     }
 
     async fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
@@ -110,6 +124,14 @@ impl FileSystem for MockFileSystem {
 
     async fn rename_file(&self, _from: &Path, _to: &Path) -> io::Result<()> {
         Ok(())
+    }
+
+    async fn sync_directory(&self, _path: &Path) -> io::Result<()> {
+        self.directory_sync_error
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(Ok(()), |message| Err(io::Error::other(message.clone())))
     }
 
     async fn sync_file(&self, _path: &Path) -> io::Result<()> {
@@ -168,6 +190,7 @@ pub(super) fn sidecar_validation_input_with_expected<'a>(
     SidecarValidationInput {
         boundaries,
         part_path,
+        part_file: None,
         sidecar,
         file_size: sidecar.file_size,
         expected_condensed_mac,
@@ -215,9 +238,29 @@ pub(super) struct FakeMegaDownloadHarness {
 
 impl FakeMegaDownloadHarness {
     pub(super) async fn new(seed: u64, file_size: u64, config: DownloadConfig) -> Self {
+        Self::build(seed, file_size, config, false).await
+    }
+
+    pub(super) async fn new_with_download_root(
+        seed: u64,
+        file_size: u64,
+        config: DownloadConfig,
+    ) -> Self {
+        Self::build(seed, file_size, config, true).await
+    }
+
+    async fn build(
+        seed: u64,
+        file_size: u64,
+        mut config: DownloadConfig,
+        use_output_dir_as_root: bool,
+    ) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let fixture_dir = temp.path().join("fixture");
         let output_dir = temp.path().join("output");
+        if use_output_dir_as_root {
+            config.path = Some(output_dir.to_string_lossy().into_owned());
+        }
         let fixture = create_fake_mega_fixture(&fixture_dir, "payload.bin", file_size, seed)
             .await
             .unwrap();
@@ -406,9 +449,15 @@ pub(super) struct RecordingProgress {
     pub(super) validation_calls: std::sync::atomic::AtomicUsize,
     pub(super) validation_checked: std::sync::atomic::AtomicU64,
     pub(super) validation_total: std::sync::atomic::AtomicU64,
+    pub(super) completed: std::sync::atomic::AtomicUsize,
 }
 
 impl DownloadProgress for RecordingProgress {
+    fn on_file_complete(&self, _name: &str, _stats: &crate::stats::FileStats) {
+        self.completed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
     fn on_resume_validation_start(&self, _name: &str) {
         self.validation_starts
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

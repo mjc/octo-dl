@@ -84,12 +84,15 @@ impl<F: FileSystem> Downloader<F> {
         self.ensure_parent_dir(path).await?;
         progress.on_file_start(path, node.size());
 
-        let pp = part_path(path);
-        let sp = sidecar_path(path);
+        let direct_output_path = self.resolve_output_path_for_direct_io(path)?;
+        let direct_output_path = direct_output_path.to_string_lossy();
+        let pp = part_path(&direct_output_path);
+        let sp = sidecar_path(&direct_output_path);
         let prepared = self
             .prepare_transfer_resume(
                 node,
                 path,
+                &direct_output_path,
                 progress,
                 trust_resume_state,
                 &pp,
@@ -98,21 +101,25 @@ impl<F: FileSystem> Downloader<F> {
             )
             .await?;
 
-        let file = self
-            .fs
-            .open_part_file(&pp, node.size(), prepared.preserve_existing)
-            .await?;
-        let callbacks: Arc<dyn mega::ParallelDownloadCallbacks> = prepared.callback_state.clone();
+        let prepared = prepared.prepare_for_transfer(node.size()).await?;
+        let super::transfer_prepare::OwnedValidatedResume {
+            part_file,
+            callback_state,
+            trusted_for_download,
+            trusted_bytes,
+        } = prepared;
+        let validated_part_file = part_file.try_clone().await?;
+        let callbacks: Arc<dyn mega::ParallelDownloadCallbacks> = callback_state.clone();
 
         let download_result = if let Some(token) = cancellation_token {
             let download_fut = self
                 .client
                 .download_node_parallel_resumable_to_file_with_callbacks(
                     node,
-                    file,
+                    part_file,
                     self.config.chunks_per_file,
                     Some(self.config.mega_chunks_per_request),
-                    Arc::clone(&prepared.trusted_for_download),
+                    Arc::clone(&trusted_for_download),
                     Some(callbacks),
                 );
             await_download_or_cancel(download_fut, token).await
@@ -120,10 +127,10 @@ impl<F: FileSystem> Downloader<F> {
             self.client
                 .download_node_parallel_resumable_to_file_with_callbacks(
                     node,
-                    file,
+                    part_file,
                     self.config.chunks_per_file,
                     Some(self.config.mega_chunks_per_request),
-                    prepared.trusted_for_download,
+                    trusted_for_download,
                     Some(callbacks),
                 )
                 .await
@@ -135,10 +142,11 @@ impl<F: FileSystem> Downloader<F> {
                     node,
                     path,
                     part_path: &pp,
+                    part_file: &validated_part_file,
                     sidecar_path: &sp,
-                    reused_bytes: prepared.trusted_bytes,
-                    stats: &prepared.callback_state.progress.stats,
-                    chunk_verified: &prepared.callback_state.chunk_verified,
+                    reused_bytes: trusted_bytes,
+                    stats: &callback_state.progress.stats,
+                    chunk_verified: &callback_state.chunk_verified,
                     progress,
                     name: path,
                 },

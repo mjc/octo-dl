@@ -329,7 +329,7 @@ impl SessionSnapshot {
     #[must_use]
     pub fn completed_count(&self) -> usize {
         self.iter_files()
-            .filter(|file| file.lifecycle.is_terminal())
+            .filter(|file| file.lifecycle.is_complete())
             .count()
     }
 

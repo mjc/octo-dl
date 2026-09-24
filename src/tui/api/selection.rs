@@ -46,8 +46,17 @@ pub(super) fn resolve_action_target(
 
     match (package_matches.as_slice(), file_matches.as_slice()) {
         ([package], [file])
-            if id.is_some_and(|id| package.id == id && file.id == id)
-                && package.source_url == file.id =>
+            if (id.is_some_and(|id| package.id == id && file.id == id)
+                || name.is_some_and(|name| package.display_name == name && file.name == name))
+                && package.id == file.id
+                // These transient rows project the submitted URL into both
+                // package.source_url and file.id. Compare named URL values:
+                // the fields intentionally have different roles here.
+                && {
+                    let submitted_url = package.source_url.as_str();
+                    let projected_file_id = file.id.as_str();
+                    submitted_url == projected_file_id
+                } =>
         {
             // A URL that has not resolved to a real package is projected as
             // both a legacy package row and a file row with the same ID. The
@@ -111,88 +120,4 @@ fn snapshot_state(
             )
         },
     )
-}
-
-#[cfg(test)]
-pub(super) fn resolve_package_id(
-    state: &ApiState,
-    id: Option<&str>,
-    name: Option<&str>,
-) -> Result<Option<PackageId>, Box<axum::response::Response>> {
-    let Some(selector) = id.or(name) else {
-        return Ok(None);
-    };
-
-    let snapshot = snapshot_state(state)?;
-
-    let matches: Vec<_> = snapshot
-        .packages
-        .into_iter()
-        .filter(|package| package.id == selector || package.display_name == selector)
-        .collect();
-    match matches.as_slice() {
-        [] => Ok(None),
-        [package] => PackageId::from_str(&package.id).map(Some).map_err(|_| {
-            Box::new(
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({"error": "invalid package id in app state"})),
-                )
-                    .into_response(),
-            )
-        }),
-        _ => Err(Box::new(
-            (
-                axum::http::StatusCode::CONFLICT,
-                axum::Json(serde_json::json!({"error": "ambiguous package name; use id"})),
-            )
-                .into_response(),
-        )),
-    }
-}
-
-#[cfg(test)]
-pub(super) fn resolve_file_id(
-    state: &ApiState,
-    id: Option<String>,
-    name: Option<String>,
-) -> Result<FileId, Box<axum::response::Response>> {
-    if let Some(id) = id {
-        return Ok(id.into());
-    }
-
-    let Some(name) = name else {
-        return Err(Box::new(
-            (
-                axum::http::StatusCode::BAD_REQUEST,
-                axum::Json(serde_json::json!({"error": "missing id or name"})),
-            )
-                .into_response(),
-        ));
-    };
-
-    let snapshot = snapshot_state(state)?;
-
-    let matches: Vec<_> = snapshot
-        .files
-        .into_iter()
-        .filter(|file| file.name == name)
-        .collect();
-    match matches.as_slice() {
-        [] => Err(Box::new(
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                axum::Json(serde_json::json!({"error": "file not found"})),
-            )
-                .into_response(),
-        )),
-        [file] => Ok(file.id.clone().into()),
-        _ => Err(Box::new(
-            (
-                axum::http::StatusCode::CONFLICT,
-                axum::Json(serde_json::json!({"error": "ambiguous file name; use id"})),
-            )
-                .into_response(),
-        )),
-    }
 }

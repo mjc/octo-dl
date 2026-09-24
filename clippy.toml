@@ -1,3 +1,6 @@
 # Keep `matches!` available to test assertions while preventing it in runtime
 # code, where domain predicates should live on the relevant types instead.
 disallowed-macros = ["std::matches"]
+disallowed-methods = [
+    { path = "std::env::set_current_dir", reason = "changing process cwd is unsafe in a long-running application" },
+]

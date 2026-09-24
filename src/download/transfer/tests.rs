@@ -91,6 +91,37 @@ async fn download_file_creates_missing_parent_dirs_and_writes_plaintext() {
 }
 
 #[tokio::test]
+async fn rooted_download_keeps_sidecars_and_output_under_download_root() {
+    let harness = FakeMegaDownloadHarness::new_with_download_root(
+        53,
+        262_219,
+        DownloadConfig::default()
+            .with_chunks_per_file(1)
+            .with_concurrent_files(1),
+    )
+    .await;
+    let progress: Arc<dyn DownloadProgress> = Arc::new(NoProgress);
+    let output = std::path::Path::new("nested/leaf/payload.bin");
+    let output_path = harness.output_path(output);
+    let stats = {
+        let node = harness.node();
+        harness
+            .downloader
+            .download_file(node, output.to_str().unwrap(), &progress, false, None)
+            .await
+            .unwrap()
+    };
+
+    assert_eq!(
+        stats.size,
+        tokio::fs::metadata(&output_path).await.unwrap().len()
+    );
+    assert!(!part_path(&output_path.to_string_lossy()).exists());
+    assert!(!sidecar_path(&output_path.to_string_lossy()).exists());
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn download_file_short_circuits_for_verified_existing_output() {
     let harness = FakeMegaDownloadHarness::new(47, 300_000, DownloadConfig::default()).await;
     let progress: Arc<dyn DownloadProgress> = Arc::new(NoProgress);

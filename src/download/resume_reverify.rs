@@ -41,14 +41,18 @@ impl<F: FileSystem> Downloader<F> {
     ) -> Result<ResumeReverify> {
         self.validate_config()?;
         self.validate_output_path(path)?;
-        let part_path = part_path(path);
-        let sidecar_path = sidecar_path(path);
+        let direct_output_path = self
+            .resolve_output_path_for_direct_io(path)?
+            .to_string_lossy()
+            .into_owned();
+        let part_path = part_path(&direct_output_path);
+        let sidecar_path = sidecar_path(&direct_output_path);
         let expected_condensed_mac = expected_mac(node)?;
         migrate_legacy_resume_state(
             &self.fs,
             node.size(),
             expected_condensed_mac,
-            path,
+            &direct_output_path,
             &part_path,
             &sidecar_path,
         )
@@ -58,6 +62,7 @@ impl<F: FileSystem> Downloader<F> {
             node,
             &boundaries,
             &part_path,
+            None,
             &sidecar_path,
             expected_condensed_mac,
             progress.map(|progress| (path, progress)),

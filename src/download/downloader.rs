@@ -88,6 +88,20 @@ impl<F: FileSystem> Downloader<F> {
         Ok(())
     }
 
+    pub(super) fn resolve_output_path_for_direct_io(
+        &self,
+        path: &str,
+    ) -> Result<std::path::PathBuf> {
+        let Some(root) = self.config.path.as_deref() else {
+            return Ok(std::path::PathBuf::from(path));
+        };
+        let root = DownloadRoot::new(root).map_err(|message| Error::Download(message.into()))?;
+        let output =
+            RelativeOutputPath::new(path).map_err(|message| Error::Download(message.into()))?;
+        root.resolve_absolute(&output)
+            .map_err(|error| Error::Download(error.to_string()))
+    }
+
     /// Creates a new downloader with a custom file system implementation.
     #[must_use]
     pub const fn with_fs(client: mega::Client, config: DownloadConfig, fs: F) -> Self {
@@ -133,6 +147,7 @@ impl<F: FileSystem> Downloader<F> {
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::symlink;
+    use std::path::Path;
 
     use tempfile::TempDir;
 
@@ -172,5 +187,36 @@ mod tests {
                 .is_err(),
             "a path resolving through a symlink outside the configured root must be rejected"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn part_file_open_rejects_final_symlink_inside_download_root() {
+        let workspace = TempDir::new().unwrap();
+        let root = workspace.path().join("downloads");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("target.part");
+        let link = root.join("link.part");
+        std::fs::write(&target, b"preserve me").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let client = mega::Client::builder()
+            .build(mega::http_client_builder().unwrap().build().unwrap())
+            .unwrap();
+        let downloader = Downloader::new(
+            client,
+            DownloadConfig {
+                path: Some(root.to_string_lossy().into_owned()),
+                ..DownloadConfig::default()
+            },
+        );
+
+        let open_error = downloader
+            .fs
+            .open_part_file_for_resume(Path::new("link.part"))
+            .await
+            .expect_err("resume open must not follow the final symlink");
+        assert!(open_error.raw_os_error().is_some());
+        assert_eq!(std::fs::read(target).unwrap(), b"preserve me");
     }
 }

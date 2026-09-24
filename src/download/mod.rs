@@ -27,6 +27,8 @@ mod transfer;
 mod transfer_prepare;
 mod verify;
 
+pub(crate) use path::resolve_output_path_under_root;
+
 #[allow(dead_code)]
 pub(crate) fn build_http_client() -> mega::Result<reqwest::Client> {
     Ok(mega::http_client_builder()?
