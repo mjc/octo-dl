@@ -86,7 +86,9 @@ where
         }
 
         let part_path = crate::download::part_path(&file_id);
-        if let Ok(metadata) = std::fs::metadata(&part_path)
+        let metadata = std::fs::metadata(&part_path)
+            .or_else(|_| std::fs::metadata(crate::download::legacy_part_path(&file_id)));
+        if let Ok(metadata) = metadata
             && metadata.is_file()
         {
             snapshot.partial_files.push(PartialFileSnapshot {

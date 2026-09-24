@@ -842,10 +842,12 @@ fn ui_retry_empty_failed_package_requeues_source_url() {
 fn ui_delete_file_removes_completed_artifacts_from_disk() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("completed.bin");
-    let part_path = dir.path().join("completed.bin.part");
+    let output_string = file_path.to_string_lossy();
+    let part_path = crate::download::part_path(&output_string);
     std::fs::write(&file_path, b"done").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
+    let sidecar_path = crate::download::sidecar_path(&output_string);
+    std::fs::write(&sidecar_path, b"metadata").unwrap();
 
     let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
@@ -1118,10 +1120,12 @@ fn deleted_file_error_event_is_ignored_and_leaves_artifacts() {
 fn ui_reset_file_resets_progress_and_requeues_url() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("active.bin");
-    let part_path = dir.path().join("active.bin.part");
+    let output_string = file_path.to_string_lossy();
+    let part_path = crate::download::part_path(&output_string);
     std::fs::write(&file_path, b"complete").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    let sidecar_path = write_dummy_legacy_resume_sidecar_for_path(&file_path);
+    let sidecar_path = crate::download::sidecar_path(&output_string);
+    std::fs::write(&sidecar_path, b"metadata").unwrap();
 
     let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);

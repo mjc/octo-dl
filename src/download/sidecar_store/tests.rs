@@ -7,9 +7,10 @@ use crate::download::test_support::{
 #[tokio::test]
 async fn load_sidecar_falls_back_to_legacy_binary() {
     let paths = TestDownloadPaths::new("file.bin");
+    let legacy_binary = legacy_binary_path_for_sidecar(&paths.sidecar);
     let legacy = sidecar_for_chunk(42, [7u8; 8], 3, [4u8; 16]);
 
-    tokio::fs::write(&paths.legacy_binary, legacy_binary_bytes(&legacy))
+    tokio::fs::write(&legacy_binary, legacy_binary_bytes(&legacy))
         .await
         .unwrap();
     let loaded = load_sidecar(&paths.sidecar).await.unwrap();
@@ -18,15 +19,16 @@ async fn load_sidecar_falls_back_to_legacy_binary() {
     assert_eq!(loaded.verified_chunks[0].index, 3);
     assert_eq!(loaded.verified_chunks[0].mac, [4u8; 16]);
     assert!(paths.sidecar.exists());
-    assert!(!paths.legacy_binary.exists());
+    assert!(!legacy_binary.exists());
 }
 
 #[tokio::test]
 async fn load_sidecar_falls_back_to_legacy_json() {
     let paths = TestDownloadPaths::new("file.bin");
+    let legacy_json = legacy_json_path_for_sidecar(&paths.sidecar);
     let legacy = legacy_json_sidecar_for_chunk(42, [9u8; 8], 7, [1u8; 16]);
 
-    write_legacy_json_sidecar(&paths.legacy_json, &legacy)
+    write_legacy_json_sidecar(&legacy_json, &legacy)
         .await
         .unwrap();
     let loaded = load_sidecar(&paths.sidecar).await.unwrap();
@@ -39,10 +41,11 @@ async fn load_sidecar_falls_back_to_legacy_json() {
 #[tokio::test]
 async fn load_sidecar_prefers_binary_over_legacy_json() {
     let paths = TestDownloadPaths::new("file.bin");
+    let legacy_json = legacy_json_path_for_sidecar(&paths.sidecar);
     let legacy = legacy_json_sidecar_for_chunk(42, [1u8; 8], 0, [1u8; 16]);
     let binary = sidecar_for_chunk(42, [2u8; 8], 1, [2u8; 16]);
 
-    write_legacy_json_sidecar(&paths.legacy_json, &legacy)
+    write_legacy_json_sidecar(&legacy_json, &legacy)
         .await
         .unwrap();
     save_sidecar_atomic(&paths.sidecar, &binary).await.unwrap();
@@ -56,12 +59,13 @@ async fn load_sidecar_prefers_binary_over_legacy_json() {
 #[tokio::test]
 async fn load_sidecar_falls_back_to_legacy_json_when_binary_is_corrupt() {
     let paths = TestDownloadPaths::new("file.bin");
+    let legacy_json = legacy_json_path_for_sidecar(&paths.sidecar);
     let legacy = legacy_json_sidecar_for_chunk(42, [9u8; 8], 7, [1u8; 16]);
 
     tokio::fs::write(&paths.sidecar, b"not-postcard")
         .await
         .unwrap();
-    write_legacy_json_sidecar(&paths.legacy_json, &legacy)
+    write_legacy_json_sidecar(&legacy_json, &legacy)
         .await
         .unwrap();
 
@@ -74,12 +78,13 @@ async fn load_sidecar_falls_back_to_legacy_json_when_binary_is_corrupt() {
 #[tokio::test]
 async fn load_sidecar_falls_back_to_legacy_binary_when_postcard_is_corrupt() {
     let paths = TestDownloadPaths::new("file.bin");
+    let legacy_binary = legacy_binary_path_for_sidecar(&paths.sidecar);
     let legacy = sidecar_for_chunk(42, [5u8; 8], 6, [7u8; 16]);
 
     tokio::fs::write(&paths.sidecar, b"not-postcard")
         .await
         .unwrap();
-    tokio::fs::write(&paths.legacy_binary, legacy_binary_bytes(&legacy))
+    tokio::fs::write(&legacy_binary, legacy_binary_bytes(&legacy))
         .await
         .unwrap();
 
@@ -92,6 +97,7 @@ async fn load_sidecar_falls_back_to_legacy_binary_when_postcard_is_corrupt() {
 #[tokio::test]
 async fn load_sidecar_rejects_bad_legacy_json_base64_without_allocating_vec_decode() {
     let paths = TestDownloadPaths::new("file.bin");
+    let legacy_json = legacy_json_path_for_sidecar(&paths.sidecar);
     let legacy = LegacyJsonResumeSidecar {
         version: CURRENT_RESUME_SIDECAR_VERSION,
         file_size: 42,
@@ -103,7 +109,7 @@ async fn load_sidecar_rejects_bad_legacy_json_base64_without_allocating_vec_deco
         part_fingerprint: None,
     };
 
-    write_legacy_json_sidecar(&paths.legacy_json, &legacy)
+    write_legacy_json_sidecar(&legacy_json, &legacy)
         .await
         .unwrap();
 

@@ -49,10 +49,15 @@ pub use self::downloader::{
 pub use self::inspect::FileStatus;
 pub(crate) use self::inspect::{ObservedLocalFile, classify_observed_local_file};
 pub use self::package_identity::{infer_package_display_name, infer_package_id};
+#[cfg(feature = "cli")]
 pub(crate) use self::resume_state::resume_validation_percent;
 pub use self::resume_state::{ResumeReuse, ResumeReuseSource, ResumeReverify};
+pub(crate) fn legacy_part_path(path: &str) -> std::path::PathBuf {
+    self::sidecar::legacy_part_path(path)
+}
+pub(crate) use self::sidecar::{has_resume_sidecar, part_path, resume_sidecar_verified_bytes};
+#[cfg(any(feature = "tui", test))]
 pub(crate) use self::sidecar::{
-    has_resume_sidecar, legacy_binary_sidecar_path, legacy_json_sidecar_path, part_path,
-    resume_sidecar_verified_bytes, sidecar_path,
+    legacy_binary_sidecar_path, legacy_json_sidecar_path, sidecar_path,
 };
 pub use self::verify::CompletedFileVerify;

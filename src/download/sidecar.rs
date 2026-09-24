@@ -1,6 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use super::path::{artifact_path, has_reserved_artifact_name};
 use super::resume_state::CURRENT_RESUME_SIDECAR_VERSION;
 use super::sidecar_store::{
     legacy_binary_path_for_sidecar, legacy_json_path_for_sidecar, load_sidecar_sync,
@@ -9,16 +10,22 @@ use super::sidecar_store::{
 use super::sidecar_writer::sidecar_tmp_path;
 
 pub fn part_path(path: &str) -> PathBuf {
-    let mut part = String::with_capacity(path.len() + ".part".len());
-    part.push_str(path);
-    part.push_str(".part");
+    let mut part = artifact_path(path).into_os_string();
+    part.push(".part");
     PathBuf::from(part)
 }
 
+pub(super) fn legacy_part_path(path: &str) -> PathBuf {
+    PathBuf::from(format!("{path}.part"))
+}
+
+pub(super) fn legacy_postcard_sidecar_path(path: &str) -> PathBuf {
+    PathBuf::from(format!("{path}.part.postcard"))
+}
+
 pub fn sidecar_path(path: &str) -> PathBuf {
-    let mut sidecar = String::with_capacity(path.len() + ".part.postcard".len());
-    sidecar.push_str(path);
-    sidecar.push_str(".part.postcard");
+    let mut sidecar = part_path(path).into_os_string();
+    sidecar.push(".postcard");
     PathBuf::from(sidecar)
 }
 
@@ -38,6 +45,7 @@ pub fn legacy_json_sidecar_path(path: &str) -> PathBuf {
 
 pub fn has_resume_sidecar(path: &str) -> bool {
     sidecar_path(path).exists()
+        || legacy_postcard_sidecar_path(path).exists()
         || legacy_binary_sidecar_path(path).exists()
         || legacy_json_sidecar_path(path).exists()
 }
@@ -78,7 +86,14 @@ pub fn resume_sidecar_verified_bytes(path: &str) -> Option<u64> {
         &sidecar_path(path),
         &legacy_binary_sidecar_path(path),
         &legacy_json_sidecar_path(path),
-    )?;
+    )
+    .or_else(|| {
+        load_sidecar_sync(
+            &legacy_postcard_sidecar_path(path),
+            &legacy_binary_sidecar_path(path),
+            &legacy_json_sidecar_path(path),
+        )
+    })?;
     if sidecar.version != CURRENT_RESUME_SIDECAR_VERSION {
         return None;
     }
@@ -103,16 +118,23 @@ pub fn resume_sidecar_verified_bytes(path: &str) -> Option<u64> {
 }
 
 pub(super) async fn delete_resume_artifacts_for_path(path: &str) -> io::Result<()> {
+    if has_reserved_artifact_name(Path::new(path)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reserved download artifact names cannot be output paths",
+        ));
+    }
     remove_file_if_exists(&part_path(path)).await?;
-    delete_sidecar_pair(
-        &sidecar_path(path),
-        &legacy_binary_sidecar_path(path),
-        &legacy_json_sidecar_path(path),
-    )
-    .await
+    delete_sidecar(&sidecar_path(path)).await
 }
 
 pub(super) async fn delete_download_artifacts_for_path(path: &str) -> io::Result<()> {
+    if has_reserved_artifact_name(Path::new(path)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reserved download artifact names cannot be output paths",
+        ));
+    }
     remove_file_if_exists(Path::new(path)).await?;
     delete_resume_artifacts_for_path(path).await
 }

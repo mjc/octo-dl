@@ -8,7 +8,7 @@ use crate::fs::{FileSystem, TokioFileSystem};
 use super::callbacks::DownloadProgress;
 use super::collect::{CollectedFiles, collect_files_with_downloader};
 use super::inspect::{InspectedLocalFile, inspect_local_file as inspect_local_file_with_fs};
-use super::path::{DownloadRoot, RelativeOutputPath};
+use super::path::{DownloadRoot, RelativeOutputPath, has_reserved_artifact_name};
 use super::sidecar;
 
 /// Fetches public-link metadata with a fresh anonymous MEGA client.
@@ -54,11 +54,12 @@ pub struct Downloader<F: FileSystem = TokioFileSystem> {
 impl Downloader<TokioFileSystem> {
     /// Creates a new downloader with the default file system.
     #[must_use]
-    pub const fn new(client: mega::Client, config: DownloadConfig) -> Self {
+    pub fn new(client: mega::Client, config: DownloadConfig) -> Self {
         Self {
             client,
+            fs: TokioFileSystem::new()
+                .with_download_root(config.path.as_deref().map(std::path::PathBuf::from)),
             config,
-            fs: TokioFileSystem,
         }
     }
 }
@@ -71,13 +72,19 @@ impl<F: FileSystem> Downloader<F> {
     /// Validates a configured relative output path without allowing it to
     /// escape the configured download root.
     pub(super) fn validate_output_path(&self, path: &str) -> Result<()> {
+        if has_reserved_artifact_name(std::path::Path::new(path)) {
+            return Err(Error::Download(
+                "output path uses a reserved download artifact name".into(),
+            ));
+        }
         let Some(root) = self.config.path.as_deref() else {
             return Ok(());
         };
         let root = DownloadRoot::new(root).map_err(|message| Error::Download(message.into()))?;
         let output =
             RelativeOutputPath::new(path).map_err(|message| Error::Download(message.into()))?;
-        let _ = root.resolve(&output);
+        root.validate_existing_ancestors(&output)
+            .map_err(|error| Error::Download(error.to_string()))?;
         Ok(())
     }
 
@@ -120,5 +127,50 @@ impl<F: FileSystem> Downloader<F> {
         progress: &Arc<dyn DownloadProgress>,
     ) -> CollectedFiles<'a> {
         collect_files_with_downloader(self, nodes, progress).await
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_path_rejects_symlinked_ancestor_outside_download_root_at_io() {
+        let workspace = TempDir::new().unwrap();
+        let root = workspace.path().join("downloads");
+        let outside = workspace.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+
+        let client = mega::Client::builder()
+            .build(mega::http_client_builder().unwrap().build().unwrap())
+            .unwrap();
+        let config = DownloadConfig {
+            path: Some(root.to_string_lossy().into_owned()),
+            ..DownloadConfig::default()
+        };
+        let downloader = Downloader::new(client, config);
+
+        let outside_output = root.join("linked/payload.bin.part");
+        let io_error = downloader
+            .fs
+            .open_part_file(&outside_output, 16, false)
+            .await
+            .expect_err("filesystem must reject writes through an escaping symlink");
+        assert_eq!(io_error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!outside.join("payload.bin.part").exists());
+
+        assert!(
+            downloader
+                .validate_output_path("linked/payload.bin")
+                .is_err(),
+            "a path resolving through a symlink outside the configured root must be rejected"
+        );
     }
 }

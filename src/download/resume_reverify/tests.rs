@@ -139,6 +139,39 @@ async fn run_restart_revalidation_and_manual_reverify_parity_test() {
 }
 
 #[tokio::test]
+async fn manual_reverify_migrates_historical_artifact_names() {
+    let harness = ResumeReverifyHarness::new(83, DownloadConfig::default()).await;
+    let (first, _, _) = harness
+        .seed_first_verified_chunk(StoredFingerprint::Current)
+        .await;
+    let old_part = std::path::PathBuf::from(format!("{}.part", harness.output_path_string));
+    let old_sidecar =
+        std::path::PathBuf::from(format!("{}.part.postcard", harness.output_path_string));
+    tokio::fs::rename(&harness.part_path, &old_part)
+        .await
+        .unwrap();
+    tokio::fs::rename(&harness.sidecar_path, &old_sidecar)
+        .await
+        .unwrap();
+
+    let result = harness
+        .base
+        .downloader
+        .reverify_resume_file(harness.node(), &harness.output_path_string)
+        .await
+        .unwrap();
+
+    assert!(result.sidecar_loaded);
+    assert_eq!(result.chunks, 1);
+    assert_eq!(result.bytes, first.length);
+    assert!(harness.part_path.exists());
+    assert!(harness.sidecar_path.exists());
+    assert!(old_part.exists());
+    assert!(old_sidecar.exists());
+    harness.base.shutdown().await;
+}
+
+#[tokio::test]
 async fn persist_revalidated_sidecar_writes_verified_chunks_and_current_fingerprint() {
     let dir = tempfile::tempdir().unwrap();
     let file_size = 300_000_u64;

@@ -10,6 +10,7 @@ use super::resume_tracker::ResumeTracker;
 use super::resume_validation::ResumeValidation;
 use super::sidecar::{part_path, sidecar_path};
 use super::sidecar_store::save_sidecar_atomic;
+use super::transfer_prepare::migrate_legacy_resume_state;
 use super::verify::expected_mac;
 
 impl<F: FileSystem> Downloader<F> {
@@ -43,6 +44,15 @@ impl<F: FileSystem> Downloader<F> {
         let part_path = part_path(path);
         let sidecar_path = sidecar_path(path);
         let expected_condensed_mac = expected_mac(node)?;
+        migrate_legacy_resume_state(
+            &self.fs,
+            node.size(),
+            expected_condensed_mac,
+            path,
+            &part_path,
+            &sidecar_path,
+        )
+        .await?;
         let boundaries = mega::mega_chunk_boundaries(node.size());
         let validation = Box::pin(self.revalidate_resume_chunks(
             node,

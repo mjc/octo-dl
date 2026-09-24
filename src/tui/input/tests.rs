@@ -3,7 +3,7 @@ use super::*;
 use crate::core::{CoreEvent, PackageCollision, ResolvedFile, ResolvedPackage};
 use crate::test_support::{
     FileFixtureStatus, StateDirectoryGuard, UrlFixtureStatus, package_id, push_file,
-    session_snapshot, write_dummy_legacy_resume_sidecar,
+    session_snapshot,
 };
 use crate::tui::event::DownloadRequest;
 use crate::tui::visible::TuiRow;
@@ -827,10 +827,11 @@ fn handle_main_input_shift_d_removes_completed_file_artifact() {
     let dir = tempdir().unwrap();
     let final_path = dir.path().join("shift-delete-complete.bin");
     let final_path_string = final_path.to_string_lossy();
-    let part_path = std::path::PathBuf::from(format!("{final_path_string}.part"));
+    let part_path = crate::download::part_path(&final_path_string);
     std::fs::write(&final_path, b"complete").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    let sidecar_path = write_dummy_legacy_resume_sidecar(&final_path_string);
+    let sidecar_path = crate::download::sidecar_path(&final_path_string);
+    std::fs::write(&sidecar_path, b"metadata").unwrap();
 
     let mut app = test_app();
     app.upsert_overlay_file(
@@ -886,10 +887,11 @@ fn handle_main_input_shift_r_resets_selected_file_from_scratch() {
     let dir = tempdir().unwrap();
     let final_path = dir.path().join("active.bin");
     let final_path_string = final_path.to_string_lossy();
-    let part_path = std::path::PathBuf::from(format!("{final_path_string}.part"));
+    let part_path = crate::download::part_path(&final_path_string);
     std::fs::write(&final_path, b"complete").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    let sidecar_path = write_dummy_legacy_resume_sidecar(&final_path_string);
+    let sidecar_path = crate::download::sidecar_path(&final_path_string);
+    std::fs::write(&sidecar_path, b"metadata").unwrap();
 
     let mut app = test_app();
     let (url_tx, mut url_rx) = mpsc::channel(64);
@@ -1271,10 +1273,11 @@ fn handle_main_input_delete_removes_completed_file_artifact() {
     let dir = tempdir().unwrap();
     let final_path = dir.path().join("complete.bin");
     let final_path_string = final_path.to_string_lossy();
-    let part_path = std::path::PathBuf::from(format!("{final_path_string}.part"));
+    let part_path = crate::download::part_path(&final_path_string);
     std::fs::write(&final_path, b"complete").unwrap();
     std::fs::write(&part_path, b"partial").unwrap();
-    let sidecar_path = write_dummy_legacy_resume_sidecar(&final_path_string);
+    let sidecar_path = crate::download::sidecar_path(&final_path_string);
+    std::fs::write(&sidecar_path, b"metadata").unwrap();
 
     let mut app = test_app();
     app.upsert_overlay_file(

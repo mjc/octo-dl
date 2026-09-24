@@ -103,15 +103,26 @@ fn expected_verified_bytes(file_size: u64, indices: &[u32]) -> u64 {
 
 #[tokio::test]
 async fn part_path_appends_extension() {
-    assert_eq!(part_path("foo/bar.zip"), PathBuf::from("foo/bar.zip.part"));
-    assert_eq!(part_path("file.txt"), PathBuf::from("file.txt.part"));
+    assert!(
+        part_path("foo/bar.zip")
+            .to_string_lossy()
+            .ends_with(".part")
+    );
+    assert!(part_path("file.txt").to_string_lossy().ends_with(".part"));
+    assert_ne!(part_path("foo/bar.zip"), PathBuf::from("foo/bar.zip.part"));
 }
 
 #[tokio::test]
 async fn sidecar_path_uses_postcard_extension_and_legacy_paths_remain_available() {
     let paths = TestDownloadPaths::new("file.bin");
 
-    assert!(paths.sidecar.ends_with("file.bin.part.postcard"));
+    assert!(paths.sidecar.to_string_lossy().ends_with(".part.postcard"));
+    assert!(
+        paths
+            .sidecar
+            .to_string_lossy()
+            .contains(".octo-dl-artifact-")
+    );
     assert!(paths.legacy_binary.ends_with("file.bin.part.meta.bin"));
     assert!(paths.legacy_json.ends_with("file.bin.part.meta.json"));
 }
@@ -121,19 +132,23 @@ async fn delete_sidecar_removes_postcard_legacy_binary_and_legacy_json() {
     let paths = TestDownloadPaths::new("file.bin");
     let binary = binary_sidecar_for_indices(42, CURRENT_RESUME_SIDECAR_VERSION, &[1]);
     let legacy = legacy_json_sidecar_for_chunk(42, [1u8; 8], 0, [1u8; 16]);
+    let legacy_binary_path =
+        super::super::sidecar_store::legacy_binary_path_for_sidecar(&paths.sidecar);
+    let legacy_json_path =
+        super::super::sidecar_store::legacy_json_path_for_sidecar(&paths.sidecar);
 
     save_sidecar_atomic(&paths.sidecar, &binary).await.unwrap();
-    tokio::fs::write(&paths.legacy_binary, legacy_binary_bytes(&binary))
+    tokio::fs::write(&legacy_binary_path, legacy_binary_bytes(&binary))
         .await
         .unwrap();
-    write_legacy_json_sidecar(&paths.legacy_json, &legacy)
+    write_legacy_json_sidecar(&legacy_json_path, &legacy)
         .await
         .unwrap();
     delete_sidecar(&paths.sidecar).await.unwrap();
 
     assert!(!paths.sidecar.exists());
-    assert!(!paths.legacy_binary.exists());
-    assert!(!paths.legacy_json.exists());
+    assert!(!legacy_binary_path.exists());
+    assert!(!legacy_json_path.exists());
 }
 
 mod property_tests {
@@ -191,7 +206,7 @@ mod property_tests {
 }
 
 #[tokio::test]
-async fn delete_resume_artifacts_removes_part_and_all_sidecars() {
+async fn delete_resume_artifacts_removes_new_artifacts_and_preserves_legacy_sibling_names() {
     let paths = TestDownloadPaths::new("file.bin");
     tokio::fs::write(&paths.part, b"partial").await.unwrap();
     tokio::fs::write(&paths.sidecar, b"{}").await.unwrap();
@@ -204,8 +219,8 @@ async fn delete_resume_artifacts_removes_part_and_all_sidecars() {
 
     assert!(!paths.part.exists());
     assert!(!paths.sidecar.exists());
-    assert!(!paths.legacy_binary.exists());
-    assert!(!paths.legacy_json.exists());
+    assert!(paths.legacy_binary.exists());
+    assert!(paths.legacy_json.exists());
 }
 
 #[tokio::test]
@@ -234,6 +249,35 @@ async fn delete_download_artifacts_removes_postcard_tmp_leftovers() {
 
     assert!(!paths.file.exists());
     assert!(!tmp_path.exists());
+}
+
+#[tokio::test]
+async fn deleting_resume_artifacts_preserves_completed_output_with_derived_name() {
+    let paths = TestDownloadPaths::new("file.bin");
+    let suffixes = [
+        ".part",
+        ".part.postcard",
+        ".part.meta.bin",
+        ".part.meta.json",
+        ".part.postcard.tmp",
+    ];
+    let completed_siblings = suffixes
+        .iter()
+        .map(|suffix| PathBuf::from(format!("{}{suffix}", paths.file_string)))
+        .collect::<Vec<_>>();
+    for sibling in &completed_siblings {
+        tokio::fs::write(sibling, b"verified sibling")
+            .await
+            .unwrap();
+    }
+
+    delete_download_artifacts_for_path(&paths.file_string)
+        .await
+        .unwrap();
+
+    for sibling in completed_siblings {
+        assert_eq!(tokio::fs::read(sibling).await.unwrap(), b"verified sibling");
+    }
 }
 
 #[tokio::test]

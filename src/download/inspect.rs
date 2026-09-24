@@ -3,8 +3,8 @@ use std::path::Path;
 use crate::fs::FileSystem;
 
 use super::sidecar::{
-    legacy_binary_sidecar_path, legacy_json_sidecar_path, part_path, resume_sidecar_verified_bytes,
-    sidecar_path,
+    legacy_binary_sidecar_path, legacy_json_sidecar_path, legacy_part_path,
+    legacy_postcard_sidecar_path, part_path, resume_sidecar_verified_bytes, sidecar_path,
 };
 
 /// Classification of a file's current state on disk.
@@ -101,15 +101,24 @@ pub async fn inspect_local_file<F: FileSystem>(
     force_overwrite: bool,
 ) -> InspectedLocalFile {
     let part_path = part_path(path);
+    let legacy_part_path = legacy_part_path(path);
     let binary_sidecar_path = sidecar_path(path);
+    let legacy_postcard_sidecar_path = legacy_postcard_sidecar_path(path);
     let legacy_binary_sidecar_path = legacy_binary_sidecar_path(path);
     let legacy_sidecar_path = legacy_json_sidecar_path(path);
-    let part_fingerprint = fs.file_fingerprint(&part_path).await;
+    let part_fingerprint = fs
+        .file_fingerprint(&part_path)
+        .await
+        .or(fs.file_fingerprint(&legacy_part_path).await);
     let observed = ObservedLocalFile {
         final_size: fs.file_size(Path::new(path)).await,
-        part_size: fs.file_size(&part_path).await,
+        part_size: fs
+            .file_size(&part_path)
+            .await
+            .or(fs.file_size(&legacy_part_path).await),
         part_allocated_bytes: part_fingerprint.and_then(|fingerprint| fingerprint.allocated_bytes),
         has_sidecar: fs.file_exists(&binary_sidecar_path).await
+            || fs.file_exists(&legacy_postcard_sidecar_path).await
             || fs.file_exists(&legacy_binary_sidecar_path).await
             || fs.file_exists(&legacy_sidecar_path).await,
         verified_resume_bytes: resume_sidecar_verified_bytes(path).unwrap_or(0),

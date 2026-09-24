@@ -16,7 +16,11 @@ use super::downloader::Downloader;
 use super::resume_state::should_reuse_resume_state;
 use super::resume_tracker::ResumeTracker;
 use super::resume_validation::ResumeValidation;
-use super::sidecar::delete_sidecar;
+use super::sidecar::{
+    delete_sidecar, legacy_binary_sidecar_path, legacy_json_sidecar_path, legacy_part_path,
+    legacy_postcard_sidecar_path,
+};
+use super::sidecar_store::{ResumeSidecar, load_sidecar_sync, save_sidecar_atomic};
 use super::sidecar_writer::LazySidecarWriter;
 use super::verify::expected_mac;
 
@@ -38,7 +42,17 @@ impl<F: FileSystem> Downloader<F> {
         sidecar_path: &Path,
         cancellation_token: Option<&CancellationToken>,
     ) -> Result<PreparedTransferResume> {
+        self.validate_output_path(path)?;
         let expected_condensed_mac = expected_mac(node)?;
+        migrate_legacy_resume_state(
+            &self.fs,
+            node.size(),
+            expected_condensed_mac,
+            path,
+            part_path,
+            sidecar_path,
+        )
+        .await?;
         let boundaries = mega::mega_chunk_boundaries(node.size());
         log::debug!(
             "Download resume setup for {path}: size={} trust_resume_state={} force_overwrite={} part={} sidecar={} chunks={}",
@@ -114,6 +128,72 @@ impl<F: FileSystem> Downloader<F> {
             preserve_existing,
         })
     }
+}
+
+pub(super) async fn migrate_legacy_resume_state(
+    fs: &impl FileSystem,
+    file_size: u64,
+    expected_condensed_mac: [u8; 8],
+    path: &str,
+    part_path: &Path,
+    sidecar_path: &Path,
+) -> std::io::Result<()> {
+    let legacy_part = &legacy_part_path(path);
+    let legacy_sidecars = [
+        legacy_postcard_sidecar_path(path),
+        legacy_binary_sidecar_path(path),
+        legacy_json_sidecar_path(path),
+    ];
+    if tokio::fs::try_exists(part_path).await? || tokio::fs::try_exists(sidecar_path).await? {
+        return Ok(());
+    }
+    let part_metadata = match tokio::fs::symlink_metadata(legacy_part).await {
+        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => metadata,
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if part_metadata.len() > file_size {
+        return Ok(());
+    }
+
+    let mut matching_sidecar: Option<ResumeSidecar> = None;
+    for candidate in &legacy_sidecars {
+        match tokio::fs::symlink_metadata(candidate).await {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        }
+        let Some(sidecar) = load_sidecar_sync(candidate, candidate, candidate) else {
+            continue;
+        };
+        if sidecar.file_size == file_size
+            && sidecar.expected_condensed_mac == expected_condensed_mac
+        {
+            matching_sidecar = Some(sidecar);
+            break;
+        }
+    }
+    let Some(matching_sidecar) = matching_sidecar else {
+        return Ok(());
+    };
+
+    let Some(actual_len) = fs.file_size(legacy_part).await else {
+        return Ok(());
+    };
+    let mut source = tokio::fs::File::open(legacy_part).await?;
+    let mut target = fs.open_part_file(part_path, actual_len, false).await?;
+    if let Err(error) = tokio::io::copy(&mut source, &mut target).await {
+        let _ = fs.remove_file(part_path).await;
+        return Err(error);
+    }
+    drop(target);
+    if let Err(error) = save_sidecar_atomic(sidecar_path, &matching_sidecar).await {
+        let _ = fs.remove_file(part_path).await;
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -213,6 +293,82 @@ mod tests {
 
             harness.shutdown().await;
         });
+    }
+
+    #[test]
+    fn legacy_resume_state_is_copied_verified_and_left_intact() {
+        run_with_large_stack_current_thread_runtime(
+            "prepare-transfer-legacy-migration-test",
+            || async {
+                let harness =
+                    FakeMegaDownloadHarness::new(67, 300_000, DownloadConfig::default()).await;
+                tokio::fs::create_dir_all(&harness.output_dir)
+                    .await
+                    .unwrap();
+                let output_path = harness.output_path(harness.fixture.file_name());
+                let output_path_string = output_path.to_string_lossy().into_owned();
+                let new_part_path = part_path(&output_path_string);
+                let new_sidecar_path = sidecar_path(&output_path_string);
+                let old_part_path = legacy_part_path(&output_path_string);
+                let old_sidecar_path = legacy_postcard_sidecar_path(&output_path_string);
+                let node = harness.node();
+                let first = mega::mega_chunk_boundaries(node.size())[0];
+                let mut first_chunk = vec![0u8; usize_from_u64(first.length)];
+                harness
+                    .fixture
+                    .fill_plaintext(first.offset, &mut first_chunk);
+                tokio::fs::write(&old_part_path, &first_chunk)
+                    .await
+                    .unwrap();
+                let expected_mac = mega::compute_mega_chunk_mac(
+                    &first_chunk,
+                    node.aes_key(),
+                    node.aes_iv().unwrap(),
+                );
+                let sidecar = sidecar_for_chunk(
+                    node.size(),
+                    *node.condensed_mac().unwrap(),
+                    first.index,
+                    expected_mac,
+                );
+                save_sidecar_atomic(&old_sidecar_path, &sidecar)
+                    .await
+                    .unwrap();
+                let progress_obj: Arc<dyn DownloadProgress> =
+                    Arc::new(ReuseRecordingProgress::default());
+
+                let prepared = harness
+                    .downloader
+                    .prepare_transfer_resume(
+                        node,
+                        &output_path_string,
+                        &progress_obj,
+                        true,
+                        &new_part_path,
+                        &new_sidecar_path,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+
+                assert!(prepared.preserve_existing);
+                assert_eq!(prepared.trusted_bytes, first.length);
+                assert_eq!(tokio::fs::read(&old_part_path).await.unwrap(), first_chunk);
+                assert!(old_sidecar_path.exists());
+                assert!(new_part_path.exists());
+                assert!(new_sidecar_path.exists());
+
+                super::super::sidecar::delete_resume_artifacts_for_path(&output_path_string)
+                    .await
+                    .unwrap();
+                assert!(!new_part_path.exists());
+                assert!(!new_sidecar_path.exists());
+                assert!(old_part_path.exists());
+                assert!(old_sidecar_path.exists());
+
+                harness.shutdown().await;
+            },
+        );
     }
 
     #[test]
