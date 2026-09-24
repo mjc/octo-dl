@@ -1237,15 +1237,21 @@ fn reset_file_accepts_new_terminal_events_after_restart() {
     );
 
     app.handle_ui_action(UiAction::ResetFile("active.bin".to_string().into()));
+    let restarted_attempt_id = app.file_attempt_ids[&crate::core::FileId::from("active.bin")];
+    assert_eq!(
+        restarted_attempt_id,
+        crate::tui::event::DownloadAttemptId::new(1)
+    );
     app.handle_download_event(DownloadEvent::FileStart {
         id: "active.bin".to_string().into(),
         size: 100,
-        attempt_id: crate::tui::event::DownloadAttemptId::new(1),
+        attempt_id: restarted_attempt_id,
     });
+    assert_eq!(app.files[0].status, FileStatus::Downloading);
     app.handle_download_event(DownloadEvent::FileError {
         id: "active.bin".to_string().into(),
         error: "boom".to_string(),
-        attempt_id: crate::tui::event::DownloadAttemptId::new(1),
+        attempt_id: restarted_attempt_id,
     });
 
     assert_eq!(app.files[0].downloaded, 0);
@@ -1516,6 +1522,12 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
     harness
         .app
         .handle_ui_action(UiAction::ResetFile("active.bin".to_string().into()));
+    let restarted_attempt_id =
+        harness.app.file_attempt_ids[&crate::core::FileId::from("active.bin")];
+    assert_eq!(
+        restarted_attempt_id,
+        crate::tui::event::DownloadAttemptId::new(1)
+    );
     harness.inject_download(DownloadEvent::FileComplete {
         id: "active.bin".to_string().into(),
         attempt_id: crate::tui::event::DownloadAttemptId::new(0),
@@ -1534,8 +1546,16 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
     harness.inject_download(DownloadEvent::FileStart {
         id: "active.bin".to_string().into(),
         size: 128,
-        attempt_id: crate::tui::event::DownloadAttemptId::new(1),
+        attempt_id: restarted_attempt_id,
     });
+    harness.tick();
+    let file = harness
+        .app
+        .files
+        .iter()
+        .find(|file| file.id == "active.bin")
+        .expect("restarted file should remain visible");
+    assert_eq!(file.status, FileStatus::Downloading);
     harness.inject_download(DownloadEvent::FileComplete {
         id: "active.bin".to_string().into(),
         attempt_id: crate::tui::event::DownloadAttemptId::new(0),
@@ -1553,7 +1573,7 @@ fn scenario_reset_ignores_late_completion_until_restarted_attempt_emits_start() 
 
     harness.inject_download(DownloadEvent::FileComplete {
         id: "active.bin".to_string().into(),
-        attempt_id: crate::tui::event::DownloadAttemptId::new(1),
+        attempt_id: restarted_attempt_id,
     });
     harness.tick();
 

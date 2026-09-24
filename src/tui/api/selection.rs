@@ -49,7 +49,14 @@ pub(super) fn resolve_action_target(
             if (id.is_some_and(|id| package.id == id && file.id == id)
                 || name.is_some_and(|name| package.display_name == name && file.name == name))
                 && package.id == file.id
-                && package.source_url == file.id =>
+                // These transient rows project the submitted URL into both
+                // package.source_url and file.id. Compare named URL values:
+                // the fields intentionally have different roles here.
+                && {
+                    let submitted_url = package.source_url.as_str();
+                    let projected_file_id = file.id.as_str();
+                    submitted_url == projected_file_id
+                } =>
         {
             // A URL that has not resolved to a real package is projected as
             // both a legacy package row and a file row with the same ID. The

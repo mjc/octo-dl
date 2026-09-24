@@ -261,9 +261,10 @@ async fn register_download_token_delivers_token_to_application_channel() {
     let (token_tx, mut token_rx) = mpsc::channel(1);
     let file_id: FileId = "episode.mkv".into();
 
-    let cancel_token = register_download_token(file_id.clone(), &token_tx)
-        .await
-        .expect("a live token channel should accept registration");
+    let cancel_token =
+        register_download_token(file_id.clone(), DownloadAttemptId::new(0), &token_tx)
+            .await
+            .expect("a live token channel should accept registration");
     let message = token_rx
         .recv()
         .await
@@ -280,7 +281,8 @@ async fn register_download_token_reports_closed_application_channel() {
     let (token_tx, token_rx) = mpsc::channel(1);
     drop(token_rx);
 
-    let result = register_download_token("episode.mkv".into(), &token_tx).await;
+    let result =
+        register_download_token("episode.mkv".into(), DownloadAttemptId::new(0), &token_tx).await;
 
     assert!(result.is_err());
 }
@@ -883,7 +885,7 @@ mod property_tests {
     proptest! {
         #![proptest_config(ProptestConfig {
             cases: 64,
-            rng_seed: RngSeed::Fixed(0x4f43_544f_3131_34),
+            rng_seed: RngSeed::Fixed(0x004f_4354_4f31_3134),
             ..ProptestConfig::default()
         })]
         #[test]

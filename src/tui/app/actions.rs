@@ -455,7 +455,15 @@ impl App {
         size: u64,
         attempt_id: DownloadAttemptId,
     ) {
-        if !self.accepts_current_attempt_update(&id, attempt_id) {
+        // A reset keeps ordinary updates out until the restarted attempt
+        // begins. Its matching FileStart is the event that clears that gate.
+        if !self.event_matches_current_attempt(&id, attempt_id)
+            || !self
+                .core_state
+                .files
+                .get(&id)
+                .is_some_and(|file| file.lifecycle.accepts_download_attempt_update())
+        {
             log::info!("Ignoring stale or terminal download start: {id}");
             return;
         }
