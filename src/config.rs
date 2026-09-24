@@ -3,12 +3,14 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize, de};
 use thiserror::Error;
 
 use crate::core::{
-    decode_credential_key, decrypt_credential, decrypt_credential_with_key, encrypt_credential,
-    encrypt_credential_with_key, generate_credential_key,
+    decode_credential_key, decrypt_credential, decrypt_credential_with_key,
+    encrypt_credential_with_key,
 };
 
 const fn default_download_path() -> Option<String> {
@@ -25,6 +27,43 @@ const fn default_chunks_per_file() -> usize {
 
 const fn default_concurrent_files() -> usize {
     4
+}
+
+/// Random per-config key used to encrypt persisted MEGA credentials and sessions.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CredentialKey([u8; 16]);
+
+impl CredentialKey {
+    /// Creates a fresh random credential key.
+    #[must_use]
+    pub fn generate() -> Self {
+        let bytes = *uuid::Uuid::new_v4().as_bytes();
+        Self(bytes)
+    }
+
+    /// Decodes a persisted credential key.
+    #[must_use]
+    pub fn decode(encoded: &str) -> Option<Self> {
+        decode_credential_key(encoded).map(Self)
+    }
+
+    /// Encodes this key for the existing config sidecar format.
+    #[must_use]
+    pub fn encode(self) -> String {
+        BASE64.encode(self.0)
+    }
+
+    /// Returns the key bytes for authenticated encryption.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CredentialKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CredentialKey([REDACTED])")
+    }
 }
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -386,21 +425,12 @@ impl ServiceCredentials {
         }
     }
 
-    /// Encrypts plaintext credentials in place, setting `encrypted = true`.
-    pub fn encrypt_in_place(&mut self) {
-        if !self.encrypted {
-            self.email = encrypt_credential(&self.email);
-            self.password = encrypt_credential(&self.password);
-            if !self.mfa.is_empty() {
-                self.mfa = encrypt_credential(&self.mfa);
-            }
-            self.encrypted = true;
-        }
-    }
-
     /// Decrypts credentials using the random key persisted with the service config.
     #[must_use]
-    pub fn decrypt_if_needed_with_key(&self, key: &[u8; 16]) -> Option<(String, String, String)> {
+    pub fn decrypt_if_needed_with_key(
+        &self,
+        key: &CredentialKey,
+    ) -> Option<(String, String, String)> {
         if !self.encrypted {
             return Some((self.email.clone(), self.password.clone(), self.mfa.clone()));
         }
@@ -415,7 +445,7 @@ impl ServiceCredentials {
     }
 
     /// Encrypts plaintext credentials with the service config's random key.
-    pub fn encrypt_in_place_with_key(&mut self, key: &[u8; 16]) {
+    pub fn encrypt_in_place_with_key(&mut self, key: &CredentialKey) {
         if !self.encrypted {
             self.email = encrypt_credential_with_key(&self.email, key);
             self.password = encrypt_credential_with_key(&self.password, key);
@@ -542,6 +572,28 @@ pub struct ServiceConfig {
 }
 
 impl ServiceConfig {
+    fn migrate_legacy_saved_session(&mut self) -> bool {
+        let Some(saved_session) = self.credentials.saved_session.as_ref() else {
+            return false;
+        };
+        if !saved_session.email.starts_with("v2:") || !saved_session.session.starts_with("v2:") {
+            return false;
+        }
+
+        let key = self
+            .credential_key
+            .as_deref()
+            .and_then(CredentialKey::decode)
+            .unwrap_or_else(CredentialKey::generate);
+        let Some(migrated) = saved_session.reencrypt_legacy_with_key(&key) else {
+            return false;
+        };
+
+        self.credentials.saved_session = Some(migrated);
+        self.credential_key = Some(key.encode());
+        true
+    }
+
     /// Loads a `ServiceConfig` from a TOML file at `path`.
     ///
     /// # Errors
@@ -564,6 +616,9 @@ impl ServiceConfig {
             }
             config.credential_key = Some(key.trim().to_string());
         }
+        if config.migrate_legacy_saved_session() {
+            config.save(path)?;
+        }
         Ok(config)
     }
 
@@ -578,10 +633,9 @@ impl ServiceConfig {
         }
 
         // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| path_io_error("create config directory", parent, &error))?;
-        }
+        let parent = config_parent(path);
+        std::fs::create_dir_all(parent)
+            .map_err(|error| path_io_error("create config directory", parent, &error))?;
 
         let template = Self {
             credentials: ServiceCredentials {
@@ -591,7 +645,7 @@ impl ServiceConfig {
                 mfa: String::new(),
                 saved_session: None,
             },
-            credential_key: Some(generate_credential_key()),
+            credential_key: Some(CredentialKey::generate().encode()),
             api: ApiConfig::default(),
             download: DownloadConfig {
                 path: None,
@@ -608,10 +662,12 @@ impl ServiceConfig {
     ///
     /// Returns an error if the file cannot be written.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let toml_str = toml::to_string(self)
+        let mut config = self.clone();
+        config.migrate_legacy_saved_session();
+        let toml_str = toml::to_string(&config)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = config_parent(path);
         let save_id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let file_name = path.file_name().unwrap_or_default().to_string_lossy();
         let temporary_path = parent.join(format!(
@@ -631,7 +687,7 @@ impl ServiceConfig {
         }
         result?;
 
-        let Some(key) = self.credential_key.as_deref() else {
+        let Some(key) = config.credential_key.as_deref() else {
             return replace_config_file(&temporary_path, path, parent);
         };
 
@@ -704,7 +760,17 @@ impl ServiceConfig {
     }
 }
 
-fn write_durable_temp_file(path: &Path, contents: &[u8], description: &str) -> std::io::Result<()> {
+fn config_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+pub(crate) fn write_durable_temp_file(
+    path: &Path,
+    contents: &[u8],
+    description: &str,
+) -> std::io::Result<()> {
     use std::io::Write as _;
 
     let mut options = std::fs::OpenOptions::new();
@@ -741,7 +807,7 @@ fn replace_config_file(temporary_path: &Path, path: &Path, parent: &Path) -> std
     sync_directory(parent)
 }
 
-fn sync_directory(parent: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_directory(parent: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         let directory = std::fs::File::open(parent)
@@ -750,6 +816,8 @@ fn sync_directory(parent: &Path) -> std::io::Result<()> {
             .sync_all()
             .map_err(|error| path_io_error("sync config directory", parent, &error))?;
     }
+    #[cfg(not(unix))]
+    let _ = parent;
     Ok(())
 }
 
@@ -828,6 +896,7 @@ mod service_config_tests {
 
     #[test]
     fn service_credentials_encrypt_decrypt() {
+        let key = CredentialKey::generate();
         let mut creds = ServiceCredentials {
             encrypted: false,
             email: "test@test.com".to_string(),
@@ -836,24 +905,20 @@ mod service_config_tests {
             saved_session: None,
         };
 
-        let (e, p, m) = creds.decrypt_if_needed().unwrap();
-        assert_eq!(e, "test@test.com");
-        assert_eq!(p, "hunter2");
-        assert!(m.is_empty());
-
-        creds.encrypt_in_place();
+        creds.encrypt_in_place_with_key(&key);
         assert!(creds.encrypted);
-        assert_ne!(creds.email, "test@test.com");
-        assert_ne!(creds.password, "hunter2");
+        assert!(creds.email.starts_with("v3:"));
+        assert!(creds.password.starts_with("v3:"));
 
-        let (e2, p2, _) = creds.decrypt_if_needed().unwrap();
+        let (e2, p2, m2) = creds.decrypt_if_needed_with_key(&key).unwrap();
         assert_eq!(e2, "test@test.com");
         assert_eq!(p2, "hunter2");
+        assert!(m2.is_empty());
     }
 
     #[test]
     fn service_credentials_use_persisted_random_key_format() {
-        let key = decode_credential_key(&generate_credential_key()).unwrap();
+        let key = CredentialKey::generate();
         let mut creds = ServiceCredentials {
             encrypted: false,
             email: "test@test.com".to_string(),
@@ -866,7 +931,11 @@ mod service_config_tests {
 
         assert!(creds.email.starts_with("v3:"));
         assert!(creds.decrypt_if_needed_with_key(&key).is_some());
-        assert!(creds.decrypt_if_needed_with_key(&[0; 16]).is_none());
+        assert!(
+            creds
+                .decrypt_if_needed_with_key(&CredentialKey::generate())
+                .is_none()
+        );
     }
 
     #[test]
@@ -897,7 +966,7 @@ mod service_config_tests {
     fn service_config_save_load_persists_separate_credential_key() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        let credential_key = generate_credential_key();
+        let credential_key = CredentialKey::generate().encode();
         let config = ServiceConfig {
             credentials: ServiceCredentials {
                 encrypted: false,
@@ -933,7 +1002,7 @@ mod service_config_tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
         let key_path = credential_key_path(&path);
-        let old_key = generate_credential_key();
+        let old_key = CredentialKey::generate().encode();
         std::fs::create_dir(&path).unwrap();
         std::fs::write(&key_path, format!("{old_key}\n")).unwrap();
 
@@ -945,7 +1014,7 @@ mod service_config_tests {
                 mfa: String::new(),
                 saved_session: None,
             },
-            credential_key: Some(generate_credential_key()),
+            credential_key: Some(CredentialKey::generate().encode()),
             api: ApiConfig::default(),
             download: DownloadConfig::default(),
         };
@@ -980,7 +1049,7 @@ mod service_config_tests {
 
         let replacement = ServiceConfig {
             credentials: initial.credentials,
-            credential_key: Some(generate_credential_key()),
+            credential_key: Some(CredentialKey::generate().encode()),
             api: initial.api,
             download: initial.download,
         };
@@ -1078,6 +1147,16 @@ path = "/tmp/downloads"
     }
 
     #[test]
+    fn load_or_create_accepts_a_bare_filename_in_the_current_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let _cwd = crate::test_support::CurrentDirGuard::set(dir.path());
+        ServiceConfig::load_or_create(Path::new("config.toml")).unwrap();
+
+        assert!(dir.path().join("config.toml").is_file());
+        assert!(dir.path().join("config.toml.key").is_file());
+    }
+
+    #[test]
     fn service_config_load_reports_path_in_io_errors() {
         let path = Path::new("/definitely/missing/octo-dl-config.toml");
         let error = ServiceConfig::load(path).expect_err("missing config should fail");
@@ -1108,11 +1187,12 @@ path = "/tmp/downloads"
                 Some((email.clone(), password.clone(), mfa.clone()))
             );
 
-            creds.encrypt_in_place();
+            let key = CredentialKey::generate();
+            creds.encrypt_in_place_with_key(&key);
 
             prop_assert!(creds.encrypted);
             prop_assert_eq!(
-                creds.decrypt_if_needed(),
+                creds.decrypt_if_needed_with_key(&key),
                 Some((email, password, mfa.clone()))
             );
             if mfa.is_empty() {
@@ -1136,9 +1216,10 @@ path = "/tmp/downloads"
                 saved_session: None,
             };
 
-            creds.encrypt_in_place();
+            let key = CredentialKey::generate();
+            creds.encrypt_in_place_with_key(&key);
             let once = creds.clone();
-            creds.encrypt_in_place();
+            creds.encrypt_in_place_with_key(&key);
 
             prop_assert_eq!(creds.encrypted, once.encrypted);
             prop_assert_eq!(creds.email, once.email);

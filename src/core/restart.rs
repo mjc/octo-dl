@@ -134,7 +134,14 @@ pub fn reconcile_restart(
                 snap.config.clone()
             }),
         credentials: session.as_ref().map_or_else(
-            || crate::core::session::SavedCredentials::encrypt("", "", None),
+            || {
+                crate::core::session::SavedCredentials::encrypt_with_key(
+                    "",
+                    "",
+                    None,
+                    &crate::config::CredentialKey::generate(),
+                )
+            },
             |snap| snap.credentials.clone(),
         ),
     });
@@ -280,7 +287,7 @@ fn canonical_restart_session(snapshot: SessionSnapshot) -> SessionSnapshot {
 mod tests {
     use super::*;
     use crate::core::session::{
-        FileSnapshot, PackageSnapshot, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
+        FileSnapshot, PackageSnapshot, SessionSnapshot, SessionUrlSnapshot,
     };
     use crate::core::{PackageId, model::SessionRunStatus};
     use crate::test_support::write_dummy_legacy_resume_sidecar_for_path;
@@ -318,7 +325,7 @@ mod tests {
                 error: None,
             }],
             config: crate::config::DownloadConfig::default(),
-            credentials: SavedCredentials::encrypt("u", "p", None),
+            credentials: crate::test_support::test_credentials(),
         }
     }
 
@@ -679,7 +686,7 @@ mod tests {
     fn restart_does_not_synthesize_complete_files_missing_from_session() {
         let mut snapshot = SessionSnapshot::new(
             crate::config::DownloadConfig::default(),
-            SavedCredentials::encrypt("u", "p", None),
+            crate::test_support::test_credentials(),
         );
         snapshot.urls.push(SessionUrlSnapshot {
             url: "https://mega.nz/file/test".to_string(),
@@ -709,7 +716,7 @@ mod tests {
     fn restart_does_not_synthesize_partial_files_missing_from_session() {
         let mut snapshot = SessionSnapshot::new(
             crate::config::DownloadConfig::default(),
-            SavedCredentials::encrypt("u", "p", None),
+            crate::test_support::test_credentials(),
         );
         snapshot.urls.push(SessionUrlSnapshot {
             url: "https://mega.nz/file/test".to_string(),

@@ -1,7 +1,10 @@
+#[cfg(any(feature = "cli", feature = "tui"))]
 use crate::config::DownloadConfig;
+use crate::core::SavedCredentials;
+#[cfg(any(feature = "cli", feature = "tui"))]
 use crate::core::{
     FileAccounting, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
-    PackageSnapshot, SavedCredentials, SessionSnapshot, SessionUrlSnapshot,
+    PackageSnapshot, SessionSnapshot, SessionUrlSnapshot,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -46,6 +49,7 @@ impl Drop for CurrentDirGuard {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(feature = "cli", feature = "tui"))]
 pub enum UrlFixtureStatus {
     Pending,
     Fetched,
@@ -53,16 +57,23 @@ pub enum UrlFixtureStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(feature = "cli", feature = "tui"))]
+#[cfg_attr(not(feature = "tui"), derive(Copy))]
 pub enum FileFixtureStatus {
     Pending,
     Completed,
+    #[cfg(feature = "tui")]
     Error(String),
 }
 
 pub fn test_credentials() -> SavedCredentials {
-    SavedCredentials::encrypt("test@example.com", "hunter2", None)
+    let key = crate::config::CredentialKey::generate();
+    key.persist_for_sessions()
+        .expect("test session key should persist");
+    SavedCredentials::encrypt_with_key("test@example.com", "hunter2", None, &key)
 }
 
+#[cfg(any(feature = "cli", feature = "tui"))]
 pub fn package_id(raw: &str, source_url: &str) -> PackageId {
     PackageId::parse_or_key(raw, &PackageKey::new(source_url))
 }
@@ -81,6 +92,7 @@ pub fn write_dummy_legacy_resume_sidecar_for_path(path: &Path) -> PathBuf {
     write_dummy_legacy_resume_sidecar(path.to_string_lossy().as_ref())
 }
 
+#[cfg(any(feature = "cli", feature = "tui"))]
 pub fn session_snapshot(urls: Vec<(&str, UrlFixtureStatus)>) -> SessionSnapshot {
     let mut session = SessionSnapshot::new(DownloadConfig::default(), test_credentials());
     session.urls = urls
@@ -96,6 +108,7 @@ pub fn session_snapshot(urls: Vec<(&str, UrlFixtureStatus)>) -> SessionSnapshot 
     session
 }
 
+#[cfg(any(feature = "cli", feature = "tui"))]
 pub fn push_file(
     session: &mut SessionSnapshot,
     package_index: usize,
@@ -136,6 +149,7 @@ pub fn push_file(
         FileFixtureStatus::Completed => {
             (FileLifecycle::Complete, FileAccounting::Preexisting, size)
         }
+        #[cfg(feature = "tui")]
         FileFixtureStatus::Error(message) => (
             FileLifecycle::Failed { message },
             FileAccounting::CurrentRun,

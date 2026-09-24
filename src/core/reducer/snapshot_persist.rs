@@ -4,12 +4,12 @@
 use std::cell::Cell;
 
 use super::CoreEvent;
-use crate::core::model::DownloadState;
+use crate::core::model::{DownloadState, FileLifecycle};
 use crate::core::session::{FileSnapshot, PackageSnapshot, SessionSnapshot, SessionUrlSnapshot};
 
 #[cfg(test)]
 use crate::core::model::{
-    FileAccounting, FileId, FileLifecycle, FileProgressState, FileState, PackageId, PackageKey,
+    FileAccounting, FileId, FileProgressState, FileState, PackageId, PackageKey,
     PackageProgressState, PackageState,
 };
 
@@ -71,14 +71,27 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
             {
                 url_errors.insert(file.source_url.clone(), error.clone());
             }
+            let (lifecycle, progress) = if file.progress.verification_origin_complete {
+                let mut progress = file.progress.clone();
+                progress.visible_completed_bytes = file.size;
+                progress.verified_existing_bytes = 0;
+                progress.downloaded_network_bytes = progress
+                    .verification_restore_downloaded_network_bytes
+                    .min(file.size);
+                progress.verification_origin_complete = false;
+                progress.verification_restore_downloaded_network_bytes = 0;
+                (FileLifecycle::Complete, progress)
+            } else {
+                (file.lifecycle.clone(), file.progress.clone())
+            };
             files.push(FileSnapshot {
                 id: file.id.clone(),
                 package_id: file.package_id,
                 source_url: file.source_url.clone(),
                 path: file.path.clone(),
                 size: file.size,
-                lifecycle: file.lifecycle.clone(),
-                progress: file.progress.clone(),
+                lifecycle,
+                progress,
                 accounting: file.accounting,
             });
         }
@@ -98,22 +111,53 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
         no_remaining_files,
         "snapshot_from_state expects files grouped in package order"
     );
+    let urls = state
+        .url_order
+        .iter()
+        .map(|url| SessionUrlSnapshot {
+            url: url.clone(),
+            error: url_errors.get(url).cloned(),
+        })
+        .collect::<Vec<_>>();
+    let status = persisted_status(&packages, &urls, state.session_meta.status);
     SessionSnapshot {
         version: 6,
         id: state.session_meta.session_id.clone(),
         created: state.session_meta.created,
-        status: state.session_meta.status,
-        urls: state
-            .url_order
-            .iter()
-            .map(|url| SessionUrlSnapshot {
-                url: url.clone(),
-                error: url_errors.get(url).cloned(),
-            })
-            .collect(),
+        status,
+        urls,
         packages,
         config: state.session_meta.config.clone(),
         credentials: state.session_meta.credentials.clone(),
+    }
+}
+
+fn persisted_status(
+    packages: &[PackageSnapshot],
+    urls: &[SessionUrlSnapshot],
+    current_status: crate::core::model::SessionRunStatus,
+) -> crate::core::model::SessionRunStatus {
+    let mut has_files = false;
+    let all_files_complete = packages
+        .iter()
+        .flat_map(|package| &package.files)
+        .all(|file| {
+            has_files = true;
+            matches!(file.lifecycle, FileLifecycle::Complete)
+        });
+    let all_sources_resolved = urls.iter().all(|tracked_url| {
+        tracked_url.error.is_none()
+            && packages
+                .iter()
+                .flat_map(|package| &package.files)
+                .any(|file| file.source_url == tracked_url.url)
+    });
+    if has_files && all_files_complete && all_sources_resolved {
+        crate::core::model::SessionRunStatus::Completed
+    } else if matches!(current_status, crate::core::model::SessionRunStatus::Paused) {
+        crate::core::model::SessionRunStatus::Paused
+    } else {
+        crate::core::model::SessionRunStatus::InProgress
     }
 }
 
@@ -177,6 +221,80 @@ mod tests {
                 .map(|file| file.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["b.bin", "a.bin"]
+        );
+    }
+
+    #[test]
+    fn snapshot_keeps_durable_completion_during_reverification() {
+        let pkg_id = package_id("pkg", "pkg");
+        let mut state = DownloadState::new(crate::core::SessionMeta::default());
+        state.url_order = vec!["pkg".to_string()];
+        state.packages.insert(
+            pkg_id,
+            PackageState {
+                id: pkg_id,
+                key: PackageKey::new("pkg"),
+                display_name: "pkg".to_string(),
+                progress: PackageProgressState {
+                    queued: 1,
+                    ..PackageProgressState::default()
+                },
+                error: None,
+            },
+        );
+        state.files.insert(
+            "file.bin".into(),
+            FileState {
+                id: "file.bin".into(),
+                package_id: pkg_id,
+                source_url: "pkg".to_string(),
+                path: "file.bin".to_string(),
+                size: 10,
+                lifecycle: FileLifecycle::Queued,
+                progress: FileProgressState {
+                    verified_existing_bytes: 10,
+                    verification_origin_complete: true,
+                    verification_restore_downloaded_network_bytes: 7,
+                    ..FileProgressState::default()
+                },
+                accounting: FileAccounting::CurrentRun,
+            },
+        );
+
+        let snapshot = snapshot_from_state(&state);
+        let saved_file = snapshot.packages[0].files[0].clone();
+
+        assert_eq!(
+            snapshot.status,
+            crate::core::model::SessionRunStatus::Completed
+        );
+        assert_eq!(saved_file.lifecycle, FileLifecycle::Complete);
+        assert_eq!(saved_file.progress.visible_completed_bytes, 10);
+        assert_eq!(saved_file.progress.downloaded_network_bytes, 7);
+        assert_eq!(saved_file.progress.verified_existing_bytes, 0);
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.postcard");
+        snapshot.save_to_path(&path).unwrap();
+        let loaded = SessionSnapshot::load(&path).unwrap();
+        let restart = crate::core::build_restart_snapshot(&loaded);
+
+        assert!(restart.resume_file_ids.is_empty());
+        assert_eq!(
+            restart.state.files[&FileId::from("file.bin")].lifecycle,
+            FileLifecycle::Complete
+        );
+    }
+
+    #[test]
+    fn empty_session_snapshot_remains_in_progress() {
+        let state = DownloadState::new(crate::core::SessionMeta::default());
+
+        let snapshot = snapshot_from_state(&state);
+
+        assert_eq!(
+            snapshot.status,
+            crate::core::model::SessionRunStatus::InProgress
         );
     }
 

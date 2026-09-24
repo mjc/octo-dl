@@ -190,17 +190,26 @@ fn save_rejects_empty_synthetic_package_placeholders() {
 fn resume_session_restores_email_password_without_restoring_mfa() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
+    let config_path = dir.path().join("config.toml");
+    let config = crate::ServiceConfig::load_or_create(&config_path).unwrap();
+    let key =
+        crate::config::CredentialKey::decode(config.credential_key.as_deref().unwrap()).unwrap();
 
     let mut session = session_snapshot(vec![(
         "https://mega.nz/file/pending",
         UrlFixtureStatus::Pending,
     )]);
-    session.credentials =
-        crate::core::SavedCredentials::encrypt("saved@example.com", "saved-pass", Some("654321"));
+    session.credentials = crate::core::SavedCredentials::encrypt_with_key(
+        "saved@example.com",
+        "saved-pass",
+        Some("654321"),
+        &key,
+    );
     session.save().unwrap();
 
     let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
+    app.persist_config_path = Some(config_path);
 
     app.resume_latest_session();
 
@@ -213,17 +222,26 @@ fn resume_session_restores_email_password_without_restoring_mfa() {
 fn resume_session_does_not_override_existing_login_credentials() {
     let dir = tempdir().unwrap();
     let _guard = StateDirectoryGuard::set(dir.path());
+    let config_path = dir.path().join("config.toml");
+    let config = crate::ServiceConfig::load_or_create(&config_path).unwrap();
+    let key =
+        crate::config::CredentialKey::decode(config.credential_key.as_deref().unwrap()).unwrap();
 
     let mut session = session_snapshot(vec![(
         "https://mega.nz/file/pending",
         UrlFixtureStatus::Pending,
     )]);
-    session.credentials =
-        crate::core::SavedCredentials::encrypt("stale@example.com", "stale-pass", Some("654321"));
+    session.credentials = crate::core::SavedCredentials::encrypt_with_key(
+        "stale@example.com",
+        "stale-pass",
+        Some("654321"),
+        &key,
+    );
     session.save().unwrap();
 
     let (event_tx, _event_rx) = DownloadEventSender::channel();
     let mut app = App::new(0, event_tx, true);
+    app.persist_config_path = Some(config_path);
     assert!(app.login.set_credentials(
         "config@example.com".to_string(),
         "config-pass".to_string(),

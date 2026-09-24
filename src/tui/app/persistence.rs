@@ -42,14 +42,49 @@ type SaveEventTx = mpsc::Sender<PathBuf>;
 #[cfg(not(test))]
 type SaveEventTx = ();
 
+struct SaveWorkerContext<'a> {
+    request_rx: &'a mpsc::Receiver<SessionPersistenceRequest>,
+    error_tx: &'a mpsc::Sender<SessionPersistenceError>,
+    save_call_count: &'a SaveCallCount,
+    save_event_tx: &'a SaveEventTx,
+    last_save_result: &'a mut Option<Result<DurableSaveAck, SessionFlushError>>,
+}
+
 enum SessionPersistenceRequest {
     Save {
         session: SessionSnapshot,
         path: PathBuf,
     },
     Remove(PathBuf),
-    Flush(mpsc::Sender<()>),
+    Flush(mpsc::Sender<Result<Option<DurableSaveAck>, SessionFlushError>>),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DurableSaveAck {
+    pub(super) session_id: String,
+    pub(super) path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(super) struct SessionFlushError {
+    id: String,
+    path: PathBuf,
+    message: String,
+}
+
+impl std::fmt::Display for SessionFlushError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "failed to durably save session {} to {}: {}",
+            self.id,
+            self.path.display(),
+            self.message
+        )
+    }
+}
+
+impl std::error::Error for SessionFlushError {}
 
 pub enum SessionPersistenceError {
     Save {
@@ -124,14 +159,27 @@ impl SessionPersistence {
             .send(SessionPersistenceRequest::Remove(path));
     }
 
-    pub(crate) fn flush(&self) {
+    pub(super) fn flush(&self) -> Result<Option<DurableSaveAck>, SessionFlushError> {
         let (tx, rx) = mpsc::channel();
         if self
             .request_tx
             .send(SessionPersistenceRequest::Flush(tx))
             .is_ok()
         {
-            let _ = rx.recv();
+            rx.recv().unwrap_or_else(|_| {
+                Err(SessionFlushError {
+                    id: "unknown".to_string(),
+                    path: PathBuf::new(),
+                    message: "session persistence worker stopped before acknowledging flush"
+                        .to_string(),
+                })
+            })
+        } else {
+            Err(SessionFlushError {
+                id: "unknown".to_string(),
+                path: PathBuf::new(),
+                message: "session persistence worker is unavailable".to_string(),
+            })
         }
     }
 
@@ -172,6 +220,7 @@ fn session_persistence_worker(
     save_event_tx: SaveEventTx,
 ) {
     let mut next_request = None;
+    let mut last_save_result = None;
     loop {
         let request = if let Some(request) = next_request.take() {
             request
@@ -183,20 +232,32 @@ fn session_persistence_worker(
         };
         match request {
             SessionPersistenceRequest::Save { session, path } => {
-                next_request = persist_latest_save(
-                    session,
-                    path,
-                    &request_rx,
-                    &error_tx,
-                    &save_call_count,
-                    &save_event_tx,
-                );
+                let mut context = SaveWorkerContext {
+                    request_rx: &request_rx,
+                    error_tx: &error_tx,
+                    save_call_count: &save_call_count,
+                    save_event_tx: &save_event_tx,
+                    last_save_result: &mut last_save_result,
+                };
+                next_request = persist_latest_save(session, path, &mut context);
             }
             SessionPersistenceRequest::Remove(path) => {
-                remove_snapshot(path, &error_tx);
+                remove_snapshot(path.clone(), &error_tx);
+                if last_save_result
+                    .as_ref()
+                    .is_some_and(|result| match result {
+                        Ok(ack) => ack.path == path,
+                        Err(error) => error.path == path,
+                    })
+                {
+                    last_save_result = None;
+                }
             }
             SessionPersistenceRequest::Flush(done_tx) => {
-                let _ = done_tx.send(());
+                let result = last_save_result
+                    .take()
+                    .map_or(Ok(None), |result| result.map(Some));
+                let _ = done_tx.send(result);
             }
         }
     }
@@ -205,40 +266,32 @@ fn session_persistence_worker(
 fn persist_latest_save(
     session: SessionSnapshot,
     path: PathBuf,
-    request_rx: &mpsc::Receiver<SessionPersistenceRequest>,
-    error_tx: &mpsc::Sender<SessionPersistenceError>,
-    save_call_count: &SaveCallCount,
-    save_event_tx: &SaveEventTx,
+    context: &mut SaveWorkerContext<'_>,
 ) -> Option<SessionPersistenceRequest> {
-    persist_latest_save_from(
-        session,
-        path,
-        request_rx,
-        error_tx,
-        save_call_count,
-        save_event_tx,
-        Instant::now(),
-    )
+    persist_latest_save_from(session, path, context, Instant::now())
 }
 
 fn persist_latest_save_from(
     mut session: SessionSnapshot,
     path: PathBuf,
-    request_rx: &mpsc::Receiver<SessionPersistenceRequest>,
-    error_tx: &mpsc::Sender<SessionPersistenceError>,
-    save_call_count: &SaveCallCount,
-    save_event_tx: &SaveEventTx,
+    context: &mut SaveWorkerContext<'_>,
     first_queued_at: Instant,
 ) -> Option<SessionPersistenceRequest> {
     loop {
         let max_remaining = SESSION_SAVE_MAX_DELAY.saturating_sub(first_queued_at.elapsed());
         let wait_for = SESSION_SAVE_DEBOUNCE.min(max_remaining);
         if wait_for.is_zero() {
-            save_snapshot(session, path, error_tx, save_call_count, save_event_tx);
+            *context.last_save_result = Some(save_snapshot(
+                session,
+                path,
+                context.error_tx,
+                context.save_call_count,
+                context.save_event_tx,
+            ));
             return None;
         }
 
-        match request_rx.recv_timeout(wait_for) {
+        match context.request_rx.recv_timeout(wait_for) {
             Ok(SessionPersistenceRequest::Save {
                 session: next_session,
                 path: next_path,
@@ -249,20 +302,48 @@ fn persist_latest_save_from(
                 return Some(SessionPersistenceRequest::Remove(remove_path));
             }
             Ok(SessionPersistenceRequest::Flush(done_tx)) => {
-                save_snapshot(session, path, error_tx, save_call_count, save_event_tx);
-                let _ = done_tx.send(());
+                *context.last_save_result = Some(save_snapshot(
+                    session,
+                    path,
+                    context.error_tx,
+                    context.save_call_count,
+                    context.save_event_tx,
+                ));
+                let result = context
+                    .last_save_result
+                    .take()
+                    .map_or(Ok(None), |result| result.map(Some));
+                let _ = done_tx.send(result);
                 return None;
             }
             Ok(request) => {
-                save_snapshot(session, path, error_tx, save_call_count, save_event_tx);
+                *context.last_save_result = Some(save_snapshot(
+                    session,
+                    path,
+                    context.error_tx,
+                    context.save_call_count,
+                    context.save_event_tx,
+                ));
                 return Some(request);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                save_snapshot(session, path, error_tx, save_call_count, save_event_tx);
+                *context.last_save_result = Some(save_snapshot(
+                    session,
+                    path,
+                    context.error_tx,
+                    context.save_call_count,
+                    context.save_event_tx,
+                ));
                 return None;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                save_snapshot(session, path, error_tx, save_call_count, save_event_tx);
+                *context.last_save_result = Some(save_snapshot(
+                    session,
+                    path,
+                    context.error_tx,
+                    context.save_call_count,
+                    context.save_event_tx,
+                ));
                 return None;
             }
         }
@@ -302,15 +383,28 @@ fn save_snapshot(
     error_tx: &mpsc::Sender<SessionPersistenceError>,
     _save_call_count: &SaveCallCount,
     _save_event_tx: &SaveEventTx,
-) {
+) -> Result<DurableSaveAck, SessionFlushError> {
     #[cfg(test)]
     _save_call_count.fetch_add(1, Ordering::Relaxed);
     let id = session.id.clone();
-    if let Err(error) = session.save_to_path(&path) {
-        let _ = error_tx.send(SessionPersistenceError::Save { id, error });
-    } else {
-        #[cfg(test)]
-        let _ = _save_event_tx.send(path);
+    match session.save_to_path(&path) {
+        Ok(()) => {
+            #[cfg(test)]
+            let _ = _save_event_tx.send(path.clone());
+            Ok(DurableSaveAck {
+                session_id: id,
+                path,
+            })
+        }
+        Err(error) => {
+            let failure = SessionFlushError {
+                id: id.clone(),
+                path: path.clone(),
+                message: error.to_string(),
+            };
+            let _ = error_tx.send(SessionPersistenceError::Save { id, error });
+            Err(failure)
+        }
     }
 }
 
@@ -345,7 +439,9 @@ mod tests {
         );
 
         persistence.save(session.clone(), path.clone());
-        persistence.flush();
+        let ack = persistence.flush().unwrap().unwrap();
+        assert_eq!(ack.session_id, session.id);
+        assert_eq!(ack.path, path);
 
         let loaded = SessionSnapshot::load(&path).unwrap();
         assert_eq!(loaded.id, session.id);
@@ -356,6 +452,26 @@ mod tests {
         assert_eq!(loaded_paths, vec!["episode-1.mkv".to_string()]);
         assert!(persistence.drain_errors().is_empty());
         assert_eq!(persistence.save_call_count(), 1);
+    }
+
+    #[test]
+    fn flush_returns_pending_save_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"blocker").unwrap();
+        let path = blocker.join("session.postcard");
+        let persistence = SessionPersistence::new();
+        let session = session_snapshot(vec![(
+            "https://mega.nz/file/root",
+            UrlFixtureStatus::Fetched,
+        )]);
+
+        persistence.save(session, path);
+
+        let error = persistence
+            .flush()
+            .expect_err("flush must report save failure");
+        assert!(error.to_string().contains("not-a-directory"));
     }
 
     #[test]
@@ -372,7 +488,7 @@ mod tests {
         let persistence = SessionPersistence::new();
 
         persistence.remove(path.clone());
-        persistence.flush();
+        assert!(persistence.flush().unwrap().is_none());
 
         assert!(!path.exists());
         assert!(!legacy_path.exists());
@@ -403,7 +519,7 @@ mod tests {
 
         persistence.save(first, path.clone());
         persistence.save(latest, path.clone());
-        persistence.flush();
+        let _ = persistence.flush().unwrap();
 
         let loaded = SessionSnapshot::load(&path).unwrap();
         assert_eq!(
@@ -430,11 +546,32 @@ mod tests {
 
         persistence.save(session, path.clone());
         persistence.remove(path.clone());
-        persistence.flush();
+        assert!(persistence.flush().unwrap().is_none());
 
         assert!(!path.exists());
         assert_eq!(persistence.save_call_count(), 0);
         assert!(persistence.drain_errors().is_empty());
+    }
+
+    #[test]
+    fn remove_clears_previous_durable_save_acknowledgement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.postcard");
+        let session = session_snapshot(vec![(
+            "https://mega.nz/file/root",
+            UrlFixtureStatus::Fetched,
+        )]);
+        let persistence = SessionPersistence::new();
+
+        persistence.save(session, path.clone());
+        let ack = persistence.flush().unwrap().unwrap();
+        assert_eq!(ack.path, path);
+        assert!(path.exists());
+
+        persistence.remove(path.clone());
+        assert!(persistence.flush().unwrap().is_none());
+
+        assert!(!path.exists());
     }
 
     #[test]
@@ -451,7 +588,7 @@ mod tests {
 
         persistence.save(session.clone(), path.clone());
         persistence.remove(other_path);
-        persistence.flush();
+        let _ = persistence.flush().unwrap();
 
         let loaded = SessionSnapshot::load(&path).unwrap();
         assert_eq!(loaded.id, session.id);
@@ -493,6 +630,7 @@ mod tests {
         let (error_tx, error_rx) = mpsc::channel();
         let save_call_count = Arc::new(AtomicUsize::new(0));
         let (save_event_tx, save_event_rx) = mpsc::channel();
+        let mut last_save_result = None;
 
         let mut first = base.clone();
         first.id = "session-0".to_string();
@@ -512,15 +650,14 @@ mod tests {
             - SESSION_SAVE_MAX_DELAY
                 .checked_sub(SESSION_SAVE_DEBOUNCE / 2)
                 .unwrap();
-        let next = persist_latest_save_from(
-            first,
-            path.clone(),
-            &request_rx,
-            &error_tx,
-            &save_call_count,
-            &save_event_tx,
-            first_queued_at,
-        );
+        let mut context = SaveWorkerContext {
+            request_rx: &request_rx,
+            error_tx: &error_tx,
+            save_call_count: &save_call_count,
+            save_event_tx: &save_event_tx,
+            last_save_result: &mut last_save_result,
+        };
+        let next = persist_latest_save_from(first, path.clone(), &mut context, first_queued_at);
 
         assert!(next.is_none());
         assert_eq!(

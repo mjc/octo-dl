@@ -1,6 +1,8 @@
 #[cfg(test)]
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::OnceLock;
@@ -185,23 +187,9 @@ impl SessionSnapshot {
     }
 
     pub(crate) fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
-        validate_snapshot(self)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(dir)?;
-        let tmp = temporary_save_path(path);
-        let bytes = encode_snapshot(path, self)?;
-        std::fs::write(&tmp, bytes)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-        }
-        if let Err(error) = std::fs::rename(&tmp, path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(error);
-        }
-        Ok(())
+        let snapshot = ValidatedSessionSnapshot::new(self)?;
+        let destination = SessionSavePath::new(path)?;
+        snapshot.write_durably(&destination)
     }
 
     ///
@@ -327,6 +315,70 @@ impl SessionSnapshot {
     }
 }
 
+struct ValidatedSessionSnapshot<'a>(&'a SessionSnapshot);
+
+impl<'a> ValidatedSessionSnapshot<'a> {
+    fn new(snapshot: &'a SessionSnapshot) -> std::io::Result<Self> {
+        validate_snapshot(snapshot)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        Ok(Self(snapshot))
+    }
+
+    fn write_durably(self, destination: &SessionSavePath) -> std::io::Result<()> {
+        fs::create_dir_all(&destination.parent)?;
+        let bytes = encode_snapshot(&destination.target, self.0)?;
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&destination.temporary)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            }
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&destination.temporary, &destination.target)?;
+            crate::config::sync_directory(&destination.parent)?;
+            Ok(())
+        })();
+        if result.is_err() && destination.temporary.exists() {
+            let _ = fs::remove_file(&destination.temporary);
+        }
+        result
+    }
+}
+
+struct SessionSavePath {
+    target: PathBuf,
+    parent: PathBuf,
+    temporary: PathBuf,
+}
+
+impl SessionSavePath {
+    fn new(path: &Path) -> std::io::Result<Self> {
+        if path.file_name().is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "session save path must name a file",
+            ));
+        }
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        Ok(Self {
+            target: path.to_path_buf(),
+            parent,
+            temporary: temporary_save_path(path),
+        })
+    }
+}
+
 #[must_use]
 pub fn queued_file_snapshot(
     file_id: impl Into<FileId>,
@@ -417,7 +469,38 @@ pub fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::StateDirectoryGuard;
+    use crate::test_support::{StateDirectoryGuard, test_credentials};
+
+    #[test]
+    fn bare_session_filename_uses_current_directory_as_parent() {
+        let destination = SessionSavePath::new(Path::new("session.postcard")).unwrap();
+
+        assert_eq!(destination.parent, PathBuf::from("."));
+        assert_eq!(destination.target, PathBuf::from("session.postcard"));
+    }
+
+    #[test]
+    fn session_save_path_rejects_paths_without_a_filename() {
+        assert!(SessionSavePath::new(Path::new(".")).is_err());
+    }
+
+    #[test]
+    fn durable_save_acknowledges_create_and_replace_on_supported_platforms() {
+        let directory = tempfile::tempdir().unwrap();
+        let _cwd = crate::test_support::CurrentDirGuard::set(directory.path());
+        let mut session = SessionSnapshot::new(DownloadConfig::default(), test_credentials());
+        session.urls.push(SessionUrlSnapshot {
+            url: "https://mega.nz/file/test".into(),
+            error: None,
+        });
+        let path = Path::new("session.postcard");
+        session.save_to_path(path).unwrap();
+        assert_eq!(SessionSnapshot::load(path).unwrap(), session);
+        session.status = SessionRunStatus::Paused;
+        session.save_to_path(path).unwrap();
+        assert_eq!(SessionSnapshot::load(path).unwrap(), session);
+        assert!(!temporary_save_path(path).exists());
+    }
 
     #[test]
     fn latest_ignores_non_v6_sessions_without_cleanup() {
@@ -435,10 +518,7 @@ mod tests {
     fn latest_prefers_newest_canonical_session() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
-        let mut first = SessionSnapshot::new(
-            DownloadConfig::default(),
-            SavedCredentials::encrypt("a", "b", None),
-        );
+        let mut first = SessionSnapshot::new(DownloadConfig::default(), test_credentials());
         first.created = Utc::now() - chrono::TimeDelta::minutes(5);
         first.urls.push(SessionUrlSnapshot {
             url: "https://mega.nz/folder/first".to_string(),
@@ -446,10 +526,7 @@ mod tests {
         });
         first.save().unwrap();
 
-        let mut second = SessionSnapshot::new(
-            DownloadConfig::default(),
-            SavedCredentials::encrypt("a", "b", None),
-        );
+        let mut second = SessionSnapshot::new(DownloadConfig::default(), test_credentials());
         second.urls.push(SessionUrlSnapshot {
             url: "https://mega.nz/folder/second".to_string(),
             error: None,
@@ -466,10 +543,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
 
-        let mut paused = SessionSnapshot::new(
-            DownloadConfig::default(),
-            SavedCredentials::encrypt("a", "b", None),
-        );
+        let mut paused = SessionSnapshot::new(DownloadConfig::default(), test_credentials());
         paused.created = Utc::now() - chrono::TimeDelta::minutes(5);
         paused.status = SessionRunStatus::Paused;
         paused.urls.push(SessionUrlSnapshot {
@@ -495,10 +569,7 @@ mod tests {
         });
         paused.save().unwrap();
 
-        let mut completed = SessionSnapshot::new(
-            DownloadConfig::default(),
-            SavedCredentials::encrypt("a", "b", None),
-        );
+        let mut completed = SessionSnapshot::new(DownloadConfig::default(), test_credentials());
         completed.status = SessionRunStatus::Completed;
         completed.urls.push(SessionUrlSnapshot {
             url: "https://mega.nz/folder/newer".to_string(),
@@ -517,10 +588,7 @@ mod tests {
     fn load_supports_legacy_toml_session_paths() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
-        let mut session = SessionSnapshot::new(
-            DownloadConfig::default(),
-            SavedCredentials::encrypt("a", "b", None),
-        );
+        let mut session = SessionSnapshot::new(DownloadConfig::default(), test_credentials());
         session.urls.push(SessionUrlSnapshot {
             url: "https://mega.nz/folder/legacy".to_string(),
             error: None,
@@ -538,10 +606,7 @@ mod tests {
     fn latest_prefers_postcard_snapshot_over_legacy_toml_duplicate() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
-        let mut session = SessionSnapshot::new(
-            DownloadConfig::default(),
-            SavedCredentials::encrypt("a", "b", None),
-        );
+        let mut session = SessionSnapshot::new(DownloadConfig::default(), test_credentials());
         session.urls.push(SessionUrlSnapshot {
             url: "https://mega.nz/folder/root".to_string(),
             error: None,
@@ -568,10 +633,7 @@ mod tests {
 
         let package_key = PackageKey::new("Folder");
         let package_id = PackageId::for_package_key(&package_key);
-        let mut session = SessionSnapshot::new(
-            DownloadConfig::default(),
-            SavedCredentials::encrypt("a", "b", None),
-        );
+        let mut session = SessionSnapshot::new(DownloadConfig::default(), test_credentials());
         session.urls = vec![
             SessionUrlSnapshot {
                 url: "https://mega.nz/folder/one".to_string(),
@@ -646,10 +708,7 @@ packages = []
     fn save_to_path_cleans_up_temp_file_when_rename_fails() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = StateDirectoryGuard::set(dir.path());
-        let session = SessionSnapshot::new(
-            DownloadConfig::default(),
-            SavedCredentials::encrypt("a", "b", None),
-        );
+        let session = SessionSnapshot::new(DownloadConfig::default(), test_credentials());
         let mut session = session;
         session.urls.push(SessionUrlSnapshot {
             url: "https://mega.nz/folder/test".to_string(),

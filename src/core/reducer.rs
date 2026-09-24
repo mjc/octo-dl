@@ -20,7 +20,7 @@ use derived::{
 };
 pub(crate) use snapshot_persist::should_persist_session;
 pub use snapshot_persist::snapshot_from_state;
-#[cfg(test)]
+#[cfg(all(test, feature = "tui"))]
 pub(crate) use snapshot_persist::{
     reset_snapshot_from_state_call_count, snapshot_from_state_call_count,
 };
@@ -201,12 +201,16 @@ fn package_status_from_files(state: &DownloadState, package_id: PackageId) -> Pa
 }
 
 fn recompute_session_status(state: &mut DownloadState) {
-    state.session_meta.status = if !state.files.is_empty()
+    let all_files_complete = !state.files.is_empty()
         && state
-            .packages
+            .files
             .values()
-            .all(|package| matches!(package.status(), PackageStatus::Complete))
-    {
+            .all(|file| matches!(file.lifecycle, FileLifecycle::Complete));
+    let all_sources_resolved = state.url_order.iter().all(|url| {
+        !state.url_errors.contains_key(url)
+            && state.files.values().any(|file| file.source_url == *url)
+    });
+    state.session_meta.status = if all_files_complete && all_sources_resolved {
         SessionRunStatus::Completed
     } else {
         SessionRunStatus::InProgress
@@ -272,16 +276,19 @@ fn reduce_impl(
             }
             state.url_errors.remove(&url);
             effects.push(CoreEffect::EnqueueUrlResolution { url });
+            recompute_session_status(state);
         }
         CoreEvent::UrlResolved { url } => {
             state.url_errors.remove(&url);
             remove_unreferenced_source_url(state, &url);
+            recompute_session_status(state);
         }
         CoreEvent::UrlFailed { url, message } => {
             if !state.url_order.iter().any(|existing| existing == &url) {
                 state.url_order.push(url.clone());
             }
             state.url_errors.insert(url, message);
+            recompute_session_status(state);
         }
         CoreEvent::PackageResolved { package } => {
             if !state
@@ -793,6 +800,7 @@ fn handle_empty_package_resolution(
         .packages
         .retain(|_, existing| existing.key != package.key);
     remove_unreferenced_source_url(state, &package.source_url);
+    recompute_session_status(state);
     if persist_session {
         effects.push(CoreEffect::PersistSession(snapshot_from_state(state)));
     }
@@ -804,6 +812,7 @@ pub fn reduce(state: &mut DownloadState, event: CoreEvent) -> CoreEffects {
     reduce_impl(state, event, true)
 }
 
+#[cfg(any(feature = "tui", test))]
 pub(crate) fn reduce_without_session_persist(
     state: &mut DownloadState,
     event: CoreEvent,
@@ -1062,6 +1071,42 @@ mod tests {
             state.url_order,
             vec!["https://mega.nz/folder/persist".to_string()]
         );
+    }
+
+    #[test]
+    fn submitting_url_after_all_files_complete_reopens_session() {
+        let mut state = sample_state();
+        let file_id = FileId::from("file.bin");
+        state.files.get_mut(&file_id).unwrap().lifecycle = FileLifecycle::Complete;
+        state
+            .packages
+            .get_mut(&package_id("pkg", "pkg"))
+            .unwrap()
+            .progress = PackageProgressState {
+            complete: 1,
+            ..PackageProgressState::default()
+        };
+        state.session_meta.status = SessionRunStatus::Completed;
+
+        reduce(
+            &mut state,
+            CoreEvent::UrlSubmitted {
+                url: "https://mega.nz/file/pending".to_string(),
+            },
+        );
+
+        assert_eq!(state.session_meta.status, SessionRunStatus::InProgress);
+    }
+
+    #[test]
+    fn empty_session_stays_in_progress_after_empty_url_resolution() {
+        let mut state = DownloadState::default();
+        let url = "https://mega.nz/file/empty".to_string();
+
+        reduce(&mut state, CoreEvent::UrlSubmitted { url: url.clone() });
+        reduce(&mut state, CoreEvent::UrlResolved { url });
+
+        assert_eq!(state.session_meta.status, SessionRunStatus::InProgress);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 #[cfg(test)]
 use crate::tui::event::DownloadEventSender;
 use std::future::Future;
+use std::io;
 use std::time::Duration;
 
 use sysinfo::{ProcessesToUpdate, System};
@@ -109,8 +110,14 @@ impl App {
         true
     }
 
-    fn saved_login_credentials(&self) -> SavedCredentials {
-        SavedCredentials::encrypt(self.login.email(), self.login.password(), None)
+    fn saved_login_credentials(&self) -> io::Result<SavedCredentials> {
+        let key = self.persisted_credential_key()?;
+        Ok(SavedCredentials::encrypt_with_key(
+            self.login.email(),
+            self.login.password(),
+            None,
+            &key,
+        ))
     }
 
     pub(crate) fn complete_login(
@@ -189,7 +196,13 @@ impl App {
     }
 
     fn ensure_download_session(&mut self, config: &DownloadConfig) {
-        let credentials = self.saved_login_credentials();
+        let credentials = match self.saved_login_credentials() {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                log::error!("Cannot persist session credentials: {error}");
+                return;
+            }
+        };
         if self.session.is_some() {
             let _ = self.mutate_session_and_save(|session| {
                 session.credentials = credentials;
@@ -743,11 +756,22 @@ mod tests {
     fn ensure_download_session_refreshes_existing_session_credentials_without_mfa() {
         let dir = tempdir().expect("temp dir should exist");
         let _guard = StateDirectoryGuard::set(dir.path());
+        let config_path = dir.path().join("config.toml");
+        let config =
+            crate::ServiceConfig::load_or_create(&config_path).expect("config should exist");
+        let key = crate::config::CredentialKey::decode(config.credential_key.as_deref().unwrap())
+            .expect("config key should decode");
         let (event_tx, _event_rx) = DownloadEventSender::channel();
         let mut app = App::new(9723, event_tx, true);
+        app.persist_config_path = Some(config_path);
         let mut session = SessionSnapshot::new(
             DownloadConfig::default(),
-            SavedCredentials::encrypt("stale@example.com", "stale-pass", Some("654321")),
+            SavedCredentials::encrypt_with_key(
+                "stale@example.com",
+                "stale-pass",
+                Some("654321"),
+                &key,
+            ),
         );
         session.urls.push(SessionUrlSnapshot {
             url: "https://mega.nz/folder/root".to_string(),
@@ -767,7 +791,7 @@ mod tests {
             .as_ref()
             .expect("session should remain installed")
             .credentials
-            .decrypt()
+            .decrypt_with_key(&app.persisted_credential_key().unwrap())
             .expect("saved credentials should decrypt");
         assert_eq!(email, "fresh@example.com");
         assert_eq!(password, "fresh-pass");

@@ -116,16 +116,25 @@ impl SessionAdapter {
         rebuild_packages(session);
 
         let has_pending_urls = session.urls.iter().any(|tracked_url| {
-            !session
-                .iter_files()
-                .any(|file| file.source_url == tracked_url.url)
+            tracked_url.error.is_some()
+                || !session
+                    .iter_files()
+                    .any(|file| file.source_url == tracked_url.url)
                 || session.iter_files().any(|file| {
                     file.source_url == tracked_url.url
                         && !matches!(file.lifecycle, FileLifecycle::Complete)
                 })
         });
 
-        if session.iter_files().next().is_none() && !has_pending_urls {
+        let has_files = session.iter_files().next().is_some();
+        if !has_files && !has_pending_urls {
+            session.status = SessionRunStatus::InProgress;
+        } else if has_files
+            && session
+                .iter_files()
+                .all(|file| matches!(file.lifecycle, FileLifecycle::Complete))
+            && !has_pending_urls
+        {
             session.status = SessionRunStatus::Completed;
         } else {
             log::info!("Marking session as paused for later resume");
@@ -337,7 +346,7 @@ mod tests {
             created: Utc::now(),
             status: SessionRunStatus::Completed,
             config: crate::config::DownloadConfig::default(),
-            credentials: crate::core::SavedCredentials::encrypt("", "", None),
+            credentials: crate::test_support::test_credentials(),
             urls: vec![SessionUrlSnapshot {
                 url: "https://example.test/new".to_string(),
                 error: None,
@@ -348,5 +357,70 @@ mod tests {
         SessionAdapter::sync_for_shutdown(&mut session, &HashSet::new());
 
         assert_eq!(session.status, SessionRunStatus::Paused);
+    }
+
+    #[test]
+    fn shutdown_keeps_retained_completed_files_completed() {
+        use crate::core::{
+            FileAccounting, FileLifecycle, FileProgressState, FileSnapshot, PackageId, PackageKey,
+            PackageSnapshot,
+        };
+
+        let package_key = PackageKey::new("pkg");
+        let package_id = PackageId::for_package_key(&package_key);
+        let mut session = SessionSnapshot {
+            version: 6,
+            id: "session".to_string(),
+            created: Utc::now(),
+            status: SessionRunStatus::InProgress,
+            config: crate::config::DownloadConfig::default(),
+            credentials: crate::test_support::test_credentials(),
+            urls: vec![SessionUrlSnapshot {
+                url: "https://example.test/done".to_string(),
+                error: None,
+            }],
+            packages: vec![PackageSnapshot {
+                id: package_id,
+                key: package_key,
+                display_name: "pkg".to_string(),
+                files: vec![FileSnapshot {
+                    id: "file.bin".into(),
+                    package_id,
+                    source_url: "https://example.test/done".to_string(),
+                    path: "file.bin".to_string(),
+                    size: 10,
+                    lifecycle: FileLifecycle::Complete,
+                    progress: FileProgressState {
+                        visible_completed_bytes: 10,
+                        ..FileProgressState::default()
+                    },
+                    accounting: FileAccounting::CurrentRun,
+                }],
+                error: None,
+            }],
+        };
+
+        SessionAdapter::sync_for_shutdown(&mut session, &HashSet::from(["file.bin".to_string()]));
+
+        assert_eq!(session.status, SessionRunStatus::Completed);
+        assert_eq!(session.file_count(), 1);
+    }
+
+    #[test]
+    fn shutdown_keeps_empty_session_in_progress() {
+        let mut session = SessionSnapshot {
+            version: 6,
+            id: "session".to_string(),
+            created: Utc::now(),
+            status: SessionRunStatus::InProgress,
+            config: crate::config::DownloadConfig::default(),
+            credentials: crate::test_support::test_credentials(),
+            urls: Vec::new(),
+            packages: Vec::new(),
+        };
+
+        SessionAdapter::sync_for_shutdown(&mut session, &HashSet::new());
+
+        assert_eq!(session.status, SessionRunStatus::InProgress);
     }
 }

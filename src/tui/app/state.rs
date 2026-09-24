@@ -372,8 +372,21 @@ impl App {
             return;
         }
 
-        let credentials =
-            SavedCredentials::encrypt(self.login.email(), self.login.password(), None);
+        let key = match self.persisted_credential_key() {
+            Ok(key) => key,
+            Err(error) => {
+                log::error!(
+                    "Cannot create a resumable session without its credential key: {error}"
+                );
+                return;
+            }
+        };
+        let credentials = SavedCredentials::encrypt_with_key(
+            self.login.email(),
+            self.login.password(),
+            None,
+            &key,
+        );
         let session = SessionSnapshot::new(self.config.config.clone(), credentials);
         self.save_session(session);
     }
@@ -485,13 +498,28 @@ impl App {
     }
 
     pub(crate) fn resume_latest_session(&mut self) {
-        let Some(session) = SessionSnapshot::latest() else {
+        let Some(mut session) = SessionSnapshot::latest() else {
             return;
         };
         log::info!("Resuming session {}", session.id);
 
-        if let Some((email, password, _mfa)) = session.credentials.decrypt() {
+        let key = match self.session_credential_key(&session.credentials) {
+            Ok(key) => key,
+            Err(error) => {
+                log::error!("Cannot load session credentials without their key: {error}");
+                return;
+            }
+        };
+        if let Some((email, password, _mfa)) = session
+            .credentials
+            .decrypt_with_key(&key)
+            .or_else(|| session.credentials.decrypt_legacy())
+        {
             self.login.set_credentials_if_missing(&email, &password, "");
+            session.credentials = SavedCredentials::encrypt_with_key(&email, &password, None, &key);
+        } else {
+            log::error!("Cannot resume session: failed to decrypt its credentials");
+            return;
         }
 
         let restart = build_restart_snapshot(&session);
@@ -553,7 +581,9 @@ impl App {
 
     pub(crate) fn flush_session_persistence(&mut self) {
         self.maybe_flush_pending_session_persistence(true);
-        self.session_persistence.flush();
+        if let Err(error) = self.session_persistence.flush() {
+            self.status = format!("Failed to flush session save: {error}");
+        }
         self.poll_session_persistence();
     }
 

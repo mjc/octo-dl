@@ -22,13 +22,10 @@ use ratatui::widgets::ListState;
 use rustc_hash::FxHashSet;
 use tokio::sync::{mpsc, watch};
 
-use crate::config::ApiKey;
+use crate::config::{ApiKey, CredentialKey};
 use crate::{
     DownloadConfig, ServiceConfig,
-    core::{
-        DownloadState, SavedMegaSession, SessionMeta, SessionSnapshot, decode_credential_key,
-        generate_credential_key,
-    },
+    core::{DownloadState, SavedMegaSession, SessionMeta, SessionSnapshot},
 };
 
 use crate::tui::dashboard::DashboardUiMode;
@@ -49,27 +46,21 @@ fn path_io_error(action: &str, path: &Path, error: io::Error) -> io::Error {
     )
 }
 
-fn config_credential_key(config: &mut ServiceConfig) -> io::Result<[u8; 16]> {
+fn config_credential_key(config: &mut ServiceConfig) -> CredentialKey {
     if let Some(encoded) = config.credential_key.as_deref()
-        && let Some(key) = decode_credential_key(encoded)
+        && let Some(key) = CredentialKey::decode(encoded)
     {
-        return Ok(key);
+        return key;
     }
 
-    let encoded = generate_credential_key();
-    let key = decode_credential_key(&encoded).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "generated invalid credential key",
-        )
-    })?;
-    config.credential_key = Some(encoded);
-    Ok(key)
+    let key = CredentialKey::generate();
+    config.credential_key = Some(key.encode());
+    key
 }
 
 fn decrypt_service_credentials(
     config: &ServiceConfig,
-    key: &[u8; 16],
+    key: &CredentialKey,
 ) -> Option<(String, String, String)> {
     config
         .credentials
@@ -114,6 +105,48 @@ pub fn api_host_requires_api_key(host: &str) -> bool {
 }
 
 impl App {
+    pub(crate) fn persisted_credential_key(&self) -> io::Result<CredentialKey> {
+        let config_path = self
+            .persist_config_path
+            .clone()
+            .unwrap_or_else(state_dir_service_config_path);
+        let mut config = ServiceConfig::load_or_create(&config_path)?;
+        let had_key = config
+            .credential_key
+            .as_deref()
+            .and_then(CredentialKey::decode)
+            .is_some();
+        let key = config_credential_key(&mut config);
+        if !had_key {
+            config.save(&config_path)?;
+        }
+        key.persist_for_sessions()?;
+        Ok(key)
+    }
+
+    pub(crate) fn session_credential_key(
+        &self,
+        credentials: &crate::core::SavedCredentials,
+    ) -> io::Result<CredentialKey> {
+        credentials.resume_key(|| {
+            let path = self
+                .persist_config_path
+                .clone()
+                .unwrap_or_else(state_dir_service_config_path);
+            let config = ServiceConfig::load(&path)?;
+            config
+                .credential_key
+                .as_deref()
+                .and_then(CredentialKey::decode)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "original config credential key is missing",
+                    )
+                })
+        })
+    }
+
     pub fn new<E>(api_port: u16, event_tx: E, quit_enabled: bool) -> Self
     where
         E: Into<DownloadEventSender>,
@@ -346,7 +379,8 @@ impl App {
     }
 
     fn matching_saved_mega_session(&self) -> Option<(String, String)> {
-        let saved = self.saved_mega_session.as_ref()?.decrypt()?;
+        let key = self.persisted_credential_key().ok()?;
+        let saved = self.saved_mega_session.as_ref()?.decrypt_with_key(&key)?;
         if self.login.has_credentials() && !saved.0.eq_ignore_ascii_case(self.login.email()) {
             return None;
         }
@@ -423,6 +457,7 @@ impl App {
         let email = self.login.email().to_owned();
         let password = self.login.password().to_owned();
         let mfa = self.login.mfa_option().map(str::to_owned);
+        let credential_key = self.persisted_credential_key().ok();
         let (client_tx, client_rx) = tokio::sync::oneshot::channel();
         self.client_rx = Some(client_rx);
 
@@ -469,7 +504,10 @@ impl App {
                             .serialize_session()
                             .await
                             .ok()
-                            .map(|session| SavedMegaSession::encrypt(&session_email, &session));
+                            .zip(credential_key.as_ref())
+                            .map(|(session, key)| {
+                                SavedMegaSession::encrypt(&session_email, &session, key)
+                            });
                         let _ = client_tx.send(super::super::event::AuthenticatedClient::new(
                             mega_client,
                             http,
@@ -525,7 +563,8 @@ impl App {
                 .serialize_session()
                 .await
                 .ok()
-                .map(|session| SavedMegaSession::encrypt(&email, &session));
+                .zip(credential_key.as_ref())
+                .map(|(session, key)| SavedMegaSession::encrypt(&email, &session, key));
             let _ = client_tx.send(super::super::event::AuthenticatedClient::new(
                 mega_client,
                 http,
@@ -577,7 +616,7 @@ impl App {
             return Ok(());
         }
 
-        let key = config_credential_key(&mut service_config)?;
+        let key = config_credential_key(&mut service_config);
         if let Some((email, password, mfa)) = decrypt_service_credentials(&service_config, &key) {
             log::info!("Loaded fallback credentials from {}", config_path.display());
             self.login
@@ -600,14 +639,19 @@ impl App {
         let had_valid_credential_key = service_config
             .credential_key
             .as_deref()
-            .and_then(decode_credential_key)
+            .and_then(CredentialKey::decode)
             .is_some();
-        let key = config_credential_key(&mut service_config)?;
+        let key = config_credential_key(&mut service_config);
         let mut config_dirty = !had_valid_credential_key;
         log::info!("Loaded config from {}", config_path.display());
 
-        if let Some(ref dl_path) = service_config.download.path {
-            let download_dir = Path::new(dl_path);
+        let download_root = service_config
+            .download
+            .path
+            .as_deref()
+            .map(std::path::absolute)
+            .transpose()?;
+        if let Some(ref download_dir) = download_root {
             if !download_dir.exists() {
                 std::fs::create_dir_all(download_dir).map_err(|error| {
                     path_io_error("Failed to create download directory", download_dir, error)
@@ -616,10 +660,11 @@ impl App {
             std::env::set_current_dir(download_dir).map_err(|error| {
                 path_io_error("Failed to change directory to", download_dir, error)
             })?;
-            log::info!("Download directory: {dl_path}");
+            log::info!("Download directory: {}", download_dir.display());
         }
 
         self.config.config = service_config.download.clone();
+        self.config.config.path = download_root.map(|path| path.to_string_lossy().into_owned());
         self.api_key.clone_from(&service_config.api.api_key);
 
         let mut credentials_from_config = false;
@@ -674,7 +719,7 @@ impl App {
                 .saved_session
                 .clone()
                 .filter(|saved_session| {
-                    let Some((email, _)) = saved_session.decrypt() else {
+                    let Some((email, _)) = saved_session.decrypt_with_key(&key) else {
                         log::warn!("Failed to decrypt saved MEGA session from config");
                         return false;
                     };
@@ -702,7 +747,7 @@ impl App {
         };
 
         let mut service_config = ServiceConfig::load_or_create(config_path)?;
-        let key = config_credential_key(&mut service_config)?;
+        let key = config_credential_key(&mut service_config);
         if self.login.has_credentials() {
             service_config.credentials = crate::ServiceCredentials {
                 encrypted: false,
@@ -731,4 +776,59 @@ fn absolute_config_path(path: &Path) -> io::Result<PathBuf> {
     }
 
     Ok(std::env::current_dir()?.join(path))
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+    use crate::core::{SavedCredentials, SessionUrlSnapshot};
+    use crate::test_support::{CurrentDirGuard, StateDirectoryGuard};
+
+    #[test]
+    fn tui_resume_uses_original_key_after_cwd_and_config_change() {
+        let state = tempfile::tempdir().unwrap();
+        let _state = StateDirectoryGuard::set(state.path());
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let key;
+        {
+            let _cwd = CurrentDirGuard::set(first.path());
+            let (tx, _rx) = DownloadEventSender::channel();
+            let mut app = App::new(0, tx, true);
+            app.persist_config_path = Some(first.path().join("config.toml"));
+            key = app.persisted_credential_key().unwrap();
+            let mut session = SessionSnapshot::new(
+                DownloadConfig::default(),
+                SavedCredentials::encrypt_with_key(
+                    "original@example.com",
+                    "original-password",
+                    Some("123456"),
+                    &key,
+                ),
+            );
+            session.urls.push(SessionUrlSnapshot {
+                url: "https://mega.nz/file/pending".into(),
+                error: None,
+            });
+            session.save().unwrap();
+        }
+        let _cwd = CurrentDirGuard::set(second.path());
+        let (tx, _rx) = DownloadEventSender::channel();
+        let mut app = App::new(0, tx, true);
+        app.persist_config_path = Some(second.path().join("config.toml"));
+        assert_ne!(app.persisted_credential_key().unwrap(), key);
+        std::fs::remove_file(first.path().join("config.toml.key")).unwrap();
+        std::fs::remove_file(first.path().join("config.toml")).unwrap();
+        app.resume_latest_session();
+        assert_eq!(app.login.email(), "original@example.com");
+        assert_eq!(app.login.password(), "original-password");
+        assert!(app.login.mfa().is_empty());
+        let saved = &app.session.as_ref().unwrap().credentials;
+        assert_eq!(app.session_credential_key(saved).unwrap(), key);
+        assert!(saved.decrypt_with_key(&key).is_some());
+        // Lookup also works with no current config to read or create.
+        app.persist_config_path = Some(second.path().join("absent.toml"));
+        assert_eq!(app.session_credential_key(saved).unwrap(), key);
+        assert!(!app.persist_config_path.as_ref().unwrap().exists());
+    }
 }

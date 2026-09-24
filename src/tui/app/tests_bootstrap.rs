@@ -23,6 +23,42 @@ fn api_host_policy_preserves_non_loopback_host_support() {
 }
 
 #[test]
+fn relative_service_download_root_supports_output_io() {
+    let directory = tempdir().unwrap();
+    let _cwd = CurrentDirGuard::set(directory.path());
+    let config_path = directory.path().join("config.toml");
+    let mut config = ServiceConfig::load_or_create(&config_path).unwrap();
+    config.download.path = Some("downloads".to_string());
+    config.save(&config_path).unwrap();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
+    let mut app = App::new(9723, event_tx, true);
+    app.apply_service_config(&config_path).unwrap();
+
+    let root = app.config.config.path.as_ref().unwrap();
+    assert!(std::path::Path::new(root).is_absolute());
+    let fs = crate::TokioFileSystem::new().with_download_root(Some(root.into()));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        use crate::FileSystem as _;
+        fs.create_dir_all(std::path::Path::new("package"))
+            .await
+            .unwrap();
+        fs.open_part_file(std::path::Path::new("package/file.part"), 16, false)
+            .await
+            .unwrap();
+    });
+    assert!(
+        directory
+            .path()
+            .join("downloads/package/file.part")
+            .exists()
+    );
+}
+
+#[test]
 fn apply_service_config_reports_download_directory_path() {
     let dir = tempdir().expect("temp dir should exist");
     let blocker = dir.path().join("not-a-directory");
@@ -106,7 +142,7 @@ fn persist_login_credentials_creates_default_config_file() {
 
     let saved = ServiceConfig::load(&config_path).expect("config should load");
     assert!(saved.credentials.encrypted);
-    let key = crate::core::decode_credential_key(saved.credential_key.as_deref().unwrap())
+    let key = crate::config::CredentialKey::decode(saved.credential_key.as_deref().unwrap())
         .expect("credential key should load");
     let (email, password, mfa) = saved
         .credentials
@@ -134,7 +170,11 @@ fn new_without_explicit_config_loads_default_saved_credentials() {
     };
     config.download.path = Some(dir.path().join("downloads").display().to_string());
     config.download.path = Some(dir.path().join("downloads").to_string_lossy().into_owned());
-    config.credentials.encrypt_in_place();
+    let key = crate::config::CredentialKey::decode(
+        config.credential_key.as_deref().expect("config key exists"),
+    )
+    .expect("config key should decode");
+    config.credentials.encrypt_in_place_with_key(&key);
     config.save(&config_path).expect("config should save");
 
     let (tx, _rx) = mpsc::channel(64);
@@ -183,22 +223,31 @@ fn persist_login_credentials_preserves_existing_credentials_when_only_session_ch
         saved_session: None,
     };
     config.download.path = Some(dir.path().join("downloads").display().to_string());
-    config.credentials.encrypt_in_place();
+    let key = crate::config::CredentialKey::decode(
+        config.credential_key.as_deref().expect("config key exists"),
+    )
+    .expect("config key should decode");
+    config.credentials.encrypt_in_place_with_key(&key);
     config.save(&config_path).expect("config should save");
 
     let (tx, _rx) = mpsc::channel(64);
     let (mut app, _host, _port) =
         App::new_with_optional_service_config(tx, true, None, 9723).expect("app should initialize");
+    let key = crate::config::CredentialKey::decode(
+        config.credential_key.as_deref().expect("config key exists"),
+    )
+    .expect("config key should decode");
     app.saved_mega_session = Some(SavedMegaSession::encrypt(
         "saved@example.com",
         "serialized-session",
+        &key,
     ));
 
     app.persist_login_credentials_to_config()
         .expect("session should persist");
 
     let saved = ServiceConfig::load(&config_path).expect("config should load");
-    let key = crate::core::decode_credential_key(saved.credential_key.as_deref().unwrap())
+    let key = crate::config::CredentialKey::decode(saved.credential_key.as_deref().unwrap())
         .expect("credential key should load");
     let (email, password, _mfa) = saved
         .credentials
@@ -210,7 +259,7 @@ fn persist_login_credentials_preserves_existing_credentials_when_only_session_ch
         .credentials
         .saved_session
         .expect("saved session should exist")
-        .decrypt()
+        .decrypt_with_key(&key)
         .expect("saved session should decrypt");
     assert_eq!(session_email, "saved@example.com");
     assert_eq!(session, "serialized-session");
@@ -223,6 +272,10 @@ fn new_without_explicit_config_loads_saved_mega_session() {
     let _cwd = CurrentDirGuard::set(dir.path());
     let config_path = dir.path().join("config.toml");
     let mut config = ServiceConfig::load_or_create(&config_path).expect("config should exist");
+    let key = crate::config::CredentialKey::decode(
+        config.credential_key.as_deref().expect("config key exists"),
+    )
+    .expect("config key should decode");
     config.credentials = crate::ServiceCredentials {
         encrypted: false,
         email: "saved@example.com".to_string(),
@@ -231,10 +284,11 @@ fn new_without_explicit_config_loads_saved_mega_session() {
         saved_session: Some(SavedMegaSession::encrypt(
             "saved@example.com",
             "serialized-session",
+            &key,
         )),
     };
     config.download.path = Some(dir.path().join("downloads").display().to_string());
-    config.credentials.encrypt_in_place();
+    config.credentials.encrypt_in_place_with_key(&key);
     config.save(&config_path).expect("config should save");
 
     let (tx, _rx) = mpsc::channel(64);
@@ -244,10 +298,62 @@ fn new_without_explicit_config_loads_saved_mega_session() {
     let (session_email, session) = app
         .saved_mega_session
         .expect("saved session should load")
-        .decrypt()
+        .decrypt_with_key(&key)
         .expect("saved session should decrypt");
     assert_eq!(session_email, "saved@example.com");
     assert_eq!(session, "serialized-session");
+}
+
+#[test]
+fn apply_service_config_migrates_legacy_saved_session_to_config_key() {
+    let dir = tempdir().expect("temp dir should exist");
+    let _cwd = CurrentDirGuard::set(dir.path());
+    let config_path = dir.path().join("config.toml");
+    let mut config = ServiceConfig::load_or_create(&config_path).expect("config should exist");
+    let legacy_session = SavedMegaSession {
+        email: crate::core::encrypt_credential("saved@example.com"),
+        session: crate::core::encrypt_credential("legacy-session"),
+    };
+    config.credentials.saved_session = Some(legacy_session);
+    let encoded_key = config
+        .credential_key
+        .as_deref()
+        .expect("config key exists")
+        .to_string();
+    fs::write(
+        &config_path,
+        toml::to_string(&config).expect("legacy config should serialize"),
+    )
+    .expect("legacy config should write");
+    fs::write(
+        dir.path().join("config.toml.key"),
+        format!("{encoded_key}\n"),
+    )
+    .expect("config key should write");
+
+    let (tx, _rx) = mpsc::channel(64);
+    let mut app = App::new(9723, tx, true);
+    app.apply_service_config(&config_path)
+        .expect("legacy config should load");
+
+    let saved = ServiceConfig::load(&config_path).expect("migrated config should load");
+    let key = crate::config::CredentialKey::decode(
+        saved.credential_key.as_deref().expect("config key exists"),
+    )
+    .expect("config key should decode");
+    let migrated = saved
+        .credentials
+        .saved_session
+        .expect("saved session should remain");
+    assert!(migrated.email.starts_with("v3:"));
+    assert!(migrated.session.starts_with("v3:"));
+    assert_eq!(
+        migrated.decrypt_with_key(&key),
+        Some((
+            "saved@example.com".to_string(),
+            "legacy-session".to_string()
+        ))
+    );
 }
 
 #[test]
@@ -301,7 +407,16 @@ fn implicit_cwd_template_falls_back_to_state_config_credentials() {
         mfa: "654321".to_string(),
         saved_session: None,
     };
-    state_config.credentials.encrypt_in_place();
+    let state_key = crate::config::CredentialKey::decode(
+        state_config
+            .credential_key
+            .as_deref()
+            .expect("state config key exists"),
+    )
+    .expect("state config key should decode");
+    state_config
+        .credentials
+        .encrypt_in_place_with_key(&state_key);
     state_config.api.api_key =
         Some(crate::config::ApiKey::new("state-api-key").expect("test API key"));
     state_config

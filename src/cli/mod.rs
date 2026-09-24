@@ -2,7 +2,8 @@
 
 #![allow(clippy::too_many_lines)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +15,8 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::{
     DlcKeyCache, DownloadConfig, DownloadItem, DownloadProgress, FileStats, NoProgress,
-    SessionStats, SessionStatsBuilder,
+    ServiceConfig, SessionStats, SessionStatsBuilder,
+    config::CredentialKey,
     core::{
         PackageId, PackageKey, PackageSnapshot, ProgressDelta, SavedCredentials, SessionRunStatus,
         SessionSnapshot, SessionUrlSnapshot, build_restart_snapshot,
@@ -44,13 +46,23 @@ struct CliConfig {
     urls: Vec<String>,
     dlc_files: Vec<String>,
     download_config: DownloadConfig,
+    download_overrides: CliDownloadOverrides,
+    config_path: Option<PathBuf>,
     resume: bool,
+}
+
+#[derive(Default)]
+struct CliDownloadOverrides {
+    chunks_per_file: Option<usize>,
+    concurrent_files: Option<usize>,
+    force_overwrite: Option<bool>,
 }
 
 struct CliPackageFiles<'a> {
     id: PackageId,
     display_name: String,
     files: Vec<DownloadItem<'a>>,
+    output_owners: Vec<(String, String)>,
     skipped: usize,
     partial: usize,
 }
@@ -64,7 +76,24 @@ impl CliPackageFiles<'_> {
 fn append_cli_package_files<'a>(
     package_files: &mut Vec<CliPackageFiles<'a>>,
     package: CliPackageFiles<'a>,
-) {
+) -> Result<(), String> {
+    validate_cli_output_owners(
+        package_files
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .output_owners
+                    .iter()
+                    .map(|(path, handle)| (path, handle))
+            })
+            .chain(
+                package
+                    .output_owners
+                    .iter()
+                    .map(|(path, handle)| (path, handle)),
+            ),
+    )?;
+
     if let Some(existing) = package_files
         .iter_mut()
         .find(|entry| entry.id == package.id)
@@ -82,9 +111,164 @@ fn append_cli_package_files<'a>(
         );
         existing.skipped += package.skipped;
         existing.partial += package.partial;
-        return;
+        existing.output_owners.extend(package.output_owners);
+        return Ok(());
     }
     package_files.push(package);
+    Ok(())
+}
+
+fn validate_cli_output_owners<I, P, H>(owners: I) -> Result<(), String>
+where
+    I: IntoIterator<Item = (P, H)>,
+    P: AsRef<str>,
+    H: AsRef<str>,
+{
+    let mut paths = HashMap::<String, String>::new();
+    for (path, handle) in owners {
+        let path = path.as_ref();
+        let handle = handle.as_ref();
+        if let Some(existing) = paths.get(path) {
+            if existing != handle {
+                return Err(format!(
+                    "different MEGA files ({existing} and {handle}) resolve to the same output path {path:?}"
+                ));
+            }
+        } else {
+            paths.insert(path.to_string(), handle.to_string());
+        }
+    }
+    Ok(())
+}
+
+const fn cli_run_can_complete(had_fetch_failures: bool, had_download_failures: bool) -> bool {
+    !had_fetch_failures && !had_download_failures
+}
+
+fn deduplicate_source_urls(urls: &mut Vec<String>) {
+    let mut seen = HashSet::with_capacity(urls.len());
+    urls.retain_mut(|url| {
+        if let Ok(DownloadSource::Mega(normalized)) = DownloadSource::parse(url) {
+            *url = normalized.into_string();
+        }
+        seen.insert(url.clone())
+    });
+}
+
+fn effective_resume_config(saved: &DownloadConfig, cli: &CliConfig) -> DownloadConfig {
+    let mut effective = saved.clone();
+    if let Some(chunks) = cli.download_overrides.chunks_per_file {
+        effective.chunks_per_file = chunks;
+    }
+    if let Some(concurrent) = cli.download_overrides.concurrent_files {
+        effective.concurrent_files = concurrent;
+    }
+    if let Some(force) = cli.download_overrides.force_overwrite {
+        effective.force_overwrite = force;
+    }
+    effective
+}
+
+fn default_cli_config_path() -> crate::Result<PathBuf> {
+    let local = std::env::current_dir()?.join("config.toml");
+    let mut state = SessionSnapshot::state_dir();
+    state.pop();
+    state.push("config.toml");
+    Ok(if local.exists() || !state.exists() {
+        local
+    } else {
+        state
+    })
+}
+
+fn load_cli_credential_key(path: Option<&Path>) -> crate::Result<CredentialKey> {
+    let path = match path {
+        Some(path) => path.to_path_buf(),
+        None => default_cli_config_path()?,
+    };
+    let mut config = ServiceConfig::load_or_create(&path)?;
+    let key = config
+        .credential_key
+        .as_deref()
+        .and_then(CredentialKey::decode)
+        .unwrap_or_else(CredentialKey::generate);
+    let encoded = key.encode();
+    if config.credential_key.as_deref() != Some(encoded.as_str()) {
+        config.credential_key = Some(encoded);
+        config.save(&path)?;
+    }
+    key.persist_for_sessions()?;
+    Ok(key)
+}
+
+fn load_cli_resume_key(
+    credentials: &SavedCredentials,
+    path: Option<&Path>,
+) -> crate::Result<CredentialKey> {
+    Ok(credentials.resume_key(|| {
+        let path = match path {
+            Some(path) => path.to_path_buf(),
+            None => default_cli_config_path().map_err(std::io::Error::other)?,
+        };
+        let config = ServiceConfig::load(&path)?;
+        config
+            .credential_key
+            .as_deref()
+            .and_then(CredentialKey::decode)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "original config credential key is missing",
+                )
+            })
+    })?)
+}
+
+fn resume_mfa(saved: Option<String>, fresh: Option<String>) -> Result<Option<String>, String> {
+    match (saved, fresh) {
+        (_, Some(fresh)) if !fresh.trim().is_empty() => Ok(Some(fresh)),
+        (Some(_), _) => Err("MEGA_MFA must contain a current code to resume this session".into()),
+        (None, Some(_) | None) => Ok(None),
+    }
+}
+
+struct DownloadRootGuard {
+    previous_dir: PathBuf,
+}
+
+impl DownloadRootGuard {
+    fn enter(config: &mut DownloadConfig) -> crate::Result<Option<Self>> {
+        let Some(root) = config.path.as_deref() else {
+            return Ok(None);
+        };
+        let previous_dir = std::env::current_dir()?;
+        let requested = PathBuf::from(root);
+        let absolute_root = if requested.is_absolute() {
+            requested
+        } else {
+            previous_dir.join(requested)
+        };
+        std::fs::create_dir_all(&absolute_root).map_err(|error| {
+            crate::Error::Download(format!(
+                "cannot create download root {}: {error}",
+                absolute_root.display()
+            ))
+        })?;
+        std::env::set_current_dir(&absolute_root).map_err(|error| {
+            crate::Error::Download(format!(
+                "cannot enter download root {}: {error}",
+                absolute_root.display()
+            ))
+        })?;
+        config.path = Some(absolute_root.to_string_lossy().into_owned());
+        Ok(Some(Self { previous_dir }))
+    }
+}
+
+impl Drop for DownloadRootGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous_dir);
+    }
 }
 
 // ============================================================================
@@ -356,6 +540,12 @@ async fn collect_cli_package_files<'a>(
     let id = infer_package_id(nodes, &collected);
     let display_name = infer_package_display_name(nodes, &collected);
     let partial = collected.partial;
+    let output_owners = collected
+        .to_download
+        .iter()
+        .chain(&collected.completed)
+        .map(|item| (item.path.clone(), item.node.handle().to_string()))
+        .collect();
     let mut files = Vec::new();
     let mut skipped = collected.skipped;
 
@@ -371,6 +561,7 @@ async fn collect_cli_package_files<'a>(
         id,
         display_name,
         files,
+        output_owners,
         skipped,
         partial,
     }
@@ -380,7 +571,7 @@ fn register_cli_package_in_session(
     session: &mut SessionSnapshot,
     source_url: &str,
     package: &CliPackageFiles<'_>,
-) {
+) -> Result<(), String> {
     if !session.packages.iter().any(|entry| entry.id == package.id) {
         session.packages.push(PackageSnapshot {
             id: package.id,
@@ -391,11 +582,13 @@ fn register_cli_package_in_session(
         });
     }
 
-    let package_entry = session
+    let Some(package_entry) = session
         .packages
         .iter_mut()
         .find(|entry| entry.id == package.id)
-        .expect("package should exist before registering package files");
+    else {
+        return Err("CLI package disappeared during session registration".into());
+    };
     let mut known_file_ids = package_entry
         .files
         .iter()
@@ -413,7 +606,7 @@ fn register_cli_package_in_session(
         }
     }
     session.prune_empty_packages();
-    crate::core::validate_snapshot(session).expect("cli session snapshots should stay canonical");
+    crate::core::validate_snapshot(session)
 }
 
 #[cfg(test)]
@@ -510,22 +703,23 @@ where
 {
     let mut urls = Vec::new();
     let mut dlc_files = Vec::new();
-    let mut chunks_per_file = DEFAULT_CHUNKS_PER_FILE;
-    let mut concurrent_files = DEFAULT_CONCURRENT_FILES;
-    let mut force = false;
+    let mut chunks_per_file = None;
+    let mut concurrent_files = None;
+    let mut force_overwrite = None;
     let mut resume = false;
+    let mut config_path = None;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-j" | "--chunks" => {
-                chunks_per_file = parse_positive_number(&mut args, &arg)?;
+                chunks_per_file = Some(parse_positive_number(&mut args, &arg)?);
             }
             "-p" | "--parallel" => {
-                concurrent_files = parse_positive_number(&mut args, &arg)?;
+                concurrent_files = Some(parse_positive_number(&mut args, &arg)?);
             }
             "-f" | "--force" => {
-                force = true;
+                force_overwrite = Some(true);
             }
             "-r" | "--resume" => {
                 resume = true;
@@ -535,7 +729,13 @@ where
                 std::process::exit(0);
             }
             // Skip global flags handled by the unified binary
-            "--host" | "--config" | "--ui" | "--tui-listen" | "--tui-attach" | "--api-key" => {
+            "--config" => {
+                config_path = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| "--config requires a path".to_string())?,
+                ));
+            }
+            "--host" | "--ui" | "--tui-listen" | "--tui-attach" | "--api-key" => {
                 let _ = args.next(); // consume the value
             }
             "--tui" | "--headless" => {}
@@ -552,13 +752,21 @@ where
         }
     }
 
+    deduplicate_source_urls(&mut urls);
+
     Ok(CliConfig {
         urls,
         dlc_files,
         download_config: DownloadConfig::new()
-            .with_chunks_per_file(chunks_per_file)
-            .with_concurrent_files(concurrent_files)
-            .with_force_overwrite(force),
+            .with_chunks_per_file(chunks_per_file.unwrap_or(DEFAULT_CHUNKS_PER_FILE))
+            .with_concurrent_files(concurrent_files.unwrap_or(DEFAULT_CONCURRENT_FILES))
+            .with_force_overwrite(force_overwrite.unwrap_or(false)),
+        download_overrides: CliDownloadOverrides {
+            chunks_per_file,
+            concurrent_files,
+            force_overwrite,
+        },
+        config_path,
         resume,
     })
 }
@@ -633,7 +841,9 @@ pub async fn run() -> crate::Result<()> {
                 session.file_count(),
                 session_completed_count(&session)
             );
-            return resume_session(session, &config).await;
+            let credential_key =
+                load_cli_resume_key(&session.credentials, config.config_path.as_deref())?;
+            return resume_session(session, &config, &credential_key).await;
         }
         println!("No resumable session found, starting fresh.");
     } else if config.urls.is_empty() && config.dlc_files.is_empty() {
@@ -650,6 +860,8 @@ pub async fn run() -> crate::Result<()> {
         print_usage();
         std::process::exit(1);
     }
+
+    let credential_key = load_cli_credential_key(config.config_path.as_deref())?;
 
     let (email, password, mfa) = get_credentials()?;
 
@@ -678,6 +890,7 @@ pub async fn run() -> crate::Result<()> {
                 Ok(urls) => {
                     println!("{} MEGA link(s)", urls.len());
                     config.urls.extend(urls);
+                    deduplicate_source_urls(&mut config.urls);
                 }
                 Err(e) => {
                     eprintln!("Error: {e}");
@@ -695,12 +908,14 @@ pub async fn run() -> crate::Result<()> {
     println!("Logged in successfully.");
 
     // Shared downloader owns collection and all payload writes.
-    let downloader = crate::Downloader::new(client, config.download_config.clone());
+    let mut fresh_download_config = effective_resume_config(&config.download_config, &config);
+    let _download_root = DownloadRootGuard::enter(&mut fresh_download_config)?;
+    let downloader = crate::Downloader::new(client, fresh_download_config.clone());
     let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
     let mut session_state = SessionSnapshot::new(
-        config.download_config.clone(),
-        SavedCredentials::encrypt(&email, &password, mfa.as_deref()),
+        fresh_download_config,
+        SavedCredentials::encrypt_with_key(&email, &password, None, &credential_key),
     );
     session_state.urls = config
         .urls
@@ -737,8 +952,15 @@ pub async fn run() -> crate::Result<()> {
     let mut package_files: Vec<CliPackageFiles<'_>> = Vec::new();
     for (_url_idx, url, nodes) in &all_nodes {
         let package = collect_cli_package_files(&downloader, &no_progress, nodes, |_| true).await;
-        register_cli_package_in_session(&mut session_state, url, &package);
-        append_cli_package_files(&mut package_files, package);
+        let package_id = package.id;
+        append_cli_package_files(&mut package_files, package).map_err(crate::Error::Download)?;
+        let Some(registered) = package_files.iter().find(|entry| entry.id == package_id) else {
+            return Err(crate::Error::Download(
+                "CLI package disappeared after being appended".to_string(),
+            ));
+        };
+        register_cli_package_in_session(&mut session_state, url, registered)
+            .map_err(crate::Error::Download)?;
     }
 
     // Save initial session state
@@ -796,9 +1018,14 @@ pub async fn run() -> crate::Result<()> {
     let session_stats = builder.build();
     print_summary(&session_stats);
 
-    if had_download_failures {
+    if !cli_run_can_complete(had_fetch_failures, had_download_failures) {
         session_state.status = SessionRunStatus::InProgress;
         persist_session(&mut session_state)?;
+        if had_fetch_failures {
+            return Err(crate::Error::Download(
+                "Failed to fetch one or more URLs".to_string(),
+            ));
+        }
         return Err(crate::Error::Download(
             "One or more downloads failed".to_string(),
         ));
@@ -812,12 +1039,27 @@ pub async fn run() -> crate::Result<()> {
 }
 
 /// Resume a previous incomplete session.
-async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> crate::Result<()> {
+async fn resume_session(
+    mut session: SessionSnapshot,
+    config: &CliConfig,
+    credential_key: &CredentialKey,
+) -> crate::Result<()> {
+    let mut resume_config = effective_resume_config(&session.config, config);
+    let _download_root = DownloadRootGuard::enter(&mut resume_config)?;
+    session.config.clone_from(&resume_config);
     let restart = build_restart_snapshot(&session);
     // Decrypt credentials
-    let (email, password, mfa) = session.credentials.decrypt().ok_or_else(|| {
-        crate::Error::Download("Failed to decrypt session credentials".to_string())
-    })?;
+    let (email, password, saved_mfa) = session
+        .credentials
+        .decrypt_with_key(credential_key)
+        .or_else(|| session.credentials.decrypt_legacy())
+        .ok_or_else(|| {
+            crate::Error::Download("Failed to decrypt session credentials".to_string())
+        })?;
+    let fresh_mfa = std::env::var("MEGA_MFA")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let mfa = resume_mfa(saved_mfa, fresh_mfa).map_err(crate::Error::Download)?;
 
     let http = build_http_client()?;
 
@@ -826,8 +1068,10 @@ async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> cra
     println!("Logging in...");
     client.login(&email, &password, mfa.as_deref()).await?;
     println!("Logged in successfully.");
+    session.credentials =
+        SavedCredentials::encrypt_with_key(&email, &password, None, credential_key);
 
-    let downloader = crate::Downloader::new(client, config.download_config.clone());
+    let downloader = crate::Downloader::new(client, resume_config.clone());
     let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
     // Re-fetch URLs and collect remaining files
@@ -869,14 +1113,21 @@ async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> cra
 
     // Collect files, skipping already-completed ones
     let mut package_files: Vec<CliPackageFiles<'_>> = Vec::new();
-    for (_url_idx, _url, nodes) in &all_nodes {
+    for (_url_idx, url, nodes) in &all_nodes {
         let package = collect_cli_package_files(&downloader, &no_progress, nodes, |item| {
             resumable_file_ids.is_empty()
                 || resumable_file_ids.contains(item.path.as_str())
                 || !ignored_paths.contains(&item.path)
         })
         .await;
-        append_cli_package_files(&mut package_files, package);
+        let package_id = package.id;
+        append_cli_package_files(&mut package_files, package).map_err(crate::Error::Download)?;
+        let registered = package_files
+            .iter()
+            .find(|entry| entry.id == package_id)
+            .expect("the package was just appended");
+        register_cli_package_in_session(&mut session, url, registered)
+            .map_err(crate::Error::Download)?;
     }
 
     print_file_list(&package_files);
@@ -930,9 +1181,14 @@ async fn resume_session(mut session: SessionSnapshot, config: &CliConfig) -> cra
     let session_stats = builder.build();
     print_summary(&session_stats);
 
-    if had_download_failures {
+    if !cli_run_can_complete(had_fetch_failures, had_download_failures) {
         session.status = SessionRunStatus::InProgress;
         persist_session(&mut session)?;
+        if had_fetch_failures {
+            return Err(crate::Error::Download(
+                "Failed to fetch one or more URLs".to_string(),
+            ));
+        }
         return Err(crate::Error::Download(
             "One or more downloads failed".to_string(),
         ));
@@ -969,6 +1225,9 @@ async fn fetch_remaining_nodes(
             Err(error) => {
                 had_fetch_failures = true;
                 println!("ERROR: {error:?}");
+                if let Some(entry) = session.urls.get_mut(*url_idx) {
+                    entry.error = Some(error.to_string());
+                }
             }
         }
     }
@@ -1014,6 +1273,305 @@ mod tests {
 
         assert_eq!(config.urls, ["https://mega.nz/folder/folder#key"]);
         assert_eq!(config.dlc_files, ["./links.DLC"]);
+    }
+
+    #[test]
+    fn cli_preserves_explicit_service_config_path_for_session_credentials() {
+        let config = parse_args(["--config", "/tmp/octo-config.toml"].map(str::to_string))
+            .expect("global config path should be accepted by the CLI parser");
+        assert_eq!(
+            config.config_path.as_deref(),
+            Some(Path::new("/tmp/octo-config.toml"))
+        );
+    }
+
+    #[test]
+    fn duplicate_direct_sources_are_admitted_once() {
+        let config = parse_args(
+            [
+                "https://mega.nz/file/abc#key",
+                "https://mega.nz/file/abc#key",
+            ]
+            .map(str::to_string),
+        )
+        .expect("duplicate source inputs should be accepted");
+
+        assert_eq!(config.urls, ["https://mega.nz/file/abc#key"]);
+    }
+
+    #[test]
+    fn source_deduplication_preserves_first_seen_order_across_expansions() {
+        let mut urls = vec![
+            "https://mega.nz/file/one#key".to_string(),
+            "https://mega.nz/file/two#key".to_string(),
+            "https://mega.nz/file/one#key".to_string(),
+        ];
+        deduplicate_source_urls(&mut urls);
+        assert_eq!(
+            urls,
+            [
+                "https://mega.nz/file/one#key",
+                "https://mega.nz/file/two#key"
+            ]
+        );
+    }
+
+    #[test]
+    fn completion_requires_successful_fetches_and_downloads() {
+        assert!(cli_run_can_complete(false, false));
+        assert!(!cli_run_can_complete(true, false));
+        assert!(!cli_run_can_complete(false, true));
+        assert!(!cli_run_can_complete(true, true));
+    }
+
+    #[test]
+    fn distinct_remote_handles_cannot_claim_the_same_output_path() {
+        assert!(validate_cli_output_owners([("payload.bin", "same-handle"); 2]).is_ok());
+        assert!(
+            validate_cli_output_owners([("payload.bin", "handle-a"), ("payload.bin", "handle-b"),])
+                .is_err()
+        );
+        assert!(
+            validate_cli_output_owners([("one.bin", "handle-a"), ("two.bin", "handle-b"),]).is_ok()
+        );
+    }
+
+    #[test]
+    fn resume_config_uses_saved_values_unless_cli_overrides_them() {
+        let saved = DownloadConfig {
+            path: Some("/saved/root".to_string()),
+            chunks_per_file: 6,
+            mega_chunks_per_request: 3,
+            concurrent_files: 9,
+            force_overwrite: true,
+            cleanup_on_error: true,
+        };
+        let defaults = parse_args(std::iter::empty()).expect("defaults should parse");
+        let resumed = effective_resume_config(&saved, &defaults);
+        assert_eq!(resumed, saved);
+
+        let overrides =
+            parse_args(["--chunks", "8", "--parallel", "2", "--force"].map(str::to_string))
+                .expect("explicit options should parse");
+        let resumed = effective_resume_config(&saved, &overrides);
+        assert_eq!(resumed.path.as_deref(), Some("/saved/root"));
+        assert_eq!(resumed.chunks_per_file, 8);
+        assert_eq!(resumed.concurrent_files, 2);
+        assert!(resumed.force_overwrite);
+        assert!(resumed.cleanup_on_error);
+    }
+
+    #[test]
+    fn resume_prefers_current_mfa_and_rejects_replaying_saved_code() {
+        assert_eq!(
+            resume_mfa(Some("111111".into()), Some("222222".into())).unwrap(),
+            Some("222222".into())
+        );
+        assert!(
+            resume_mfa(Some("111111".into()), None)
+                .unwrap_err()
+                .contains("MEGA_MFA")
+        );
+        assert_eq!(resume_mfa(None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn cli_credentials_use_the_persisted_random_config_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let first = load_cli_credential_key(Some(&config_path)).unwrap();
+        let second = load_cli_credential_key(Some(&config_path)).unwrap();
+        assert_eq!(first, second);
+
+        let saved = SavedCredentials::encrypt_with_key("user", "password", None, &first);
+        assert_eq!(
+            saved.decrypt_with_key(&second),
+            Some(("user".into(), "password".into(), None))
+        );
+    }
+
+    #[test]
+    fn cli_resume_keeps_original_key_across_directories_and_configs() {
+        let state = tempfile::tempdir().unwrap();
+        let _state = crate::test_support::StateDirectoryGuard::set(state.path());
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let key;
+        let path;
+        {
+            let _cwd = CurrentDirGuard::set(first_dir.path());
+            key = load_cli_credential_key(None).unwrap();
+            let mut session = session_snapshot(vec![(
+                "https://mega.nz/file/pending",
+                UrlFixtureStatus::Pending,
+            )]);
+            session.credentials =
+                SavedCredentials::encrypt_with_key("original", "password", None, &key);
+            session.save().unwrap();
+            path = session.state_path();
+        }
+        let _cwd = CurrentDirGuard::set(second_dir.path());
+        let other_key = load_cli_credential_key(None).unwrap();
+        assert_ne!(other_key, key);
+        // Neither changing config nor losing the original config loses the archived key.
+        std::fs::remove_file(first_dir.path().join("config.toml.key")).unwrap();
+        std::fs::remove_file(first_dir.path().join("config.toml")).unwrap();
+        let restored = SessionSnapshot::load(&path).unwrap();
+        assert_eq!(
+            load_cli_resume_key(&restored.credentials, None).unwrap(),
+            key
+        );
+        assert_eq!(
+            load_cli_resume_key(&restored.credentials, Some(Path::new("config.toml"))).unwrap(),
+            key
+        );
+        let absent = second_dir.path().join("absent.toml");
+        assert_eq!(
+            load_cli_resume_key(&restored.credentials, Some(&absent)).unwrap(),
+            key
+        );
+        assert!(!absent.exists());
+        assert_eq!(
+            restored.credentials.decrypt_with_key(&key),
+            Some(("original".into(), "password".into(), None))
+        );
+    }
+
+    #[test]
+    fn cli_refuses_to_create_session_credentials_when_key_archive_cannot_be_written() {
+        let state = tempfile::tempdir().unwrap();
+        let _state = crate::test_support::StateDirectoryGuard::set(state.path());
+        std::fs::create_dir_all(SessionSnapshot::state_dir()).unwrap();
+        std::fs::write(
+            SessionSnapshot::state_dir().join("credential-keys"),
+            b"blocked",
+        )
+        .unwrap();
+        assert!(load_cli_credential_key(Some(&state.path().join("config.toml"))).is_err());
+        assert!(SessionSnapshot::latest().is_none());
+    }
+
+    #[test]
+    fn resume_root_guard_enters_the_configured_root_and_restores_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let _cwd = CurrentDirGuard::set(temp.path());
+        let root = temp.path().join("saved-root");
+        let mut config = DownloadConfig {
+            path: Some("saved-root".into()),
+            ..DownloadConfig::default()
+        };
+        {
+            let _root = DownloadRootGuard::enter(&mut config).unwrap();
+            assert_eq!(
+                std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap(),
+                std::fs::canonicalize(&root).unwrap()
+            );
+            assert_eq!(
+                std::fs::canonicalize(config.path.as_deref().unwrap()).unwrap(),
+                std::fs::canonicalize(&root).unwrap()
+            );
+        }
+        assert_eq!(
+            std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap(),
+            std::fs::canonicalize(temp.path()).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn newly_resolved_resume_files_are_registered_before_download_scheduling() {
+        let temp = tempfile::tempdir().unwrap();
+        let _cwd = CurrentDirGuard::set(temp.path());
+        let fixture =
+            crate::fake_mega::create_fake_mega_fixture(temp.path(), "payload.bin", 64, 19)
+                .await
+                .unwrap();
+        let server = crate::fake_mega::FakeMegaServer::spawn(fixture.clone(), 1).unwrap();
+        let http = mega::http_client_builder().unwrap().build().unwrap();
+        let client = mega::Client::builder()
+            .origin(server.origin().clone())
+            .build(http)
+            .unwrap();
+        let nodes = client
+            .fetch_public_nodes(&fixture.public_url())
+            .await
+            .unwrap();
+        let downloader = crate::Downloader::new(client, DownloadConfig::default());
+        let progress: Arc<dyn DownloadProgress> = Arc::new(NoProgress);
+        let mut session = session_snapshot(vec![(
+            &fixture.public_url(),
+            UrlFixtureStatus::Error("unavailable during first run".into()),
+        )]);
+
+        let package = collect_cli_package_files(&downloader, &progress, &nodes, |_| true).await;
+        let source_url = fixture.public_url();
+        register_cli_package_in_session(&mut session, &source_url, &package).unwrap();
+
+        let file = session
+            .iter_files()
+            .next()
+            .expect("newly collected file must be tracked before it is scheduled");
+        assert_eq!(file.path, package.files[0].path);
+        assert_eq!(file.source_url, source_url);
+        assert!(matches!(
+            &file.lifecycle,
+            crate::core::FileLifecycle::Queued
+        ));
+        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn colliding_output_paths_from_distinct_remote_handles_fail_collection() {
+        let temp = tempfile::tempdir().unwrap();
+        let _cwd = CurrentDirGuard::set(temp.path());
+        let first = crate::fake_mega::create_fake_mega_fixture(
+            &temp.path().join("first"),
+            "payload.bin",
+            64,
+            19,
+        )
+        .await
+        .unwrap();
+        let second = crate::fake_mega::create_fake_mega_fixture(
+            &temp.path().join("second"),
+            "payload.bin",
+            64,
+            29,
+        )
+        .await
+        .unwrap();
+        let first_server = crate::fake_mega::FakeMegaServer::spawn(first.clone(), 1).unwrap();
+        let second_server = crate::fake_mega::FakeMegaServer::spawn(second.clone(), 1).unwrap();
+        let http = mega::http_client_builder().unwrap().build().unwrap();
+        let first_client = mega::Client::builder()
+            .origin(first_server.origin().clone())
+            .build(http.clone())
+            .unwrap();
+        let second_client = mega::Client::builder()
+            .origin(second_server.origin().clone())
+            .build(http)
+            .unwrap();
+        let first_nodes = first_client
+            .fetch_public_nodes(&first.public_url())
+            .await
+            .unwrap();
+        let second_nodes = second_client
+            .fetch_public_nodes(&second.public_url())
+            .await
+            .unwrap();
+        let first_downloader = crate::Downloader::new(first_client, DownloadConfig::default());
+        let second_downloader = crate::Downloader::new(second_client, DownloadConfig::default());
+        let progress: Arc<dyn DownloadProgress> = Arc::new(NoProgress);
+        let first_package =
+            collect_cli_package_files(&first_downloader, &progress, &first_nodes, |_| true).await;
+        let second_package =
+            collect_cli_package_files(&second_downloader, &progress, &second_nodes, |_| true).await;
+        let mut packages = vec![first_package];
+
+        let error = append_cli_package_files(&mut packages, second_package)
+            .expect_err("different remote handles must not silently share a destination");
+        assert!(error.contains("same output path"));
+        first_server.shutdown().await.unwrap();
+        second_server.shutdown().await.unwrap();
     }
 
     #[test]

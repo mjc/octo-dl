@@ -21,12 +21,12 @@ thread_local! {
     static PENDING_FILE_IDS_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tui"))]
 pub(crate) fn reset_pending_file_ids_call_count() {
     PENDING_FILE_IDS_CALLS.with(|count| count.set(0));
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tui"))]
 pub(crate) fn pending_file_ids_call_count() -> usize {
     PENDING_FILE_IDS_CALLS.with(Cell::get)
 }
@@ -473,7 +473,12 @@ impl Default for SessionMeta {
             created: Utc::now(),
             status: SessionRunStatus::InProgress,
             config: DownloadConfig::default(),
-            credentials: SavedCredentials::encrypt("", "", None),
+            credentials: SavedCredentials::encrypt_with_key(
+                "",
+                "",
+                None,
+                &crate::config::CredentialKey::generate(),
+            ),
         }
     }
 }
