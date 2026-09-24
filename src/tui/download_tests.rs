@@ -261,8 +261,7 @@ async fn register_download_token_delivers_token_to_application_channel() {
     let (token_tx, mut token_rx) = mpsc::channel(1);
     let file_id: FileId = "episode.mkv".into();
 
-    let attempt_id = DownloadAttemptId::new(7);
-    let cancel_token = register_download_token(file_id.clone(), attempt_id, &token_tx)
+    let cancel_token = register_download_token(file_id.clone(), &token_tx)
         .await
         .expect("a live token channel should accept registration");
     let message = token_rx
@@ -271,7 +270,6 @@ async fn register_download_token_delivers_token_to_application_channel() {
         .expect("registered token should arrive at the application");
 
     assert_eq!(message.file_id, file_id);
-    assert_eq!(message.attempt_id, attempt_id);
     assert!(!message.token.is_cancelled());
     cancel_token.cancel();
     assert!(message.token.is_cancelled());
@@ -282,8 +280,7 @@ async fn register_download_token_reports_closed_application_channel() {
     let (token_tx, token_rx) = mpsc::channel(1);
     drop(token_rx);
 
-    let result =
-        register_download_token("episode.mkv".into(), DownloadAttemptId::new(0), &token_tx).await;
+    let result = register_download_token("episode.mkv".into(), &token_tx).await;
 
     assert!(result.is_err());
 }
@@ -642,6 +639,48 @@ async fn failed_transfer_leaves_scheduler_and_fake_server_usable() {
     let (token_tx, _token_rx) = mpsc::channel(4);
     let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
 
+    let mut api_server = None;
+    let mut api_port = None;
+    for _ in 0..5 {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("API probe port should be available")
+            .local_addr()
+            .expect("API probe listener should have an address")
+            .port();
+        match app
+            .start_api_server(
+                "127.0.0.1".to_string(),
+                port,
+                Some("127.0.0.1".to_string()),
+                None,
+                false,
+            )
+            .await
+        {
+            Ok(server) => {
+                api_port = Some(port);
+                api_server = Some(server);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("API server should start before the transfer: {error}"),
+        }
+    }
+    let api_port = api_port.expect("an available API port should be found after retries");
+    let api_server = api_server.expect("API server should start before the transfer");
+    let api = mega::http_client_builder()
+        .expect("API HTTP builder should exist")
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .expect("API HTTP client should build");
+    let health_url = format!("http://127.0.0.1:{api_port}/api/health");
+    let health = api
+        .get(&health_url)
+        .send()
+        .await
+        .expect("API should respond before a transfer");
+    assert!(health.status().is_success());
+
     server.fail_next_download_request();
     assert!(
         start_pending_downloads(&runtime, &mut scheduler, &event_tx, &token_tx, &pause_rx).await
@@ -662,6 +701,13 @@ async fn failed_transfer_leaves_scheduler_and_fake_server_usable() {
             .is_failed()
     );
 
+    let health = api
+        .get(&health_url)
+        .send()
+        .await
+        .expect("API should respond after a failed transfer");
+    assert!(health.status().is_success());
+
     assert!(
         start_pending_downloads(&runtime, &mut scheduler, &event_tx, &token_tx, &pause_rx).await
     );
@@ -680,6 +726,10 @@ async fn failed_transfer_leaves_scheduler_and_fake_server_usable() {
         FileLifecycle::Complete
     );
     assert!(output_dir.join("succeeding.bin").exists());
+    api_server
+        .shutdown()
+        .await
+        .expect("API server should shut down cleanly");
     server.shutdown().await.expect("fake server should stop");
 }
 
@@ -704,6 +754,7 @@ fn expand_dlc_path_leaves_absolute_paths_unchanged() {
 mod property_tests {
     use super::*;
     use proptest::prelude::*;
+    use proptest::test_runner::{Config as ProptestConfig, RngSeed};
 
     fn dedup_file_ids(values: &[u8]) -> Vec<FileId> {
         let mut seen = HashSet::new();
@@ -736,42 +787,84 @@ mod property_tests {
     fn lifecycle_snapshot(
         app: &App,
         file_id: &FileId,
-    ) -> Option<(crate::core::FileLifecycle, u64)> {
+    ) -> Option<(
+        crate::core::FileLifecycle,
+        u64,
+        crate::core::FileAccounting,
+        u64,
+    )> {
         app.core_state.files.get(file_id).map(|file| {
             (
                 file.lifecycle.clone(),
                 file.progress.visible_completed_bytes,
+                file.accounting,
+                app.core_state.totals.run_completed_bytes,
             )
         })
     }
 
     fn queue_stale_attempt_history(
+        app: &mut App,
         event_tx: &DownloadEventSender,
+        event_rx: &mut mpsc::Receiver<DownloadEvent>,
         file_id: &FileId,
         attempt_id: crate::tui::event::DownloadAttemptId,
     ) {
-        let _ = event_tx.send(DownloadEvent::FileStart {
-            id: file_id.clone(),
-            size: 100,
-            attempt_id,
-        });
-        let _ = event_tx.send(DownloadEvent::Progress {
-            id: file_id.clone(),
-            delta: ProgressDelta {
-                total_bytes_delta: 17,
-                network_bytes_delta: 17,
+        enqueue_and_drain(
+            app,
+            event_tx,
+            event_rx,
+            DownloadEvent::FileStart {
+                id: file_id.clone(),
+                size: 100,
+                attempt_id,
             },
-            attempt_id,
-        });
-        let _ = event_tx.send(DownloadEvent::FileComplete {
-            id: file_id.clone(),
-            attempt_id,
-        });
-        let _ = event_tx.send(DownloadEvent::FileError {
-            id: file_id.clone(),
-            error: "late failure".to_string(),
-            attempt_id,
-        });
+        );
+        enqueue_and_drain(
+            app,
+            event_tx,
+            event_rx,
+            DownloadEvent::Progress {
+                id: file_id.clone(),
+                delta: ProgressDelta {
+                    total_bytes_delta: 17,
+                    network_bytes_delta: 17,
+                },
+                attempt_id,
+            },
+        );
+        enqueue_and_drain(
+            app,
+            event_tx,
+            event_rx,
+            DownloadEvent::FileComplete {
+                id: file_id.clone(),
+                attempt_id,
+            },
+        );
+        enqueue_and_drain(
+            app,
+            event_tx,
+            event_rx,
+            DownloadEvent::FileError {
+                id: file_id.clone(),
+                error: "late failure".to_string(),
+                attempt_id,
+            },
+        );
+    }
+
+    fn enqueue_and_drain(
+        app: &mut App,
+        event_tx: &DownloadEventSender,
+        event_rx: &mut mpsc::Receiver<DownloadEvent>,
+        event: DownloadEvent,
+    ) {
+        assert!(
+            event_tx.send(event).is_ok(),
+            "generated lifecycle history event should be admitted"
+        );
+        drain_all_download_events(app, event_tx, event_rx);
     }
 
     fn drain_all_download_events(
@@ -788,57 +881,108 @@ mod property_tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 64,
+            rng_seed: RngSeed::Fixed(0x4f43_544f_3131_34),
+            ..ProptestConfig::default()
+        })]
         #[test]
-        fn generated_lifecycle_histories_preserve_stale_attempt_isolation(
-            operations in proptest::collection::vec(0u8..12, 1..40),
+        fn generated_lifecycle_histories_preserve_independent_invariants(
+            operations in proptest::collection::vec((0u8..4, 0u8..5), 1..48),
             capacity in 1usize..=3,
         ) {
             let directory = tempdir().expect("state directory should exist");
             let _guard = StateDirectoryGuard::set(directory.path());
             let (event_tx, mut event_rx) = DownloadEventSender::channel_with_capacity(capacity);
             let mut app = App::new(9723, event_tx.clone(), true);
-            let file_id = FileId::from("history.bin");
             let source_url = "https://mega.nz/file/history";
-            event_tx.send(DownloadEvent::UrlQueued { url: source_url.to_string() }).unwrap();
-            event_tx.send(DownloadEvent::FileQueued(QueuedFile {
-                id: file_id.clone(),
-                attempt_id: crate::tui::event::DownloadAttemptId::new(0),
-                size: 100,
-                accounting: FileAccounting::CurrentRun,
-                origin: FileOrigin {
-                    package_id: None,
-                    package_display_name: None,
-                    source_url: source_url.to_string(),
-                    submitted_url: source_url.to_string(),
+            enqueue_and_drain(
+                &mut app,
+                &event_tx,
+                &mut event_rx,
+                DownloadEvent::UrlQueued {
+                    url: source_url.to_string(),
                 },
-            })).unwrap();
-            drain_all_download_events(&mut app, &event_tx, &mut event_rx);
+            );
+            let file_ids = ["history-a.bin", "history-b.bin", "history-c.bin", "history-d.bin"]
+                .map(FileId::from);
+            for file_id in &file_ids {
+                enqueue_and_drain(
+                    &mut app,
+                    &event_tx,
+                    &mut event_rx,
+                    DownloadEvent::FileQueued(QueuedFile {
+                        id: file_id.clone(),
+                        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
+                        size: 100,
+                        accounting: FileAccounting::CurrentRun,
+                        origin: FileOrigin {
+                            package_id: None,
+                            package_display_name: None,
+                            source_url: source_url.to_string(),
+                            submitted_url: source_url.to_string(),
+                        },
+                    }),
+                );
+            }
 
-            for operation in operations {
+            // Each lifecycle class has its own seeded fixture. Generated
+            // operations exercise retry, reset, reverify, delete/re-add, and
+            // progress on separate files without repeating delayed registration.
+            let mut history = vec![
+                (0, 0), // retry after failure
+                (1, 1), // reset
+                (2, 2), // reverify after completion
+                (3, 3), // delete and re-add
+                (4, 4), // delayed registration on a distinct, initially absent file
+                (1, 5), // duplicate terminal event and late progress
+            ];
+            history.extend(operations);
+
+            for (file_index, operation) in history {
+                let file_id = if file_index == 4 {
+                    FileId::from("delayed.bin")
+                } else {
+                    file_ids[usize::from(file_index)].clone()
+                };
                 let current = current_attempt(&app, &file_id);
                 let before = lifecycle_snapshot(&app, &file_id);
-                queue_stale_attempt_history(&event_tx, &file_id, stale_attempt(current));
-                drain_all_download_events(&mut app, &event_tx, &mut event_rx);
+                queue_stale_attempt_history(
+                    &mut app,
+                    &event_tx,
+                    &mut event_rx,
+                    &file_id,
+                    stale_attempt(current),
+                );
                 prop_assert_eq!(lifecycle_snapshot(&app, &file_id), before);
 
-                match operation % 6 {
+                match operation {
                     0 => {
                         let attempt_id = current_attempt(&app, &file_id);
-                        let _ = event_tx.send(DownloadEvent::FileStart { id: file_id.clone(), size: 100, attempt_id });
-                        let _ = event_tx.send(DownloadEvent::Progress {
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::FileError {
+                            id: file_id.clone(), error: "retry fixture".to_string(), attempt_id,
+                        });
+                        app.perform_retry_file_action(&file_id);
+                        let attempt_id = current_attempt(&app, &file_id);
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::FileQueued(QueuedFile {
+                            id: file_id.clone(), attempt_id, size: 100,
+                            accounting: FileAccounting::CurrentRun,
+                            origin: FileOrigin {
+                                package_id: None, package_display_name: None,
+                                source_url: source_url.to_string(), submitted_url: source_url.to_string(),
+                            },
+                        }));
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::FileStart { id: file_id.clone(), size: 100, attempt_id });
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::Progress {
                             id: file_id.clone(),
                             delta: ProgressDelta { total_bytes_delta: 5, network_bytes_delta: 5 },
                             attempt_id,
                         });
                     }
-                    1 => app.perform_retry_file_action(&file_id),
-                    2 => app.perform_reset_file_action(&file_id),
-                    3 => app.perform_reverify_file_action(&file_id),
-                    4 => {
-                        app.perform_delete_file_action(&file_id);
+                    1 => {
+                        app.perform_reset_file_action(&file_id);
                         let attempt_id = current_attempt(&app, &file_id);
-                        let _ = event_tx.send(DownloadEvent::UrlQueued { url: source_url.to_string() });
-                        let _ = event_tx.send(DownloadEvent::FileQueued(QueuedFile {
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::FileQueued(QueuedFile {
                             id: file_id.clone(), attempt_id, size: 100,
                             accounting: FileAccounting::CurrentRun,
                             origin: FileOrigin {
@@ -847,13 +991,59 @@ mod property_tests {
                             },
                         }));
                     }
+                    2 => {
+                        let attempt_id = current_attempt(&app, &file_id);
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::FileComplete { id: file_id.clone(), attempt_id });
+                        let completed_bytes = app.core_state.totals.run_completed_bytes;
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::FileComplete { id: file_id.clone(), attempt_id });
+                        prop_assert_eq!(app.core_state.totals.run_completed_bytes, completed_bytes);
+                        app.perform_reverify_file_action(&file_id);
+                    }
+                    3 => {
+                        let old_attempt = current_attempt(&app, &file_id);
+                        app.perform_delete_file_action(&file_id);
+                        let attempt_id = current_attempt(&app, &file_id);
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::UrlQueued { url: source_url.to_string() });
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::FileQueued(QueuedFile {
+                            id: file_id.clone(), attempt_id, size: 100,
+                            accounting: FileAccounting::CurrentRun,
+                            origin: FileOrigin {
+                                package_id: None, package_display_name: None,
+                                source_url: source_url.to_string(), submitted_url: source_url.to_string(),
+                            },
+                        }));
+                        let replacement = lifecycle_snapshot(&app, &file_id);
+                        queue_stale_attempt_history(
+                            &mut app,
+                            &event_tx,
+                            &mut event_rx,
+                            &file_id,
+                            old_attempt,
+                        );
+                        prop_assert_eq!(lifecycle_snapshot(&app, &file_id), replacement);
+                    }
+                    5 => {
+                        let attempt_id = current_attempt(&app, &file_id);
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::FileComplete { id: file_id.clone(), attempt_id });
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::FileComplete { id: file_id.clone(), attempt_id });
+                        let complete = lifecycle_snapshot(&app, &file_id);
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::Progress {
+                            id: file_id.clone(),
+                            delta: ProgressDelta { total_bytes_delta: 73, network_bytes_delta: 73 },
+                            attempt_id,
+                        });
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::FileStart { id: file_id.clone(), size: 100, attempt_id });
+                        prop_assert_eq!(lifecycle_snapshot(&app, &file_id), complete);
+                    }
                     _ => {
                         let attempt_id = current_attempt(&app, &file_id);
-                        let _ = event_tx.send(DownloadEvent::FileComplete { id: file_id.clone(), attempt_id });
-                        let _ = event_tx.send(DownloadEvent::FileComplete { id: file_id.clone(), attempt_id });
+                        enqueue_and_drain(&mut app, &event_tx, &mut event_rx, DownloadEvent::Progress {
+                            id: file_id.clone(),
+                            delta: ProgressDelta { total_bytes_delta: 3, network_bytes_delta: 3 },
+                            attempt_id,
+                        });
                     }
                 }
-                drain_all_download_events(&mut app, &event_tx, &mut event_rx);
                 if let Some(file) = app.core_state.files.get(&file_id) {
                     prop_assert!(file.progress.visible_completed_bytes <= file.size);
                 }
