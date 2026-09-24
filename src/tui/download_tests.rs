@@ -1,9 +1,9 @@
 #![allow(clippy::zero_sized_map_values)]
 
 use super::super::app::{App, FileEntry, FileStatus, UiAction};
-use super::super::event::{DownloadEvent, FileOrigin, QueuedFile};
+use super::super::event::{DownloadEvent, DownloadEventSender, FileOrigin, QueuedFile};
 use super::*;
-use crate::core::{CoreEvent, ProgressDelta};
+use crate::core::{CoreEvent, FileLifecycle, ProgressDelta};
 use crate::test_support::StateDirectoryGuard;
 use std::collections::{HashMap, HashSet, VecDeque};
 use tempfile::tempdir;
@@ -507,6 +507,151 @@ async fn panicked_download_task_is_removed_from_available_and_pending_state() {
     assert!(scheduler.active_task_files.is_empty());
 }
 
+#[tokio::test]
+async fn failed_transfer_leaves_scheduler_and_fake_server_usable() {
+    let temp = tempdir().expect("test directory should exist");
+    let fixture_dir = temp.path().join("fixture");
+    let output_dir = temp.path().join("output");
+    let fixture = crate::fake_mega::create_fake_mega_fixture(&fixture_dir, "payload.bin", 32, 71)
+        .await
+        .expect("fake fixture should be created");
+    let server = crate::fake_mega::FakeMegaServer::spawn(fixture.clone(), 2)
+        .expect("fake server should start");
+    let http = mega::http_client_builder()
+        .expect("MEGA HTTP builder should exist")
+        .build()
+        .expect("HTTP client should build");
+    let client = mega::Client::builder()
+        .origin(server.origin().clone())
+        .build(http.clone())
+        .expect("MEGA client should build");
+    let nodes = client
+        .fetch_public_nodes(&fixture.public_url())
+        .await
+        .expect("metadata request should succeed");
+    let node = nodes
+        .get_node_by_handle(fixture.handle())
+        .expect("fixture node should be present")
+        .clone();
+    let config = DownloadConfig {
+        chunks_per_file: 1,
+        concurrent_files: 1,
+        force_overwrite: true,
+        ..DownloadConfig::default()
+    };
+    let runtime = DownloadRuntime {
+        downloader: Arc::new(crate::Downloader::new(client, config)),
+        http: Arc::new(http),
+        dlc_cache: Arc::new(DlcKeyCache::new()),
+        concurrent_files: 1,
+    };
+    let resolved = ResolvedUrl::direct(&fixture.public_url());
+    let failed_path = output_dir.join("failed.bin").to_string_lossy().into_owned();
+    let succeeding_path = output_dir
+        .join("succeeding.bin")
+        .to_string_lossy()
+        .into_owned();
+    let failed = QueuedDownload {
+        resolved: resolved.clone(),
+        item: crate::OwnedDownloadItem {
+            path: failed_path.clone(),
+            node: node.clone(),
+            was_partial: false,
+        },
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
+        trust_resume_state: false,
+    };
+    let succeeding = QueuedDownload {
+        resolved,
+        item: crate::OwnedDownloadItem {
+            path: succeeding_path.clone(),
+            node,
+            was_partial: false,
+        },
+        attempt_id: crate::tui::event::DownloadAttemptId::new(0),
+        trust_resume_state: false,
+    };
+    let (event_tx, mut event_rx) = DownloadEventSender::channel();
+    let mut app = App::new(9723, event_tx.clone(), true);
+    app.apply_core_event(CoreEvent::UrlSubmitted {
+        url: fixture.public_url(),
+    });
+    event_tx
+        .send(DownloadEvent::UrlQueued {
+            url: fixture.public_url(),
+        })
+        .expect("URL event should be accepted");
+    for item in [&failed, &succeeding] {
+        event_tx
+            .send(DownloadEvent::FileQueued(
+                item.queued_event(FileAccounting::CurrentRun),
+            ))
+            .expect("file event should be accepted");
+    }
+    for _ in 0..8 {
+        if !app.drain_download_events(&mut event_rx) {
+            break;
+        }
+    }
+    assert!(app.core_state.files.contains_key(failed_path.as_str()));
+    assert!(app.core_state.files.contains_key(succeeding_path.as_str()));
+
+    let mut scheduler = SchedulerState::new();
+    scheduler.register_resolved_batch(CollectedBatch {
+        queued_items: vec![failed.clone(), succeeding.clone()],
+        completed_items: Vec::new(),
+        skipped_count: 0,
+        partial_count: 0,
+        successful_submitted_urls: Vec::new(),
+    });
+    scheduler.sync_pending_order(vec![
+        failed_path.clone().into(),
+        succeeding_path.clone().into(),
+    ]);
+    let (token_tx, _token_rx) = mpsc::channel(4);
+    let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
+
+    server.fail_next_download_request();
+    assert!(
+        start_pending_downloads(&runtime, &mut scheduler, &event_tx, &token_tx, &pause_rx).await
+    );
+    handle_download_join_result(
+        scheduler
+            .join_set
+            .join_next()
+            .await
+            .expect("failed transfer should join"),
+        &mut scheduler,
+        &event_tx,
+    );
+    app.drain_download_events(&mut event_rx);
+    assert!(
+        app.core_state.files[failed_path.as_str()]
+            .lifecycle
+            .is_failed()
+    );
+
+    assert!(
+        start_pending_downloads(&runtime, &mut scheduler, &event_tx, &token_tx, &pause_rx).await
+    );
+    handle_download_join_result(
+        scheduler
+            .join_set
+            .join_next()
+            .await
+            .expect("subsequent transfer should join"),
+        &mut scheduler,
+        &event_tx,
+    );
+    app.drain_download_events(&mut event_rx);
+    assert_eq!(
+        app.core_state.files[succeeding_path.as_str()].lifecycle,
+        FileLifecycle::Complete
+    );
+    assert!(output_dir.join("succeeding.bin").exists());
+    server.shutdown().await.expect("fake server should stop");
+}
+
 #[test]
 fn expand_dlc_path_expands_tilde_prefix() {
     let home = dirs::home_dir().expect("home dir should exist for test");
@@ -542,6 +687,147 @@ mod property_tests {
 
     fn dedup_file_id_set(values: &[u8]) -> HashSet<FileId> {
         dedup_file_ids(values).into_iter().collect()
+    }
+
+    fn current_attempt(app: &App, file_id: &FileId) -> crate::tui::event::DownloadAttemptId {
+        app.file_attempt_ids
+            .get(file_id)
+            .copied()
+            .unwrap_or(crate::tui::event::DownloadAttemptId::new(0))
+    }
+
+    fn stale_attempt(
+        current: crate::tui::event::DownloadAttemptId,
+    ) -> crate::tui::event::DownloadAttemptId {
+        crate::tui::event::DownloadAttemptId::new(current.raw().checked_sub(1).unwrap_or(u64::MAX))
+    }
+
+    fn lifecycle_snapshot(
+        app: &App,
+        file_id: &FileId,
+    ) -> Option<(crate::core::FileLifecycle, u64)> {
+        app.core_state.files.get(file_id).map(|file| {
+            (
+                file.lifecycle.clone(),
+                file.progress.visible_completed_bytes,
+            )
+        })
+    }
+
+    fn queue_stale_attempt_history(
+        event_tx: &DownloadEventSender,
+        file_id: &FileId,
+        attempt_id: crate::tui::event::DownloadAttemptId,
+    ) {
+        let _ = event_tx.send(DownloadEvent::FileStart {
+            id: file_id.clone(),
+            size: 100,
+            attempt_id,
+        });
+        let _ = event_tx.send(DownloadEvent::Progress {
+            id: file_id.clone(),
+            delta: ProgressDelta {
+                total_bytes_delta: 17,
+                network_bytes_delta: 17,
+            },
+            attempt_id,
+        });
+        let _ = event_tx.send(DownloadEvent::FileComplete {
+            id: file_id.clone(),
+            attempt_id,
+        });
+        let _ = event_tx.send(DownloadEvent::FileError {
+            id: file_id.clone(),
+            error: "late failure".to_string(),
+            attempt_id,
+        });
+    }
+
+    fn drain_all_download_events(
+        app: &mut App,
+        event_tx: &DownloadEventSender,
+        event_rx: &mut mpsc::Receiver<DownloadEvent>,
+    ) {
+        for _ in 0..32 {
+            let handled = app.drain_download_events(event_rx);
+            if !handled && event_rx.is_empty() && !event_tx.has_pending_lifecycle_events() {
+                break;
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn generated_lifecycle_histories_preserve_stale_attempt_isolation(
+            operations in proptest::collection::vec(0u8..12, 1..40),
+            capacity in 1usize..=3,
+        ) {
+            let directory = tempdir().expect("state directory should exist");
+            let _guard = StateDirectoryGuard::set(directory.path());
+            let (event_tx, mut event_rx) = DownloadEventSender::channel_with_capacity(capacity);
+            let mut app = App::new(9723, event_tx.clone(), true);
+            let file_id = FileId::from("history.bin");
+            let source_url = "https://mega.nz/file/history";
+            event_tx.send(DownloadEvent::UrlQueued { url: source_url.to_string() }).unwrap();
+            event_tx.send(DownloadEvent::FileQueued(QueuedFile {
+                id: file_id.clone(),
+                attempt_id: crate::tui::event::DownloadAttemptId::new(0),
+                size: 100,
+                accounting: FileAccounting::CurrentRun,
+                origin: FileOrigin {
+                    package_id: None,
+                    package_display_name: None,
+                    source_url: source_url.to_string(),
+                    submitted_url: source_url.to_string(),
+                },
+            })).unwrap();
+            drain_all_download_events(&mut app, &event_tx, &mut event_rx);
+
+            for operation in operations {
+                let current = current_attempt(&app, &file_id);
+                let before = lifecycle_snapshot(&app, &file_id);
+                queue_stale_attempt_history(&event_tx, &file_id, stale_attempt(current));
+                drain_all_download_events(&mut app, &event_tx, &mut event_rx);
+                prop_assert_eq!(lifecycle_snapshot(&app, &file_id), before);
+
+                match operation % 6 {
+                    0 => {
+                        let attempt_id = current_attempt(&app, &file_id);
+                        let _ = event_tx.send(DownloadEvent::FileStart { id: file_id.clone(), size: 100, attempt_id });
+                        let _ = event_tx.send(DownloadEvent::Progress {
+                            id: file_id.clone(),
+                            delta: ProgressDelta { total_bytes_delta: 5, network_bytes_delta: 5 },
+                            attempt_id,
+                        });
+                    }
+                    1 => app.perform_retry_file_action(&file_id),
+                    2 => app.perform_reset_file_action(&file_id),
+                    3 => app.perform_reverify_file_action(&file_id),
+                    4 => {
+                        app.perform_delete_file_action(&file_id);
+                        let attempt_id = current_attempt(&app, &file_id);
+                        let _ = event_tx.send(DownloadEvent::UrlQueued { url: source_url.to_string() });
+                        let _ = event_tx.send(DownloadEvent::FileQueued(QueuedFile {
+                            id: file_id.clone(), attempt_id, size: 100,
+                            accounting: FileAccounting::CurrentRun,
+                            origin: FileOrigin {
+                                package_id: None, package_display_name: None,
+                                source_url: source_url.to_string(), submitted_url: source_url.to_string(),
+                            },
+                        }));
+                    }
+                    _ => {
+                        let attempt_id = current_attempt(&app, &file_id);
+                        let _ = event_tx.send(DownloadEvent::FileComplete { id: file_id.clone(), attempt_id });
+                        let _ = event_tx.send(DownloadEvent::FileComplete { id: file_id.clone(), attempt_id });
+                    }
+                }
+                drain_all_download_events(&mut app, &event_tx, &mut event_rx);
+                if let Some(file) = app.core_state.files.get(&file_id) {
+                    prop_assert!(file.progress.visible_completed_bytes <= file.size);
+                }
+            }
+        }
     }
 
     fn expected_startable_file_ids(
