@@ -88,6 +88,7 @@ in
     exec = "true";
     after = [
       "check:fmt"
+      "check:check"
       "check:clippy"
       "check:test"
       "check:test:no-default"

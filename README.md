@@ -98,7 +98,7 @@ devenv tasks run check:all
 ```
 
 `check:all` schedules independent checks in parallel. It runs formatting,
-strict all-targets Clippy with `-D warnings`, all-feature tests, and the
+all-targets compilation, strict all-targets Clippy with `-D warnings`, all-feature tests, and the
 supported feature matrix: no default features, `cli` only, and `tui` only.
 It also runs release-mode tests filtered to `resume` and `lifecycle` so
 release-only behavior is checked without repeating the full release suite,
