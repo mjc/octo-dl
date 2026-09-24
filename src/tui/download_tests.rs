@@ -233,7 +233,8 @@ async fn register_download_token_delivers_token_to_application_channel() {
     let (token_tx, mut token_rx) = mpsc::channel(1);
     let file_id: FileId = "episode.mkv".into();
 
-    let cancel_token = register_download_token(file_id.clone(), &token_tx)
+    let attempt_id = DownloadAttemptId::new(7);
+    let cancel_token = register_download_token(file_id.clone(), attempt_id, &token_tx)
         .await
         .expect("a live token channel should accept registration");
     let message = token_rx
@@ -242,6 +243,7 @@ async fn register_download_token_delivers_token_to_application_channel() {
         .expect("registered token should arrive at the application");
 
     assert_eq!(message.file_id, file_id);
+    assert_eq!(message.attempt_id, attempt_id);
     assert!(!message.token.is_cancelled());
     cancel_token.cancel();
     assert!(message.token.is_cancelled());
@@ -252,7 +254,8 @@ async fn register_download_token_reports_closed_application_channel() {
     let (token_tx, token_rx) = mpsc::channel(1);
     drop(token_rx);
 
-    let result = register_download_token("episode.mkv".into(), &token_tx).await;
+    let result =
+        register_download_token("episode.mkv".into(), DownloadAttemptId::new(0), &token_tx).await;
 
     assert!(result.is_err());
 }

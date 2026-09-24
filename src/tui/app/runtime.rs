@@ -496,12 +496,7 @@ impl App {
     fn handle_token_message(&mut self, msg: super::TokenMessage) {
         let file_id = msg.file_id;
         let token = msg.token;
-        if self
-            .core_state
-            .files
-            .get(&file_id)
-            .is_some_and(|file| file.lifecycle.is_terminal() || file.lifecycle.is_failed())
-        {
+        if !self.accepts_current_attempt_update(&file_id, msg.attempt_id) {
             token.cancel();
             return;
         }
@@ -961,6 +956,7 @@ mod tests {
             let _ = token_tx
                 .send(TokenMessage {
                     file_id: sent_id.clone(),
+                    attempt_id: crate::tui::event::DownloadAttemptId::new(0),
                     token: sent_token,
                 })
                 .await;
@@ -1001,6 +997,77 @@ mod tests {
         assert!(app.shutdown_pending_files.is_empty());
         assert!(app.cancellation_tokens.is_empty());
         assert!(app.paused);
+    }
+
+    #[tokio::test]
+    async fn delayed_token_and_result_from_deleted_attempt_cannot_affect_readded_file() {
+        let dir = tempdir().expect("temp dir should exist");
+        let _guard = StateDirectoryGuard::set(dir.path());
+        let (event_tx, _event_rx) = DownloadEventSender::channel();
+        let mut app = App::new(9723, event_tx, true);
+        let file_id = FileId::from("episode.bin");
+        let source_url = "https://mega.nz/folder/root";
+        app.apply_core_event(CoreEvent::PackageResolved {
+            package: ResolvedPackage {
+                id: package_id("pkg", source_url),
+                source_url: source_url.to_string(),
+                key: PackageKey::new(source_url),
+                display_name: "Package".to_string(),
+                files: vec![ResolvedFile {
+                    file_id: file_id.clone(),
+                    path: file_id.to_string(),
+                    size: 128,
+                }],
+                collision: None,
+            },
+        });
+        app.handle_file_start_event(
+            file_id.clone(),
+            128,
+            crate::tui::event::DownloadAttemptId::new(0),
+        );
+        let old_token = tokio_util::sync::CancellationToken::new();
+
+        app.perform_delete_file_action(&file_id);
+        app.ensure_core_file(
+            &file_id,
+            source_url,
+            file_id.as_str(),
+            128,
+            crate::core::FileAccounting::CurrentRun,
+        );
+        app.handle_file_start_event(
+            file_id.clone(),
+            128,
+            crate::tui::event::DownloadAttemptId::new(1),
+        );
+
+        let current_token = tokio_util::sync::CancellationToken::new();
+        app.handle_token_message(TokenMessage {
+            file_id: file_id.clone(),
+            attempt_id: crate::tui::event::DownloadAttemptId::new(1),
+            token: current_token.clone(),
+        });
+        app.handle_token_message(TokenMessage {
+            file_id: file_id.clone(),
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
+            token: old_token.clone(),
+        });
+
+        assert!(old_token.is_cancelled());
+        assert!(!current_token.is_cancelled());
+        assert!(app.cancellation_tokens.contains_key(&file_id));
+
+        app.handle_file_complete_event(
+            file_id.clone(),
+            crate::tui::event::DownloadAttemptId::new(0),
+        );
+        let file = app
+            .core_state
+            .files
+            .get(&file_id)
+            .expect("file should remain tracked");
+        assert_eq!(file.lifecycle, crate::core::FileLifecycle::Downloading);
     }
 
     #[tokio::test]
@@ -1047,6 +1114,7 @@ mod tests {
             let _ = token_tx
                 .send(TokenMessage {
                     file_id: sent_id.clone(),
+                    attempt_id: crate::tui::event::DownloadAttemptId::new(0),
                     token: sent_token,
                 })
                 .await;
@@ -1676,6 +1744,7 @@ mod tests {
 
         app.handle_token_message(super::super::TokenMessage {
             file_id: file_id.clone(),
+            attempt_id: crate::tui::event::DownloadAttemptId::new(0),
             token: tokio_util::sync::CancellationToken::new(),
         });
 

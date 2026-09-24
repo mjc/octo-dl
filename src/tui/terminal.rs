@@ -345,6 +345,7 @@ mod tests {
             token_tx
                 .try_send(crate::tui::event::TokenMessage {
                     file_id: "late.bin".into(),
+                    attempt_id: crate::tui::event::DownloadAttemptId::new(0),
                     token: late_token,
                 })
                 .expect("late token should queue");

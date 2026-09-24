@@ -1415,7 +1415,9 @@ async fn start_pending_downloads(
             continue;
         }
         let cancel_token =
-            match register_download_token(item.item.path.clone().into(), token_tx).await {
+            match register_download_token(item.item.path.clone().into(), item.attempt_id, token_tx)
+                .await
+            {
                 Ok(cancel_token) => cancel_token,
                 Err(error) => {
                     scheduler.release_download_claim(file_id);
@@ -1441,12 +1443,14 @@ async fn start_pending_downloads(
 
 async fn register_download_token(
     file_id: FileId,
+    attempt_id: DownloadAttemptId,
     token_tx: &mpsc::Sender<TokenMessage>,
 ) -> Result<CancellationToken, mpsc::error::SendError<TokenMessage>> {
     let cancel_token = CancellationToken::new();
     token_tx
         .send(TokenMessage {
             file_id,
+            attempt_id,
             token: cancel_token.clone(),
         })
         .await

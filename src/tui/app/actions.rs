@@ -273,6 +273,20 @@ impl App {
         self.current_attempt_id(id) == attempt_id
     }
 
+    pub(crate) fn accepts_current_attempt_update(
+        &self,
+        id: &FileId,
+        attempt_id: DownloadAttemptId,
+    ) -> bool {
+        self.event_matches_current_attempt(id, attempt_id)
+            && !self.reset_is_waiting_for_new_attempt(id)
+            && self
+                .core_state
+                .files
+                .get(id)
+                .is_some_and(|file| file.lifecycle.accepts_download_attempt_update())
+    }
+
     fn is_session_url(&self, url: &str) -> bool {
         self.core_state
             .url_order
@@ -310,16 +324,8 @@ impl App {
         attempt_id: DownloadAttemptId,
     ) {
         log::error!("Download error: {id}: {error}");
-        if !self.event_matches_current_attempt(&id, attempt_id) {
+        if !self.accepts_current_attempt_update(&id, attempt_id) {
             log::info!("Ignoring stale download error after retry/reset: {id}");
-            return;
-        }
-        if self.reset_is_waiting_for_new_attempt(&id) {
-            log::info!("Ignoring stale download error after reset: {id}");
-            return;
-        }
-        if !self.core_state.files.contains_key(&id) {
-            log::info!("Ignoring download error for untracked file: {id}");
             return;
         }
 
@@ -449,15 +455,11 @@ impl App {
         size: u64,
         attempt_id: DownloadAttemptId,
     ) {
+        if !self.accepts_current_attempt_update(&id, attempt_id) {
+            log::info!("Ignoring stale or terminal download start: {id}");
+            return;
+        }
         log::info!("Download started: {id} ({})", format_bytes(size));
-        if !self.event_matches_current_attempt(&id, attempt_id) {
-            log::info!("Ignoring stale download start after retry/reset: {id}");
-            return;
-        }
-        if !self.core_state.files.contains_key(&id) {
-            log::info!("Ignoring download start for untracked file: {id}");
-            return;
-        }
         self.verifying_files.remove(&id);
         self.retire_inflight_verification(&id);
         self.reset_pending_files.remove(&id);
@@ -483,12 +485,8 @@ impl App {
         id: FileId,
         attempt_id: DownloadAttemptId,
     ) {
-        if !self.event_matches_current_attempt(&id, attempt_id) {
-            log::info!("Ignoring stale resume validation start after retry/reset: {id}");
-            return;
-        }
-        if !self.core_state.files.contains_key(&id) {
-            log::info!("Ignoring resume validation start for untracked file: {id}");
+        if !self.accepts_current_attempt_update(&id, attempt_id) {
+            log::info!("Ignoring stale or terminal resume validation start: {id}");
             return;
         }
         self.verifying_files.insert(id.clone());
@@ -510,12 +508,8 @@ impl App {
         delta: ProgressDelta,
         attempt_id: DownloadAttemptId,
     ) {
-        if !self.event_matches_current_attempt(&id, attempt_id) {
+        if !self.accepts_current_attempt_update(&id, attempt_id) {
             log::info!("Ignoring stale download progress after retry/reset: {id}");
-            return;
-        }
-        if !self.core_state.files.contains_key(&id) {
-            log::info!("Ignoring download progress for untracked file: {id}");
             return;
         }
         self.reset_pending_files.remove(&id);
@@ -575,12 +569,8 @@ impl App {
         bytes: u64,
         attempt_id: DownloadAttemptId,
     ) {
-        if !self.event_matches_current_attempt(&id, attempt_id) {
+        if !self.accepts_current_attempt_update(&id, attempt_id) {
             log::info!("Ignoring stale resume reuse event after retry/reset: {id}");
-            return;
-        }
-        if !self.core_state.files.contains_key(&id) {
-            log::info!("Ignoring resume reuse for untracked file: {id}");
             return;
         }
         self.reset_pending_files.remove(&id);
@@ -744,16 +734,8 @@ impl App {
 
     pub(crate) fn handle_file_complete_event(&mut self, id: FileId, attempt_id: DownloadAttemptId) {
         log::info!("Download complete: {id}");
-        if !self.event_matches_current_attempt(&id, attempt_id) {
+        if !self.accepts_current_attempt_update(&id, attempt_id) {
             log::info!("Ignoring stale download completion after retry/reset: {id}");
-            return;
-        }
-        if self.reset_is_waiting_for_new_attempt(&id) {
-            log::info!("Ignoring stale download completion after reset: {id}");
-            return;
-        }
-        if !self.core_state.files.contains_key(&id) {
-            log::info!("Ignoring download completion for untracked file: {id}");
             return;
         }
         self.verifying_files.remove(&id);
@@ -773,16 +755,8 @@ impl App {
         attempt_id: DownloadAttemptId,
     ) {
         log::info!("Download cancelled: {id}");
-        if !self.event_matches_current_attempt(&id, attempt_id) {
+        if !self.accepts_current_attempt_update(&id, attempt_id) {
             log::info!("Ignoring stale download cancellation after retry/reset: {id}");
-            return;
-        }
-        if self.reset_is_waiting_for_new_attempt(&id) {
-            log::info!("Ignoring stale download cancellation after reset: {id}");
-            return;
-        }
-        if !self.core_state.files.contains_key(&id) {
-            log::info!("Ignoring download cancellation for untracked file: {id}");
             return;
         }
         self.cancellation_tokens.remove(&id);

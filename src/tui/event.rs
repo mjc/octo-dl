@@ -67,6 +67,7 @@ impl VerificationOperationId {
 #[derive(Clone)]
 pub struct TokenMessage {
     pub file_id: FileId,
+    pub attempt_id: DownloadAttemptId,
     pub token: CancellationToken,
 }
 

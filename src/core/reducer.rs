@@ -235,10 +235,16 @@ where
 }
 
 fn complete_file(state: &mut DownloadState, file_id: &FileId) {
-    mutate_file(state, file_id, |file| {
-        file.lifecycle = FileLifecycle::Complete;
-        normalize_completed_file_progress(&mut file.progress, file.size);
-    });
+    if state
+        .files
+        .get(file_id)
+        .is_some_and(|file| file.lifecycle.accepts_download_attempt_update())
+    {
+        mutate_file(state, file_id, |file| {
+            file.lifecycle = FileLifecycle::Complete;
+            normalize_completed_file_progress(&mut file.progress, file.size);
+        });
+    }
 }
 
 fn insert_file_state(state: &mut DownloadState, file: FileState) {
@@ -470,8 +476,9 @@ fn reduce_impl(
         } => {
             if state.files.contains_key(&file_id) {
                 mutate_file(state, &file_id, |file| {
-                    if file.lifecycle == FileLifecycle::Downloading
-                        || file.lifecycle == FileLifecycle::Queued
+                    if file.lifecycle.accepts_download_attempt_update()
+                        && (file.lifecycle == FileLifecycle::Downloading
+                            || file.lifecycle == FileLifecycle::Queued)
                     {
                         file.progress.visible_completed_bytes = file
                             .progress
