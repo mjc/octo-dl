@@ -6,6 +6,87 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DurableTempFileMode {
+    CreateNew,
+    Truncate,
+}
+
+pub(crate) fn write_durable_temp_file(
+    path: &Path,
+    contents: &[u8],
+    description: &str,
+    mode: DurableTempFileMode,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    match mode {
+        DurableTempFileMode::CreateNew => {
+            options.create_new(true);
+        }
+        DurableTempFileMode::Truncate => {
+            options.create(true).truncate(true);
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("write {description} {}: {error}", path.display()),
+        )
+    })?;
+    file.write_all(contents).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("write {description} {}: {error}", path.display()),
+        )
+    })?;
+    file.flush().map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("flush {description} {}: {error}", path.display()),
+        )
+    })?;
+    file.sync_all().map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("sync {description} {}: {error}", path.display()),
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("set {description} permissions {}: {error}", path.display()),
+                )
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let directory = std::fs::File::open(path)?;
+        directory.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileFingerprint {
     pub len: u64,
@@ -131,6 +212,18 @@ pub(crate) fn canonicalize_allow_missing(path: &Path) -> std::io::Result<PathBuf
     }
 }
 
+pub(crate) fn resolve_within_root(root: &Path, candidate: &Path) -> std::io::Result<PathBuf> {
+    let root = canonicalize_allow_missing(root)?;
+    let resolved = canonicalize_allow_missing(candidate)?;
+    if !resolved.starts_with(root) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "path resolves outside configured download root",
+        ));
+    }
+    Ok(resolved)
+}
+
 impl TokioFileSystem {
     /// Creates a new `TokioFileSystem` instance.
     #[must_use]
@@ -149,23 +242,24 @@ impl TokioFileSystem {
         let Some(root) = &self.download_root else {
             return Ok(path.to_path_buf());
         };
-        let root = canonicalize_allow_missing(root)?;
         let candidate = if path.is_absolute() {
             path.to_path_buf()
         } else {
             std::env::current_dir()?.join(path)
         };
-        let resolved = canonicalize_allow_missing(&candidate)?;
-        if !resolved.starts_with(root) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "download path resolves outside configured root: {}",
-                    path.display()
-                ),
-            ));
-        }
-        Ok(resolved)
+        resolve_within_root(root, &candidate).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "download path resolves outside configured root: {}",
+                        path.display()
+                    ),
+                )
+            } else {
+                error
+            }
+        })
     }
 }
 
@@ -276,6 +370,20 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
+
+    #[test]
+    fn resolve_within_root_accepts_missing_descendants_and_rejects_sibling_prefixes() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("downloads");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let inside = resolve_within_root(&root, &root.join("nested/file.bin")).unwrap();
+        assert!(inside.starts_with(std::fs::canonicalize(&root).unwrap()));
+
+        let outside = resolve_within_root(&root, &dir.path().join("downloads-other/file.bin"))
+            .expect_err("a sibling prefix must not satisfy containment");
+        assert_eq!(outside.kind(), std::io::ErrorKind::PermissionDenied);
+    }
 
     #[tokio::test]
     async fn tokio_fs_file_exists() {

@@ -1,8 +1,7 @@
 #[cfg(test)]
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::OnceLock;
@@ -96,6 +95,56 @@ pub struct SessionUrlSnapshot {
     pub url: UrlId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionCompletionFacts {
+    has_files: bool,
+    all_files_complete: bool,
+    all_sources_resolved: bool,
+}
+
+impl SessionCompletionFacts {
+    #[must_use]
+    pub(crate) fn from_parts<'file, 'url, FI, UI>(files: FI, urls: UI) -> Self
+    where
+        FI: IntoIterator<Item = (&'file str, bool)>,
+        UI: IntoIterator<Item = (&'url str, bool)>,
+    {
+        let mut file_sources = Vec::new();
+        let mut all_files_complete = true;
+        for (source_url, is_complete) in files {
+            file_sources.push(source_url);
+            all_files_complete &= is_complete;
+        }
+        let all_sources_resolved = urls
+            .into_iter()
+            .all(|(url, has_error)| !has_error && file_sources.contains(&url));
+        Self {
+            has_files: !file_sources.is_empty(),
+            all_files_complete,
+            all_sources_resolved,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_complete(self) -> bool {
+        self.has_files && self.all_files_complete && self.all_sources_resolved
+    }
+
+    #[must_use]
+    pub(crate) const fn status_for_persistence(
+        self,
+        current: SessionRunStatus,
+    ) -> SessionRunStatus {
+        if self.is_complete() {
+            SessionRunStatus::Completed
+        } else if matches!(current, SessionRunStatus::Paused) {
+            SessionRunStatus::Paused
+        } else {
+            SessionRunStatus::InProgress
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -328,21 +377,14 @@ impl<'a> ValidatedSessionSnapshot<'a> {
         fs::create_dir_all(&destination.parent)?;
         let bytes = encode_snapshot(&destination.target, self.0)?;
         let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&destination.temporary)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                file.set_permissions(fs::Permissions::from_mode(0o600))?;
-            }
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            drop(file);
+            crate::fs::write_durable_temp_file(
+                &destination.temporary,
+                &bytes,
+                "temporary session snapshot",
+                crate::fs::DurableTempFileMode::Truncate,
+            )?;
             fs::rename(&destination.temporary, &destination.target)?;
-            crate::config::sync_directory(&destination.parent)?;
+            crate::fs::sync_directory(&destination.parent)?;
             Ok(())
         })();
         if result.is_err() && destination.temporary.exists() {
@@ -726,6 +768,55 @@ packages = []
         assert!(
             !tmp_path.exists(),
             "temporary snapshot should be removed after rename failure"
+        );
+    }
+
+    #[test]
+    fn save_to_path_replaces_a_preexisting_temporary_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = SessionSnapshot::new(DownloadConfig::default(), test_credentials());
+        let mut session = session;
+        session.urls.push(SessionUrlSnapshot {
+            url: "https://mega.nz/folder/test".to_string(),
+            error: None,
+        });
+        let target = dir.path().join("session.postcard");
+        let temporary = temporary_save_path(&target);
+        std::fs::write(&temporary, b"stale temporary bytes").unwrap();
+
+        session
+            .save_to_path(&target)
+            .expect("a stale temporary file must be replaced");
+
+        assert!(!temporary.exists());
+        assert!(SessionSnapshot::load(&target).is_ok());
+    }
+
+    #[test]
+    fn completion_facts_require_files_and_resolved_sources() {
+        let facts = SessionCompletionFacts::from_parts(
+            [("source", true), ("other", true)],
+            [("source", false), ("other", false)],
+        );
+
+        assert!(facts.has_files);
+        assert!(facts.all_files_complete);
+        assert!(facts.all_sources_resolved);
+        assert!(facts.is_complete());
+        assert_eq!(
+            facts.status_for_persistence(SessionRunStatus::Paused),
+            SessionRunStatus::Completed
+        );
+
+        let unfinished =
+            SessionCompletionFacts::from_parts([("source", false)], [("source", false)]);
+        assert_eq!(
+            unfinished.status_for_persistence(SessionRunStatus::Paused),
+            SessionRunStatus::Paused
+        );
+        assert_eq!(
+            unfinished.status_for_persistence(SessionRunStatus::InProgress),
+            SessionRunStatus::InProgress
         );
     }
 }

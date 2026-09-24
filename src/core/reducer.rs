@@ -8,7 +8,7 @@ use crate::core::model::{
     SessionRunStatus, UrlId,
 };
 use crate::core::restart::RestartSnapshot;
-use crate::core::session::SessionSnapshot;
+use crate::core::session::{SessionCompletionFacts, SessionSnapshot};
 use smallvec::SmallVec;
 
 mod derived;
@@ -16,7 +16,8 @@ mod snapshot_persist;
 
 use derived::{
     FileDerivedState, PackageProgressBucket, add_package_progress, add_totals_contribution,
-    apply_file_change, recompute_derived, remove_package_progress, remove_totals_contribution,
+    apply_file_change, normalize_completed_file_progress, recompute_derived,
+    remove_package_progress, remove_totals_contribution,
 };
 pub(crate) use snapshot_persist::should_persist_session;
 pub use snapshot_persist::snapshot_from_state;
@@ -201,16 +202,17 @@ fn package_status_from_files(state: &DownloadState, package_id: PackageId) -> Pa
 }
 
 fn recompute_session_status(state: &mut DownloadState) {
-    let all_files_complete = !state.files.is_empty()
-        && state
+    let facts = SessionCompletionFacts::from_parts(
+        state
             .files
             .values()
-            .all(|file| matches!(file.lifecycle, FileLifecycle::Complete));
-    let all_sources_resolved = state.url_order.iter().all(|url| {
-        !state.url_errors.contains_key(url)
-            && state.files.values().any(|file| file.source_url == *url)
-    });
-    state.session_meta.status = if all_files_complete && all_sources_resolved {
+            .map(|file| (file.source_url.as_str(), file.lifecycle.is_terminal())),
+        state
+            .url_order
+            .iter()
+            .map(|url| (url.as_str(), state.url_errors.contains_key(url))),
+    );
+    state.session_meta.status = if facts.is_complete() {
         SessionRunStatus::Completed
     } else {
         SessionRunStatus::InProgress
@@ -220,17 +222,8 @@ fn recompute_session_status(state: &mut DownloadState) {
 fn complete_file(state: &mut DownloadState, file_id: &FileId) {
     let delta = if let Some(file) = state.files.get_mut(file_id) {
         let before = FileDerivedState::from(&*file);
-        if file.progress.verification_origin_complete {
-            file.progress.downloaded_network_bytes = file
-                .progress
-                .verification_restore_downloaded_network_bytes
-                .min(file.size);
-        }
         file.lifecycle = FileLifecycle::Complete;
-        file.progress.visible_completed_bytes = file.size;
-        file.progress.verified_existing_bytes = 0;
-        file.progress.verification_origin_complete = false;
-        file.progress.verification_restore_downloaded_network_bytes = 0;
+        normalize_completed_file_progress(&mut file.progress, file.size);
         let after = FileDerivedState::from(&*file);
         Some((before, after))
     } else {
@@ -244,7 +237,7 @@ fn complete_file(state: &mut DownloadState, file_id: &FileId) {
 fn insert_file_state(state: &mut DownloadState, file: FileState) {
     let derived = FileDerivedState::from(&file);
     add_package_progress(state, file.package_id, derived.lifecycle_bucket);
-    add_totals_contribution(state, derived);
+    add_totals_contribution(&mut state.totals, derived);
     let insert_index = state.package_insert_index(&file.package_id);
     state
         .files
@@ -637,12 +630,7 @@ fn reduce_impl(
                     let was_downloading = matches!(file.lifecycle, FileLifecycle::Downloading);
                     if file.progress.verification_origin_complete {
                         file.lifecycle = FileLifecycle::Complete;
-                        file.progress.visible_completed_bytes = file.size;
-                        file.progress.verified_existing_bytes = 0;
-                        file.progress.downloaded_network_bytes = file
-                            .progress
-                            .verification_restore_downloaded_network_bytes
-                            .min(file.size);
+                        normalize_completed_file_progress(&mut file.progress, file.size);
                     } else {
                         file.lifecycle = FileLifecycle::Queued;
                         if !was_downloading && file.progress.visible_completed_bytes == 0 {
@@ -650,9 +638,9 @@ fn reduce_impl(
                                 file.progress.verified_existing_bytes.min(file.size);
                             file.progress.downloaded_network_bytes = 0;
                         }
+                        file.progress.verification_origin_complete = false;
+                        file.progress.verification_restore_downloaded_network_bytes = 0;
                     }
-                    file.progress.verification_origin_complete = false;
-                    file.progress.verification_restore_downloaded_network_bytes = 0;
                 }
                 let after = FileDerivedState::from(&*file);
                 delta = Some((before, after));
@@ -667,7 +655,7 @@ fn reduce_impl(
                 let source_url = file.source_url.clone();
                 let resume_path =
                     (!matches!(file.lifecycle, FileLifecycle::Complete)).then(|| file.path.clone());
-                remove_totals_contribution(state, before);
+                remove_totals_contribution(&mut state.totals, before);
                 remove_package_progress(state, before.package_id, before.lifecycle_bucket);
                 if !state.package_has_files(&before.package_id) {
                     state.packages.shift_remove(&before.package_id);
@@ -691,7 +679,7 @@ fn reduce_impl(
                         if !matches!(file.lifecycle, FileLifecycle::Complete) {
                             resume_paths.push(file.path.clone());
                         }
-                        remove_totals_contribution(state, before);
+                        remove_totals_contribution(&mut state.totals, before);
                     } else {
                         remaining_files.insert(file_id, file);
                     }

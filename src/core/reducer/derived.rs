@@ -1,10 +1,10 @@
 use crate::core::model::{
-    DownloadState, FileAccounting, FileId, FileLifecycle, FileState, PackageId,
+    DownloadState, FileAccounting, FileId, FileLifecycle, FileProgressState, FileState, PackageId,
     PackageProgressState, TotalsState,
 };
 
 #[cfg(test)]
-use crate::core::model::{FileProgressState, PackageKey, PackageState, PackageStatus};
+use crate::core::model::{PackageKey, PackageState, PackageStatus};
 
 const fn counts_in_run_totals(file: &FileState) -> bool {
     matches!(file.accounting, FileAccounting::CurrentRun)
@@ -70,48 +70,56 @@ impl From<&FileState> for FileDerivedState {
     }
 }
 
-pub(super) const fn add_totals_contribution(state: &mut DownloadState, file: FileDerivedState) {
+pub(super) const fn add_totals_contribution(totals: &mut TotalsState, file: FileDerivedState) {
     if !file.counts_in_run_totals {
         return;
     }
-    state.totals.run_total_bytes = state.totals.run_total_bytes.saturating_add(file.size);
-    state.totals.run_completed_bytes = state
-        .totals
+    totals.run_total_bytes = totals.run_total_bytes.saturating_add(file.size);
+    totals.run_completed_bytes = totals
         .run_completed_bytes
         .saturating_add(file.visible_completed_bytes);
-    state.totals.displayed_network_bytes = state
-        .totals
+    totals.displayed_network_bytes = totals
         .displayed_network_bytes
         .saturating_add(file.downloaded_network_bytes);
-    state.totals.run_file_total = state.totals.run_file_total.saturating_add(1);
+    totals.run_file_total = totals.run_file_total.saturating_add(1);
     if matches!(file.lifecycle_bucket, PackageProgressBucket::Downloading) {
-        state.totals.run_file_downloading = state.totals.run_file_downloading.saturating_add(1);
+        totals.run_file_downloading = totals.run_file_downloading.saturating_add(1);
     }
     if matches!(file.lifecycle_bucket, PackageProgressBucket::Complete) {
-        state.totals.run_file_completed = state.totals.run_file_completed.saturating_add(1);
+        totals.run_file_completed = totals.run_file_completed.saturating_add(1);
     }
 }
 
-pub(super) const fn remove_totals_contribution(state: &mut DownloadState, file: FileDerivedState) {
+pub(super) const fn remove_totals_contribution(totals: &mut TotalsState, file: FileDerivedState) {
     if !file.counts_in_run_totals {
         return;
     }
-    state.totals.run_total_bytes = state.totals.run_total_bytes.saturating_sub(file.size);
-    state.totals.run_completed_bytes = state
-        .totals
+    totals.run_total_bytes = totals.run_total_bytes.saturating_sub(file.size);
+    totals.run_completed_bytes = totals
         .run_completed_bytes
         .saturating_sub(file.visible_completed_bytes);
-    state.totals.displayed_network_bytes = state
-        .totals
+    totals.displayed_network_bytes = totals
         .displayed_network_bytes
         .saturating_sub(file.downloaded_network_bytes);
-    state.totals.run_file_total = state.totals.run_file_total.saturating_sub(1);
+    totals.run_file_total = totals.run_file_total.saturating_sub(1);
     if matches!(file.lifecycle_bucket, PackageProgressBucket::Downloading) {
-        state.totals.run_file_downloading = state.totals.run_file_downloading.saturating_sub(1);
+        totals.run_file_downloading = totals.run_file_downloading.saturating_sub(1);
     }
     if matches!(file.lifecycle_bucket, PackageProgressBucket::Complete) {
-        state.totals.run_file_completed = state.totals.run_file_completed.saturating_sub(1);
+        totals.run_file_completed = totals.run_file_completed.saturating_sub(1);
     }
+}
+
+pub(super) fn normalize_completed_file_progress(progress: &mut FileProgressState, size: u64) {
+    if progress.verification_origin_complete {
+        progress.downloaded_network_bytes = progress
+            .verification_restore_downloaded_network_bytes
+            .min(size);
+    }
+    progress.visible_completed_bytes = size;
+    progress.verified_existing_bytes = 0;
+    progress.verification_origin_complete = false;
+    progress.verification_restore_downloaded_network_bytes = 0;
 }
 
 pub(super) fn add_package_progress(
@@ -140,12 +148,12 @@ pub(super) fn apply_file_change(
     before: FileDerivedState,
     after: FileDerivedState,
 ) {
-    remove_totals_contribution(state, before);
+    remove_totals_contribution(&mut state.totals, before);
     if before.package_id != after.package_id || before.lifecycle_bucket != after.lifecycle_bucket {
         remove_package_progress(state, before.package_id, before.lifecycle_bucket);
         add_package_progress(state, after.package_id, after.lifecycle_bucket);
     }
-    add_totals_contribution(state, after);
+    add_totals_contribution(&mut state.totals, after);
     if before.package_id != after.package_id || before.lifecycle_bucket != after.lifecycle_bucket {
         super::recompute_session_status(state);
     }
@@ -169,27 +177,10 @@ pub(super) fn recompute_derived(state: &mut DownloadState) {
         add_package_progress(state, package_id, lifecycle_bucket);
     }
 
-    let mut totals = TotalsState::default();
+    state.totals = TotalsState::default();
     for file in state.files.values() {
-        if !matches!(file.accounting, FileAccounting::CurrentRun) {
-            continue;
-        }
-        totals.run_total_bytes = totals.run_total_bytes.saturating_add(file.size);
-        totals.run_completed_bytes = totals
-            .run_completed_bytes
-            .saturating_add(file.progress.visible_completed_bytes.min(file.size));
-        totals.displayed_network_bytes = totals
-            .displayed_network_bytes
-            .saturating_add(file.progress.downloaded_network_bytes.min(file.size));
-        totals.run_file_total = totals.run_file_total.saturating_add(1);
-        if matches!(file.lifecycle, FileLifecycle::Downloading) {
-            totals.run_file_downloading = totals.run_file_downloading.saturating_add(1);
-        }
-        if matches!(file.lifecycle, FileLifecycle::Complete) {
-            totals.run_file_completed = totals.run_file_completed.saturating_add(1);
-        }
+        add_totals_contribution(&mut state.totals, FileDerivedState::from(file));
     }
-    state.totals = totals;
     super::recompute_session_status(state);
 }
 
@@ -309,5 +300,54 @@ mod tests {
         assert_eq!(state.totals.run_file_completed, 1);
         assert_eq!(state.totals.run_file_downloading, 1);
         assert_eq!(state.packages[&pkg_id].progress.downloading, 1);
+    }
+
+    #[test]
+    fn totals_contribution_updates_detached_totals() {
+        let mut totals = TotalsState::default();
+        let file = FileDerivedState {
+            package_id: PackageId::new_v4(),
+            lifecycle_bucket: PackageProgressBucket::Complete,
+            size: 20,
+            visible_completed_bytes: 15,
+            downloaded_network_bytes: 10,
+            counts_in_run_totals: true,
+        };
+
+        add_totals_contribution(&mut totals, file);
+
+        assert_eq!(
+            totals,
+            TotalsState {
+                run_total_bytes: 20,
+                run_completed_bytes: 15,
+                run_file_total: 1,
+                run_file_completed: 1,
+                displayed_network_bytes: 10,
+                ..TotalsState::default()
+            }
+        );
+    }
+
+    #[test]
+    fn completed_progress_normalization_restores_verified_file_accounting() {
+        let mut progress = FileProgressState {
+            verified_existing_bytes: 80,
+            downloaded_network_bytes: 40,
+            visible_completed_bytes: 25,
+            verification_origin_complete: true,
+            verification_restore_downloaded_network_bytes: 100,
+        };
+
+        normalize_completed_file_progress(&mut progress, 60);
+
+        assert_eq!(
+            progress,
+            FileProgressState {
+                downloaded_network_bytes: 60,
+                visible_completed_bytes: 60,
+                ..FileProgressState::default()
+            }
+        );
     }
 }

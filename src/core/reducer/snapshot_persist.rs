@@ -4,8 +4,11 @@
 use std::cell::Cell;
 
 use super::CoreEvent;
+use super::derived::normalize_completed_file_progress;
 use crate::core::model::{DownloadState, FileLifecycle};
-use crate::core::session::{FileSnapshot, PackageSnapshot, SessionSnapshot, SessionUrlSnapshot};
+use crate::core::session::{
+    FileSnapshot, PackageSnapshot, SessionCompletionFacts, SessionSnapshot, SessionUrlSnapshot,
+};
 
 #[cfg(test)]
 use crate::core::model::{
@@ -73,13 +76,7 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
             }
             let (lifecycle, progress) = if file.progress.verification_origin_complete {
                 let mut progress = file.progress.clone();
-                progress.visible_completed_bytes = file.size;
-                progress.verified_existing_bytes = 0;
-                progress.downloaded_network_bytes = progress
-                    .verification_restore_downloaded_network_bytes
-                    .min(file.size);
-                progress.verification_origin_complete = false;
-                progress.verification_restore_downloaded_network_bytes = 0;
+                normalize_completed_file_progress(&mut progress, file.size);
                 (FileLifecycle::Complete, progress)
             } else {
                 (file.lifecycle.clone(), file.progress.clone())
@@ -119,7 +116,15 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
             error: url_errors.get(url).cloned(),
         })
         .collect::<Vec<_>>();
-    let status = persisted_status(&packages, &urls, state.session_meta.status);
+    let status = SessionCompletionFacts::from_parts(
+        packages
+            .iter()
+            .flat_map(|package| &package.files)
+            .map(|file| (file.source_url.as_str(), file.lifecycle.is_terminal())),
+        urls.iter()
+            .map(|tracked_url| (tracked_url.url.as_str(), tracked_url.error.is_some())),
+    )
+    .status_for_persistence(state.session_meta.status);
     SessionSnapshot {
         version: 6,
         id: state.session_meta.session_id.clone(),
@@ -129,35 +134,6 @@ pub fn snapshot_from_state(state: &DownloadState) -> SessionSnapshot {
         packages,
         config: state.session_meta.config.clone(),
         credentials: state.session_meta.credentials.clone(),
-    }
-}
-
-fn persisted_status(
-    packages: &[PackageSnapshot],
-    urls: &[SessionUrlSnapshot],
-    current_status: crate::core::model::SessionRunStatus,
-) -> crate::core::model::SessionRunStatus {
-    let mut has_files = false;
-    let all_files_complete = packages
-        .iter()
-        .flat_map(|package| &package.files)
-        .all(|file| {
-            has_files = true;
-            matches!(file.lifecycle, FileLifecycle::Complete)
-        });
-    let all_sources_resolved = urls.iter().all(|tracked_url| {
-        tracked_url.error.is_none()
-            && packages
-                .iter()
-                .flat_map(|package| &package.files)
-                .any(|file| file.source_url == tracked_url.url)
-    });
-    if has_files && all_files_complete && all_sources_resolved {
-        crate::core::model::SessionRunStatus::Completed
-    } else if matches!(current_status, crate::core::model::SessionRunStatus::Paused) {
-        crate::core::model::SessionRunStatus::Paused
-    } else {
-        crate::core::model::SessionRunStatus::InProgress
     }
 }
 
@@ -272,6 +248,11 @@ mod tests {
         assert_eq!(saved_file.progress.visible_completed_bytes, 10);
         assert_eq!(saved_file.progress.downloaded_network_bytes, 7);
         assert_eq!(saved_file.progress.verified_existing_bytes, 0);
+        let live_file = &state.files[&FileId::from("file.bin")];
+        assert_eq!(live_file.lifecycle, FileLifecycle::Queued);
+        assert_eq!(live_file.progress.verified_existing_bytes, 10);
+        assert!(live_file.progress.verification_origin_complete);
+        assert_eq!(live_file.progress.downloaded_network_bytes, 0);
 
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.postcard");
