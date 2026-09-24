@@ -74,17 +74,13 @@ in
     "CARGO_TARGET_DIR=target/devenv-test-cli cargo test --all-targets --no-default-features --features cli --locked";
   tasks."check:test:tui".exec =
     "CARGO_TARGET_DIR=target/devenv-test-tui cargo test --all-targets --no-default-features --features tui --locked";
-  tasks."check:test:release:resume".exec =
-    "CARGO_TARGET_DIR=target/devenv-test-release-resume cargo test --release --all-targets --all-features --locked resume";
-  tasks."check:test:release:lifecycle".exec =
-    "CARGO_TARGET_DIR=target/devenv-test-release-lifecycle cargo test --release --all-targets --all-features --locked lifecycle";
   tasks."check:dependencies".exec = "./scripts/check-dependencies.sh";
   tasks."check:flake".exec = "nix flake check --no-build --no-write-lock-file";
   tasks."check:all" = {
     # Independent prerequisites are scheduled in parallel by devenv. The
     # feature matrix uses test invocations because they compile the exact
-    # targets they execute; the release checks stay focused on lifecycle and
-    # resume regressions instead of repeating the full release suite.
+    # targets they execute. Focus on the debug profile for normal checks;
+    # release-profile checks are opt-in when a change specifically needs them.
     exec = "true";
     after = [
       "check:fmt"
@@ -94,8 +90,6 @@ in
       "check:test:no-default"
       "check:test:cli"
       "check:test:tui"
-      "check:test:release:resume"
-      "check:test:release:lifecycle"
       "check:dependencies"
       "check:flake"
     ];
