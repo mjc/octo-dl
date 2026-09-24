@@ -46,7 +46,9 @@ pub(super) fn resolve_action_target(
 
     match (package_matches.as_slice(), file_matches.as_slice()) {
         ([package], [file])
-            if id.is_some_and(|id| package.id == id && file.id == id)
+            if (id.is_some_and(|id| package.id == id && file.id == id)
+                || name.is_some_and(|name| package.display_name == name && file.name == name))
+                && package.id == file.id
                 && package.source_url == file.id =>
         {
             // A URL that has not resolved to a real package is projected as
