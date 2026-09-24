@@ -119,10 +119,11 @@ impl FileSystem for MockFileSystem {
     }
 
     async fn sync_directory(&self, _path: &Path) -> io::Result<()> {
-        match self.directory_sync_error.lock().unwrap().as_ref() {
-            Some(message) => Err(io::Error::other(message.clone())),
-            None => Ok(()),
-        }
+        self.directory_sync_error
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(Ok(()), |message| Err(io::Error::other(message.clone())))
     }
 
     async fn sync_file(&self, _path: &Path) -> io::Result<()> {
@@ -181,6 +182,7 @@ pub(super) fn sidecar_validation_input_with_expected<'a>(
     SidecarValidationInput {
         boundaries,
         part_path,
+        part_file: None,
         sidecar,
         file_size: sidecar.file_size,
         expected_condensed_mac,

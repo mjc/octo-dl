@@ -43,6 +43,7 @@ fn inject_failure(
         let mut configured = injection.lock().unwrap();
         if *configured == Some(point) {
             *configured = None;
+            drop(configured);
             return Err(io::Error::other(format!("injected {point:?} failure")));
         }
     }
@@ -345,23 +346,20 @@ impl LazySidecarWriter {
         }
         if let Some(tx) = self.tx.lock().unwrap().take()
             && !abort
+            && tx.send(SidecarWriterCommand::Finish).is_err()
         {
-            if tx.send(SidecarWriterCommand::Finish).is_err() {
-                let mut failure = self.failure.lock().unwrap();
-                if failure.is_none() {
-                    *failure = Some("queue sidecar writer finish command".to_string());
-                }
+            let mut failure = self.failure.lock().unwrap();
+            if failure.is_none() {
+                *failure = Some("queue sidecar writer finish command".to_string());
             }
         }
         let worker = self.worker.lock().unwrap().take();
         if let Some(worker) = worker {
-            match tokio::task::spawn_blocking(move || worker.join()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) | Err(_) => {
-                    let mut failure = self.failure.lock().unwrap();
-                    if failure.is_none() {
-                        *failure = Some("join sidecar writer worker".to_string());
-                    }
+            let joined = tokio::task::spawn_blocking(move || worker.join()).await;
+            if joined.is_err() || joined.is_ok_and(|result| result.is_err()) {
+                let mut failure = self.failure.lock().unwrap();
+                if failure.is_none() {
+                    *failure = Some("join sidecar writer worker".to_string());
                 }
             }
         }
