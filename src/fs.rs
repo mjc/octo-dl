@@ -169,6 +169,39 @@ pub trait FileSystem: Send + Sync {
         preserve_existing: bool,
     ) -> std::io::Result<tokio::fs::File>;
 
+    /// Opens a resumable part file without truncating or resizing it.
+    async fn open_part_file_for_resume(&self, path: &Path) -> std::io::Result<tokio::fs::File> {
+        tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .await
+    }
+
+    /// Reads from the already-open part file, so path replacement cannot
+    /// redirect resume validation to a different file.
+    async fn read_exact_at_open_file(
+        &self,
+        file: &tokio::fs::File,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> std::io::Result<()> {
+        let mut file = file.try_clone().await?;
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        file.read_exact(buf).await?;
+        Ok(())
+    }
+
+    /// Returns metadata for the open part file rather than its current path.
+    async fn fingerprint_open_file(&self, file: &tokio::fs::File) -> Option<FileFingerprint> {
+        file.metadata()
+            .await
+            .ok()
+            .map(|metadata| FileFingerprint::from_metadata(&metadata))
+    }
+
     /// Reads exactly `buf.len()` bytes at `offset` without trusting file cursor state.
     async fn read_exact_at(&self, path: &Path, offset: u64, buf: &mut [u8]) -> std::io::Result<()>;
 
@@ -347,6 +380,25 @@ impl FileSystem for TokioFileSystem {
             .await?;
         file.set_len(size).await?;
         Ok(file)
+    }
+
+    async fn open_part_file_for_resume(&self, path: &Path) -> std::io::Result<tokio::fs::File> {
+        if let Ok(metadata) = tokio::fs::symlink_metadata(path).await
+            && metadata.file_type().is_symlink()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("refusing to open symlink as part file: {}", path.display()),
+            ));
+        }
+        let path = self.resolve_download_path(path)?;
+        tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .await
     }
 
     async fn read_exact_at(&self, path: &Path, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {

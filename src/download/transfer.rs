@@ -98,21 +98,24 @@ impl<F: FileSystem> Downloader<F> {
             )
             .await?;
 
-        let file = self
-            .fs
-            .open_part_file(&pp, node.size(), prepared.preserve_existing)
-            .await?;
-        let callbacks: Arc<dyn mega::ParallelDownloadCallbacks> = prepared.callback_state.clone();
+        let prepared = prepared.prepare_for_transfer(node.size()).await?;
+        let super::transfer_prepare::OwnedValidatedResume {
+            part_file,
+            callback_state,
+            trusted_for_download,
+            trusted_bytes,
+        } = prepared;
+        let callbacks: Arc<dyn mega::ParallelDownloadCallbacks> = callback_state.clone();
 
         let download_result = if let Some(token) = cancellation_token {
             let download_fut = self
                 .client
                 .download_node_parallel_resumable_to_file_with_callbacks(
                     node,
-                    file,
+                    part_file,
                     self.config.chunks_per_file,
                     Some(self.config.mega_chunks_per_request),
-                    Arc::clone(&prepared.trusted_for_download),
+                    Arc::clone(&trusted_for_download),
                     Some(callbacks),
                 );
             await_download_or_cancel(download_fut, token).await
@@ -120,10 +123,10 @@ impl<F: FileSystem> Downloader<F> {
             self.client
                 .download_node_parallel_resumable_to_file_with_callbacks(
                     node,
-                    file,
+                    part_file,
                     self.config.chunks_per_file,
                     Some(self.config.mega_chunks_per_request),
-                    prepared.trusted_for_download,
+                    trusted_for_download,
                     Some(callbacks),
                 )
                 .await
@@ -136,9 +139,9 @@ impl<F: FileSystem> Downloader<F> {
                     path,
                     part_path: &pp,
                     sidecar_path: &sp,
-                    reused_bytes: prepared.trusted_bytes,
-                    stats: &prepared.callback_state.progress.stats,
-                    chunk_verified: &prepared.callback_state.chunk_verified,
+                    reused_bytes: trusted_bytes,
+                    stats: &callback_state.progress.stats,
+                    chunk_verified: &callback_state.chunk_verified,
                     progress,
                     name: path,
                 },

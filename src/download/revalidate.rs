@@ -13,7 +13,8 @@ use super::downloader::Downloader;
 use super::resume_state::CURRENT_RESUME_SIDECAR_VERSION;
 use super::resume_validation::{
     ResumeValidation, SidecarValidationInput, TrustedResumeChunkCandidate,
-    mark_sidecar_source_if_trusted, resume_fingerprint_matches, trust_resume_candidate,
+    mark_sidecar_source_if_trusted, resume_fingerprint_is_complete, resume_fingerprint_matches,
+    trust_resume_candidate,
 };
 use super::revalidate_part::revalidate_candidates_from_part;
 use super::sidecar_store::load_sidecar;
@@ -24,6 +25,7 @@ impl<F: FileSystem> Downloader<F> {
         node: &mega::Node,
         boundaries: &[mega::MegaChunk],
         part_path: &Path,
+        part_file: Option<&tokio::fs::File>,
         sidecar_path: &Path,
         expected_condensed_mac: [u8; 8],
         progress: Option<(&str, &dyn DownloadProgress)>,
@@ -41,6 +43,7 @@ impl<F: FileSystem> Downloader<F> {
             SidecarValidationInput {
                 boundaries,
                 part_path,
+                part_file,
                 sidecar: &sidecar,
                 file_size: node.size(),
                 expected_condensed_mac,
@@ -77,7 +80,10 @@ impl<F: FileSystem> Downloader<F> {
             return Ok(validation);
         }
 
-        let part_size = self.fs.file_size(input.part_path).await.unwrap_or(0);
+        let part_size = match input.part_file {
+            Some(file) => file.metadata().await.map_or(0, |metadata| metadata.len()),
+            None => self.fs.file_size(input.part_path).await.unwrap_or(0),
+        };
         let mut candidates = Vec::with_capacity(input.sidecar.verified_chunks.len());
 
         for record in &input.sidecar.verified_chunks {
@@ -120,9 +126,11 @@ impl<F: FileSystem> Downloader<F> {
             })
             .sum::<u64>();
         let part_fingerprint = input.sidecar.part_fingerprint;
-        let Some(expected_fingerprint) = part_fingerprint else {
+        let Some(expected_fingerprint) =
+            part_fingerprint.filter(|fingerprint| resume_fingerprint_is_complete(*fingerprint))
+        else {
             log::debug!(
-                "Resume sidecar for {} has no part fingerprint; falling back to disk revalidation",
+                "Resume sidecar for {} has no complete part fingerprint; falling back to disk revalidation",
                 input.part_path.display()
             );
             return self
@@ -135,7 +143,11 @@ impl<F: FileSystem> Downloader<F> {
                 )
                 .await;
         };
-        let Some(actual_fingerprint) = self.fs.file_fingerprint(input.part_path).await else {
+        let actual_fingerprint = match input.part_file {
+            Some(file) => self.fs.fingerprint_open_file(file).await,
+            None => self.fs.file_fingerprint(input.part_path).await,
+        };
+        let Some(actual_fingerprint) = actual_fingerprint else {
             log::debug!(
                 "Resume sidecar for {} could not fingerprint part file; falling back to disk revalidation",
                 input.part_path.display()

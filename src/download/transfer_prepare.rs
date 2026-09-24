@@ -21,11 +21,22 @@ use super::sidecar_store::{ResumeSidecar, load_sidecar_sync, save_sidecar_atomic
 use super::sidecar_writer::LazySidecarWriter;
 use super::verify::expected_mac;
 
-pub(super) struct PreparedTransferResume {
+pub(super) struct OwnedValidatedResume {
+    pub(super) part_file: tokio::fs::File,
     pub(super) callback_state: Arc<DownloadCallbackState>,
     pub(super) trusted_for_download: Arc<[Option<[u8; 16]>]>,
     pub(super) trusted_bytes: u64,
-    pub(super) preserve_existing: bool,
+}
+
+impl OwnedValidatedResume {
+    pub(super) async fn prepare_for_transfer(mut self, file_size: u64) -> std::io::Result<Self> {
+        if self.trusted_bytes == 0 {
+            self.part_file.set_len(0).await?;
+        }
+        self.part_file.set_len(file_size).await?;
+        tokio::io::AsyncSeekExt::seek(&mut self.part_file, std::io::SeekFrom::Start(0)).await?;
+        Ok(self)
+    }
 }
 
 impl<F: FileSystem> Downloader<F> {
@@ -38,7 +49,7 @@ impl<F: FileSystem> Downloader<F> {
         part_path: &Path,
         sidecar_path: &Path,
         cancellation_token: Option<&CancellationToken>,
-    ) -> Result<PreparedTransferResume> {
+    ) -> Result<OwnedValidatedResume> {
         self.validate_output_path(path)?;
         let expected_condensed_mac = expected_mac(node)?;
         migrate_legacy_resume_state(
@@ -50,6 +61,7 @@ impl<F: FileSystem> Downloader<F> {
             sidecar_path,
         )
         .await?;
+        let part_file = self.fs.open_part_file_for_resume(part_path).await?;
         let boundaries = mega::mega_chunk_boundaries(node.size());
         log::debug!(
             "Download resume setup for {path}: size={} trust_resume_state={} force_overwrite={} part={} sidecar={} chunks={}",
@@ -68,6 +80,7 @@ impl<F: FileSystem> Downloader<F> {
                 node,
                 &boundaries,
                 part_path,
+                Some(&part_file),
                 sidecar_path,
                 expected_condensed_mac,
                 Some((path, &resume_status_progress)),
@@ -118,11 +131,11 @@ impl<F: FileSystem> Downloader<F> {
             ),
         ));
 
-        Ok(PreparedTransferResume {
+        Ok(OwnedValidatedResume {
+            part_file,
             callback_state,
             trusted_for_download,
             trusted_bytes,
-            preserve_existing,
         })
     }
 }
@@ -253,7 +266,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(prepared.preserve_existing);
             assert_eq!(prepared.trusted_bytes, first.length);
             assert_eq!(
                 prepared.trusted_for_download[usize_from_u32(first.index)],
@@ -271,6 +283,71 @@ mod tests {
             assert_eq!(progress.reused_bytes.load(Ordering::SeqCst), first.length);
             assert!(tokio::fs::try_exists(&sidecar_path).await.unwrap());
 
+            harness.shutdown().await;
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validated_resume_keeps_the_open_part_when_its_path_is_replaced() {
+        run_with_large_stack_current_thread_runtime("resume-path-replacement-test", || async {
+            let harness =
+                FakeMegaDownloadHarness::new(57, 300_000, DownloadConfig::default()).await;
+            tokio::fs::create_dir_all(&harness.output_dir)
+                .await
+                .unwrap();
+            let output_path = harness.output_path(harness.fixture.file_name());
+            let output_path_string = output_path.to_string_lossy().into_owned();
+            let part_path = part_path(&output_path_string);
+            let sidecar_path = sidecar_path(&output_path_string);
+            let node = harness.node();
+            let seeded = seed_first_verified_chunk(&harness, &part_path).await;
+            let expected_chunk = seeded.plaintext;
+            let first = seeded.boundary;
+            let expected_mac = seeded.sidecar.verified_chunks[0].mac;
+            let mut sidecar = seeded.sidecar;
+            sidecar.part_fingerprint = Some(seeded.fingerprint);
+            save_sidecar_atomic(&sidecar_path, &sidecar).await.unwrap();
+            let progress_obj: Arc<dyn DownloadProgress> =
+                Arc::new(ReuseRecordingProgress::default());
+
+            let validated = harness
+                .downloader
+                .prepare_transfer_resume(
+                    node,
+                    &output_path_string,
+                    &progress_obj,
+                    true,
+                    &part_path,
+                    &sidecar_path,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(validated.trusted_bytes, first.length);
+            assert_eq!(
+                validated.trusted_for_download[usize_from_u32(first.index)],
+                Some(expected_mac)
+            );
+
+            let displaced_path = part_path.with_extension("part.displaced");
+            tokio::fs::rename(&part_path, &displaced_path)
+                .await
+                .unwrap();
+            let replacement = vec![0xa5; usize_from_u64(first.length)];
+            tokio::fs::write(&part_path, &replacement).await.unwrap();
+
+            let mut bytes = vec![0; expected_chunk.len()];
+            harness
+                .downloader
+                .fs
+                .read_exact_at_open_file(&validated.part_file, first.offset, &mut bytes)
+                .await
+                .unwrap();
+            assert_eq!(bytes, expected_chunk);
+            assert_ne!(bytes, tokio::fs::read(&part_path).await.unwrap());
+
+            drop(validated);
             harness.shutdown().await;
         });
     }
@@ -316,7 +393,6 @@ mod tests {
                     .await
                     .unwrap();
 
-                assert!(prepared.preserve_existing);
                 assert_eq!(prepared.trusted_bytes, first.length);
                 assert_eq!(tokio::fs::read(&old_part_path).await.unwrap(), first_chunk);
                 assert!(old_sidecar_path.exists());
@@ -349,6 +425,9 @@ mod tests {
             let part_path = part_path(&output_path_string);
             let sidecar_path = sidecar_path(&output_path_string);
             let node = harness.node();
+            tokio::fs::write(&part_path, vec![0xa5; usize_from_u64(node.size())])
+                .await
+                .unwrap();
             let first = mega::mega_chunk_boundaries(node.size())[0];
             let expected_mac = [5u8; 16];
             let sidecar = sidecar_for_chunk(
@@ -375,13 +454,21 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(!prepared.preserve_existing);
             assert_eq!(prepared.trusted_bytes, 0);
             assert!(prepared.trusted_for_download.iter().all(Option::is_none));
             assert_eq!(progress.reused_calls.load(Ordering::SeqCst), 0);
             assert_eq!(progress.reused_chunks.load(Ordering::SeqCst), 0);
             assert_eq!(progress.reused_bytes.load(Ordering::SeqCst), 0);
             assert!(!tokio::fs::try_exists(&sidecar_path).await.unwrap());
+            let prepared = prepared.prepare_for_transfer(node.size()).await.unwrap();
+            let mut first_bytes = [0xa5; 16];
+            harness
+                .downloader
+                .fs
+                .read_exact_at_open_file(&prepared.part_file, 0, &mut first_bytes)
+                .await
+                .unwrap();
+            assert_eq!(first_bytes, [0; 16]);
 
             harness.shutdown().await;
         });
