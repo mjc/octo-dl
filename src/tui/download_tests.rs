@@ -603,13 +603,16 @@ mod property_tests {
             let available_set = dedup_file_id_set(&available);
             let active_set = dedup_file_id_set(&active);
 
-            let selected = select_startable_file_ids(
-                &pending_queue,
-                &resume_priority_set,
-                &available_set,
-                &active_set,
-                capacity,
-            );
+            let mut scheduler = SchedulerState::new();
+            scheduler.pending_queue = pending_queue.clone();
+            scheduler
+                .resume_priority_set
+                .extend(resume_priority_set.iter().cloned());
+            scheduler
+                .active_downloads
+                .extend(active_set.iter().cloned());
+            let selected = scheduler
+                .select_startable_file_ids(capacity, |file_id| available_set.contains(file_id));
             let expected = expected_startable_file_ids(
                 &pending_queue,
                 &resume_priority_set,
@@ -765,23 +768,18 @@ fn resume_priority_targets_block_other_pending_downloads() {
     let resume_priority_set = HashSet::from([resume_a.clone(), resume_b.clone()]);
     let available = HashSet::from([resume_a.clone(), resume_b.clone(), new_a, new_b]);
 
-    let selected = select_startable_file_ids(
-        &pending_queue,
-        &resume_priority_set,
-        &available,
-        &HashSet::new(),
-        2,
-    );
+    let mut scheduler = SchedulerState::new();
+    scheduler.pending_queue = pending_queue;
+    scheduler
+        .resume_priority_set
+        .extend(resume_priority_set.iter().cloned());
+    let selected = scheduler.select_startable_file_ids(2, |file_id| available.contains(file_id));
 
     assert_eq!(selected, vec![resume_a.clone(), resume_b.clone()]);
 
-    let selected_while_one_resume_active = select_startable_file_ids(
-        &pending_queue,
-        &resume_priority_set,
-        &available,
-        &HashSet::from([resume_a]),
-        2,
-    );
+    scheduler.active_downloads.insert(resume_a);
+    let selected_while_one_resume_active =
+        scheduler.select_startable_file_ids(2, |file_id| available.contains(file_id));
 
     assert_eq!(
         selected_while_one_resume_active,
@@ -806,8 +804,13 @@ fn unavailable_resume_priority_blocks_new_downloads_until_reverify_finishes() {
     let available = HashSet::from([resume_a.clone(), new_a, new_b]);
     let active = HashSet::from([resume_a]);
 
-    let selected =
-        select_startable_file_ids(&pending_queue, &resume_priority_set, &available, &active, 1);
+    let mut scheduler = SchedulerState::new();
+    scheduler.pending_queue = pending_queue;
+    scheduler
+        .resume_priority_set
+        .extend(resume_priority_set.iter().cloned());
+    scheduler.active_downloads.extend(active.iter().cloned());
+    let selected = scheduler.select_startable_file_ids(1, |file_id| available.contains(file_id));
 
     assert!(
         selected.is_empty(),

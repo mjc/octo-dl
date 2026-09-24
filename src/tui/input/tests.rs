@@ -176,6 +176,37 @@ fn handle_main_input_ignores_unmapped_keys_in_command_mode() {
 }
 
 #[test]
+fn download_command_decoder_gives_alt_uppercase_r_reverify_precedence() {
+    let cases = [
+        (
+            KeyCode::Char('r'),
+            KeyModifiers::ALT,
+            Some(DownloadKeyCommand::Reverify),
+        ),
+        (
+            KeyCode::Char('R'),
+            KeyModifiers::ALT,
+            Some(DownloadKeyCommand::Reverify),
+        ),
+        (
+            KeyCode::Char('r'),
+            KeyModifiers::NONE,
+            Some(DownloadKeyCommand::Retry),
+        ),
+        (
+            KeyCode::Char('R'),
+            KeyModifiers::NONE,
+            Some(DownloadKeyCommand::Reset),
+        ),
+        (KeyCode::Char('x'), KeyModifiers::NONE, None),
+    ];
+
+    for (code, modifiers, expected) in cases {
+        assert_eq!(decode_download_key(code, modifiers), expected);
+    }
+}
+
+#[test]
 fn handle_main_input_typing_q_does_not_quit_in_url_mode() {
     let mut app = test_app();
     app.url_input = "https://example".to_string();

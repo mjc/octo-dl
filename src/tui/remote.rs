@@ -412,20 +412,20 @@ fn handle_attached_input(
         app.should_quit = true;
         return;
     }
+    if let Some(command) = super::input::decode_download_key(*code, *modifiers) {
+        let action = match command {
+            super::input::DownloadKeyCommand::Retry => "retry",
+            super::input::DownloadKeyCommand::Reset => "reset",
+            super::input::DownloadKeyCommand::Reverify => "reverify",
+        };
+        spawn_remote_action(addr, action, selected_id(app), api_key, app, status_tx);
+        return;
+    }
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('p') => spawn_remote_action(addr, "pause", None, api_key, app, status_tx),
         KeyCode::Char('d') | KeyCode::Delete => {
             spawn_remote_action(addr, "delete", selected_id(app), api_key, app, status_tx);
-        }
-        KeyCode::Char('r') if modifiers.contains(KeyModifiers::ALT) => {
-            spawn_remote_action(addr, "reverify", selected_id(app), api_key, app, status_tx);
-        }
-        KeyCode::Char('r') => {
-            spawn_remote_action(addr, "retry", selected_id(app), api_key, app, status_tx);
-        }
-        KeyCode::Char('R') => {
-            spawn_remote_action(addr, "reset", selected_id(app), api_key, app, status_tx);
         }
         KeyCode::Up | KeyCode::Char('k') => app.select_delta(-1),
         KeyCode::Down | KeyCode::Char('j') => app.select_delta(1),
@@ -541,6 +541,37 @@ mod tests {
         }
         handle_attached_input(&mut dashboard, &event, address, None, status_tx);
         assert!(dashboard.should_quit);
+    }
+
+    #[tokio::test]
+    async fn attached_alt_uppercase_r_sends_reverify() {
+        let mut dashboard = AttachedDashboard {
+            state: Some({
+                let mut state =
+                    DownloadDashboardState::empty(DashboardUiMode::Attached, false, "ready", 9723);
+                state
+                    .rows
+                    .push(super::super::dashboard::DashboardRow::File {
+                        package_id: "package".to_string(),
+                        file_id: "file.bin".to_string(),
+                    });
+                state
+            }),
+            ..AttachedDashboard::default()
+        };
+        dashboard.list_state.select(Some(0));
+        let (status_tx, _status_rx) = tokio::sync::mpsc::unbounded_channel();
+        let address = "127.0.0.1:9723".parse().expect("test address should parse");
+        let event = Event::Key(KeyEvent {
+            code: KeyCode::Char('R'),
+            modifiers: KeyModifiers::ALT,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+
+        handle_attached_input(&mut dashboard, &event, address, None, status_tx);
+
+        assert_eq!(dashboard.status, "Sending reverify");
     }
 
     #[test]

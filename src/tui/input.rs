@@ -107,9 +107,37 @@ pub(super) const fn request_quit(app: &mut App) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DownloadKeyCommand {
+    Retry,
+    Reset,
+    Reverify,
+}
+
+pub(super) const fn decode_download_key(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Option<DownloadKeyCommand> {
+    match (code, modifiers.contains(KeyModifiers::ALT)) {
+        (KeyCode::Char('r' | 'R'), true) => Some(DownloadKeyCommand::Reverify),
+        (KeyCode::Char('r'), false) => Some(DownloadKeyCommand::Retry),
+        (KeyCode::Char('R'), false) => Some(DownloadKeyCommand::Reset),
+        _ => None,
+    }
+}
+
 fn handle_main_input(app: &mut App, key: KeyEvent) {
     if app.url_input_active {
         handle_url_input(app, key);
+        return;
+    }
+
+    if let Some(command) = decode_download_key(key.code, key.modifiers) {
+        match command {
+            DownloadKeyCommand::Retry => retry_selected(app),
+            DownloadKeyCommand::Reset => reset_selected(app),
+            DownloadKeyCommand::Reverify => reverify_selected(app),
+        }
         return;
     }
 
@@ -121,13 +149,8 @@ fn handle_main_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('p') => {
             app.handle_ui_action(UiAction::TogglePause);
         }
-        KeyCode::Char('r' | 'R') if key.modifiers.contains(KeyModifiers::ALT) => {
-            reverify_selected(app);
-        }
         KeyCode::Char('D') => delete_selected_immediately(app),
         KeyCode::Char('d') | KeyCode::Delete => delete_selected(app),
-        KeyCode::Char('R') => reset_selected(app),
-        KeyCode::Char('r') => retry_selected(app),
         KeyCode::Char('c') => {
             app.popup = Popup::Config;
         }

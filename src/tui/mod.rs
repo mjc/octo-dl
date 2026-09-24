@@ -8,6 +8,7 @@ mod download;
 mod draw;
 mod event;
 mod input;
+mod package_stats;
 mod remote;
 mod session;
 mod terminal;

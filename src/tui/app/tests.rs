@@ -1146,6 +1146,69 @@ fn reverify_active_file_bumps_attempt_generation() {
 }
 
 #[test]
+fn reverify_file_and_package_actions_apply_the_same_active_file_transition() {
+    let mut file_app = test_app();
+    let mut package_app = test_app();
+    let source_url = "https://mega.nz/file/reverify-parity";
+    let file_id = crate::core::FileId::from("active.bin");
+    resolve_package(&mut file_app, source_url, &[("active.bin", 100)]);
+    resolve_package(&mut package_app, source_url, &[("active.bin", 100)]);
+    for app in [&mut file_app, &mut package_app] {
+        app.apply_core_event(CoreEvent::FileStarted {
+            file_id: file_id.clone(),
+            size: 100,
+        });
+        app.apply_core_event(CoreEvent::FileProgress {
+            file_id: file_id.clone(),
+            total_bytes_delta: 40,
+            network_bytes_delta: 40,
+        });
+        app.sync_visible_files();
+        app.cancellation_tokens
+            .insert(file_id.clone(), CancellationToken::new());
+    }
+    let package_id = package_app.core_state.files[&file_id].package_id;
+    let (file_tx, mut file_rx) = mpsc::channel(64);
+    file_app.url_tx = file_tx;
+    let (package_tx, mut package_rx) = mpsc::channel(64);
+    package_app.url_tx = package_tx;
+
+    file_app.perform_reverify_file_action(&file_id);
+    package_app.perform_reverify_package_action(package_id);
+
+    assert_eq!(
+        file_app.file_attempt_ids.get(&file_id),
+        package_app.file_attempt_ids.get(&file_id)
+    );
+    assert_eq!(
+        file_app.verification_operation_ids.get(&file_id),
+        package_app.verification_operation_ids.get(&file_id)
+    );
+    assert_eq!(
+        file_app.verifying_files.contains(&file_id),
+        package_app.verifying_files.contains(&file_id)
+    );
+    assert_eq!(
+        file_app.verification_inflight_files.contains(&file_id),
+        package_app.verification_inflight_files.contains(&file_id)
+    );
+    assert_eq!(
+        file_app.reverify_pending_files.contains(&file_id),
+        package_app.reverify_pending_files.contains(&file_id)
+    );
+    assert!(matches!(
+        file_rx.try_recv().expect("file request should be queued"),
+        crate::tui::event::DownloadRequest::ReverifyFileIdsWithOperations { .. }
+    ));
+    assert!(matches!(
+        package_rx
+            .try_recv()
+            .expect("package request should be queued"),
+        crate::tui::event::DownloadRequest::ReverifyFileIdsWithOperations { .. }
+    ));
+}
+
+#[test]
 fn full_request_queue_keeps_file_download_ids_pending_until_admitted() {
     let mut app = test_app();
     let (url_tx, mut url_rx) = mpsc::channel(1);

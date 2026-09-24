@@ -18,10 +18,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::cell::Cell;
 
-use crate::core::{FileId, FileLifecycle, FileState, PackageId, PackageStatus};
+use crate::core::{FileId, FileLifecycle, PackageId, PackageStatus};
 use crate::{DownloadConfig, format_bytes, format_duration};
 
 use super::app::{App, FileStatus, Popup};
+use super::package_stats::PackageDisplayStats;
 use super::visible::TuiRow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -762,13 +763,13 @@ struct BinaryCorePackageRowRef<'a> {
     app: &'a App,
     package: &'a crate::core::PackageState,
     file_ids: Vec<&'a FileId>,
-    stats: CorePackageStats<'a>,
+    stats: PackageDisplayStats<'a>,
 }
 
 struct BinaryCorePackageRowBuilder<'a> {
     package: &'a crate::core::PackageState,
     file_ids: Vec<&'a FileId>,
-    stats: CorePackageStats<'a>,
+    stats: PackageDisplayStats<'a>,
 }
 
 struct BinaryLegacyPackageRowRef<'a> {
@@ -780,7 +781,7 @@ struct BinaryLegacyPackageRowRef<'a> {
 struct CorePackageRowRef<'a> {
     app: &'a App,
     package: &'a crate::core::PackageState,
-    stats: CorePackageStats<'a>,
+    stats: PackageDisplayStats<'a>,
 }
 
 #[cfg(test)]
@@ -799,19 +800,6 @@ struct PackageFileIdsRef<'a>(&'a [&'a FileId]);
 
 struct SingleFileIdRef<'a>(&'a FileId);
 
-#[derive(Clone, Copy)]
-struct CorePackageStats<'a> {
-    source_url: &'a str,
-    present_files: usize,
-    completed_files: usize,
-    downloaded_bytes: u64,
-    total_bytes: u64,
-    downloading: bool,
-    verifying: bool,
-    folder_label: Option<&'a str>,
-    folder_conflict: bool,
-}
-
 #[cfg(test)]
 thread_local! {
     static CORE_PACKAGE_STATS_CALLS: Cell<usize> = const { Cell::new(0) };
@@ -825,6 +813,11 @@ fn reset_core_package_stats_call_count() {
 #[cfg(test)]
 fn core_package_stats_call_count() -> usize {
     CORE_PACKAGE_STATS_CALLS.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(super) fn record_package_stats_call() {
+    CORE_PACKAGE_STATS_CALLS.with(|count| count.set(count.get().saturating_add(1)));
 }
 
 #[derive(Serialize)]
@@ -912,7 +905,7 @@ impl Serialize for DashboardPackagesRef<'_> {
                 .packages
                 .values()
                 .filter_map(|package| {
-                    let stats = CorePackageStats::new(app, package);
+                    let stats = PackageDisplayStats::new(app, package.id);
                     (stats.present_files > 0).then_some((package, stats))
                 })
                 .collect::<Vec<_>>();
@@ -1369,59 +1362,6 @@ impl Serialize for PackageLabelRef<'_> {
     }
 }
 
-impl<'a> CorePackageStats<'a> {
-    #[cfg(test)]
-    fn new(app: &'a App, package: &'a crate::core::PackageState) -> Self {
-        Self::from_files(app, app.core_state.package_files(&package.id))
-    }
-
-    #[cfg(test)]
-    fn from_files(app: &'a App, files: impl IntoIterator<Item = &'a FileState>) -> Self {
-        CORE_PACKAGE_STATS_CALLS.with(|count| count.set(count.get().saturating_add(1)));
-        let mut stats = Self {
-            source_url: "",
-            present_files: 0,
-            completed_files: 0,
-            downloaded_bytes: 0,
-            total_bytes: 0,
-            downloading: false,
-            verifying: false,
-            folder_label: None,
-            folder_conflict: false,
-        };
-        for file in files {
-            stats.record_file(app, file);
-        }
-        stats
-    }
-
-    fn record_file(&mut self, app: &App, file: &'a FileState) {
-        if self.source_url.is_empty() {
-            self.source_url = &file.source_url;
-        }
-        self.downloading |= matches!(file.lifecycle, FileLifecycle::Downloading);
-        self.verifying |= app.is_verification_active(&file.id);
-        let folder = file.path.split('/').next().filter(|part| !part.is_empty());
-        match (self.folder_label, folder) {
-            (None, Some(folder)) => self.folder_label = Some(folder),
-            (Some(existing), Some(folder)) if existing == folder => {}
-            (Some(_), Some(_)) => self.folder_conflict = true,
-            _ => {}
-        }
-
-        let file_complete = matches!(file.lifecycle, FileLifecycle::Complete);
-        let visible = if file_complete {
-            file.size
-        } else {
-            crate::core::visible_completed_bytes_for_display(file)
-        };
-        self.present_files += 1;
-        self.completed_files += usize::from(file_complete);
-        self.downloaded_bytes = self.downloaded_bytes.saturating_add(visible);
-        self.total_bytes = self.total_bytes.saturating_add(file.size);
-    }
-}
-
 #[cfg(test)]
 fn file_status_ref<'a>(app: &App, file: &'a super::app::FileEntry) -> DashboardFileStatusRef<'a> {
     if app.is_verification_active(&file.id) {
@@ -1498,21 +1438,11 @@ fn binary_core_package_rows(app: &App) -> Vec<BinaryCorePackageRowRef<'_>> {
         .values()
         .map(|package| {
             #[cfg(test)]
-            CORE_PACKAGE_STATS_CALLS.with(|count| count.set(count.get().saturating_add(1)));
+            record_package_stats_call();
             BinaryCorePackageRowBuilder {
                 package,
                 file_ids: Vec::with_capacity(package.progress.file_count()),
-                stats: CorePackageStats {
-                    source_url: "",
-                    present_files: 0,
-                    completed_files: 0,
-                    downloaded_bytes: 0,
-                    total_bytes: 0,
-                    downloading: false,
-                    verifying: false,
-                    folder_label: None,
-                    folder_conflict: false,
-                },
+                stats: PackageDisplayStats::empty(),
             }
         })
         .collect::<Vec<_>>();

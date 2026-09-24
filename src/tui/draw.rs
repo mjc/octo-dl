@@ -31,8 +31,9 @@ use self::dashboard::{
 };
 use super::app::{App, FileEntry, FileStatus, Popup};
 use super::dashboard::{DashboardChrome, DashboardUiMode, DownloadDashboardState, clamp_selection};
+use super::package_stats::PackageDisplayStats;
 use super::visible::TuiRow;
-use crate::core::{FileLifecycle, PackageStatus};
+use crate::core::PackageStatus;
 
 pub fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     draw_interactive_dashboard(frame, app);
@@ -479,8 +480,8 @@ fn render_package_row_app(
     let Some(package) = app.core_state.packages.get(&package_id) else {
         return;
     };
-    let stats = PackageRowStats::new(app, package_id);
-    let percent = percent(stats.downloaded, stats.size);
+    let stats = PackageDisplayStats::new(app, package_id);
+    let percent = percent(stats.downloaded_bytes, stats.total_bytes);
     let package_status = package.status();
     let expanded = app.expanded_packages.contains(&package_id)
         || matches!(package_status, PackageStatus::Failed);
@@ -488,16 +489,16 @@ fn render_package_row_app(
     if stats.active() {
         color = Color::Yellow;
     }
-    let marker = if stats.present > 1 {
+    let marker = if stats.present_files > 1 {
         if expanded { "-" } else { "+" }
     } else {
         " "
     };
     let detail = PackageDetail {
-        completed: stats.complete,
-        present: stats.present,
-        downloaded: stats.downloaded,
-        total_bytes: stats.size,
+        completed: stats.completed_files,
+        present: stats.present_files,
+        downloaded: stats.downloaded_bytes,
+        total_bytes: stats.total_bytes,
         percent,
         speed_label: stats.activity_label(package_status),
     };
@@ -552,81 +553,6 @@ impl RowSlots {
             detail_width,
             filler_width,
         }
-    }
-}
-
-struct PackageRowStats<'a> {
-    present: usize,
-    complete: usize,
-    downloaded: u64,
-    size: u64,
-    common_folder: Option<&'a str>,
-    folder_conflict: bool,
-    downloading: bool,
-    verifying: bool,
-}
-
-impl<'a> PackageRowStats<'a> {
-    fn new(app: &'a App, package_id: crate::core::PackageId) -> Self {
-        let mut stats = Self {
-            present: 0,
-            complete: 0,
-            downloaded: 0,
-            size: 0,
-            common_folder: None,
-            folder_conflict: false,
-            downloading: false,
-            verifying: false,
-        };
-        for file in app.core_state.files.values() {
-            if file.package_id != package_id {
-                continue;
-            }
-            stats.downloading |= matches!(file.lifecycle, FileLifecycle::Downloading);
-            stats.verifying |= app.is_verification_active(&file.id);
-            stats.record_folder(file.path.split('/').next().filter(|part| !part.is_empty()));
-
-            let file_complete = matches!(file.lifecycle, FileLifecycle::Complete);
-            let visible = if file_complete {
-                file.size
-            } else {
-                crate::core::visible_completed_bytes_for_display(file)
-            };
-            stats.present += 1;
-            stats.complete += usize::from(file_complete);
-            stats.downloaded = stats.downloaded.saturating_add(visible);
-            stats.size = stats.size.saturating_add(file.size);
-        }
-        stats
-    }
-
-    fn record_folder(&mut self, folder: Option<&'a str>) {
-        match (self.common_folder, folder) {
-            (None, Some(folder)) => self.common_folder = Some(folder),
-            (Some(existing), Some(folder)) if existing == folder => {}
-            (Some(_), Some(_)) => self.folder_conflict = true,
-            _ => {}
-        }
-    }
-
-    const fn active(&self) -> bool {
-        self.downloading || self.verifying
-    }
-
-    const fn activity_label(&self, status: PackageStatus) -> &'static str {
-        if self.verifying {
-            "verify"
-        } else if self.downloading || matches!(status, PackageStatus::Downloading) {
-            "active"
-        } else {
-            ""
-        }
-    }
-
-    fn folder_label(&self) -> Option<&'a str> {
-        (!self.folder_conflict)
-            .then_some(self.common_folder)
-            .flatten()
     }
 }
 
@@ -1974,12 +1900,12 @@ mod tests {
         app.verification_targets
             .insert(verifying_id, crate::tui::app::VerificationTarget::Resume);
 
-        let stats = PackageRowStats::new(&app, package_id);
+        let stats = PackageDisplayStats::new(&app, package_id);
 
-        assert_eq!(stats.present, 2);
-        assert_eq!(stats.complete, 0);
-        assert_eq!(stats.downloaded, 40);
-        assert_eq!(stats.size, 300);
+        assert_eq!(stats.present_files, 2);
+        assert_eq!(stats.completed_files, 0);
+        assert_eq!(stats.downloaded_bytes, 40);
+        assert_eq!(stats.total_bytes, 300);
         assert_eq!(stats.folder_label(), Some("Folder"));
         assert!(stats.active());
         assert_eq!(stats.activity_label(PackageStatus::Queued), "verify");
@@ -2011,7 +1937,7 @@ mod tests {
             },
         });
 
-        let stats = PackageRowStats::new(&app, package_id);
+        let stats = PackageDisplayStats::new(&app, package_id);
 
         assert_eq!(stats.folder_label(), None);
         assert_eq!(stats.activity_label(PackageStatus::Downloading), "active");

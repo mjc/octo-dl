@@ -43,6 +43,36 @@ fn reverify_target_for_core_file(file: &crate::core::FileState) -> Option<Verifi
 }
 
 impl App {
+    fn begin_explicit_reverification(
+        &mut self,
+        id: &FileId,
+        target: VerificationTarget,
+        operation_id: VerificationOperationId,
+        was_downloading: bool,
+    ) {
+        self.cancel_file_token(id);
+        self.startup_resume_pending_files.remove(id);
+        let attempt_id = self.bump_file_attempt_id(id);
+        debug_assert_eq!(attempt_id.raw(), operation_id.raw());
+        self.verifying_files.insert(id.clone());
+        self.verification_inflight_files.insert(id.clone());
+        self.verification_operation_ids
+            .insert(id.clone(), operation_id);
+        self.verification_targets.insert(id.clone(), target);
+        self.apply_core_event(CoreEvent::FileVerificationStarted {
+            file_id: id.clone(),
+        });
+        self.refresh_visible_core_file(id);
+        if was_downloading {
+            self.apply_core_event(CoreEvent::FileCancelled {
+                file_id: id.clone(),
+            });
+            self.reset_file_ui_rate(id);
+            self.reverify_pending_files.insert(id.clone());
+        }
+        self.reset_pending_files.remove(id);
+    }
+
     pub(crate) fn retry_target(&self, id: &FileId) -> Option<RetryTarget> {
         if let Some(row) = self.overlay_files.get(id)
             && matches!(row.file().status, super::FileStatus::Error(_))
@@ -985,27 +1015,12 @@ impl App {
             return;
         }
 
-        self.cancel_file_token(id);
-        self.startup_resume_pending_files.remove(id);
-        let attempt_id = self.bump_file_attempt_id(id);
-        debug_assert_eq!(attempt_id, next_attempt_id);
-        self.verifying_files.insert(id.clone());
-        self.verification_inflight_files.insert(id.clone());
-        self.verification_operation_ids
-            .insert(id.clone(), operation_id);
-        self.verification_targets.insert(id.clone(), target);
-        self.apply_core_event(CoreEvent::FileVerificationStarted {
-            file_id: id.clone(),
-        });
-        self.refresh_visible_core_file(id);
-        if matches!(context.status, super::FileStatus::Downloading) {
-            self.apply_core_event(CoreEvent::FileCancelled {
-                file_id: id.clone(),
-            });
-            self.reset_file_ui_rate(id);
-            self.reverify_pending_files.insert(id.clone());
-        }
-        self.reset_pending_files.remove(id);
+        self.begin_explicit_reverification(
+            id,
+            target,
+            operation_id,
+            matches!(context.status, super::FileStatus::Downloading),
+        );
         self.status = if target == VerificationTarget::Completed {
             format!("Verifying completed file {id}...")
         } else {
@@ -1075,27 +1090,15 @@ impl App {
         }
 
         for (file_id, source_url, lifecycle, target) in files {
-            self.cancel_file_token(&file_id);
-            self.startup_resume_pending_files.remove(&file_id);
-            let attempt_id = self.bump_file_attempt_id(&file_id);
-            let operation_id = VerificationOperationId::new(attempt_id.raw());
-            self.verifying_files.insert(file_id.clone());
-            self.verification_inflight_files.insert(file_id.clone());
-            self.verification_operation_ids
-                .insert(file_id.clone(), operation_id);
-            self.verification_targets.insert(file_id.clone(), target);
-            self.apply_core_event(CoreEvent::FileVerificationStarted {
-                file_id: file_id.clone(),
-            });
-            self.refresh_visible_core_file(&file_id);
-            if matches!(lifecycle, crate::core::FileLifecycle::Downloading) {
-                self.apply_core_event(CoreEvent::FileCancelled {
-                    file_id: file_id.clone(),
-                });
-                self.reset_file_ui_rate(&file_id);
-                self.reverify_pending_files.insert(file_id.clone());
-            }
-            self.reset_pending_files.remove(&file_id);
+            let operation_id = VerificationOperationId::new(
+                self.current_attempt_id(&file_id).raw().saturating_add(1),
+            );
+            self.begin_explicit_reverification(
+                &file_id,
+                target,
+                operation_id,
+                matches!(lifecycle, crate::core::FileLifecycle::Downloading),
+            );
 
             let grouped = if target == VerificationTarget::Completed {
                 &mut grouped_completed

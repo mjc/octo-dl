@@ -437,48 +437,45 @@ impl SchedulerState {
         self.desired_pending_set
             .extend(self.desired_pending_order.iter().cloned());
     }
-}
 
-#[cfg(test)]
-fn select_startable_file_ids(
-    pending_queue: &VecDeque<FileId>,
-    resume_priority_set: &HashSet<FileId>,
-    available_file_ids: &HashSet<FileId>,
-    active_downloads: &HashSet<FileId>,
-    capacity: usize,
-) -> Vec<FileId> {
-    if capacity == 0 {
-        return Vec::new();
-    }
+    fn select_startable_file_ids(
+        &self,
+        capacity: usize,
+        is_available: impl Fn(&FileId) -> bool,
+    ) -> Vec<FileId> {
+        if capacity == 0 {
+            return Vec::new();
+        }
 
-    let resume_priority = pending_queue
-        .iter()
-        .filter(|file_id| {
-            resume_priority_set.contains(*file_id)
-                && available_file_ids.contains(*file_id)
-                && !active_downloads.contains(*file_id)
-        })
-        .take(capacity)
-        .cloned()
-        .collect::<Vec<_>>();
-    if !resume_priority.is_empty() {
-        return resume_priority;
-    }
-    if resume_priority_set
-        .iter()
-        .any(|file_id| !active_downloads.contains(file_id))
-    {
-        return Vec::new();
-    }
+        let resume_priority = self
+            .pending_queue
+            .iter()
+            .filter(|file_id| {
+                self.resume_priority_set.contains(*file_id)
+                    && is_available(file_id)
+                    && !self.active_downloads.contains(*file_id)
+            })
+            .take(capacity)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !resume_priority.is_empty() {
+            return resume_priority;
+        }
+        if self
+            .resume_priority_set
+            .iter()
+            .any(|file_id| !self.active_downloads.contains(file_id))
+        {
+            return Vec::new();
+        }
 
-    pending_queue
-        .iter()
-        .filter(|file_id| {
-            available_file_ids.contains(*file_id) && !active_downloads.contains(*file_id)
-        })
-        .take(capacity)
-        .cloned()
-        .collect()
+        self.pending_queue
+            .iter()
+            .filter(|file_id| is_available(file_id) && !self.active_downloads.contains(*file_id))
+            .take(capacity)
+            .cloned()
+            .collect()
+    }
 }
 
 struct FileProgress {
@@ -1416,42 +1413,9 @@ async fn start_pending_downloads(
     let capacity = runtime
         .concurrent_files
         .saturating_sub(scheduler.active_downloads.len());
-    let startable = if capacity == 0 {
-        Vec::new()
-    } else {
-        let resume_priority = scheduler
-            .pending_queue
-            .iter()
-            .filter(|file_id| {
-                scheduler.resume_priority_set.contains(*file_id)
-                    && scheduler.available_downloads.contains_key(*file_id)
-                    && !scheduler.active_downloads.contains(*file_id)
-            })
-            .take(capacity)
-            .cloned()
-            .collect::<Vec<_>>();
-        if !resume_priority.is_empty() {
-            resume_priority
-        } else if scheduler
-            .resume_priority_set
-            .iter()
-            .any(|file_id| !scheduler.active_downloads.contains(file_id))
-        {
-            Vec::new()
-        } else {
-            scheduler
-                .pending_queue
-                .iter()
-                .filter(|file_id| {
-                    scheduler.available_downloads.contains_key(*file_id)
-                        && !scheduler.active_downloads.contains(*file_id)
-                })
-                .take(capacity)
-                .cloned()
-                .collect::<Vec<_>>()
-        }
-    };
-
+    let startable = scheduler.select_startable_file_ids(capacity, |file_id| {
+        scheduler.available_downloads.contains_key(file_id)
+    });
     for file_id in startable {
         let Some(item) = scheduler.available_downloads.get(&file_id).cloned() else {
             continue;
