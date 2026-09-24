@@ -36,10 +36,11 @@ fn save_sidecar_atomic_sync(path: &Path, sidecar: &ResumeSidecar) -> io::Result<
     drop(file);
     std::fs::rename(&tmp, path)?;
 
-    #[cfg(unix)]
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        let _ = std::fs::File::open(parent).and_then(|dir| dir.sync_all());
-    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    crate::fs::sync_directory(parent)?;
 
     Ok(())
 }
@@ -75,6 +76,7 @@ struct SidecarWriterWorker {
     #[cfg(test)]
     persist_event_tx: PersistEventTx,
     abort_requested: Arc<AtomicBool>,
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 impl SidecarWriterWorker {
@@ -83,6 +85,7 @@ impl SidecarWriterWorker {
         part_path: PathBuf,
         #[cfg(test)] persist_event_tx: PersistEventTx,
         abort_requested: Arc<AtomicBool>,
+        failure: Arc<Mutex<Option<String>>>,
     ) -> Self {
         Self {
             path,
@@ -91,6 +94,7 @@ impl SidecarWriterWorker {
             #[cfg(test)]
             persist_event_tx,
             abort_requested,
+            failure,
         }
     }
 
@@ -99,7 +103,7 @@ impl SidecarWriterWorker {
         generation: SidecarGeneration,
         mut snapshot: ResumeSidecar,
         allow_equal: bool,
-    ) {
+    ) -> bool {
         let stale = if allow_equal {
             self.last_persisted_generation
                 .is_some_and(|last| generation < last)
@@ -108,19 +112,27 @@ impl SidecarWriterWorker {
                 .is_some_and(|last| generation <= last)
         };
         if stale {
-            return;
+            return true;
         }
         snapshot.part_fingerprint = fingerprint_part_sync(&self.part_path);
         if let Err(err) = save_sidecar_atomic_sync(&self.path, &snapshot) {
+            let mut failure = self.failure.lock().unwrap();
+            if failure.is_none() {
+                *failure = Some(format!(
+                    "persist resume sidecar {}: {err}",
+                    self.path.display()
+                ));
+            }
             log::warn!(
                 "Failed to persist resume sidecar {} after verified chunk sync: {err}",
                 self.path.display()
             );
-            return;
+            return false;
         }
         self.last_persisted_generation = Some(generation);
         #[cfg(test)]
         let _ = self.persist_event_tx.send(());
+        true
     }
 
     fn run(mut self, rx: mpsc::Receiver<SidecarWriterCommand>) {
@@ -130,11 +142,13 @@ impl SidecarWriterWorker {
             }
             match command {
                 SidecarWriterCommand::Persist(request) => {
-                    self.persist_snapshot(
+                    if !self.persist_snapshot(
                         request.generation,
                         request.snapshot,
                         request.allow_equal,
-                    );
+                    ) {
+                        break;
+                    }
                 }
                 SidecarWriterCommand::Finish => break,
             }
@@ -146,6 +160,7 @@ pub(super) struct LazySidecarWriter {
     tx: Mutex<Option<Sender<SidecarWriterCommand>>>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     abort_requested: Arc<AtomicBool>,
+    failure: Arc<Mutex<Option<String>>>,
     #[cfg(test)]
     persist_event_rx: PersistEventRx,
 }
@@ -154,11 +169,13 @@ impl LazySidecarWriter {
     pub(super) fn new(path: PathBuf, part_path: PathBuf) -> io::Result<Self> {
         let (tx, rx) = mpsc::channel();
         let abort_requested = Arc::new(AtomicBool::new(false));
+        let failure = Arc::new(Mutex::new(None));
         #[cfg(test)]
         let (persist_event_tx, persist_event_rx) = mpsc::channel();
         #[cfg(test)]
         let persist_event_rx = Arc::new(Mutex::new(persist_event_rx));
         let worker_abort_requested = Arc::clone(&abort_requested);
+        let worker_failure = Arc::clone(&failure);
         let worker = std::thread::Builder::new()
             // Keep user-controlled paths out of the OS thread name. In
             // particular, `Builder::name` panics on interior NUL bytes.
@@ -170,6 +187,7 @@ impl LazySidecarWriter {
                     #[cfg(test)]
                     persist_event_tx,
                     worker_abort_requested,
+                    worker_failure,
                 )
                 .run(rx);
             })?;
@@ -177,6 +195,7 @@ impl LazySidecarWriter {
             tx: Mutex::new(Some(tx)),
             worker: Mutex::new(Some(worker)),
             abort_requested,
+            failure,
             #[cfg(test)]
             persist_event_rx,
         })
@@ -225,7 +244,7 @@ impl LazySidecarWriter {
         self.persist_snapshot(generation, snapshot, true);
     }
 
-    pub(super) async fn finish(&self, shutdown: SidecarWriterShutdown) {
+    pub(super) async fn finish(&self, shutdown: SidecarWriterShutdown) -> io::Result<()> {
         let abort = match &shutdown {
             SidecarWriterShutdown::Abort => true,
             SidecarWriterShutdown::Flush => false,
@@ -236,12 +255,30 @@ impl LazySidecarWriter {
         if let Some(tx) = self.tx.lock().unwrap().take()
             && !abort
         {
-            let _ = tx.send(SidecarWriterCommand::Finish);
+            if tx.send(SidecarWriterCommand::Finish).is_err() {
+                let mut failure = self.failure.lock().unwrap();
+                if failure.is_none() {
+                    *failure = Some("queue sidecar writer finish command".to_string());
+                }
+            }
         }
         let worker = self.worker.lock().unwrap().take();
         if let Some(worker) = worker {
-            let _ = tokio::task::spawn_blocking(move || worker.join()).await;
+            match tokio::task::spawn_blocking(move || worker.join()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => {
+                    let mut failure = self.failure.lock().unwrap();
+                    if failure.is_none() {
+                        *failure = Some("join sidecar writer worker".to_string());
+                    }
+                }
+            }
         }
+        self.failure
+            .lock()
+            .unwrap()
+            .take()
+            .map_or(Ok(()), |error| Err(io::Error::other(error)))
     }
 }
 

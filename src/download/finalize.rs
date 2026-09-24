@@ -55,7 +55,7 @@ impl<F: FileSystem> Downloader<F> {
             Ok(()) => {
                 ctx.chunk_verified
                     .finish_sidecar_writer(SidecarWriterShutdown::Abort)
-                    .await;
+                    .await?;
                 self.fs
                     .rename_file(ctx.part_path, Path::new(ctx.path))
                     .await?;
@@ -75,9 +75,13 @@ impl<F: FileSystem> Downloader<F> {
             }
             Err(e) => {
                 if should_delete_resume_state_on_error(&self.config, &e) {
-                    ctx.chunk_verified
+                    if let Err(error) = ctx
+                        .chunk_verified
                         .finish_sidecar_writer(SidecarWriterShutdown::Abort)
-                        .await;
+                        .await
+                    {
+                        log::warn!("Failed to stop resume sidecar writer: {error}");
+                    }
                     let _ = self.fs.remove_file(ctx.part_path).await;
                     let _ = delete_sidecar(ctx.sidecar_path).await;
                 } else {
@@ -85,12 +89,17 @@ impl<F: FileSystem> Downloader<F> {
                         Ok(()) => {
                             ctx.chunk_verified
                                 .finish_sidecar_writer(SidecarWriterShutdown::Flush)
-                                .await;
+                                .await
+                                .map_err(Error::Io)?;
                         }
                         Err(sync_err) => {
                             ctx.chunk_verified
                                 .finish_sidecar_writer(SidecarWriterShutdown::Abort)
-                                .await;
+                                .await
+                                .map_err(Error::Io)
+                                .unwrap_or_else(|error| {
+                                    log::warn!("Failed to stop resume sidecar writer: {error}");
+                                });
                             log::warn!(
                                 "Failed to sync partial file {} before saving resume sidecar: {sync_err}",
                                 ctx.part_path.display()
