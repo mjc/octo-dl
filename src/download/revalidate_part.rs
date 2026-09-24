@@ -34,11 +34,11 @@ pub(super) async fn revalidate_candidate_from_part<F: FileSystem>(
         }
         let read_len = revalidation_buffer_len(end - offset);
         let read_buffer = &mut buffer[..read_len];
-        if fs
-            .read_exact_at(input.part_path, offset, read_buffer)
-            .await
-            .is_err()
-        {
+        let read_result = match input.part_file {
+            Some(file) => fs.read_exact_at_open_file(file, offset, read_buffer).await,
+            None => fs.read_exact_at(input.part_path, offset, read_buffer).await,
+        };
+        if read_result.is_err() {
             return Ok(false);
         }
         mac.update(read_buffer);

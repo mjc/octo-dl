@@ -76,15 +76,25 @@ pub(crate) fn write_durable_temp_file(
     Ok(())
 }
 
+/// Syncs directory-entry changes where the platform supports directory syncing.
+///
+/// Returns [`std::io::ErrorKind::Unsupported`] on non-Unix platforms rather
+/// than claiming durability without performing a directory sync.
 pub(crate) fn sync_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         let directory = std::fs::File::open(path)?;
         directory.sync_all()?;
+        Ok(())
     }
     #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "directory syncing is not supported on this platform",
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,11 +169,52 @@ pub trait FileSystem: Send + Sync {
         preserve_existing: bool,
     ) -> std::io::Result<tokio::fs::File>;
 
+    /// Opens a resumable part file without truncating or resizing it.
+    async fn open_part_file_for_resume(&self, path: &Path) -> std::io::Result<tokio::fs::File> {
+        tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .await
+    }
+
+    /// Reads from the already-open part file, so path replacement cannot
+    /// redirect resume validation to a different file.
+    async fn read_exact_at_open_file(
+        &self,
+        file: &tokio::fs::File,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> std::io::Result<()> {
+        let mut file = file.try_clone().await?;
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        file.read_exact(buf).await?;
+        Ok(())
+    }
+
+    /// Returns metadata for the open part file rather than its current path.
+    async fn fingerprint_open_file(&self, file: &tokio::fs::File) -> Option<FileFingerprint> {
+        file.metadata()
+            .await
+            .ok()
+            .map(|metadata| FileFingerprint::from_metadata(&metadata))
+    }
+
     /// Reads exactly `buf.len()` bytes at `offset` without trusting file cursor state.
     async fn read_exact_at(&self, path: &Path, offset: u64, buf: &mut [u8]) -> std::io::Result<()>;
 
-    /// Renames a file from one path to another.
+    /// Makes a file visible at another path by renaming it.
     async fn rename_file(&self, from: &Path, to: &Path) -> std::io::Result<()>;
+
+    /// Acknowledges durability of directory-entry changes in this directory.
+    async fn sync_directory(&self, path: &Path) -> std::io::Result<()> {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::fs::sync_directory(&path))
+            .await
+            .map_err(std::io::Error::other)?
+    }
 
     /// Flushes a file's contents and metadata to stable storage.
     async fn sync_file(&self, path: &Path) -> std::io::Result<()>;
@@ -331,6 +382,25 @@ impl FileSystem for TokioFileSystem {
         Ok(file)
     }
 
+    async fn open_part_file_for_resume(&self, path: &Path) -> std::io::Result<tokio::fs::File> {
+        if let Ok(metadata) = tokio::fs::symlink_metadata(path).await
+            && metadata.file_type().is_symlink()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("refusing to open symlink as part file: {}", path.display()),
+            ));
+        }
+        let path = self.resolve_download_path(path)?;
+        tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .await
+    }
+
     async fn read_exact_at(&self, path: &Path, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
         let path = self.resolve_download_path(path)?;
         let mut file = tokio::fs::File::open(path).await?;
@@ -343,6 +413,13 @@ impl FileSystem for TokioFileSystem {
         let from = self.resolve_download_path(from)?;
         let to = self.resolve_download_path(to)?;
         tokio::fs::rename(from, to).await
+    }
+
+    async fn sync_directory(&self, path: &Path) -> std::io::Result<()> {
+        let path = self.resolve_download_path(path)?;
+        tokio::task::spawn_blocking(move || crate::fs::sync_directory(&path))
+            .await
+            .map_err(std::io::Error::other)?
     }
 
     async fn sync_file(&self, path: &Path) -> std::io::Result<()> {
@@ -370,6 +447,15 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
+
+    #[cfg(not(unix))]
+    #[test]
+    fn sync_directory_fails_closed_when_platform_sync_is_unsupported() {
+        let error = sync_directory(Path::new("."))
+            .expect_err("unsupported platforms must not acknowledge directory durability");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    }
 
     #[test]
     fn resolve_within_root_accepts_missing_descendants_and_rejects_sibling_prefixes() {
@@ -538,6 +624,24 @@ mod tests {
 
         let fs = TokioFileSystem::new();
         fs.sync_file(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rooted_tokio_fs_rejects_sync_outside_download_root() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("downloads");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fs = TokioFileSystem::new().with_download_root(Some(root.clone()));
+        fs.sync_directory(&root).await.unwrap();
+        let error = fs
+            .sync_directory(&outside)
+            .await
+            .expect_err("directory sync must remain inside the configured root");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     mod property_tests {

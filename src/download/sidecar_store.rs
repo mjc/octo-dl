@@ -333,14 +333,14 @@ pub(super) async fn save_sidecar_atomic(path: &Path, sidecar: &ResumeSidecar) ->
     drop(file);
     tokio::fs::rename(&tmp, path).await?;
 
-    #[cfg(unix)]
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        let parent = parent.to_path_buf();
-        let _ = tokio::task::spawn_blocking(move || {
-            std::fs::File::open(parent).and_then(|dir| dir.sync_all())
-        })
-        .await;
-    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    tokio::task::spawn_blocking(move || crate::fs::sync_directory(&parent))
+        .await
+        .map_err(io::Error::other)??;
 
     Ok(())
 }

@@ -30,6 +30,7 @@ impl ResumeValidation {
 pub(super) struct SidecarValidationInput<'a> {
     pub(super) boundaries: &'a [mega::MegaChunk],
     pub(super) part_path: &'a Path,
+    pub(super) part_file: Option<&'a tokio::fs::File>,
     pub(super) sidecar: &'a ResumeSidecar,
     pub(super) file_size: u64,
     pub(super) expected_condensed_mac: [u8; 8],
@@ -87,6 +88,13 @@ pub(super) fn resume_fingerprint_matches(
             .is_none_or(|allocated| actual.allocated_bytes == Some(allocated))
         && expected.dev.is_none_or(|dev| actual.dev == Some(dev))
         && expected.ino.is_none_or(|ino| actual.ino == Some(ino))
+}
+
+pub(super) const fn resume_fingerprint_is_complete(fingerprint: FileFingerprint) -> bool {
+    fingerprint.modified_ns > 0
+        && fingerprint.allocated_bytes.is_some()
+        && fingerprint.dev.is_some()
+        && fingerprint.ino.is_some()
 }
 
 #[cfg(test)]

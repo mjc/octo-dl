@@ -21,7 +21,40 @@ fn fingerprint_part_sync(path: &Path) -> Option<FileFingerprint> {
     Some(FileFingerprint::from_metadata(&metadata))
 }
 
-fn save_sidecar_atomic_sync(path: &Path, sidecar: &ResumeSidecar) -> io::Result<()> {
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SidecarFailurePoint {
+    Write,
+    FileSync,
+    Rename,
+    DirectorySync,
+    WorkerDisconnect,
+}
+
+#[cfg(test)]
+type SidecarFailureInjection = Arc<Mutex<Option<SidecarFailurePoint>>>;
+
+#[cfg(test)]
+fn inject_failure(
+    injection: Option<&SidecarFailureInjection>,
+    point: SidecarFailurePoint,
+) -> io::Result<()> {
+    if let Some(injection) = injection {
+        let mut configured = injection.lock().unwrap();
+        if *configured == Some(point) {
+            *configured = None;
+            drop(configured);
+            return Err(io::Error::other(format!("injected {point:?} failure")));
+        }
+    }
+    Ok(())
+}
+
+fn save_sidecar_atomic_sync(
+    path: &Path,
+    sidecar: &ResumeSidecar,
+    #[cfg(test)] injection: Option<&SidecarFailureInjection>,
+) -> io::Result<()> {
     let tmp = sidecar_tmp_path(path);
     match std::fs::symlink_metadata(&tmp) {
         Ok(metadata) => reject_symlink(&tmp, &metadata)?,
@@ -30,16 +63,24 @@ fn save_sidecar_atomic_sync(path: &Path, sidecar: &ResumeSidecar) -> io::Result<
     }
     let data = serialize_sidecar(sidecar)?;
     let mut file = std::fs::File::create(&tmp)?;
+    #[cfg(test)]
+    inject_failure(injection, SidecarFailurePoint::Write)?;
     std::io::Write::write_all(&mut file, &data)?;
     std::io::Write::flush(&mut file)?;
+    #[cfg(test)]
+    inject_failure(injection, SidecarFailurePoint::FileSync)?;
     file.sync_data()?;
     drop(file);
+    #[cfg(test)]
+    inject_failure(injection, SidecarFailurePoint::Rename)?;
     std::fs::rename(&tmp, path)?;
 
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    #[cfg(test)]
+    inject_failure(injection, SidecarFailurePoint::DirectorySync)?;
     crate::fs::sync_directory(parent)?;
 
     Ok(())
@@ -75,6 +116,8 @@ struct SidecarWriterWorker {
     last_persisted_generation: Option<SidecarGeneration>,
     #[cfg(test)]
     persist_event_tx: PersistEventTx,
+    #[cfg(test)]
+    failure_injection: Option<SidecarFailureInjection>,
     abort_requested: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<String>>>,
 }
@@ -84,6 +127,7 @@ impl SidecarWriterWorker {
         path: PathBuf,
         part_path: PathBuf,
         #[cfg(test)] persist_event_tx: PersistEventTx,
+        #[cfg(test)] failure_injection: Option<SidecarFailureInjection>,
         abort_requested: Arc<AtomicBool>,
         failure: Arc<Mutex<Option<String>>>,
     ) -> Self {
@@ -93,6 +137,8 @@ impl SidecarWriterWorker {
             last_persisted_generation: None,
             #[cfg(test)]
             persist_event_tx,
+            #[cfg(test)]
+            failure_injection,
             abort_requested,
             failure,
         }
@@ -115,7 +161,12 @@ impl SidecarWriterWorker {
             return true;
         }
         snapshot.part_fingerprint = fingerprint_part_sync(&self.part_path);
-        if let Err(err) = save_sidecar_atomic_sync(&self.path, &snapshot) {
+        if let Err(err) = save_sidecar_atomic_sync(
+            &self.path,
+            &snapshot,
+            #[cfg(test)]
+            self.failure_injection.as_ref(),
+        ) {
             let mut failure = self.failure.lock().unwrap();
             if failure.is_none() {
                 *failure = Some(format!(
@@ -142,6 +193,17 @@ impl SidecarWriterWorker {
             }
             match command {
                 SidecarWriterCommand::Persist(request) => {
+                    #[cfg(test)]
+                    if let Err(error) = inject_failure(
+                        self.failure_injection.as_ref(),
+                        SidecarFailurePoint::WorkerDisconnect,
+                    ) {
+                        let mut failure = self.failure.lock().unwrap();
+                        if failure.is_none() {
+                            *failure = Some(format!("sidecar writer worker disconnected: {error}"));
+                        }
+                        return;
+                    }
                     if !self.persist_snapshot(
                         request.generation,
                         request.snapshot,
@@ -167,6 +229,34 @@ pub(super) struct LazySidecarWriter {
 
 impl LazySidecarWriter {
     pub(super) fn new(path: PathBuf, part_path: PathBuf) -> io::Result<Self> {
+        #[cfg(test)]
+        {
+            Self::new_with_failure_injection(path, part_path, None)
+        }
+        #[cfg(not(test))]
+        {
+            Self::new_with_failure_injection(path, part_path)
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_with_failpoint(
+        path: PathBuf,
+        part_path: PathBuf,
+        failpoint: SidecarFailurePoint,
+    ) -> io::Result<Self> {
+        Self::new_with_failure_injection(
+            path,
+            part_path,
+            Some(Arc::new(Mutex::new(Some(failpoint)))),
+        )
+    }
+
+    fn new_with_failure_injection(
+        path: PathBuf,
+        part_path: PathBuf,
+        #[cfg(test)] failure_injection: Option<SidecarFailureInjection>,
+    ) -> io::Result<Self> {
         let (tx, rx) = mpsc::channel();
         let abort_requested = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
@@ -186,6 +276,8 @@ impl LazySidecarWriter {
                     part_path,
                     #[cfg(test)]
                     persist_event_tx,
+                    #[cfg(test)]
+                    failure_injection,
                     worker_abort_requested,
                     worker_failure,
                 )
@@ -254,23 +346,20 @@ impl LazySidecarWriter {
         }
         if let Some(tx) = self.tx.lock().unwrap().take()
             && !abort
+            && tx.send(SidecarWriterCommand::Finish).is_err()
         {
-            if tx.send(SidecarWriterCommand::Finish).is_err() {
-                let mut failure = self.failure.lock().unwrap();
-                if failure.is_none() {
-                    *failure = Some("queue sidecar writer finish command".to_string());
-                }
+            let mut failure = self.failure.lock().unwrap();
+            if failure.is_none() {
+                *failure = Some("queue sidecar writer finish command".to_string());
             }
         }
         let worker = self.worker.lock().unwrap().take();
         if let Some(worker) = worker {
-            match tokio::task::spawn_blocking(move || worker.join()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) | Err(_) => {
-                    let mut failure = self.failure.lock().unwrap();
-                    if failure.is_none() {
-                        *failure = Some("join sidecar writer worker".to_string());
-                    }
+            let joined = tokio::task::spawn_blocking(move || worker.join()).await;
+            if joined.is_err() || joined.is_ok_and(|result| result.is_err()) {
+                let mut failure = self.failure.lock().unwrap();
+                if failure.is_none() {
+                    *failure = Some("join sidecar writer worker".to_string());
                 }
             }
         }

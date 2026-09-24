@@ -58,6 +58,7 @@ impl<F: FileSystem> Downloader<F> {
             node,
             &boundaries,
             &part_path,
+            None,
             &sidecar_path,
             expected_condensed_mac,
             progress.map(|progress| (path, progress)),

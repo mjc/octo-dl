@@ -100,6 +100,7 @@ async fn run_restart_revalidation_and_manual_reverify_parity_test() {
                 node,
                 &boundaries,
                 &harness.part_path,
+                None,
                 &harness.sidecar_path,
                 condensed_mac,
                 None,
