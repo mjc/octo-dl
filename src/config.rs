@@ -1,6 +1,6 @@
 //! Configuration types for download operations.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine as _;
@@ -656,6 +656,44 @@ impl ServiceConfig {
         Ok(template)
     }
 
+    pub(crate) fn load_or_create_credential_key(path: &Path) -> std::io::Result<CredentialKey> {
+        let mut config = Self::load_or_create(path)?;
+        let had_valid_key = config
+            .credential_key
+            .as_deref()
+            .and_then(CredentialKey::decode)
+            .is_some();
+        let key = config.ensure_credential_key();
+        if !had_valid_key {
+            config.save(path)?;
+        }
+        key.persist_for_sessions().map(|()| key)
+    }
+
+    pub(crate) fn require_credential_key(&self) -> std::io::Result<CredentialKey> {
+        self.credential_key
+            .as_deref()
+            .and_then(CredentialKey::decode)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "original config credential key is missing",
+                )
+            })
+    }
+
+    fn ensure_credential_key(&mut self) -> CredentialKey {
+        if let Some(encoded) = self.credential_key.as_deref()
+            && let Some(key) = CredentialKey::decode(encoded)
+        {
+            return key;
+        }
+
+        let key = CredentialKey::generate();
+        self.credential_key = Some(key.encode());
+        key
+    }
+
     /// Saves the config back to disk with 0o600 permissions.
     ///
     /// # Errors
@@ -766,39 +804,30 @@ fn config_parent(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+pub(crate) fn prepare_download_root(root: Option<&Path>) -> std::io::Result<Option<PathBuf>> {
+    let Some(root) = root else {
+        return Ok(None);
+    };
+    let absolute = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(root)
+    };
+    std::fs::create_dir_all(&absolute)?;
+    Ok(Some(absolute))
+}
+
 pub(crate) fn write_durable_temp_file(
     path: &Path,
     contents: &[u8],
     description: &str,
 ) -> std::io::Result<()> {
-    use std::io::Write as _;
-
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|error| path_io_error(&format!("write {description}"), path, &error))?;
-    file.write_all(contents)
-        .map_err(|error| path_io_error(&format!("write {description}"), path, &error))?;
-    file.flush()
-        .map_err(|error| path_io_error(&format!("flush {description}"), path, &error))?;
-    file.sync_all()
-        .map_err(|error| path_io_error(&format!("sync {description}"), path, &error))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
-            |error| path_io_error(&format!("set {description} permissions"), path, &error),
-        )?;
-    }
-
-    Ok(())
+    crate::fs::write_durable_temp_file(
+        path,
+        contents,
+        description,
+        crate::fs::DurableTempFileMode::CreateNew,
+    )
 }
 
 fn replace_config_file(temporary_path: &Path, path: &Path, parent: &Path) -> std::io::Result<()> {
@@ -808,17 +837,7 @@ fn replace_config_file(temporary_path: &Path, path: &Path, parent: &Path) -> std
 }
 
 pub(crate) fn sync_directory(parent: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        let directory = std::fs::File::open(parent)
-            .map_err(|error| path_io_error("open config directory", parent, &error))?;
-        directory
-            .sync_all()
-            .map_err(|error| path_io_error("sync config directory", parent, &error))?;
-    }
-    #[cfg(not(unix))]
-    let _ = parent;
-    Ok(())
+    crate::fs::sync_directory(parent)
 }
 
 fn credential_key_path(path: &Path) -> std::path::PathBuf {
@@ -892,6 +911,59 @@ mod service_config_tests {
         assert_eq!(loaded.api.port, 9723);
         assert_eq!(loaded.download.mega_chunks_per_request, 2);
         assert_eq!(loaded.download.concurrent_files, 4);
+    }
+
+    #[test]
+    fn load_or_create_credential_key_persists_and_reuses_one_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let first = ServiceConfig::load_or_create_credential_key(&path).unwrap();
+        let second = ServiceConfig::load_or_create_credential_key(&path).unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn require_credential_key_does_not_create_missing_key() {
+        let config = ServiceConfig {
+            credentials: ServiceCredentials {
+                encrypted: false,
+                email: String::new(),
+                password: String::new(),
+                mfa: String::new(),
+                saved_session: None,
+            },
+            credential_key: None,
+            api: ApiConfig::default(),
+            download: DownloadConfig::default(),
+        };
+
+        let error = config
+            .require_credential_key()
+            .expect_err("missing key lookup must not create a key");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(config.credential_key.is_none());
+    }
+
+    #[test]
+    fn prepare_download_root_creates_without_changing_current_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = crate::test_support::CurrentDirGuard::set(dir.path());
+        let requested = Path::new("nested/downloads");
+
+        let prepared = prepare_download_root(Some(requested)).unwrap();
+
+        assert_eq!(
+            std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap(),
+            std::fs::canonicalize(dir.path()).unwrap()
+        );
+        assert_eq!(
+            prepared.map(|path| std::fs::canonicalize(path).unwrap()),
+            Some(std::fs::canonicalize(dir.path().join(requested)).unwrap())
+        );
+        assert!(dir.path().join(requested).is_dir());
+        drop(cwd);
     }
 
     #[test]

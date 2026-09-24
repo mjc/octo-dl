@@ -186,19 +186,7 @@ fn load_cli_credential_key(path: Option<&Path>) -> crate::Result<CredentialKey> 
         Some(path) => path.to_path_buf(),
         None => default_cli_config_path()?,
     };
-    let mut config = ServiceConfig::load_or_create(&path)?;
-    let key = config
-        .credential_key
-        .as_deref()
-        .and_then(CredentialKey::decode)
-        .unwrap_or_else(CredentialKey::generate);
-    let encoded = key.encode();
-    if config.credential_key.as_deref() != Some(encoded.as_str()) {
-        config.credential_key = Some(encoded);
-        config.save(&path)?;
-    }
-    key.persist_for_sessions()?;
-    Ok(key)
+    Ok(ServiceConfig::load_or_create_credential_key(&path)?)
 }
 
 fn load_cli_resume_key(
@@ -211,16 +199,7 @@ fn load_cli_resume_key(
             None => default_cli_config_path().map_err(std::io::Error::other)?,
         };
         let config = ServiceConfig::load(&path)?;
-        config
-            .credential_key
-            .as_deref()
-            .and_then(CredentialKey::decode)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "original config credential key is missing",
-                )
-            })
+        config.require_credential_key()
     })?)
 }
 
@@ -243,17 +222,14 @@ impl DownloadRootGuard {
         };
         let previous_dir = std::env::current_dir()?;
         let requested = PathBuf::from(root);
-        let absolute_root = if requested.is_absolute() {
-            requested
-        } else {
-            previous_dir.join(requested)
-        };
-        std::fs::create_dir_all(&absolute_root).map_err(|error| {
-            crate::Error::Download(format!(
-                "cannot create download root {}: {error}",
-                absolute_root.display()
-            ))
-        })?;
+        let absolute_root = crate::config::prepare_download_root(Some(&requested))
+            .map_err(|error| {
+                crate::Error::Download(format!(
+                    "cannot create download root {}: {error}",
+                    previous_dir.join(&requested).display()
+                ))
+            })?
+            .expect("a configured download root produces a path");
         std::env::set_current_dir(&absolute_root).map_err(|error| {
             crate::Error::Download(format!(
                 "cannot enter download root {}: {error}",
@@ -928,22 +904,20 @@ pub async fn run() -> crate::Result<()> {
 
     // Phase 1: Fetch all URLs and collect files
     println!("Fetching file lists from {} URL(s)...\n", config.urls.len());
+    let sources = config.urls.iter().cloned().enumerate().collect::<Vec<_>>();
+    let fetched_sources = fetch_source_nodes(&http, &sources).await;
     let mut all_nodes: Vec<(usize, String, mega::Nodes)> = Vec::new();
     let mut had_fetch_failures = false;
-    for (idx, url) in config.urls.iter().enumerate() {
-        print!("  {url} ... ");
-        match crate::fetch_public_nodes(&http, url).await {
+    for (idx, url, result) in fetched_sources {
+        match result {
             Ok(nodes) => {
-                let collected_tmp = downloader.collect_files(&nodes, &no_progress).await;
-                let file_count = collected_tmp.to_download.len() + collected_tmp.skipped;
-                println!("{file_count} file(s)");
-                ensure_session_url(&mut session_state, url).error = None;
-                all_nodes.push((idx, url.clone(), nodes));
+                ensure_session_url(&mut session_state, &url).error = None;
+                all_nodes.push((idx, url, nodes));
             }
-            Err(e) => {
-                println!("ERROR: {e:?}");
+            Err(error) => {
+                println!("  {url} ... ERROR: {error}");
                 had_fetch_failures = true;
-                ensure_session_url(&mut session_state, url).error = Some(e.to_string());
+                ensure_session_url(&mut session_state, &url).error = Some(error);
             }
         }
     }
@@ -952,6 +926,10 @@ pub async fn run() -> crate::Result<()> {
     let mut package_files: Vec<CliPackageFiles<'_>> = Vec::new();
     for (_url_idx, url, nodes) in &all_nodes {
         let package = collect_cli_package_files(&downloader, &no_progress, nodes, |_| true).await;
+        println!(
+            "  {url} ... {} file(s)",
+            package.files.len() + package.skipped
+        );
         let package_id = package.id;
         append_cli_package_files(&mut package_files, package).map_err(crate::Error::Download)?;
         let Some(registered) = package_files.iter().find(|entry| entry.id == package_id) else {
@@ -1091,14 +1069,26 @@ async fn resume_session(
         "Fetching file lists from {} URL(s)...\n",
         remaining_urls.len()
     );
-    let (all_nodes, had_fetch_failures) = fetch_remaining_nodes(
-        &downloader,
-        &http,
-        &no_progress,
-        &mut session,
-        &remaining_urls,
-    )
-    .await;
+    let fetched_sources = fetch_source_nodes(&http, &remaining_urls).await;
+    let mut all_nodes = Vec::new();
+    let mut had_fetch_failures = false;
+    for (url_idx, url, result) in fetched_sources {
+        match result {
+            Ok(nodes) => {
+                if let Some(entry) = session.urls.get_mut(url_idx) {
+                    entry.error = None;
+                }
+                all_nodes.push((url_idx, url, nodes));
+            }
+            Err(error) => {
+                had_fetch_failures = true;
+                println!("  {url} ... ERROR: {error}");
+                if let Some(entry) = session.urls.get_mut(url_idx) {
+                    entry.error = Some(error);
+                }
+            }
+        }
+    }
 
     // Completed file paths from session state
     let resumable_file_ids: std::collections::HashSet<_> =
@@ -1120,6 +1110,10 @@ async fn resume_session(
                 || !ignored_paths.contains(&item.path)
         })
         .await;
+        println!(
+            "  {url} ... {} file(s)",
+            package.files.len() + package.skipped
+        );
         let package_id = package.id;
         append_cli_package_files(&mut package_files, package).map_err(crate::Error::Download)?;
         let registered = package_files
@@ -1200,39 +1194,18 @@ async fn resume_session(
     Ok(())
 }
 
-async fn fetch_remaining_nodes(
-    downloader: &crate::Downloader,
+async fn fetch_source_nodes(
     http: &reqwest::Client,
-    no_progress: &Arc<dyn crate::DownloadProgress>,
-    session: &mut SessionSnapshot,
-    remaining_urls: &[(usize, String)],
-) -> (Vec<(usize, String, mega::Nodes)>, bool) {
-    let mut all_nodes = Vec::new();
-    let mut had_fetch_failures = false;
-
-    for (url_idx, url) in remaining_urls {
-        print!("  {url} ... ");
-        match crate::fetch_public_nodes(http, url).await {
-            Ok(nodes) => {
-                let collected = downloader.collect_files(&nodes, no_progress).await;
-                let file_count = collected.to_download.len() + collected.skipped;
-                println!("{file_count} file(s)");
-                if let Some(entry) = session.urls.get_mut(*url_idx) {
-                    entry.error = None;
-                }
-                all_nodes.push((*url_idx, url.clone(), nodes));
-            }
-            Err(error) => {
-                had_fetch_failures = true;
-                println!("ERROR: {error:?}");
-                if let Some(entry) = session.urls.get_mut(*url_idx) {
-                    entry.error = Some(error.to_string());
-                }
-            }
-        }
+    sources: &[(usize, String)],
+) -> Vec<(usize, String, Result<mega::Nodes, String>)> {
+    let mut fetched = Vec::with_capacity(sources.len());
+    for (index, url) in sources {
+        let result = crate::fetch_public_nodes(http, url)
+            .await
+            .map_err(|error| error.to_string());
+        fetched.push((*index, url.clone(), result));
     }
-
-    (all_nodes, had_fetch_failures)
+    fetched
 }
 
 // ============================================================================

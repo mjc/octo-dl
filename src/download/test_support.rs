@@ -256,6 +256,44 @@ impl FakeMegaDownloadHarness {
     }
 }
 
+pub(super) struct SeededVerifiedChunk {
+    pub(super) boundary: mega::MegaChunk,
+    pub(super) plaintext: Vec<u8>,
+    pub(super) fingerprint: FileFingerprint,
+    pub(super) sidecar: ResumeSidecar,
+}
+
+pub(super) async fn seed_first_verified_chunk(
+    harness: &FakeMegaDownloadHarness,
+    part_path: &Path,
+) -> SeededVerifiedChunk {
+    let node = harness.node();
+    let boundary = mega::mega_chunk_boundaries(node.size())[0];
+    let mut plaintext = vec![0u8; usize_from_u64(boundary.length)];
+    harness
+        .fixture
+        .fill_plaintext(boundary.offset, &mut plaintext);
+    tokio::fs::write(part_path, &plaintext).await.unwrap();
+
+    let fingerprint = TokioFileSystem::new()
+        .file_fingerprint(part_path)
+        .await
+        .unwrap();
+    let sidecar = sidecar_for_chunk(
+        node.size(),
+        *node.condensed_mac().unwrap(),
+        boundary.index,
+        mega::compute_mega_chunk_mac(&plaintext, node.aes_key(), node.aes_iv().unwrap()),
+    );
+
+    SeededVerifiedChunk {
+        boundary,
+        plaintext,
+        fingerprint,
+        sidecar,
+    }
+}
+
 pub(super) fn run_with_large_stack_current_thread_runtime<F, Fut>(name: &str, run: F)
 where
     F: FnOnce() -> Fut + Send + 'static,

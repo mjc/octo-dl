@@ -48,37 +48,21 @@ impl ResumeReverifyHarness {
         &self,
         stored_fingerprint: StoredFingerprint,
     ) -> (mega::MegaChunk, crate::fs::FileFingerprint, ResumeSidecar) {
-        let node = self.node();
-        let first = mega::mega_chunk_boundaries(node.size())[0];
-        let mut first_chunk = vec![0u8; usize_from_u64(first.length)];
-        self.base
-            .fixture
-            .fill_plaintext(first.offset, &mut first_chunk);
-        tokio::fs::write(&self.part_path, &first_chunk)
-            .await
-            .unwrap();
-
-        let current_fingerprint = TokioFileSystem::new()
-            .file_fingerprint(&self.part_path)
-            .await
-            .unwrap();
-        let mut persisted_fingerprint = current_fingerprint;
+        let seeded =
+            super::super::test_support::seed_first_verified_chunk(&self.base, &self.part_path)
+                .await;
+        let mut persisted_fingerprint = seeded.fingerprint;
         if matches!(stored_fingerprint, StoredFingerprint::Stale) {
             persisted_fingerprint.len = persisted_fingerprint.len.saturating_add(1);
         }
 
-        let mut sidecar = sidecar_for_chunk(
-            node.size(),
-            *node.condensed_mac().unwrap(),
-            first.index,
-            mega::compute_mega_chunk_mac(&first_chunk, node.aes_key(), node.aes_iv().unwrap()),
-        );
+        let mut sidecar = seeded.sidecar;
         sidecar.part_fingerprint = Some(persisted_fingerprint);
         save_sidecar_atomic(&self.sidecar_path, &sidecar)
             .await
             .unwrap();
 
-        (first, current_fingerprint, sidecar)
+        (seeded.boundary, seeded.fingerprint, sidecar)
     }
 }
 

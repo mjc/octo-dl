@@ -206,7 +206,6 @@ mod tests {
     use super::super::test_support::*;
     use super::*;
     use crate::config::DownloadConfig;
-    use crate::fs::{FileSystem, TokioFileSystem};
 
     #[derive(Default)]
     struct ReuseRecordingProgress {
@@ -236,24 +235,11 @@ mod tests {
             let part_path = part_path(&output_path_string);
             let sidecar_path = sidecar_path(&output_path_string);
             let node = harness.node();
-            let first = mega::mega_chunk_boundaries(node.size())[0];
-            let mut first_chunk = vec![0u8; usize_from_u64(first.length)];
-            harness
-                .fixture
-                .fill_plaintext(first.offset, &mut first_chunk);
-            tokio::fs::write(&part_path, &first_chunk).await.unwrap();
-            let expected_fingerprint = TokioFileSystem::new()
-                .file_fingerprint(&part_path)
-                .await
-                .unwrap();
-            let expected_mac =
-                mega::compute_mega_chunk_mac(&first_chunk, node.aes_key(), node.aes_iv().unwrap());
-            let mut sidecar = sidecar_for_chunk(
-                node.size(),
-                *node.condensed_mac().unwrap(),
-                first.index,
-                expected_mac,
-            );
+            let seeded = seed_first_verified_chunk(&harness, &part_path).await;
+            let first = seeded.boundary;
+            let expected_fingerprint = seeded.fingerprint;
+            let mut sidecar = seeded.sidecar;
+            let expected_mac = sidecar.verified_chunks[0].mac;
             sidecar.part_fingerprint = Some(expected_fingerprint);
             save_sidecar_atomic(&sidecar_path, &sidecar).await.unwrap();
             let progress = Arc::new(ReuseRecordingProgress::default());
@@ -312,25 +298,10 @@ mod tests {
                 let old_part_path = legacy_part_path(&output_path_string);
                 let old_sidecar_path = legacy_postcard_sidecar_path(&output_path_string);
                 let node = harness.node();
-                let first = mega::mega_chunk_boundaries(node.size())[0];
-                let mut first_chunk = vec![0u8; usize_from_u64(first.length)];
-                harness
-                    .fixture
-                    .fill_plaintext(first.offset, &mut first_chunk);
-                tokio::fs::write(&old_part_path, &first_chunk)
-                    .await
-                    .unwrap();
-                let expected_mac = mega::compute_mega_chunk_mac(
-                    &first_chunk,
-                    node.aes_key(),
-                    node.aes_iv().unwrap(),
-                );
-                let sidecar = sidecar_for_chunk(
-                    node.size(),
-                    *node.condensed_mac().unwrap(),
-                    first.index,
-                    expected_mac,
-                );
+                let seeded = seed_first_verified_chunk(&harness, &old_part_path).await;
+                let first = seeded.boundary;
+                let first_chunk = seeded.plaintext;
+                let sidecar = seeded.sidecar;
                 save_sidecar_atomic(&old_sidecar_path, &sidecar)
                     .await
                     .unwrap();

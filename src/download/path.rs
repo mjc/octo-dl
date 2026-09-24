@@ -2,7 +2,7 @@ use sha2::Digest as _;
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
-use crate::fs::canonicalize_allow_missing;
+use crate::fs::resolve_within_root;
 
 const ARTIFACT_PREFIX: &str = ".octo-dl-artifact-";
 
@@ -40,15 +40,17 @@ impl DownloadRoot {
         } else {
             std::env::current_dir()?.join(&self.0)
         };
-        let root = canonicalize_allow_missing(&root_path)?;
         let candidate = self.resolve(output);
-        let resolved = canonicalize_allow_missing(&candidate)?;
-        if !resolved.starts_with(root) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "output path resolves outside the configured download root",
-            ));
-        }
+        resolve_within_root(&root_path, &candidate).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "output path resolves outside the configured download root",
+                )
+            } else {
+                error
+            }
+        })?;
         Ok(())
     }
 }
