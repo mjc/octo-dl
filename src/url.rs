@@ -272,10 +272,7 @@ fn canonicalize_modern_link(scheme: &str, payload: &str) -> Result<String, Sourc
     let (node_id, key) = rest
         .split_once('#')
         .map_or((rest, None), |(id, key)| (id, Some(key)));
-    if node_id.is_empty()
-        || node_id.contains(['/', '?', '#', ' ', '\t', '\r', '\n'])
-        || key.is_some_and(|key| key.is_empty() || key.contains(['?', ' ', '\t', '\r', '\n']))
-    {
+    if !valid_link_components(node_id, key) {
         return Err(SourceParseError::UnsupportedMegaUrl(format!(
             "{scheme}://mega.nz/{payload}"
         )));
@@ -297,17 +294,19 @@ fn canonicalize_legacy_link(
     let (node_id, key) = rest.split_once('!').ok_or_else(|| {
         SourceParseError::UnsupportedMegaUrl(format!("{scheme}://mega.nz/#!{rest}"))
     })?;
-    if node_id.is_empty()
-        || key.is_empty()
-        || node_id.contains(['/', '?', '#', ' ', '\t', '\r', '\n'])
-        || key.contains(['?', ' ', '\t', '\r', '\n'])
-    {
+    if !valid_link_components(node_id, Some(key)) {
         return Err(SourceParseError::UnsupportedMegaUrl(format!(
             "{scheme}://mega.nz/#{kind}!{rest}"
         )));
     }
 
     Ok(format!("{scheme}://mega.nz/{kind}/{node_id}#{key}"))
+}
+
+fn valid_link_components(node_id: &str, key: Option<&str>) -> bool {
+    !node_id.is_empty()
+        && !node_id.contains(['/', '?', '#', ' ', '\t', '\r', '\n'])
+        && key.is_none_or(|key| !key.is_empty() && !key.contains(['?', ' ', '\t', '\r', '\n']))
 }
 
 fn normalize_extracted_url(raw_url: &str) -> String {
@@ -692,6 +691,18 @@ mod tests {
                 .as_str(),
             "http://mega.nz/folder/folder-id#folder-key"
         );
+    }
+
+    #[test]
+    fn mega_url_parsing_keeps_modern_keys_optional_but_legacy_keys_required() {
+        assert_eq!(
+            MegaUrl::parse("https://mega.nz/file/file-id")
+                .unwrap()
+                .as_str(),
+            "https://mega.nz/file/file-id"
+        );
+        assert!(MegaUrl::parse("https://mega.nz/#!file-id").is_err());
+        assert!(MegaUrl::parse("https://mega.nz/#!file-id!").is_err());
     }
 
     #[test]

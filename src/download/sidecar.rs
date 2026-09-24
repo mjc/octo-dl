@@ -43,11 +43,39 @@ pub fn legacy_json_sidecar_path(path: &str) -> PathBuf {
     PathBuf::from(sidecar)
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct ResumeArtifactCandidate {
+    pub(super) part: PathBuf,
+    pub(super) sidecars: [PathBuf; 3],
+}
+
+pub(super) fn resume_artifact_candidates(path: &str) -> [ResumeArtifactCandidate; 2] {
+    let legacy_binary = legacy_binary_sidecar_path(path);
+    let legacy_json = legacy_json_sidecar_path(path);
+    [
+        ResumeArtifactCandidate {
+            part: part_path(path),
+            sidecars: [
+                sidecar_path(path),
+                legacy_binary.clone(),
+                legacy_json.clone(),
+            ],
+        },
+        ResumeArtifactCandidate {
+            part: legacy_part_path(path),
+            sidecars: [
+                legacy_postcard_sidecar_path(path),
+                legacy_binary,
+                legacy_json,
+            ],
+        },
+    ]
+}
+
 pub fn has_resume_sidecar(path: &str) -> bool {
-    sidecar_path(path).exists()
-        || legacy_postcard_sidecar_path(path).exists()
-        || legacy_binary_sidecar_path(path).exists()
-        || legacy_json_sidecar_path(path).exists()
+    resume_artifact_candidates(path)
+        .iter()
+        .any(|candidate| candidate.sidecars.iter().any(|path| path.exists()))
 }
 
 pub(super) async fn remove_file_if_exists(path: &Path) -> io::Result<()> {
@@ -82,18 +110,15 @@ pub(super) async fn delete_sidecar_pair(
 }
 
 pub fn resume_sidecar_verified_bytes(path: &str) -> Option<u64> {
-    let sidecar = load_sidecar_sync(
-        &sidecar_path(path),
-        &legacy_binary_sidecar_path(path),
-        &legacy_json_sidecar_path(path),
-    )
-    .or_else(|| {
-        load_sidecar_sync(
-            &legacy_postcard_sidecar_path(path),
-            &legacy_binary_sidecar_path(path),
-            &legacy_json_sidecar_path(path),
-        )
-    })?;
+    let sidecar = resume_artifact_candidates(path)
+        .iter()
+        .find_map(|candidate| {
+            load_sidecar_sync(
+                &candidate.sidecars[0],
+                &candidate.sidecars[1],
+                &candidate.sidecars[2],
+            )
+        })?;
     if sidecar.version != CURRENT_RESUME_SIDECAR_VERSION {
         return None;
     }

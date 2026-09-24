@@ -1,5 +1,7 @@
 //! Core download logic and abstractions.
 
+use std::time::Duration;
+
 mod callbacks;
 mod collect;
 mod downloader;
@@ -24,6 +26,25 @@ mod test_support;
 mod transfer;
 mod transfer_prepare;
 mod verify;
+
+#[allow(dead_code)]
+pub(crate) fn build_http_client() -> mega::Result<reqwest::Client> {
+    Ok(mega::http_client_builder()?
+        .pool_idle_timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(8)
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_http_client;
+
+    #[test]
+    fn shared_http_client_constructor_builds() {
+        assert!(build_http_client().is_ok());
+    }
+}
 
 /// Returns unused glibc heap pages to the OS after a large transfer.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]

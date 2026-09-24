@@ -16,10 +16,7 @@ use super::downloader::Downloader;
 use super::resume_state::should_reuse_resume_state;
 use super::resume_tracker::ResumeTracker;
 use super::resume_validation::ResumeValidation;
-use super::sidecar::{
-    delete_sidecar, legacy_binary_sidecar_path, legacy_json_sidecar_path, legacy_part_path,
-    legacy_postcard_sidecar_path,
-};
+use super::sidecar::{delete_sidecar, resume_artifact_candidates};
 use super::sidecar_store::{ResumeSidecar, load_sidecar_sync, save_sidecar_atomic};
 use super::sidecar_writer::LazySidecarWriter;
 use super::verify::expected_mac;
@@ -138,16 +135,11 @@ pub(super) async fn migrate_legacy_resume_state(
     part_path: &Path,
     sidecar_path: &Path,
 ) -> std::io::Result<()> {
-    let legacy_part = &legacy_part_path(path);
-    let legacy_sidecars = [
-        legacy_postcard_sidecar_path(path),
-        legacy_binary_sidecar_path(path),
-        legacy_json_sidecar_path(path),
-    ];
+    let [_, legacy] = resume_artifact_candidates(path);
     if tokio::fs::try_exists(part_path).await? || tokio::fs::try_exists(sidecar_path).await? {
         return Ok(());
     }
-    let part_metadata = match tokio::fs::symlink_metadata(legacy_part).await {
+    let part_metadata = match tokio::fs::symlink_metadata(&legacy.part).await {
         Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => metadata,
         Ok(_) => return Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -158,7 +150,7 @@ pub(super) async fn migrate_legacy_resume_state(
     }
 
     let mut matching_sidecar: Option<ResumeSidecar> = None;
-    for candidate in &legacy_sidecars {
+    for candidate in &legacy.sidecars {
         match tokio::fs::symlink_metadata(candidate).await {
             Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {}
             Ok(_) => continue,
@@ -179,10 +171,10 @@ pub(super) async fn migrate_legacy_resume_state(
         return Ok(());
     };
 
-    let Some(actual_len) = fs.file_size(legacy_part).await else {
+    let Some(actual_len) = fs.file_size(&legacy.part).await else {
         return Ok(());
     };
-    let mut source = tokio::fs::File::open(legacy_part).await?;
+    let mut source = tokio::fs::File::open(&legacy.part).await?;
     let mut target = fs.open_part_file(part_path, actual_len, false).await?;
     if let Err(error) = tokio::io::copy(&mut source, &mut target).await {
         let _ = fs.remove_file(part_path).await;
@@ -201,7 +193,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-    use super::super::sidecar::{part_path, sidecar_path};
+    use super::super::sidecar::{
+        legacy_part_path, legacy_postcard_sidecar_path, part_path, sidecar_path,
+    };
     use super::super::sidecar_store::save_sidecar_atomic;
     use super::super::test_support::*;
     use super::*;

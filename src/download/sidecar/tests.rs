@@ -112,6 +112,23 @@ async fn part_path_appends_extension() {
     assert_ne!(part_path("foo/bar.zip"), PathBuf::from("foo/bar.zip.part"));
 }
 
+#[test]
+fn resume_artifact_candidates_are_ordered_canonical_first() {
+    let paths = TestDownloadPaths::new("file.bin");
+    let candidates = resume_artifact_candidates(&paths.file_string);
+
+    assert_eq!(candidates[0].part, paths.part);
+    assert_eq!(candidates[0].sidecars[0], paths.sidecar);
+    assert_eq!(
+        candidates[1].part,
+        PathBuf::from(format!("{}.part", paths.file_string))
+    );
+    assert_eq!(
+        candidates[1].sidecars[0],
+        PathBuf::from(format!("{}.part.postcard", paths.file_string))
+    );
+}
+
 #[tokio::test]
 async fn sidecar_path_uses_postcard_extension_and_legacy_paths_remain_available() {
     let paths = TestDownloadPaths::new("file.bin");
