@@ -7,7 +7,35 @@ use crate::core::{CoreEvent, ProgressDelta};
 use crate::test_support::StateDirectoryGuard;
 use std::collections::{HashMap, HashSet, VecDeque};
 use tempfile::tempdir;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, watch};
+
+#[tokio::test]
+async fn download_supervisor_cancellation_interrupts_client_wait() {
+    let (_client_tx, client_rx) = oneshot::channel();
+    let (event_tx, _event_rx) = DownloadEventSender::channel();
+    let (_url_tx, url_rx) = mpsc::channel(1);
+    let (token_tx, _token_rx) = mpsc::channel(1);
+    let (_pause_tx, pause_rx) = watch::channel(false);
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task = tokio::spawn(run_download(
+        DownloadChannels {
+            client_rx: Some(client_rx),
+            event_tx,
+            url_rx,
+            token_tx,
+            pause_rx,
+            task_cancellation,
+        },
+        DownloadConfig::default(),
+    ));
+
+    cancellation.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .expect("supervisor should acknowledge cancellation")
+        .expect("supervisor should exit without panicking");
+}
 
 #[tokio::test]
 async fn verification_executor_limits_parallel_work_to_four() {

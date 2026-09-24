@@ -275,7 +275,7 @@ pub struct App {
     pub(super) token_tx: Option<mpsc::Sender<TokenMessage>>,
     /// Receives the authenticated client from the login task.
     pub client_rx: Option<tokio::sync::oneshot::Receiver<super::event::AuthenticatedClient>>,
-    pub(super) download_task_running: bool,
+    pub(super) download_task: runtime::DownloadTaskLifecycle,
     // Cancellation tokens for active downloads (maps file path to token)
     pub cancellation_tokens: FileIdMap<CancellationToken>,
     pub(crate) shutdown_pending_files: FileIdSet,

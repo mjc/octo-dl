@@ -122,7 +122,7 @@ fn config_update_is_explicitly_next_run_and_survives_core_events() {
         "https://mega.nz/file/config",
         UrlFixtureStatus::Pending,
     )]));
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
 
     app.handle_ui_action(UiAction::UpdateConfig {
         chunks_per_file: Some(9),
@@ -1335,7 +1335,7 @@ fn package_reverify_rejects_when_cancellation_and_verification_cannot_both_be_qu
     let token = CancellationToken::new();
     app.cancellation_tokens
         .insert(file_id.clone(), token.clone());
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
 
     let (url_tx, mut url_rx) = mpsc::channel(1);
     app.url_tx = url_tx;
@@ -1405,7 +1405,7 @@ fn full_request_queue_retries_pending_order_sync_on_the_next_core_tick() {
         })
         .expect("queue filler should be admitted");
     app.url_tx = url_tx;
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
 
     resolve_package(
         &mut app,
@@ -2597,7 +2597,7 @@ fn pending_order_sync_is_immediate_outside_batch() {
     let mut app = test_app();
     let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
     crate::core::model::reset_pending_file_ids_call_count();
 
     resolve_package(
@@ -2621,7 +2621,7 @@ fn pending_order_sync_collapses_for_nested_batches() {
     let mut app = test_app();
     let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
     crate::core::model::reset_pending_file_ids_call_count();
 
     app.with_deferred_batch_updates(|app| {
@@ -2675,7 +2675,7 @@ fn pending_order_sync_skips_noop_batches() {
     let mut app = test_app();
     let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
     resolve_package(
         &mut app,
         "https://mega.nz/folder/root",
@@ -4174,7 +4174,7 @@ fn drain_download_events_collapses_visible_syncs_for_batched_files() {
     crate::core::model::reset_pending_file_ids_call_count();
     let (url_tx, mut url_rx) = mpsc::channel(64);
     app.url_tx = url_tx;
-    app.download_task_running = true;
+    app.download_task.set_running_for_test();
     app.core_state
         .url_order
         .push("https://mega.nz/folder/resolved".to_string());

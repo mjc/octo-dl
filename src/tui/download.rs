@@ -622,6 +622,7 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
         mut url_rx,
         token_tx,
         pause_rx,
+        task_cancellation,
     } = channels;
 
     // Receive the pre-authenticated client from the login task
@@ -632,7 +633,11 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
         });
         return;
     };
-    let Ok(authenticated_client) = rx.await else {
+    let client_result = tokio::select! {
+        () = task_cancellation.cancelled() => return,
+        result = rx => result,
+    };
+    let Ok(authenticated_client) = client_result else {
         let _ = tx.send(DownloadEvent::ScopeError {
             scope: "setup".to_string(),
             error: "Login task dropped before sending client".to_string(),
@@ -656,6 +661,7 @@ pub(super) async fn run_download(channels: DownloadChannels, config: DownloadCon
 
     loop {
         tokio::select! {
+            () = task_cancellation.cancelled() => break,
             request_opt = url_rx.recv() => {
                 let Some(request) = request_opt else { break };
                 if !handle_download_request_batch(

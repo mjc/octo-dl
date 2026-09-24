@@ -505,6 +505,7 @@ pub struct DownloadChannels {
     pub url_rx: mpsc::Receiver<DownloadRequest>,
     pub token_tx: mpsc::Sender<TokenMessage>,
     pub pause_rx: tokio::sync::watch::Receiver<bool>,
+    pub task_cancellation: CancellationToken,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

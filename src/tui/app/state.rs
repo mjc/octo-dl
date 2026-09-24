@@ -387,7 +387,7 @@ impl App {
     }
 
     pub(super) fn flush_scheduler_pending_order(&mut self) {
-        if self.download_task_running {
+        if self.download_task.has_started() {
             let outcome = self.try_dispatch_request(DownloadRequest::SyncPendingOrder {
                 file_ids: self.core_state.pending_file_ids(),
             });
