@@ -115,7 +115,8 @@ async fn chunk_verified_persists_sidecar_after_each_chunk() {
 
     verified
         .finish_sidecar_writer(SidecarWriterShutdown::Flush)
-        .await;
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -141,7 +142,8 @@ async fn chunk_verified_flush_persists_queued_sidecar_updates() {
     verified.mark_verified(boundaries[1].index, [2_u8; 16]);
     verified
         .finish_sidecar_writer(SidecarWriterShutdown::Flush)
-        .await;
+        .await
+        .unwrap();
 
     let first = load_sidecar(&sidecar_path)
         .await
@@ -174,7 +176,8 @@ async fn chunk_verified_replaces_existing_sidecar_record_without_duplication() {
     verified.mark_verified(0, [7_u8; 16]);
     verified
         .finish_sidecar_writer(SidecarWriterShutdown::Flush)
-        .await;
+        .await
+        .unwrap();
 
     let sidecar = load_sidecar(&sidecar_path).await.unwrap();
     assert_eq!(sidecar.verified_chunks.len(), 1);
@@ -206,7 +209,8 @@ async fn chunk_verified_flush_keeps_sidecar_chunks_sorted_after_out_of_order_mar
     verified.mark_verified(boundaries[1].index, [2_u8; 16]);
     verified
         .finish_sidecar_writer(SidecarWriterShutdown::Flush)
-        .await;
+        .await
+        .unwrap();
 
     let sidecar = load_sidecar(&sidecar_path).await.unwrap();
     assert_eq!(

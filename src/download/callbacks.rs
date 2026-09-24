@@ -149,7 +149,10 @@ impl ChunkVerifiedState {
         }
     }
 
-    pub(super) async fn finish_sidecar_writer(&self, shutdown: SidecarWriterShutdown) {
+    pub(super) async fn finish_sidecar_writer(
+        &self,
+        shutdown: SidecarWriterShutdown,
+    ) -> std::io::Result<()> {
         match &shutdown {
             SidecarWriterShutdown::Flush => {
                 let snapshot = {
@@ -163,7 +166,7 @@ impl ChunkVerifiedState {
             }
             SidecarWriterShutdown::Abort => {}
         }
-        self.sidecar_writer.finish(shutdown).await;
+        self.sidecar_writer.finish(shutdown).await
     }
 }
 
