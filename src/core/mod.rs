@@ -20,6 +20,7 @@ pub use restart::{
     FilesystemFile, FilesystemSnapshot, PartialFileSnapshot, RestartSnapshot,
     build_restart_snapshot, reconcile_restart, scan_filesystem,
 };
+pub(crate) use session::SessionCompletionFacts;
 pub use session::{
     FileSnapshot, PackageSnapshot, SavedCredentials, SavedMegaSession, SessionSnapshot,
     SessionUrlSnapshot, decode_credential_key, decrypt_credential, decrypt_credential_with_key,
