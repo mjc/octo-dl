@@ -16,8 +16,8 @@ mod snapshot_persist;
 
 use derived::{
     FileDerivedState, PackageProgressBucket, add_package_progress, add_totals_contribution,
-    apply_file_change, normalize_completed_file_progress, recompute_derived,
-    remove_package_progress, remove_totals_contribution,
+    normalize_completed_file_progress, recompute_derived, remove_package_progress,
+    remove_totals_contribution,
 };
 pub(crate) use snapshot_persist::should_persist_session;
 pub use snapshot_persist::snapshot_from_state;
@@ -219,19 +219,26 @@ fn recompute_session_status(state: &mut DownloadState) {
     };
 }
 
-fn complete_file(state: &mut DownloadState, file_id: &FileId) {
-    let delta = if let Some(file) = state.files.get_mut(file_id) {
+fn mutate_file<F>(state: &mut DownloadState, file_id: &FileId, mutation: F)
+where
+    F: FnOnce(&mut FileState),
+{
+    let delta = state.files.get_mut(file_id).map(|file| {
         let before = FileDerivedState::from(&*file);
+        mutation(file);
+        let after = FileDerivedState::from(&*file);
+        (before, after)
+    });
+    if let Some((before, after)) = delta {
+        derived::apply_file_change(state, file_id, before, after);
+    }
+}
+
+fn complete_file(state: &mut DownloadState, file_id: &FileId) {
+    mutate_file(state, file_id, |file| {
         file.lifecycle = FileLifecycle::Complete;
         normalize_completed_file_progress(&mut file.progress, file.size);
-        let after = FileDerivedState::from(&*file);
-        Some((before, after))
-    } else {
-        None
-    };
-    if let Some((before, after)) = delta {
-        apply_file_change(state, file_id, before, after);
-    }
+    });
 }
 
 fn insert_file_state(state: &mut DownloadState, file: FileState) {
@@ -379,17 +386,12 @@ fn reduce_impl(
                         ));
                     }
                     Some(_) => {
-                        let mut delta = None;
-                        if let Some(file) = state.files.get_mut(&resolved.file_id) {
-                            let before = FileDerivedState::from(&*file);
-                            file.source_url.clone_from(&package.source_url);
-                            file.path.clone_from(&resolved.path);
-                            file.size = resolved.size;
-                            let after = FileDerivedState::from(&*file);
-                            delta = Some((before, after));
-                        }
-                        if let Some((before, after)) = delta {
-                            apply_file_change(state, &resolved.file_id, before, after);
+                        if state.files.contains_key(&resolved.file_id) {
+                            mutate_file(state, &resolved.file_id, |file| {
+                                file.source_url.clone_from(&package.source_url);
+                                file.path.clone_from(&resolved.path);
+                                file.size = resolved.size;
+                            });
                         }
                     }
                     None => {
@@ -416,45 +418,37 @@ fn reduce_impl(
             recompute_session_status(state);
         }
         CoreEvent::FileQueued { file_id } => {
-            let delta = state
+            if state
                 .files
-                .get_mut(&file_id)
-                .filter(|file| !matches!(file.lifecycle, FileLifecycle::Complete))
-                .map(|file| {
-                    let before = FileDerivedState::from(&*file);
+                .get(&file_id)
+                .is_some_and(|file| !matches!(file.lifecycle, FileLifecycle::Complete))
+            {
+                mutate_file(state, &file_id, |file| {
                     file.lifecycle = FileLifecycle::Queued;
-                    let after = FileDerivedState::from(&*file);
-                    (before, after)
                 });
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileStarted { file_id, size } => {
-            let delta = state
+            if state
                 .files
-                .get_mut(&file_id)
-                .filter(|file| !matches!(file.lifecycle, FileLifecycle::Complete))
-                .map(|file| {
-                    let before = FileDerivedState::from(&*file);
+                .get(&file_id)
+                .is_some_and(|file| !matches!(file.lifecycle, FileLifecycle::Complete))
+            {
+                mutate_file(state, &file_id, |file| {
                     file.size = size;
                     file.lifecycle = FileLifecycle::Downloading;
                     file.progress = FileProgressState::default();
                     file.accounting = FileAccounting::CurrentRun;
-                    let after = FileDerivedState::from(&*file);
-                    (before, after)
                 });
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileResumeStarted { file_id, size } => {
-            let delta = state
+            if state
                 .files
-                .get_mut(&file_id)
-                .filter(|file| !matches!(file.lifecycle, FileLifecycle::Complete))
-                .map(|file| {
-                    let before = FileDerivedState::from(&*file);
+                .get(&file_id)
+                .is_some_and(|file| !matches!(file.lifecycle, FileLifecycle::Complete))
+            {
+                mutate_file(state, &file_id, |file| {
                     let preserved_verified = file.progress.verified_existing_bytes.min(size);
                     let preserved_visible = file.progress.visible_completed_bytes.min(size);
                     file.size = size;
@@ -466,11 +460,7 @@ fn reduce_impl(
                         ..FileProgressState::default()
                     };
                     file.accounting = FileAccounting::CurrentRun;
-                    let after = FileDerivedState::from(&*file);
-                    (before, after)
                 });
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileProgress {
@@ -478,40 +468,37 @@ fn reduce_impl(
             total_bytes_delta,
             network_bytes_delta,
         } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id) {
-                let before = FileDerivedState::from(&*file);
-                if matches!(
-                    file.lifecycle,
-                    FileLifecycle::Downloading | FileLifecycle::Queued
-                ) {
-                    file.progress.visible_completed_bytes = file
-                        .progress
-                        .visible_completed_bytes
-                        .saturating_add(total_bytes_delta)
-                        .min(file.size);
-                    file.progress.downloaded_network_bytes = file
-                        .progress
-                        .downloaded_network_bytes
-                        .saturating_add(network_bytes_delta)
-                        .min(file.size);
-                    if matches!(file.lifecycle, FileLifecycle::Queued) {
-                        file.lifecycle = FileLifecycle::Downloading;
+            if state.files.contains_key(&file_id) {
+                mutate_file(state, &file_id, |file| {
+                    if matches!(
+                        file.lifecycle,
+                        FileLifecycle::Downloading | FileLifecycle::Queued
+                    ) {
+                        file.progress.visible_completed_bytes = file
+                            .progress
+                            .visible_completed_bytes
+                            .saturating_add(total_bytes_delta)
+                            .min(file.size);
+                        file.progress.downloaded_network_bytes = file
+                            .progress
+                            .downloaded_network_bytes
+                            .saturating_add(network_bytes_delta)
+                            .min(file.size);
+                        if matches!(file.lifecycle, FileLifecycle::Queued) {
+                            file.lifecycle = FileLifecycle::Downloading;
+                        }
                     }
-                }
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
-            }
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
+                });
             }
         }
         CoreEvent::FileVerificationStarted { file_id } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id) {
-                let before = FileDerivedState::from(&*file);
-                let (verified_existing_bytes, verification_origin_complete, restore_network_bytes) =
-                    match file.lifecycle {
+            if state.files.contains_key(&file_id) {
+                mutate_file(state, &file_id, |file| {
+                    let (
+                        verified_existing_bytes,
+                        verification_origin_complete,
+                        restore_network_bytes,
+                    ) = match file.lifecycle {
                         FileLifecycle::Complete => (
                             file.size,
                             true,
@@ -524,38 +511,29 @@ fn reduce_impl(
                         ),
                         _ => (0, false, 0),
                     };
-                file.lifecycle = FileLifecycle::Queued;
-                file.progress = FileProgressState {
-                    verified_existing_bytes,
-                    downloaded_network_bytes: 0,
-                    visible_completed_bytes: 0,
-                    verification_origin_complete,
-                    verification_restore_downloaded_network_bytes: restore_network_bytes,
-                };
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
-            }
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
+                    file.lifecycle = FileLifecycle::Queued;
+                    file.progress = FileProgressState {
+                        verified_existing_bytes,
+                        downloaded_network_bytes: 0,
+                        visible_completed_bytes: 0,
+                        verification_origin_complete,
+                        verification_restore_downloaded_network_bytes: restore_network_bytes,
+                    };
+                });
             }
         }
         CoreEvent::FileVerificationProgress {
             file_id,
             bytes_delta,
         } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id) {
-                let before = FileDerivedState::from(&*file);
-                file.progress.visible_completed_bytes = file
-                    .progress
-                    .visible_completed_bytes
-                    .saturating_add(bytes_delta)
-                    .min(file.size);
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
-            }
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
+            if state.files.contains_key(&file_id) {
+                mutate_file(state, &file_id, |file| {
+                    file.progress.visible_completed_bytes = file
+                        .progress
+                        .visible_completed_bytes
+                        .saturating_add(bytes_delta)
+                        .min(file.size);
+                });
             }
         }
         CoreEvent::FileReuseDetected {
@@ -563,25 +541,21 @@ fn reduce_impl(
             reused_bytes,
             reused_chunks: _,
         } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id) {
-                let before = FileDerivedState::from(&*file);
-                file.progress.verified_existing_bytes = file
-                    .progress
-                    .verified_existing_bytes
-                    .saturating_add(reused_bytes)
-                    .min(file.size);
-                file.progress.visible_completed_bytes = file.progress.visible_completed_bytes.max(
-                    file.progress
+            if state.files.contains_key(&file_id) {
+                mutate_file(state, &file_id, |file| {
+                    file.progress.verified_existing_bytes = file
+                        .progress
                         .verified_existing_bytes
-                        .saturating_add(file.progress.downloaded_network_bytes)
-                        .min(file.size),
-                );
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
-            }
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
+                        .saturating_add(reused_bytes)
+                        .min(file.size);
+                    file.progress.visible_completed_bytes =
+                        file.progress.visible_completed_bytes.max(
+                            file.progress
+                                .verified_existing_bytes
+                                .saturating_add(file.progress.downloaded_network_bytes)
+                                .min(file.size),
+                        );
+                });
             }
         }
         CoreEvent::FileResumeReverified {
@@ -589,64 +563,49 @@ fn reduce_impl(
             verified_bytes,
             verified_chunks: _,
         } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id) {
-                let before = FileDerivedState::from(&*file);
-                let verified = verified_bytes.min(file.size);
-                file.progress.verified_existing_bytes = verified;
-                file.progress.visible_completed_bytes = verified;
-                file.progress.downloaded_network_bytes = 0;
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
-            }
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
+            if state.files.contains_key(&file_id) {
+                mutate_file(state, &file_id, |file| {
+                    let verified = verified_bytes.min(file.size);
+                    file.progress.verified_existing_bytes = verified;
+                    file.progress.visible_completed_bytes = verified;
+                    file.progress.downloaded_network_bytes = 0;
+                });
             }
         }
         CoreEvent::FileCompleted { file_id } | CoreEvent::FileVerificationCompleted { file_id } => {
             complete_file(state, &file_id);
         }
         CoreEvent::FileFailed { file_id, message } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id) {
-                let before = FileDerivedState::from(&*file);
-                if !file.lifecycle.is_terminal() {
-                    file.lifecycle = FileLifecycle::Failed { message };
-                    file.progress.verification_origin_complete = false;
-                    file.progress.verification_restore_downloaded_network_bytes = 0;
-                }
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
-            }
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
-            }
-        }
-        CoreEvent::FileCancelled { file_id } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id) {
-                let before = FileDerivedState::from(&*file);
-                if !file.lifecycle.is_terminal() {
-                    let was_downloading = matches!(file.lifecycle, FileLifecycle::Downloading);
-                    if file.progress.verification_origin_complete {
-                        file.lifecycle = FileLifecycle::Complete;
-                        normalize_completed_file_progress(&mut file.progress, file.size);
-                    } else {
-                        file.lifecycle = FileLifecycle::Queued;
-                        if !was_downloading && file.progress.visible_completed_bytes == 0 {
-                            file.progress.visible_completed_bytes =
-                                file.progress.verified_existing_bytes.min(file.size);
-                            file.progress.downloaded_network_bytes = 0;
-                        }
+            if state.files.contains_key(&file_id) {
+                mutate_file(state, &file_id, |file| {
+                    if !file.lifecycle.is_terminal() {
+                        file.lifecycle = FileLifecycle::Failed { message };
                         file.progress.verification_origin_complete = false;
                         file.progress.verification_restore_downloaded_network_bytes = 0;
                     }
-                }
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
+                });
             }
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
+        }
+        CoreEvent::FileCancelled { file_id } => {
+            if state.files.contains_key(&file_id) {
+                mutate_file(state, &file_id, |file| {
+                    if !file.lifecycle.is_terminal() {
+                        let was_downloading = matches!(file.lifecycle, FileLifecycle::Downloading);
+                        if file.progress.verification_origin_complete {
+                            file.lifecycle = FileLifecycle::Complete;
+                            normalize_completed_file_progress(&mut file.progress, file.size);
+                        } else {
+                            file.lifecycle = FileLifecycle::Queued;
+                            if !was_downloading && file.progress.visible_completed_bytes == 0 {
+                                file.progress.visible_completed_bytes =
+                                    file.progress.verified_existing_bytes.min(file.size);
+                                file.progress.downloaded_network_bytes = 0;
+                            }
+                            file.progress.verification_origin_complete = false;
+                            file.progress.verification_restore_downloaded_network_bytes = 0;
+                        }
+                    }
+                });
             }
         }
         CoreEvent::FileDeleted { file_id } => {
@@ -697,50 +656,42 @@ fn reduce_impl(
             }
         }
         CoreEvent::FileRetryRequested { file_id } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id)
-                && matches!(file.lifecycle, FileLifecycle::Failed { .. })
+            if state
+                .files
+                .get(&file_id)
+                .is_some_and(|file| matches!(file.lifecycle, FileLifecycle::Failed { .. }))
             {
-                let before = FileDerivedState::from(&*file);
-                file.lifecycle = FileLifecycle::Queued;
-                file.accounting = FileAccounting::CurrentRun;
-                file.progress.visible_completed_bytes = 0;
-                file.progress.downloaded_network_bytes = 0;
-                file.progress.verified_existing_bytes = 0;
-                effects.push(CoreEffect::DeleteResumeArtifacts {
-                    path: file.path.clone(),
+                mutate_file(state, &file_id, |file| {
+                    file.lifecycle = FileLifecycle::Queued;
+                    file.accounting = FileAccounting::CurrentRun;
+                    file.progress.visible_completed_bytes = 0;
+                    file.progress.downloaded_network_bytes = 0;
+                    file.progress.verified_existing_bytes = 0;
+                    effects.push(CoreEffect::DeleteResumeArtifacts {
+                        path: file.path.clone(),
+                    });
+                    effects.push(CoreEffect::EnqueueFileDownload {
+                        file_id: file_id.clone(),
+                    });
                 });
-                effects.push(CoreEffect::EnqueueFileDownload {
-                    file_id: file_id.clone(),
-                });
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
-            }
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::FileResetRequested { file_id } => {
-            let mut delta = None;
-            if let Some(file) = state.files.get_mut(&file_id) {
-                let before = FileDerivedState::from(&*file);
-                file.lifecycle = FileLifecycle::Queued;
-                file.accounting = FileAccounting::CurrentRun;
-                file.progress = FileProgressState::default();
-                effects.push(CoreEffect::DeleteOutputArtifacts {
-                    path: file.path.clone(),
+            if state.files.contains_key(&file_id) {
+                mutate_file(state, &file_id, |file| {
+                    file.lifecycle = FileLifecycle::Queued;
+                    file.accounting = FileAccounting::CurrentRun;
+                    file.progress = FileProgressState::default();
+                    effects.push(CoreEffect::DeleteOutputArtifacts {
+                        path: file.path.clone(),
+                    });
+                    effects.push(CoreEffect::DeleteResumeArtifacts {
+                        path: file.path.clone(),
+                    });
+                    effects.push(CoreEffect::EnqueueFileDownload {
+                        file_id: file_id.clone(),
+                    });
                 });
-                effects.push(CoreEffect::DeleteResumeArtifacts {
-                    path: file.path.clone(),
-                });
-                effects.push(CoreEffect::EnqueueFileDownload {
-                    file_id: file_id.clone(),
-                });
-                let after = FileDerivedState::from(&*file);
-                delta = Some((before, after));
-            }
-            if let Some((before, after)) = delta {
-                apply_file_change(state, &file_id, before, after);
             }
         }
         CoreEvent::PackageMoveRequested { package_id, delta } => {

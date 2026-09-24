@@ -146,9 +146,9 @@ impl Default for DownloadConfig {
     fn default() -> Self {
         Self {
             path: None,
-            chunks_per_file: 2,
+            chunks_per_file: default_chunks_per_file(),
             mega_chunks_per_request: default_mega_chunks_per_request(),
-            concurrent_files: 4,
+            concurrent_files: default_concurrent_files(),
             force_overwrite: false,
             cleanup_on_error: false,
         }
@@ -687,7 +687,7 @@ impl ServiceConfig {
     }
 
     #[cfg(any(feature = "cli", feature = "tui", test))]
-    fn ensure_credential_key(&mut self) -> CredentialKey {
+    pub(crate) fn ensure_credential_key(&mut self) -> CredentialKey {
         if let Some(encoded) = self.credential_key.as_deref()
             && let Some(key) = CredentialKey::decode(encoded)
         {

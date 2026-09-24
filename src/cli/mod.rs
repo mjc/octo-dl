@@ -21,22 +21,12 @@ use crate::{
         PackageId, PackageKey, PackageSnapshot, ProgressDelta, SavedCredentials, SessionRunStatus,
         SessionSnapshot, SessionUrlSnapshot, build_restart_snapshot,
     },
-    download::{infer_package_display_name, infer_package_id},
+    download::{build_http_client, infer_package_display_name, infer_package_id},
     format_bytes, format_duration,
     url::DownloadSource,
 };
 
-const DEFAULT_CONCURRENT_FILES: usize = 4;
-const DEFAULT_CHUNKS_PER_FILE: usize = 2;
 const SEPARATOR: &str = "────────────────────────────────────────────────────────────";
-
-fn build_http_client() -> mega::Result<reqwest::Client> {
-    Ok(mega::http_client_builder()?
-        .pool_idle_timeout(Duration::from_secs(60))
-        .pool_max_idle_per_host(8)
-        .tcp_keepalive(Duration::from_secs(30))
-        .build()?)
-}
 
 // ============================================================================
 // CLI Configuration
@@ -585,11 +575,11 @@ fn register_cli_package_in_session(
     crate::core::validate_snapshot(session)
 }
 
-#[cfg(test)]
-fn resumable_urls(session: &SessionSnapshot) -> Vec<(usize, String)> {
-    let restart = build_restart_snapshot(session);
-    restart
-        .resumable_urls()
+fn resumable_urls<I>(session: &SessionSnapshot, selected_urls: I) -> Vec<(usize, String)>
+where
+    I: IntoIterator<Item = String>,
+{
+    selected_urls
         .into_iter()
         .filter_map(|url| {
             session
@@ -730,13 +720,21 @@ where
 
     deduplicate_source_urls(&mut urls);
 
+    let mut download_config = DownloadConfig::default();
+    if let Some(chunks) = chunks_per_file {
+        download_config.chunks_per_file = chunks;
+    }
+    if let Some(concurrent) = concurrent_files {
+        download_config.concurrent_files = concurrent;
+    }
+    if let Some(force) = force_overwrite {
+        download_config.force_overwrite = force;
+    }
+
     Ok(CliConfig {
         urls,
         dlc_files,
-        download_config: DownloadConfig::new()
-            .with_chunks_per_file(chunks_per_file.unwrap_or(DEFAULT_CHUNKS_PER_FILE))
-            .with_concurrent_files(concurrent_files.unwrap_or(DEFAULT_CONCURRENT_FILES))
-            .with_force_overwrite(force_overwrite.unwrap_or(false)),
+        download_config,
         download_overrides: CliDownloadOverrides {
             chunks_per_file,
             concurrent_files,
@@ -763,6 +761,7 @@ where
 }
 
 fn print_usage() {
+    let defaults = DownloadConfig::default();
     eprintln!("Usage: octo [OPTIONS] <url|dlc>...");
     eprintln!();
     eprintln!("Arguments:");
@@ -770,10 +769,12 @@ fn print_usage() {
     eprintln!();
     eprintln!("Options:");
     eprintln!(
-        "  -j, --chunks <N>    Chunks per file for parallel download (default: {DEFAULT_CHUNKS_PER_FILE})"
+        "  -j, --chunks <N>    Chunks per file for parallel download (default: {})",
+        defaults.chunks_per_file
     );
     eprintln!(
-        "  -p, --parallel <N>  Concurrent file downloads (default: {DEFAULT_CONCURRENT_FILES})"
+        "  -p, --parallel <N>  Concurrent file downloads (default: {})",
+        defaults.concurrent_files
     );
     eprintln!("  -f, --force         Overwrite existing files");
     eprintln!("  -r, --resume        Resume a previous incomplete session");
@@ -1053,17 +1054,7 @@ async fn resume_session(
     let no_progress: Arc<dyn crate::DownloadProgress> = Arc::new(NoProgress);
 
     // Re-fetch URLs and collect remaining files
-    let remaining_urls = restart
-        .resumable_urls()
-        .into_iter()
-        .filter_map(|url| {
-            session
-                .urls
-                .iter()
-                .position(|entry| entry.url == url)
-                .map(|idx| (idx, url))
-        })
-        .collect::<Vec<_>>();
+    let remaining_urls = resumable_urls(&session, restart.resumable_urls());
 
     println!(
         "Fetching file lists from {} URL(s)...\n",
@@ -1335,6 +1326,13 @@ mod tests {
     }
 
     #[test]
+    fn no_option_cli_download_config_matches_download_defaults() {
+        let cli = parse_args(std::iter::empty()).expect("defaults should parse");
+
+        assert_eq!(cli.download_config, DownloadConfig::default());
+    }
+
+    #[test]
     fn resume_prefers_current_mfa_and_rejects_replaying_saved_code() {
         assert_eq!(
             resume_mfa(Some("111111".into()), Some("222222".into())).unwrap(),
@@ -1592,7 +1590,8 @@ mod tests {
             ),
         ]);
 
-        let urls = resumable_urls(&session);
+        let restart = build_restart_snapshot(&session);
+        let urls = resumable_urls(&session, restart.resumable_urls());
         assert_eq!(
             urls,
             vec![
@@ -1620,8 +1619,42 @@ mod tests {
         );
         std::fs::write("complete.bin", vec![0_u8; 123]).unwrap();
 
-        let urls = resumable_urls(&session);
+        let restart = build_restart_snapshot(&session);
+        let urls = resumable_urls(&session, restart.resumable_urls());
         assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn resumable_url_indices_preserve_original_positions_around_terminal_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let _cwd = CurrentDirGuard::set(dir.path());
+        let mut session = session_snapshot(vec![
+            ("https://mega.nz/file/pending", UrlFixtureStatus::Pending),
+            ("https://mega.nz/file/complete", UrlFixtureStatus::Fetched),
+            (
+                "https://mega.nz/file/error",
+                UrlFixtureStatus::Error("nope".into()),
+            ),
+        ]);
+        push_file(
+            &mut session,
+            1,
+            "complete.bin",
+            123,
+            FileFixtureStatus::Completed,
+        );
+        std::fs::write("complete.bin", vec![0_u8; 123]).unwrap();
+
+        let restart = build_restart_snapshot(&session);
+        let urls = resumable_urls(&session, restart.resumable_urls());
+
+        assert_eq!(
+            urls,
+            vec![
+                (0, "https://mega.nz/file/pending".to_string()),
+                (2, "https://mega.nz/file/error".to_string()),
+            ]
+        );
     }
 
     #[test]
