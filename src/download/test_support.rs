@@ -29,6 +29,7 @@ pub(super) struct MockFileSystem {
     files: Mutex<HashMap<PathBuf, u64>>,
     file_bytes: Mutex<HashMap<PathBuf, Vec<u8>>>,
     fingerprints: Mutex<HashMap<PathBuf, FileFingerprint>>,
+    directory_sync_error: Mutex<Option<String>>,
 }
 
 impl MockFileSystem {
@@ -37,6 +38,7 @@ impl MockFileSystem {
             files: Mutex::new(HashMap::new()),
             file_bytes: Mutex::new(HashMap::new()),
             fingerprints: Mutex::new(HashMap::new()),
+            directory_sync_error: Mutex::new(None),
         }
     }
 
@@ -58,6 +60,10 @@ impl MockFileSystem {
             .lock()
             .unwrap()
             .insert(path.into(), fingerprint);
+    }
+
+    pub(super) fn fail_directory_sync(&self, message: impl Into<String>) {
+        *self.directory_sync_error.lock().unwrap() = Some(message.into());
     }
 }
 
@@ -110,6 +116,13 @@ impl FileSystem for MockFileSystem {
 
     async fn rename_file(&self, _from: &Path, _to: &Path) -> io::Result<()> {
         Ok(())
+    }
+
+    async fn sync_directory(&self, _path: &Path) -> io::Result<()> {
+        match self.directory_sync_error.lock().unwrap().as_ref() {
+            Some(message) => Err(io::Error::other(message.clone())),
+            None => Ok(()),
+        }
     }
 
     async fn sync_file(&self, _path: &Path) -> io::Result<()> {
@@ -406,9 +419,15 @@ pub(super) struct RecordingProgress {
     pub(super) validation_calls: std::sync::atomic::AtomicUsize,
     pub(super) validation_checked: std::sync::atomic::AtomicU64,
     pub(super) validation_total: std::sync::atomic::AtomicU64,
+    pub(super) completed: std::sync::atomic::AtomicUsize,
 }
 
 impl DownloadProgress for RecordingProgress {
+    fn on_file_complete(&self, _name: &str, _stats: &crate::stats::FileStats) {
+        self.completed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
     fn on_resume_validation_start(&self, _name: &str) {
         self.validation_starts
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

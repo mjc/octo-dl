@@ -1,3 +1,4 @@
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -59,7 +60,33 @@ impl<F: FileSystem> Downloader<F> {
                 self.fs
                     .rename_file(ctx.part_path, Path::new(ctx.path))
                     .await?;
-                delete_sidecar(ctx.sidecar_path).await?;
+                // Rename publishes the output path; this sync is the separate
+                // durability acknowledgement required before completion.
+                let output_parent = Path::new(ctx.path)
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                self.fs
+                    .sync_directory(output_parent)
+                    .await
+                    .map_err(|error| {
+                        Error::Io(io::Error::new(
+                            error.kind(),
+                            format!(
+                                "output rename completed but durability acknowledgement failed for {}: {error}",
+                                ctx.path
+                            ),
+                        ))
+                    })?;
+                delete_sidecar(ctx.sidecar_path).await.map_err(|error| {
+                    Error::Io(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "output {} is durable, but resume sidecar cleanup failed: {error}",
+                            ctx.path
+                        ),
+                    ))
+                })?;
 
                 let file_stats = FileStats {
                     size: ctx.node.size(),
@@ -83,7 +110,11 @@ impl<F: FileSystem> Downloader<F> {
                         log::warn!("Failed to stop resume sidecar writer: {error}");
                     }
                     let _ = self.fs.remove_file(ctx.part_path).await;
-                    let _ = delete_sidecar(ctx.sidecar_path).await;
+                    if let Err(error) = delete_sidecar(ctx.sidecar_path).await {
+                        log::warn!(
+                            "Failed to clean resume sidecar after download failure: {error}"
+                        );
+                    }
                 } else {
                     match self.fs.sync_file(ctx.part_path).await {
                         Ok(()) => {
@@ -224,5 +255,131 @@ mod tests {
                 harness.shutdown().await;
             },
         );
+    }
+
+    #[tokio::test]
+    async fn output_directory_sync_failure_is_not_reported_as_completion() {
+        let harness = super::super::test_support::FakeMegaDownloadHarness::new(
+            62,
+            300_000,
+            DownloadConfig::default(),
+        )
+        .await;
+        let node = harness.node();
+        let output_path = harness.output_path("result.bin");
+        let output = output_path.to_string_lossy().into_owned();
+        let part_path = super::super::sidecar::part_path(&output);
+        let sidecar_path = super::super::sidecar::sidecar_path(&output);
+        let fs = super::super::test_support::MockFileSystem::new();
+        fs.fail_directory_sync("injected output directory sync failure");
+        let downloader = super::super::test_support::mock_downloader(fs);
+        let chunk_verified = super::super::callbacks::ChunkVerifiedState::new(
+            super::super::resume_tracker::ResumeTracker::new(
+                node.size(),
+                *node.condensed_mac().unwrap(),
+                vec![None; mega::mega_chunk_boundaries(node.size()).len()],
+            ),
+            super::super::sidecar_writer::LazySidecarWriter::new(
+                sidecar_path.clone(),
+                part_path.clone(),
+            )
+            .expect("sidecar writer should start"),
+        );
+        let progress = Arc::new(super::super::test_support::RecordingProgress::default());
+        let progress_callback: Arc<dyn super::super::callbacks::DownloadProgress> =
+            progress.clone();
+        let stats = DownloadStatsTracker::new(node.size());
+
+        let result = downloader
+            .finish_download_result(
+                DownloadFinishContext {
+                    node,
+                    path: &output,
+                    part_path: &part_path,
+                    sidecar_path: &sidecar_path,
+                    reused_bytes: 0,
+                    stats: &stats,
+                    chunk_verified: &chunk_verified,
+                    progress: &progress_callback,
+                    name: &output,
+                },
+                Ok(()),
+            )
+            .await;
+
+        let error = result.expect_err("directory sync failure must fail completion");
+        assert!(error.to_string().contains("rename completed"));
+        assert_eq!(
+            progress.completed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "completion callback must follow durable directory acknowledgement"
+        );
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sidecar_cleanup_failure_is_returned_after_durable_output() {
+        let harness = super::super::test_support::FakeMegaDownloadHarness::new(
+            63,
+            300_000,
+            DownloadConfig::default(),
+        )
+        .await;
+        let node = harness.node();
+        let output_path = harness.output_path("result.bin");
+        let output = output_path.to_string_lossy().into_owned();
+        let part_path = super::super::sidecar::part_path(&output);
+        let sidecar_path = super::super::sidecar::sidecar_path(&output);
+        tokio::fs::create_dir_all(output_path.parent().unwrap())
+            .await
+            .expect("output parent should be available for sidecar setup");
+        tokio::fs::create_dir(&sidecar_path)
+            .await
+            .expect("directory at sidecar path should force cleanup failure");
+        let fs = super::super::test_support::MockFileSystem::new();
+        let downloader = super::super::test_support::mock_downloader(fs);
+        let chunk_verified = super::super::callbacks::ChunkVerifiedState::new(
+            super::super::resume_tracker::ResumeTracker::new(
+                node.size(),
+                *node.condensed_mac().unwrap(),
+                vec![None; mega::mega_chunk_boundaries(node.size()).len()],
+            ),
+            super::super::sidecar_writer::LazySidecarWriter::new(
+                sidecar_path.clone(),
+                part_path.clone(),
+            )
+            .expect("sidecar writer should start"),
+        );
+        let progress = Arc::new(super::super::test_support::RecordingProgress::default());
+        let progress_callback: Arc<dyn super::super::callbacks::DownloadProgress> =
+            progress.clone();
+        let stats = DownloadStatsTracker::new(node.size());
+
+        let result = downloader
+            .finish_download_result(
+                DownloadFinishContext {
+                    node,
+                    path: &output,
+                    part_path: &part_path,
+                    sidecar_path: &sidecar_path,
+                    reused_bytes: 0,
+                    stats: &stats,
+                    chunk_verified: &chunk_verified,
+                    progress: &progress_callback,
+                    name: &output,
+                },
+                Ok(()),
+            )
+            .await;
+
+        let error = result.expect_err("sidecar cleanup failure must be returned");
+        assert!(error.to_string().contains("output "));
+        assert!(error.to_string().contains("sidecar cleanup failed"));
+        assert_eq!(
+            progress.completed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "completion callback must follow sidecar cleanup"
+        );
+        harness.shutdown().await;
     }
 }
