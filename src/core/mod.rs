@@ -20,6 +20,7 @@ pub use restart::{
     FilesystemFile, FilesystemSnapshot, PartialFileSnapshot, RestartSnapshot,
     build_restart_snapshot, reconcile_restart, scan_filesystem,
 };
+#[cfg(feature = "tui")]
 pub(crate) use session::SessionCompletionFacts;
 pub use session::{
     FileSnapshot, PackageSnapshot, SavedCredentials, SavedMegaSession, SessionSnapshot,

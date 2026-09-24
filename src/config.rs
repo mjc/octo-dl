@@ -1,6 +1,8 @@
 //! Configuration types for download operations.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(feature = "cli", feature = "tui", test))]
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine as _;
@@ -656,6 +658,7 @@ impl ServiceConfig {
         Ok(template)
     }
 
+    #[cfg(any(feature = "cli", feature = "tui", test))]
     pub(crate) fn load_or_create_credential_key(path: &Path) -> std::io::Result<CredentialKey> {
         let mut config = Self::load_or_create(path)?;
         let had_valid_key = config
@@ -670,6 +673,7 @@ impl ServiceConfig {
         key.persist_for_sessions().map(|()| key)
     }
 
+    #[cfg(any(feature = "cli", feature = "tui", test))]
     pub(crate) fn require_credential_key(&self) -> std::io::Result<CredentialKey> {
         self.credential_key
             .as_deref()
@@ -682,6 +686,7 @@ impl ServiceConfig {
             })
     }
 
+    #[cfg(any(feature = "cli", feature = "tui", test))]
     fn ensure_credential_key(&mut self) -> CredentialKey {
         if let Some(encoded) = self.credential_key.as_deref()
             && let Some(key) = CredentialKey::decode(encoded)
@@ -804,6 +809,7 @@ fn config_parent(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+#[cfg(any(feature = "cli", feature = "tui", test))]
 pub(crate) fn prepare_download_root(root: Option<&Path>) -> std::io::Result<Option<PathBuf>> {
     let Some(root) = root else {
         return Ok(None);
