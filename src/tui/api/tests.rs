@@ -964,6 +964,48 @@ fn transient_url_id_resolves_to_its_file_action_target() {
 }
 
 #[test]
+fn transient_url_name_resolves_to_its_file_action_target() {
+    let url = "https://mega.nz/file/transient#key";
+    let (state, _rx) = state_with_dashboard(
+        vec![DashboardFileRow {
+            id: url.to_string(),
+            package_id: url.to_string(),
+            name: "transient".to_string(),
+            size: 0,
+            downloaded: 0,
+            speed: 0,
+            status: DashboardFileStatus::Error {
+                message: "source unavailable".to_string(),
+            },
+            package_label: None,
+        }],
+        vec![DashboardPackageRow {
+            id: url.to_string(),
+            source_url: url.to_string(),
+            display_name: "transient".to_string(),
+            status: crate::core::PackageStatus::Failed,
+            file_ids: vec![url.to_string()],
+            present_files: 1,
+            completed_files: 0,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            percent: 0,
+            expanded: false,
+            folder_label: None,
+            error: Some("source unavailable".to_string()),
+        }],
+        None,
+        None,
+    );
+
+    assert_eq!(
+        selection::resolve_action_target(&state, None, Some("transient"))
+            .expect("transient URL name should resolve to its file"),
+        ActionTarget::File(url.to_string().into())
+    );
+}
+
+#[test]
 fn resolve_action_target_rejects_package_file_name_collision() {
     let package_id_str = package_id("pkg", "https://mega.nz/folder/pkg").to_string();
     let (state, _rx) = state_with_dashboard(
