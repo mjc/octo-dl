@@ -617,9 +617,24 @@ pub struct AttachedDashboard {
 
 impl AttachedDashboard {
     pub fn replace_state(&mut self, state: DownloadDashboardState) {
+        let selected_row = self
+            .state
+            .as_ref()
+            .and_then(|state| self.list_state.selected().and_then(|i| state.rows.get(i)))
+            .cloned();
+        let previous_index = self.list_state.selected();
         self.state = Some(state);
         if let Some(state) = &self.state {
-            clamp_selection(&mut self.list_state, state.rows.len());
+            if let Some(index) =
+                selected_row.and_then(|selected| state.rows.iter().position(|row| *row == selected))
+            {
+                self.list_state.select(Some(index));
+            } else if let Some(index) = previous_index {
+                self.list_state.select(Some(index));
+                clamp_selection(&mut self.list_state, state.rows.len());
+            } else {
+                clamp_selection(&mut self.list_state, state.rows.len());
+            }
         }
     }
 
@@ -1952,6 +1967,45 @@ fn progress_bar(downloaded: u64, total: u64, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attached_selection_follows_row_identity_when_snapshot_inserts_rows() {
+        let mut dashboard = AttachedDashboard::default();
+        let mut first = DownloadDashboardState::empty(DashboardUiMode::Attached, true, "", 9723);
+        first.rows = vec![
+            DashboardRow::Package {
+                package_id: "package-a".to_string(),
+            },
+            DashboardRow::Package {
+                package_id: "package-b".to_string(),
+            },
+        ];
+        dashboard.replace_state(first);
+        dashboard.list_state.select(Some(1));
+
+        let mut updated = DownloadDashboardState::empty(DashboardUiMode::Attached, true, "", 9723);
+        updated.rows = vec![
+            DashboardRow::Package {
+                package_id: "package-a".to_string(),
+            },
+            DashboardRow::File {
+                package_id: "package-a".to_string(),
+                file_id: "file-a".to_string(),
+            },
+            DashboardRow::Package {
+                package_id: "package-b".to_string(),
+            },
+        ];
+        dashboard.replace_state(updated);
+
+        assert_eq!(dashboard.list_state.selected(), Some(2));
+        assert_eq!(
+            dashboard.state.as_ref().unwrap().rows[2],
+            DashboardRow::Package {
+                package_id: "package-b".to_string(),
+            }
+        );
+    }
     use crate::core::{CoreEvent, ResolvedFile, ResolvedPackage};
     use crate::test_support::package_id;
     use tokio::sync::mpsc;

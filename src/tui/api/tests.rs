@@ -21,7 +21,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::net::TcpListener;
 use tempfile::tempdir;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 fn api_key(value: &str) -> ApiKey {
     ApiKey::new(value).expect("test API key should be non-empty")
@@ -875,6 +875,87 @@ async fn api_shutdown_releases_port_before_owner_returns() {
 }
 
 #[tokio::test]
+async fn cancelling_api_wait_keeps_shutdown_joinable() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+    let address = listener.local_addr().expect("listener has address");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _ = shutdown_rx.await;
+        let _ = release_rx.await;
+        drop(listener);
+        Ok(())
+    });
+    let mut server = ApiServerHandle {
+        shutdown_tx: Some(shutdown_tx),
+        task: Some(task),
+    };
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), server.wait())
+            .await
+            .is_err()
+    );
+
+    let shutdown = server.shutdown();
+    tokio::pin!(shutdown);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut shutdown)
+            .await
+            .is_err()
+    );
+    release_tx
+        .send(())
+        .expect("server task should still be waiting");
+    shutdown
+        .await
+        .expect("shutdown should join the server after release");
+    TcpListener::bind(address).expect("listener should be released before shutdown returns");
+}
+
+#[test]
+fn transient_url_id_resolves_to_its_file_action_target() {
+    let url = "https://mega.nz/file/transient#key";
+    let (state, _rx) = state_with_dashboard(
+        vec![DashboardFileRow {
+            id: url.to_string(),
+            package_id: url.to_string(),
+            name: "transient".to_string(),
+            size: 0,
+            downloaded: 0,
+            speed: 0,
+            status: DashboardFileStatus::Error {
+                message: "source unavailable".to_string(),
+            },
+            package_label: None,
+        }],
+        vec![DashboardPackageRow {
+            id: url.to_string(),
+            source_url: url.to_string(),
+            display_name: "transient".to_string(),
+            status: crate::core::PackageStatus::Failed,
+            file_ids: vec![url.to_string()],
+            present_files: 1,
+            completed_files: 0,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            percent: 0,
+            expanded: false,
+            folder_label: None,
+            error: Some("source unavailable".to_string()),
+        }],
+        None,
+        None,
+    );
+
+    assert_eq!(
+        selection::resolve_action_target(&state, Some(url), None)
+            .expect("transient URL ID should resolve unambiguously"),
+        ActionTarget::File(url.to_string().into())
+    );
+}
+
+#[tokio::test]
 async fn parse_api_extracts_url_from_syntax_highlighted_code_html() {
     let dir = tempdir().unwrap();
     let _guard = crate::test_support::StateDirectoryGuard::set(dir.path());
@@ -901,6 +982,100 @@ async fn parse_api_extracts_url_from_syntax_highlighted_code_html() {
                 vec!["https://mega.nz/file/abc123#key".to_string()]
             );
         }
+        other => panic!("unexpected UI action: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn parse_api_keeps_highlighted_links_when_page_also_has_raw_links() {
+    let dir = tempdir().unwrap();
+    let _guard = crate::test_support::StateDirectoryGuard::set(dir.path());
+    let (state, mut rx) = state_with_snapshot(r#"{"files":[]}"#);
+
+    let response = api_parse_page(
+        State(state),
+        HeaderMap::new(),
+        axum::Json(ParseRequest {
+            page: concat!(
+                r#"<a href="https://mega.nz/file/first#key1">First</a>"#,
+                r#"<pre><code><span>https://mega.nz/</span><span>file/second#key2</span></code></pre>"#
+            )
+            .to_string(),
+            fallback: String::new(),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    match rx.try_recv().expect("UI action should be sent") {
+        UiAction::AddUrls(received) => assert_eq!(
+            received,
+            vec![
+                "https://mega.nz/file/first#key1".to_string(),
+                "https://mega.nz/file/second#key2".to_string(),
+            ]
+        ),
+        other => panic!("unexpected UI action: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn parse_api_preserves_block_boundaries_between_links_and_text() {
+    for page in [
+        "<p>https://mega.nz/file/abc#key</p><p>More</p>",
+        "<div>https://mega.nz/file/abc#key</div><div>More</div>",
+        "https://mega.nz/file/abc#key<BR class=\"break\"/>More",
+    ] {
+        let (state, mut rx) = state_with_snapshot(r#"{"files":[]}"#);
+        let response = api_parse_page(
+            State(state),
+            HeaderMap::new(),
+            axum::Json(ParseRequest {
+                page: page.to_string(),
+                fallback: String::new(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        match rx.try_recv().expect("UI action should be sent") {
+            UiAction::AddUrls(received) => {
+                assert_eq!(received, vec!["https://mega.nz/file/abc#key"], "{page}");
+            }
+            other => panic!("unexpected UI action: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn parse_api_keeps_adjacent_link_blocks_separate() {
+    let (state, mut rx) = state_with_snapshot(r#"{"files":[]}"#);
+    let response = api_parse_page(
+        State(state),
+        HeaderMap::new(),
+        axum::Json(ParseRequest {
+            page: concat!(
+                "<p>https://mega.nz/file/first#key1</p>",
+                "<p><span>https://mega.nz/</span><span>file/second#key2</span></p>"
+            )
+            .to_string(),
+            fallback: String::new(),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    match rx.try_recv().expect("UI action should be sent") {
+        UiAction::AddUrls(received) => assert_eq!(
+            received,
+            vec![
+                "https://mega.nz/file/first#key1",
+                "https://mega.nz/file/second#key2"
+            ]
+        ),
         other => panic!("unexpected UI action: {other:?}"),
     }
 }

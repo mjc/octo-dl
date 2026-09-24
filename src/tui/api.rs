@@ -73,11 +73,15 @@ impl ApiServerHandle {
     }
 
     pub(crate) async fn wait(&mut self) -> io::Result<()> {
-        let Some(task) = self.task.take() else {
+        let Some(task) = self.task.as_mut() else {
             return Ok(());
         };
-        task.await
-            .map_err(|error| io::Error::other(format!("API server task failed: {error}")))?
+        let result = task
+            .await
+            .map_err(|error| io::Error::other(format!("API server task failed: {error}")))?;
+        self.task.take();
+        self.shutdown_tx.take();
+        result
     }
 }
 

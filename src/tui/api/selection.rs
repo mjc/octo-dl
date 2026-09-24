@@ -45,6 +45,15 @@ pub(super) fn resolve_action_target(
         .collect();
 
     match (package_matches.as_slice(), file_matches.as_slice()) {
+        ([package], [file])
+            if id.is_some_and(|id| package.id == id && file.id == id)
+                && package.source_url == file.id =>
+        {
+            // A URL that has not resolved to a real package is projected as
+            // both a legacy package row and a file row with the same ID. The
+            // file identity is the actionable one for these transient rows.
+            Ok(ActionTarget::File(file.id.clone().into()))
+        }
         ([package], []) => PackageId::from_str(&package.id)
             .map(ActionTarget::Package)
             .map_err(|_| Box::new(invalid_package_id_response())),

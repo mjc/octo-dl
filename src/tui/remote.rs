@@ -2,7 +2,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt as _;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -397,11 +397,17 @@ fn handle_attached_input(
     status_tx: tokio::sync::mpsc::UnboundedSender<DashboardReaderMessage>,
 ) {
     let Event::Key(KeyEvent {
-        code, modifiers, ..
+        code,
+        modifiers,
+        kind,
+        ..
     }) = event
     else {
         return;
     };
+    if *kind == KeyEventKind::Release {
+        return;
+    }
     if modifiers.contains(KeyModifiers::CONTROL) && *code == KeyCode::Char('c') {
         app.should_quit = true;
         return;
@@ -514,6 +520,28 @@ fn api_headers(api_key: Option<&ApiKey>) -> io::Result<HeaderMap> {
 mod tests {
     use super::*;
     use tokio_tungstenite::tungstenite::Message;
+
+    #[test]
+    fn attached_key_release_is_ignored_but_repeat_is_processed() {
+        let mut dashboard = AttachedDashboard::default();
+        let (status_tx, _status_rx) = tokio::sync::mpsc::unbounded_channel();
+        let address = "127.0.0.1:9723".parse().expect("test address should parse");
+        let mut event = Event::Key(KeyEvent {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Release,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+
+        handle_attached_input(&mut dashboard, &event, address, None, status_tx.clone());
+        assert!(!dashboard.should_quit);
+
+        if let Event::Key(key) = &mut event {
+            key.kind = crossterm::event::KeyEventKind::Repeat;
+        }
+        handle_attached_input(&mut dashboard, &event, address, None, status_tx);
+        assert!(dashboard.should_quit);
+    }
 
     #[test]
     fn loopback_validation_rejects_non_loopback_listeners() {

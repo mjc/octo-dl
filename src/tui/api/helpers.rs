@@ -87,9 +87,7 @@ pub(super) fn extract_urls_from_parse_payload(page: &str, fallback: &str) -> Vec
     let mut urls = Vec::new();
     let mut seen = HashSet::new();
     append_unique_urls(&mut urls, &mut seen, extract_urls(page));
-    if urls.is_empty() {
-        append_unique_urls(&mut urls, &mut seen, extract_urls(&html_to_text(page)));
-    }
+    append_unique_urls(&mut urls, &mut seen, extract_urls(&html_to_text(page)));
     if !fallback.is_empty() {
         append_unique_urls(&mut urls, &mut seen, extract_urls(fallback));
     }
@@ -165,14 +163,19 @@ fn parse_forwarded_param(value: &str, key: &str) -> Option<String> {
 fn html_to_text(html: &str) -> String {
     let mut text = String::with_capacity(html.len());
     let mut in_tag = false;
+    let mut tag = String::new();
     let mut chars = html.chars().peekable();
 
     while let Some(ch) = chars.next() {
         match ch {
             '<' => {
                 in_tag = true;
+                tag.clear();
             }
-            '>' => {
+            '>' if in_tag => {
+                if is_html_text_boundary(&tag) {
+                    text.push('\n');
+                }
                 in_tag = false;
             }
             '&' if !in_tag => {
@@ -187,11 +190,57 @@ fn html_to_text(html: &str) -> String {
                 text.push(decode_html_entity(&entity));
             }
             _ if !in_tag => text.push(ch),
-            _ => {}
+            _ => tag.push(ch),
         }
     }
 
     text
+}
+
+fn is_html_text_boundary(tag: &str) -> bool {
+    let name = tag
+        .trim_start_matches('/')
+        .split([' ', '\t', '\r', '\n', '/'])
+        .next()
+        .unwrap_or_default();
+    [
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "br",
+        "dd",
+        "div",
+        "dl",
+        "dt",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "hr",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "p",
+        "pre",
+        "section",
+        "table",
+        "td",
+        "th",
+        "tr",
+        "ul",
+    ]
+    .iter()
+    .any(|boundary| name.eq_ignore_ascii_case(boundary))
 }
 
 fn decode_html_entity(entity: &str) -> char {
