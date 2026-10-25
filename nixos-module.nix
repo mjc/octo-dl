@@ -31,7 +31,10 @@ in {
 
         When enabled, the module preserves any existing `[credentials]` block,
         `credentials.saved_session`, and `api.api_key`, while rewriting the managed `[api]` and
-        `[download]` fields on each start.
+        `[download]` fields on each start. It also writes that API key to
+        `${stateDir}/api-key` as mode 0640 for the service user and group.
+        Home Manager, or another user session, should export that path as
+        `OCTO_API_KEY_FILE` so `octo-tui` can attach.
       '';
     };
 
@@ -281,6 +284,22 @@ in {
         chmod 600 "$config_tmp"
         mv -f "$config_tmp" "$OCTO_CONFIG_PATH"
         trap - EXIT
+
+        # Interactive clients read this file through OCTO_API_KEY_FILE. The
+        # service config stays private because it also holds MEGA credentials.
+        raw_api_key="$api_key"
+        case "$raw_api_key" in
+          \"*\")
+            raw_api_key="''${raw_api_key#\"}"
+            raw_api_key="''${raw_api_key%\"}"
+            ;;
+        esac
+        if [ -n "$raw_api_key" ]; then
+          api_key_export="${stateDir}/api-key"
+          printf '%s\n' "$raw_api_key" > "$api_key_export"
+          chown ${cfg.user}:${cfg.group} "$api_key_export"
+          chmod 640 "$api_key_export"
+        fi
       '';
     in {
       description = "octo-dl MEGA download service";
