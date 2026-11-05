@@ -8,6 +8,9 @@ use super::App;
 
 const MIN_RATE_SAMPLE_SPAN: Duration = Duration::from_secs(1);
 const THROUGHPUT_DECAY: Duration = Duration::from_secs(30);
+/// Idle longer than this, before any measured sample, is startup wait.
+/// Counting it makes the first burst look like a very slow transfer.
+const LEADING_IDLE_GAP: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Default)]
 pub struct FileUiState {
@@ -53,7 +56,22 @@ impl TransferRate {
             self.reset(total, now);
             return;
         }
-        if total == self.last_total || now <= self.last_time {
+        if now <= self.last_time {
+            return;
+        }
+        if total == self.last_total {
+            // Ticks during the initial hang must not leave the clock at reset
+            // time, or the first bytes are divided by that whole wait.
+            if self.is_unmeasured() {
+                self.start_time = now;
+                self.last_time = now;
+            }
+            return;
+        }
+        if self.is_unmeasured() && now.duration_since(self.last_time) > LEADING_IDLE_GAP {
+            self.start_time = now;
+            self.last_time = now;
+            self.last_total = total;
             return;
         }
 
@@ -111,6 +129,10 @@ impl TransferRate {
         } else {
             bytes_per_sec as u64
         }
+    }
+
+    const fn is_unmeasured(&self) -> bool {
+        self.smoothed_bytes_per_sec == 0.0 && self.double_smoothed_bytes_per_sec == 0.0
     }
 }
 

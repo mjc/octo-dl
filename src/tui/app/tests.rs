@@ -368,6 +368,42 @@ fn transfer_rate_smooths_cumulative_samples() {
 }
 
 #[test]
+fn aggregate_rate_ignores_startup_stall_before_the_first_bytes() {
+    let start = Instant::now();
+    let mut app = test_app();
+    app.core_state.totals.run_file_downloading = 1;
+    app.aggregate_rate.reset(0, start);
+
+    app.update_speeds_at(start + Duration::from_secs(30));
+    assert_eq!(app.current_speed, 0);
+
+    app.total_network_downloaded = 1_000_000;
+    app.update_speeds_at(start + Duration::from_secs(31));
+
+    assert!(
+        (950_000..=1_050_000).contains(&app.current_speed),
+        "startup stall leaked into the rate: {}",
+        app.current_speed
+    );
+}
+
+#[test]
+fn transfer_rate_does_not_charge_a_leading_gap_when_the_first_sample_arrives_late() {
+    let start = Instant::now();
+    let mut rate = TransferRate::default();
+    rate.reset(0, start);
+    rate.record(1_000_000, start + Duration::from_secs(30));
+    assert_eq!(rate.bytes_per_sec(start + Duration::from_secs(30)), 0);
+
+    rate.record(2_000_000, start + Duration::from_secs(31));
+    let current = rate.bytes_per_sec(start + Duration::from_secs(31));
+    assert!(
+        (950_000..=1_050_000).contains(&current),
+        "leading gap leaked into the rate: {current}"
+    );
+}
+
+#[test]
 fn aggregate_rate_uses_progress_since_current_baseline() {
     let start = Instant::now();
     let mut app = test_app();
