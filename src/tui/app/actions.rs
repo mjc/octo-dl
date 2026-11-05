@@ -256,7 +256,7 @@ impl App {
         self.reset_pending_files.contains(id)
     }
 
-    fn current_attempt_id(&self, id: &FileId) -> DownloadAttemptId {
+    pub(super) fn current_attempt_id(&self, id: &FileId) -> DownloadAttemptId {
         self.file_attempt_ids
             .get(id)
             .copied()
