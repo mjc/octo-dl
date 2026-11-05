@@ -230,7 +230,7 @@ pub fn draw_dashboard(
 
     let controls = if state.read_only {
         truncate_end(
-            "up/down:select  q:quit  read-only",
+            "up/down:select  enter:open  q:quit  read-only",
             usize::from(layout.controls.width),
         )
     } else {

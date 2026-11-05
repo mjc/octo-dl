@@ -7,6 +7,7 @@
     clippy::too_many_lines
 )]
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -661,16 +662,26 @@ pub struct AttachedDashboard {
     pub list_state: ListState,
     pub should_quit: bool,
     pub status: String,
+    /// Packages the attached user opened. The service snapshot stays collapsed
+    /// until this client inserts their files.
+    pub(crate) expanded_packages: HashSet<String>,
+    /// Packages the attached user closed after the service had them open.
+    pub(crate) collapsed_packages: HashSet<String>,
 }
 
 impl AttachedDashboard {
-    pub fn replace_state(&mut self, state: DownloadDashboardState) {
+    pub fn replace_state(&mut self, mut state: DownloadDashboardState) {
         let selected_row = self
             .state
             .as_ref()
             .and_then(|state| self.list_state.selected().and_then(|i| state.rows.get(i)))
             .cloned();
         let previous_index = self.list_state.selected();
+        apply_attached_package_expansion(
+            &mut state,
+            &self.expanded_packages,
+            &self.collapsed_packages,
+        );
         self.state = Some(state);
         if let Some(state) = &self.state {
             if let Some(index) =
@@ -698,6 +709,120 @@ impl AttachedDashboard {
             .min(len.saturating_sub(1));
         self.list_state.select(Some(next));
     }
+
+    pub fn toggle_selected_package(&mut self) {
+        let Some(package_id) = self.selected_package_id() else {
+            return;
+        };
+        if self.package_row_is_open(&package_id) {
+            self.expanded_packages.remove(&package_id);
+            self.collapsed_packages.insert(package_id);
+        } else {
+            self.collapsed_packages.remove(&package_id);
+            self.expanded_packages.insert(package_id);
+        }
+        if let Some(state) = self.state.as_mut() {
+            apply_attached_package_expansion(
+                state,
+                &self.expanded_packages,
+                &self.collapsed_packages,
+            );
+        }
+    }
+
+    fn selected_package_id(&self) -> Option<String> {
+        let state = self.state.as_ref()?;
+        let row = state.rows.get(self.list_state.selected()?)?;
+        match row {
+            DashboardRow::Package { package_id } => Some(package_id.clone()),
+            DashboardRow::File { .. } => None,
+        }
+    }
+
+    fn package_row_is_open(&self, package_id: &str) -> bool {
+        let Some(state) = &self.state else {
+            return false;
+        };
+        let Some(index) = state.rows.iter().position(
+            |row| matches!(row, DashboardRow::Package { package_id: id } if id == package_id),
+        ) else {
+            return false;
+        };
+        matches!(
+            state.rows.get(index.saturating_add(1)),
+            Some(DashboardRow::File {
+                package_id: child_id,
+                ..
+            }) if child_id == package_id
+        )
+    }
+}
+
+fn apply_attached_package_expansion(
+    state: &mut DownloadDashboardState,
+    expanded: &HashSet<String>,
+    collapsed: &HashSet<String>,
+) {
+    if expanded.is_empty() && collapsed.is_empty() {
+        return;
+    }
+
+    let mut rows = Vec::with_capacity(state.rows.len().saturating_add(state.files.len()));
+    let mut index = 0;
+    while index < state.rows.len() {
+        match &state.rows[index] {
+            DashboardRow::Package { package_id } => {
+                let package_id = package_id.clone();
+                index += 1;
+                let mut server_children = Vec::new();
+                while let Some(DashboardRow::File {
+                    package_id: child_id,
+                    file_id,
+                }) = state.rows.get(index)
+                    && child_id == &package_id
+                {
+                    server_children.push(file_id.clone());
+                    index += 1;
+                }
+                let open = if expanded.contains(&package_id) {
+                    true
+                } else if collapsed.contains(&package_id) {
+                    false
+                } else {
+                    !server_children.is_empty()
+                };
+                if let Some(package) = state
+                    .packages
+                    .iter_mut()
+                    .find(|package| package.id == package_id)
+                {
+                    package.expanded = open;
+                }
+                rows.push(DashboardRow::Package {
+                    package_id: package_id.clone(),
+                });
+                if !open {
+                    continue;
+                }
+                let file_ids = state
+                    .packages
+                    .iter()
+                    .find(|package| package.id == package_id)
+                    .filter(|package| !package.file_ids.is_empty())
+                    .map(|package| package.file_ids.clone());
+                let file_ids = file_ids.unwrap_or(server_children);
+                rows.extend(file_ids.into_iter().map(|file_id| DashboardRow::File {
+                    package_id: package_id.clone(),
+                    file_id,
+                }));
+            }
+            DashboardRow::File { .. } => {
+                rows.push(state.rows[index].clone());
+                index += 1;
+            }
+        }
+    }
+    state.rows = rows;
 }
 
 pub const fn clamp_selection(list_state: &mut ListState, row_count: usize) {

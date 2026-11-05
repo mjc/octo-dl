@@ -423,6 +423,7 @@ fn handle_attached_input(
     }
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        KeyCode::Enter | KeyCode::Char(' ') => app.toggle_selected_package(),
         KeyCode::Char('p') => spawn_remote_action(addr, "pause", None, api_key, app, status_tx),
         KeyCode::Char('d') | KeyCode::Delete => {
             spawn_remote_action(addr, "delete", selected_id(app), api_key, app, status_tx);
@@ -580,6 +581,119 @@ mod tests {
         assert!(parse_loopback_addr("[::1]:9723").is_ok());
         assert!(parse_loopback_addr("0.0.0.0:9723").is_err());
         assert!(parse_loopback_addr("192.168.1.10:9723").is_err());
+    }
+
+    fn collapsed_package_dashboard() -> AttachedDashboard {
+        let mut state =
+            DownloadDashboardState::empty(DashboardUiMode::Attached, true, "ready", 9723);
+        state
+            .packages
+            .push(super::super::dashboard::DashboardPackageRow {
+                id: "pkg".to_string(),
+                source_url: "https://mega.nz/folder/pkg".to_string(),
+                display_name: "Package".to_string(),
+                status: crate::core::PackageStatus::Downloading,
+                file_ids: vec!["first.bin".to_string(), "second.bin".to_string()],
+                present_files: 2,
+                completed_files: 0,
+                downloaded_bytes: 0,
+                total_bytes: 30,
+                percent: 0,
+                expanded: false,
+                folder_label: None,
+                error: None,
+            });
+        state.files.push(super::super::dashboard::DashboardFileRow {
+            id: "first.bin".to_string(),
+            package_id: "pkg".to_string(),
+            name: "first.bin".to_string(),
+            size: 10,
+            downloaded: 0,
+            speed: 0,
+            status: super::super::dashboard::DashboardFileStatus::Downloading,
+            package_label: None,
+        });
+        state.files.push(super::super::dashboard::DashboardFileRow {
+            id: "second.bin".to_string(),
+            package_id: "pkg".to_string(),
+            name: "second.bin".to_string(),
+            size: 20,
+            downloaded: 0,
+            speed: 0,
+            status: super::super::dashboard::DashboardFileStatus::Queued,
+            package_label: None,
+        });
+        state
+            .rows
+            .push(super::super::dashboard::DashboardRow::Package {
+                package_id: "pkg".to_string(),
+            });
+        let mut dashboard = AttachedDashboard {
+            state: Some(state),
+            ..AttachedDashboard::default()
+        };
+        dashboard.list_state.select(Some(0));
+        dashboard
+    }
+
+    fn press(dashboard: &mut AttachedDashboard, code: KeyCode) {
+        let (status_tx, _status_rx) = tokio::sync::mpsc::unbounded_channel();
+        let address = "127.0.0.1:9723".parse().expect("test address should parse");
+        let event = Event::Key(KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
+        handle_attached_input(dashboard, &event, address, None, status_tx);
+    }
+
+    #[test]
+    fn attached_enter_expands_and_collapses_package_files() {
+        let mut dashboard = collapsed_package_dashboard();
+        press(&mut dashboard, KeyCode::Enter);
+
+        let state = dashboard.state.as_ref().expect("dashboard state");
+        assert!(state.packages[0].expanded);
+        assert_eq!(
+            state.rows,
+            vec![
+                super::super::dashboard::DashboardRow::Package {
+                    package_id: "pkg".to_string(),
+                },
+                super::super::dashboard::DashboardRow::File {
+                    package_id: "pkg".to_string(),
+                    file_id: "first.bin".to_string(),
+                },
+                super::super::dashboard::DashboardRow::File {
+                    package_id: "pkg".to_string(),
+                    file_id: "second.bin".to_string(),
+                },
+            ]
+        );
+
+        press(&mut dashboard, KeyCode::Char(' '));
+        let state = dashboard.state.as_ref().expect("dashboard state");
+        assert!(!state.packages[0].expanded);
+        assert_eq!(state.rows.len(), 1);
+    }
+
+    #[test]
+    fn attached_expansion_survives_the_next_snapshot() {
+        let mut dashboard = collapsed_package_dashboard();
+        press(&mut dashboard, KeyCode::Enter);
+
+        let mut refreshed = dashboard.state.clone().expect("expanded state");
+        refreshed.rows = vec![super::super::dashboard::DashboardRow::Package {
+            package_id: "pkg".to_string(),
+        }];
+        refreshed.packages[0].expanded = false;
+        dashboard.replace_state(refreshed);
+
+        let state = dashboard.state.as_ref().expect("dashboard state");
+        assert!(state.packages[0].expanded);
+        assert_eq!(state.rows.len(), 3);
+        assert_eq!(dashboard.list_state.selected(), Some(0));
     }
 
     #[test]
