@@ -57,8 +57,8 @@ in
     RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
     BINDGEN_EXTRA_CLANG_ARGS = bindgenArgs;
   } // {
-    "${targetLinker}" = linuxLinker;
-    "${targetRustflags}" = if linux then linuxRustflags else commonRustflags;
+    "${targetLinker}" = lib.mkForce linuxLinker;
+    "${targetRustflags}" = lib.mkForce (if linux then linuxRustflags else commonRustflags);
   };
 
   tasks."check:fmt".exec = "cargo fmt --all -- --check";
